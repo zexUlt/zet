@@ -31,10 +31,13 @@ runs:
           | sudo tee /etc/apt/sources.list.d/llvm.list >/dev/null
 
         sudo apt-get update
+        # libclang-rt carries the sanitizer and fuzzer runtimes. The clang
+        # package alone compiles -fsanitize=... fine and then fails at link.
         sudo apt-get install -y --no-install-recommends \
           "clang-${{ inputs.version }}" \
           "clang-tidy-${{ inputs.version }}" \
-          "clang-format-${{ inputs.version }}"
+          "clang-format-${{ inputs.version }}" \
+          "libclang-rt-${{ inputs.version }}-dev"
 
     - name: Put the pinned tools first on PATH
       shell: bash
