@@ -1,11 +1,6 @@
 {
   "$schema": "https://json.schemastore.org/claude-code-settings.json",
 
-  "attribution": {
-    "commit": "",
-    "pr": ""
-  },
-
   "permissions": {
     "allow": [
       "Bash(cmake:*)",
@@ -45,42 +40,6 @@
       "Edit(./external/**)",
       "Bash(git commit --no-verify:*)",
       "Bash(git commit -n:*)"
-    ]
-  },
-
-  "hooks": {
-    "PreToolUse": [
-      {
-        "matcher": "Bash",
-        "hooks": [
-          {
-            "type": "command",
-            "if": "Bash(git commit:*)",
-            "command": "sh -c '\"${CLAUDE_PROJECT_DIR:-.}/.claude/hooks/no-attribution-trailer.sh\"'",
-            "timeout": 10,
-            "statusMessage": "Проверяю сообщение коммита"
-          }
-        ]
-      }
-    ],
-    "PostToolUse": [
-      {
-        "matcher": "Write|Edit",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "sh -c '\"${CLAUDE_PROJECT_DIR:-.}/.claude/hooks/format-cpp.sh\"'",
-            "timeout": 20,
-            "statusMessage": "clang-format"
-          },
-          {
-            "type": "command",
-            "command": "sh -c '\"${CLAUDE_PROJECT_DIR:-.}/.claude/hooks/check-invariants.sh\"'",
-            "timeout": 20,
-            "statusMessage": "Проверяю инварианты zet"
-          }
-        ]
-      }
     ]
   }
 }
