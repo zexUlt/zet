@@ -1,16 +1,20 @@
 #include "zet/core/byte_reader.hpp"
 
+#include <concepts>
+
 namespace zet {
 namespace {
 
-/// Reads `TWidth` bytes big-endian. Written as shifts rather than a memcpy plus
-/// a byte swap so the result does not depend on the host's endianness — the
-/// handshake framing in EternalTerminal writes an int64 length with no
-/// conversion at all, which quietly limits it to same-endian peers.
-template <typename TValue, std::size_t TWidth = sizeof(TValue)>
+/// Reads `sizeof(TValue)` bytes big-endian. Written as shifts rather than a
+/// memcpy plus a byte swap so the result does not depend on the host's byte
+/// order — the handshake framing in EternalTerminal writes an int64 length
+/// with no conversion at all, which quietly limits it to same-endian peers.
+template <typename TValue>
+    requires std::unsigned_integral<TValue>
 [[nodiscard]] TValue DecodeBE(ByteSpan bytes) noexcept {
+    constexpr std::size_t width = sizeof(TValue);
     TValue value{0};
-    for (std::size_t i = 0; i < TWidth; ++i) {
+    for (std::size_t i = 0; i < width; ++i) {
         value = static_cast<TValue>(value << 8) |
                 static_cast<TValue>(std::to_integer<std::uint8_t>(bytes[i]));
     }

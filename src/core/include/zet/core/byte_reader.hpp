@@ -13,7 +13,7 @@ namespace zet {
 /// Every read is bounds-checked and reports failure through the return value,
 /// so a parser cannot index past the end however carelessly it is written.
 /// Direct indexing of wire buffers is banned elsewhere in the protocol core
-/// (see .claude/rules/invariants.md) precisely so that this stays the one path.
+/// precisely so that this stays the one path.
 ///
 /// A failed read leaves the position untouched. Callers may therefore try a
 /// read, fail, and hand the same reader to a different decoder without having

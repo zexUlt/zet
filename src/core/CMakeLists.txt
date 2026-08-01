@@ -1,5 +1,3 @@
-# Explicit file lists, never file(GLOB): a glob turns a typo into a file that
-# silently is not built. EternalTerminal lost a whole test that way for years.
 add_library(zet_core STATIC
     byte_reader.cpp
     byte_writer.cpp

@@ -11,7 +11,8 @@
 # The rest are gaps the convention does not mention, decided once here:
 #   enums                EPascalCase — prefix E
 #   concepts             CPascalCase — prefix C
-#   template parameters  TPascalCase — prefix T
+#   type template params TPascalCase — prefix T
+#   value template params camelCase  — values, not types, so no prefix
 #
 # The rest are gaps the convention does not mention, decided once here:
 #   namespaces           lower_case  — never confusable with a type
@@ -57,10 +58,10 @@ CheckOptions:
     value: CamelCase
   - key: readability-identifier-naming.TypeTemplateParameterPrefix
     value: T
+  # Non-type template parameters are values, not types: no T prefix, and they
+  # read like the variables they stand in for.
   - key: readability-identifier-naming.ValueTemplateParameterCase
-    value: CamelCase
-  - key: readability-identifier-naming.ValueTemplateParameterPrefix
-    value: T
+    value: camelBack
   - key: readability-identifier-naming.TemplateTemplateParameterCase
     value: CamelCase
   - key: readability-identifier-naming.TemplateTemplateParameterPrefix

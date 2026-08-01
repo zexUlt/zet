@@ -1,11 +1,14 @@
 #include "zet/core/byte_writer.hpp"
 
 #include <algorithm>
+#include <concepts>
 
 namespace zet {
 namespace {
 
+/// Mirror of DecodeBE in byte_reader.cpp; keep the two in step.
 template <typename TValue>
+    requires std::unsigned_integral<TValue>
 void EncodeBE(MutableByteSpan out, TValue value) noexcept {
     constexpr std::size_t width = sizeof(TValue);
     for (std::size_t i = 0; i < width; ++i) {
