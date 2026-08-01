@@ -1,0 +1,56 @@
+name: Toolchain
+description: Installs the Clang version zet is developed against, plus CMake and Ninja.
+
+# Ubuntu 24.04 ships Clang 18, whose pairing with the distribution libstdc++
+# has no usable <expected>. Pinning the toolchain is pointless if CI builds
+# with a different compiler than the one the code is written against, so the
+# version comes from apt.llvm.org rather than from whatever the image happens
+# to carry.
+
+inputs:
+  version:
+    description: LLVM major version
+    required: false
+    default: "20"
+
+runs:
+  using: composite
+  steps:
+    - name: Install LLVM ${{ inputs.version }}
+      shell: bash
+      run: |
+        set -euo pipefail
+        sudo apt-get update
+        sudo apt-get install -y --no-install-recommends \
+          ninja-build cmake wget gnupg lsb-release software-properties-common
+
+        wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key \
+          | sudo tee /etc/apt/trusted.gpg.d/apt.llvm.org.asc >/dev/null
+        codename=$(lsb_release -cs)
+        echo "deb http://apt.llvm.org/${codename}/ llvm-toolchain-${codename}-${{ inputs.version }} main" \
+          | sudo tee /etc/apt/sources.list.d/llvm.list >/dev/null
+
+        sudo apt-get update
+        sudo apt-get install -y --no-install-recommends \
+          "clang-${{ inputs.version }}" \
+          "clang-tidy-${{ inputs.version }}" \
+          "clang-format-${{ inputs.version }}"
+
+    - name: Put the pinned tools first on PATH
+      shell: bash
+      run: |
+        set -euo pipefail
+        dir="$RUNNER_TEMP/llvm-bin"
+        mkdir -p "$dir"
+        for tool in clang clang++ clang-tidy clang-format; do
+          ln -sf "/usr/bin/${tool}-${{ inputs.version }}" "$dir/$tool"
+        done
+        echo "$dir" >> "$GITHUB_PATH"
+
+    - name: Report versions
+      shell: bash
+      run: |
+        export PATH="$RUNNER_TEMP/llvm-bin:$PATH"
+        clang++ --version | head -1
+        clang-tidy --version | head -2 | tail -1
+        cmake --version | head -1

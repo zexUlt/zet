@@ -21,10 +21,15 @@ if(NOT CMAKE_CXX_COMPILER_ID MATCHES "Clang")
         "(cmake --preset dev), which pins the compiler.")
 endif()
 
-if(CMAKE_CXX_COMPILER_VERSION VERSION_LESS 17)
+# 20 is what this is developed and tested against. Clang 18 paired with the
+# libstdc++ that ships on Ubuntu 24.04 has no usable <expected>, which is not
+# a corner of the standard library we can do without, so the floor is set to a
+# version observed to work rather than to the oldest that might.
+if(CMAKE_CXX_COMPILER_VERSION VERSION_LESS 20)
     message(FATAL_ERROR
-        "Clang 17 or newer is required for the C++23 subset zet uses; "
-        "found ${CMAKE_CXX_COMPILER_VERSION}.")
+        "Clang 20 or newer is required: the C++23 subset zet uses needs a "
+        "working <expected>, which Clang 18 with Ubuntu's libstdc++ does not "
+        "provide. Found ${CMAKE_CXX_COMPILER_VERSION}.")
 endif()
 
 set(CMAKE_CXX_STANDARD 23)

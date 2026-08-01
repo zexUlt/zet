@@ -9,12 +9,6 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
-env:
-  # Ubuntu 24.04 ships Clang 18. The project requires 17 or newer, so the
-  # stock package is fine and we avoid depending on apt.llvm.org staying up.
-  CC: clang
-  CXX: clang++
-
 jobs:
   test:
     name: test (${{ matrix.preset }})
@@ -27,9 +21,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install toolchain
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends clang ninja-build cmake
+        uses: ./.github/actions/toolchain
 
       - name: Configure
         run: cmake --preset ${{ matrix.preset }}
@@ -47,9 +39,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install toolchain
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends clang-format
+        uses: ./.github/actions/toolchain
 
       - name: Check formatting
         run: |
@@ -67,9 +57,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install toolchain
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends clang clang-tidy ninja-build cmake
+        uses: ./.github/actions/toolchain
 
       - name: Configure
         run: cmake --preset dev
@@ -90,9 +78,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install toolchain
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends clang ninja-build cmake
+        uses: ./.github/actions/toolchain
 
       - name: Build
         run: |
@@ -124,9 +110,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install toolchain
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends clang ninja-build cmake
+        uses: ./.github/actions/toolchain
 
       # A gate that cannot fail is decoration. Break each invariant on purpose
       # and require the gate to notice.
