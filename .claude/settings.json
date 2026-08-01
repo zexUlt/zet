@@ -1,0 +1,86 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-settings.json",
+
+  "attribution": {
+    "commit": "",
+    "pr": ""
+  },
+
+  "permissions": {
+    "allow": [
+      "Bash(cmake:*)",
+      "Bash(ctest:*)",
+      "Bash(cpack:*)",
+      "Bash(ninja:*)",
+      "Bash(clang-format:*)",
+      "Bash(clang-tidy:*)",
+      "Bash(clang:*)",
+      "Bash(clang++:*)",
+      "Bash(g++:*)",
+      "Bash(gcc:*)",
+      "Bash(pytest:*)",
+      "Bash(nm:*)",
+      "Bash(objdump:*)",
+      "Bash(readelf:*)",
+      "Bash(strings:*)",
+      "Bash(size:*)",
+      "Bash(ldd:*)",
+      "Bash(strace:*)",
+      "Bash(openssl:*)",
+      "Bash(pkg-config:*)",
+      "Bash(getconf:*)",
+      "Bash(ss:*)",
+      "Bash(lsof:*)",
+      "Bash(chmod:*)"
+    ],
+    "ask": [
+      "Bash(iptables:*)",
+      "Bash(systemctl:*)",
+      "Bash(setcap:*)",
+      "Bash(pkill:*)",
+      "Bash(killall:*)"
+    ],
+    "deny": [
+      "Write(./external/**)",
+      "Edit(./external/**)",
+      "Bash(git commit --no-verify:*)",
+      "Bash(git commit -n:*)"
+    ]
+  },
+
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "if": "Bash(git commit:*)",
+            "command": "sh -c '\"${CLAUDE_PROJECT_DIR:-.}/.claude/hooks/no-attribution-trailer.sh\"'",
+            "timeout": 10,
+            "statusMessage": "Проверяю сообщение коммита"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Write|Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sh -c '\"${CLAUDE_PROJECT_DIR:-.}/.claude/hooks/format-cpp.sh\"'",
+            "timeout": 20,
+            "statusMessage": "clang-format"
+          },
+          {
+            "type": "command",
+            "command": "sh -c '\"${CLAUDE_PROJECT_DIR:-.}/.claude/hooks/check-invariants.sh\"'",
+            "timeout": 20,
+            "statusMessage": "Проверяю инварианты zet"
+          }
+        ]
+      }
+    ]
+  }
+}

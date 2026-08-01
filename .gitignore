@@ -1,0 +1,31 @@
+# Build
+build/
+build-*/
+out/
+cmake-build-*/
+compile_commands.json
+CMakeUserPresets.json
+
+# Test / coverage
+.pytest_cache/
+__pycache__/
+*.pyc
+*.gcda
+*.gcno
+*.profraw
+coverage/
+
+# Fuzzing artifacts (corpora are committed, findings are not)
+crash-*
+leak-*
+timeout-*
+oom-*
+
+# Editors / OS
+.vscode/
+.idea/
+*.swp
+.DS_Store
+
+# Local agent overrides
+.claude/settings.local.json
