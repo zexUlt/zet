@@ -45,4 +45,13 @@ add_library(zet_core_options INTERFACE)
 add_library(zet::core_options ALIAS zet_core_options)
 
 target_link_libraries(zet_core_options INTERFACE zet::compile_options)
-target_compile_options(zet_core_options INTERFACE -fno-rtti)
+
+# -fno-exceptions is not about code size here. Under noexcept the compiler
+# emits a landing pad that calls std::terminate, so an exceptions-enabled core
+# links against a way to kill the process — which is the thing the no-abort
+# gate exists to forbid. The core reports failures through std::expected and
+# has no use for exceptions, so removing them makes the guarantee real rather
+# than aspirational.
+#
+# -fno-rtti is separate and merely saves space: nothing here downcasts.
+target_compile_options(zet_core_options INTERFACE -fno-exceptions -fno-rtti)

@@ -12,8 +12,8 @@ namespace {
 using zet::ByteReader;
 using zet::ByteSpan;
 using zet::ByteWriter;
-using zet::MutableByteSpan;
 using zet::EProtoError;
+using zet::MutableByteSpan;
 
 }  // namespace
 
