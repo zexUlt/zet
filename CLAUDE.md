@@ -30,9 +30,25 @@
 
 ## Стек
 
-- C++23, форматирование — `.clang-format` (google, 4 пробела).
-- Рантайм-зависимость одна: libsodium.
+- C++23, **только clang** (17+). Один компилятор — один набор диагностик, и libFuzzer у GCC аналога не имеет. CMake проверяет это и падает на GCC.
+- Сборка только через пресеты: `cmake --preset dev`, `ctest --preset dev`. Пресеты: `dev`, `asan-ubsan`, `tsan`, `fuzz`, `coverage`, `release`.
+- Форматирование — `.clang-format` (google, 4 пробела). Нейминг — `.clang-tidy`, `readability-identifier-naming`, требует `clang-tidy-20`.
+- Рантайм-зависимость одна: libsodium (нужна с M1).
 - Тесты: pytest для сценарных и интеграционных, doctest для мелких C++-юнитов, libFuzzer для фаззеров.
+
+## Нейминг
+
+| Что | Как | Пример |
+|---|---|---|
+| классы, функции, методы | PascalCase | `ByteReader`, `ReadU16BE` |
+| аргументы и переменные | camelCase | `count`, `messageLength` |
+| глобальные константы, `static constexpr` члены | ALL_CAPS | `MAX_FRAME` |
+| приватные члены | camelCase с `_` | `pos_`, `data_` |
+| перечисления | префикс `E` | `EProtoError`, значения `EProtoError::Truncated` |
+| концепты | префикс `C` | `CByteSource` |
+| параметры шаблонов | префикс `T` | `TValue`, `TWidth` |
+| пространства имён | lower_case | `zet` |
+| имена файлов | snake_case | `byte_reader.cpp` |
 
 ## Чем zet не является
 

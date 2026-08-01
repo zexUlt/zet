@@ -1,0 +1,45 @@
+cmake_minimum_required(VERSION 3.24)
+
+project(zet
+    VERSION 0.1.0
+    DESCRIPTION "A terminal session that survives the network"
+    LANGUAGES CXX
+)
+
+if(PROJECT_SOURCE_DIR STREQUAL PROJECT_BINARY_DIR)
+    message(FATAL_ERROR "In-source builds are not allowed. Use a preset: cmake --preset dev")
+endif()
+
+# Clang only, and deliberately so. One compiler means one set of diagnostics to
+# satisfy, and the fuzzing and sanitizer story is built around it: libFuzzer is
+# a Clang runtime, and -fsanitize=fuzzer has no GCC equivalent. Supporting a
+# second compiler is a cost we take on when someone actually needs it.
+if(NOT CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+    message(FATAL_ERROR
+        "zet builds with Clang; found ${CMAKE_CXX_COMPILER_ID} "
+        "${CMAKE_CXX_COMPILER_VERSION}. Configure through a preset "
+        "(cmake --preset dev), which pins the compiler.")
+endif()
+
+if(CMAKE_CXX_COMPILER_VERSION VERSION_LESS 17)
+    message(FATAL_ERROR
+        "Clang 17 or newer is required for the C++23 subset zet uses; "
+        "found ${CMAKE_CXX_COMPILER_VERSION}.")
+endif()
+
+set(CMAKE_CXX_STANDARD 23)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS OFF)
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+
+option(ZET_BUILD_TESTS "Build the test suite" ON)
+option(ZET_WERROR "Treat warnings as errors" ON)
+
+include(cmake/CompileOptions.cmake)
+
+add_subdirectory(src)
+
+if(ZET_BUILD_TESTS)
+    enable_testing()
+    add_subdirectory(tests)
+endif()
