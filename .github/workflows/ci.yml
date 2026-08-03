@@ -1,8 +1,5 @@
 name: CI
 
-# Only on pull requests. Nothing reaches trunk except through one, so a push
-# trigger would re-run a checked tree, and a job costs a whole minute however
-# short it is.
 on:
   pull_request:
     paths-ignore:
@@ -47,10 +44,6 @@ jobs:
         if: always()
         run: ccache --show-stats
 
-  # Formatting, naming, the invariant gates and their self-test all run off one
-  # checkout and one dev build. As separate jobs they paid for a toolchain
-  # install and a build each, and four rounded-up minutes for work that fits in
-  # two.
   checks:
     name: checks
     runs-on: ubuntu-24.04
@@ -71,9 +64,6 @@ jobs:
       - name: Build
         run: cmake --build --preset dev
 
-      # always(), so a formatting slip does not hide the state of everything
-      # after it — the whole point of the four separate jobs was independent
-      # verdicts, and that part is worth keeping.
       - name: Check formatting
         if: always()
         run: |
