@@ -7,13 +7,6 @@ on:
       - '**/*.md'
       - '.claude/**'
       - 'LICENSE'
-  push:
-    branches: [trunk]
-    paths-ignore:
-      - 'docs/**'
-      - '**/*.md'
-      - '.claude/**'
-      - 'LICENSE'
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -51,49 +44,8 @@ jobs:
         if: always()
         run: ccache --show-stats
 
-  format:
-    name: clang-format
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install toolchain
-        uses: ./.github/actions/toolchain
-
-      - name: Check formatting
-        run: |
-          mapfile -t files < <(find src tests -name '*.cpp' -o -name '*.hpp' | sort)
-          if [ ${#files[@]} -eq 0 ]; then
-            echo "нет C++ файлов"
-            exit 0
-          fi
-          clang-format --dry-run --Werror "${files[@]}"
-
-  tidy:
-    name: clang-tidy
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install toolchain
-        uses: ./.github/actions/toolchain
-
-      - name: Configure
-        run: cmake --preset dev
-
-      - name: Check naming and run the static analyser
-        run: |
-          # find, not git ls-files: the latter only lists tracked files, so a
-          # newly written source would be silently skipped.
-          mapfile -t files < <(find src tests -name '*.cpp' | sort)
-          if [ ${#files[@]} -eq 0 ]; then
-            echo "нет исходников"
-            exit 0
-          fi
-          clang-tidy -p build/dev --warnings-as-errors='*' "${files[@]}"
-
-  gates:
-    name: invariant gates
+  checks:
+    name: checks
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -106,10 +58,33 @@ jobs:
         with:
           key: dev
 
+      - name: Configure
+        run: cmake --preset dev
+
       - name: Build
+        run: cmake --build --preset dev
+
+      - name: Check formatting
+        if: always()
         run: |
-          cmake --preset dev
-          cmake --build --preset dev
+          mapfile -t files < <(find src tests -name '*.cpp' -o -name '*.hpp' | sort)
+          if [ ${#files[@]} -eq 0 ]; then
+            echo "нет C++ файлов"
+            exit 0
+          fi
+          clang-format --dry-run --Werror "${files[@]}"
+
+      - name: Check naming and run the static analyser
+        if: always()
+        run: |
+          # find, not git ls-files: the latter only lists tracked files, so a
+          # newly written source would be silently skipped.
+          mapfile -t files < <(find src tests -name '*.cpp' | sort)
+          if [ ${#files[@]} -eq 0 ]; then
+            echo "нет исходников"
+            exit 0
+          fi
+          clang-tidy -p build/dev --warnings-as-errors='*' "${files[@]}"
 
       # Each gate is a script so it runs identically on a laptop. The point of
       # having them in CI is that a violation stops a pull request, not that it
@@ -126,26 +101,9 @@ jobs:
       - name: Binary size budgets
         run: tools/check_binary_size.sh build/dev
 
-      - name: Compiler cache statistics
-        if: always()
-        run: ccache --show-stats
-
-  gates-self-test:
-    name: gates fail when they should
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install toolchain
-        uses: ./.github/actions/toolchain
-
-      - name: Restore the compiler cache
-        uses: ./.github/actions/ccache
-        with:
-          key: dev
-
       # A gate that cannot fail is decoration. Break each invariant on purpose
-      # and require the gate to notice.
+      # and require the gate to notice. These come last: they dirty the working
+      # tree and rebuild, so anything after them would measure the wrong thing.
       # Инъекция дописывается в конец файла и ни к чему в нём не привязана.
       # Прошлая версия цеплялась за имя члена, переименование сделало sed
       # холостым, и самотест позеленел бы на пустом месте — а сообщение об
@@ -153,7 +111,6 @@ jobs:
       # инъекция вообще состоялась.
       - name: check_no_abort catches a deliberate abort
         run: |
-          cmake --preset dev
           printf '\nnamespace zet {\nvoid GateSelfTestCanary() { std::abort(); }\n}  // namespace zet\n' \
             >> src/core/byte_writer.cpp
           sed -i '1i #include <cstdlib>' src/core/byte_writer.cpp
