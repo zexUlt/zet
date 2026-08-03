@@ -1,6 +1,7 @@
 add_library(zet_core STATIC
     byte_reader.cpp
     byte_writer.cpp
+    log.cpp
 )
 add_library(zet::core ALIAS zet_core)
 
