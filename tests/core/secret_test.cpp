@@ -43,11 +43,17 @@ TEST_CASE("secrets cannot be copied, only moved") {
     static_assert(std::is_nothrow_move_assignable_v<Secret<Key>>);
 }
 
+// Reading a moved-from object is normally a bug, and the analyser is right to
+// say so. Here it is the assertion: Secret guarantees the source is left wiped
+// rather than merely unspecified, and that guarantee is only worth anything if
+// something checks it.
+
 TEST_CASE("moving wipes the source") {
     Secret<Key> from{Key{9, 9, 9, 9}};
     const Secret<Key> to{std::move(from)};
 
     CHECK(to.Expose()[0] == 9);
+    // NOLINTNEXTLINE(clang-analyzer-cplusplus.Move)
     CHECK(AllZero(from.Expose()));
 }
 
@@ -58,6 +64,7 @@ TEST_CASE("move assignment wipes both the old value and the source") {
     to = std::move(from);
 
     CHECK(to.Expose()[0] == 7);
+    // NOLINTNEXTLINE(clang-analyzer-cplusplus.Move)
     CHECK(AllZero(from.Expose()));
 }
 

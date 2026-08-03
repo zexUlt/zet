@@ -23,8 +23,12 @@
 #                                      is exactly the -Wshadow class of bug
 #   local constexpr      camelCase   — scoped, so not a "global constant"
 
+# The static analyser comes along by default and is worth keeping: it caught a
+# real read of a moved-from object on the first run. Listed explicitly so that
+# the set of checks is visible here rather than inherited silently.
 Checks: >
-  readability-identifier-naming
+  readability-identifier-naming,
+  clang-analyzer-*
 
 WarningsAsErrors: 'readability-identifier-naming'
 

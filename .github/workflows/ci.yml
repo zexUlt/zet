@@ -43,7 +43,7 @@ jobs:
 
       - name: Check formatting
         run: |
-          mapfile -t files < <(git ls-files '*.cpp' '*.hpp' '*.cc' '*.h')
+          mapfile -t files < <(find src tests -name '*.cpp' -o -name '*.hpp' | sort)
           if [ ${#files[@]} -eq 0 ]; then
             echo "нет C++ файлов"
             exit 0
@@ -51,7 +51,7 @@ jobs:
           clang-format --dry-run --Werror "${files[@]}"
 
   tidy:
-    name: clang-tidy (naming)
+    name: clang-tidy
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -62,9 +62,11 @@ jobs:
       - name: Configure
         run: cmake --preset dev
 
-      - name: Check naming
+      - name: Check naming and run the static analyser
         run: |
-          mapfile -t files < <(git ls-files 'src/*.cpp' 'tests/*.cpp')
+          # find, not git ls-files: the latter only lists tracked files, so a
+          # newly written source would be silently skipped.
+          mapfile -t files < <(find src tests -name '*.cpp' | sort)
           if [ ${#files[@]} -eq 0 ]; then
             echo "нет исходников"
             exit 0
