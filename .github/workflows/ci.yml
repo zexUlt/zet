@@ -116,11 +116,22 @@ jobs:
 
       # A gate that cannot fail is decoration. Break each invariant on purpose
       # and require the gate to notice.
+      # Инъекция дописывается в конец файла и ни к чему в нём не привязана.
+      # Прошлая версия цеплялась за имя члена, переименование сделало sed
+      # холостым, и самотест позеленел бы на пустом месте — а сообщение об
+      # ошибке обвинило бы гейт. Поэтому теперь сначала проверяем, что
+      # инъекция вообще состоялась.
       - name: check_no_abort catches a deliberate abort
         run: |
           cmake --preset dev
+          printf '\nnamespace zet {\nvoid GateSelfTestCanary() { std::abort(); }\n}  // namespace zet\n' \
+            >> src/core/byte_writer.cpp
           sed -i '1i #include <cstdlib>' src/core/byte_writer.cpp
-          sed -i 's|const MutableByteSpan slot = out_|if (count == 424242) std::abort();\n    const MutableByteSpan slot = out_|' src/core/byte_writer.cpp
+          if ! grep -q GateSelfTestCanary src/core/byte_writer.cpp; then
+            echo "инъекция не применилась — самотест ничего не проверяет"
+            git checkout src/core/byte_writer.cpp
+            exit 1
+          fi
           cmake --build --preset dev
           if tools/check_no_abort.sh build/dev; then
             echo "гейт пропустил std::abort в ядре"
@@ -130,6 +141,7 @@ jobs:
 
       - name: check_deps catches an undeclared dependency
         run: |
+          test -f src/core/CMakeLists.txt || { echo "цель инъекции переехала"; exit 1; }
           echo 'find_package(Boost REQUIRED)' >> src/core/CMakeLists.txt
           if tools/check_deps.sh; then
             echo "гейт пропустил незаявленную зависимость"
