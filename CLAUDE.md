@@ -31,7 +31,7 @@
 ## Стек
 
 - C++23, **только clang** (17+). Один компилятор — один набор диагностик, и libFuzzer у GCC аналога не имеет. CMake проверяет это и падает на GCC.
-- Сборка только через пресеты: `cmake --preset dev`, `ctest --preset dev`. Пресеты: `dev`, `asan-ubsan`, `tsan`, `fuzz`, `coverage`, `release`.
+- Сборка только через пресеты: `cmake --preset dev`, `ctest --preset dev`. Пресеты: `dev`, `asan-ubsan`, `fuzz`, `coverage`, `release`. TSan убран: приложение однопоточное, ловить нечего — вернуть вместе с тредом резолвера.
 - Форматирование — `.clang-format` (google, 4 пробела). Нейминг — `.clang-tidy`, `readability-identifier-naming`, требует `clang-tidy-20`.
 - Рантайм-зависимость одна: libsodium (нужна с M1).
 - Тесты: pytest для сценарных и интеграционных, doctest для мелких C++-юнитов, libFuzzer для фаззеров.

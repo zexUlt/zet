@@ -1,0 +1,34 @@
+name: Docs
+
+# Counterpart to the path filter in ci.yml. Documentation does not affect the
+# build, so it does not deserve a compiler — but its references into the
+# studied projects rot silently, which is exactly what this catches.
+on:
+  pull_request:
+    paths:
+      - 'docs/**'
+      - '**/*.md'
+      - 'tools/check_refs.py'
+  push:
+    branches: [trunk]
+    paths:
+      - 'docs/**'
+      - '**/*.md'
+      - 'tools/check_refs.py'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  refs:
+    name: documentation references
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      # The reference checkouts live outside this repository, so without them
+      # the script reports how many references it did not check and exits 0.
+      # A green run here means "nothing is provably broken", not "all verified".
+      - name: Check references
+        run: python3 tools/check_refs.py
