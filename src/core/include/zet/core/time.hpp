@@ -27,34 +27,34 @@ public:
     }
 
     explicit constexpr Timestamp(Duration sinceEpoch) noexcept
-        : sinceEpoch_(sinceEpoch) {}
+        : SinceEpoch_(sinceEpoch) {}
 
     [[nodiscard]] constexpr Duration SinceEpoch() const noexcept {
-        return sinceEpoch_;
+        return SinceEpoch_;
     }
 
     constexpr Timestamp& operator+=(Duration d) noexcept {
-        sinceEpoch_ += d;
+        SinceEpoch_ += d;
         return *this;
     }
     constexpr Timestamp& operator-=(Duration d) noexcept {
-        sinceEpoch_ -= d;
+        SinceEpoch_ -= d;
         return *this;
     }
 
     [[nodiscard]] friend constexpr Timestamp operator+(Timestamp t,
                                                        Duration d) noexcept {
-        return Timestamp{t.sinceEpoch_ + d};
+        return Timestamp{t.SinceEpoch_ + d};
     }
     [[nodiscard]] friend constexpr Timestamp operator-(Timestamp t,
                                                        Duration d) noexcept {
-        return Timestamp{t.sinceEpoch_ - d};
+        return Timestamp{t.SinceEpoch_ - d};
     }
 
     /// How much later `a` is than `b`. Negative if it is earlier.
     [[nodiscard]] friend constexpr Duration operator-(Timestamp a,
                                                       Timestamp b) noexcept {
-        return a.sinceEpoch_ - b.sinceEpoch_;
+        return a.SinceEpoch_ - b.SinceEpoch_;
     }
 
     [[nodiscard]] friend constexpr auto operator<=>(
@@ -63,7 +63,7 @@ public:
         Timestamp, Timestamp) noexcept = default;
 
 private:
-    Duration sinceEpoch_{};
+    Duration SinceEpoch_{};
 };
 
 /// A deadline that has not been set yet.
@@ -75,31 +75,31 @@ class Deadline {
 public:
     constexpr Deadline() noexcept = default;
 
-    explicit constexpr Deadline(Timestamp at) noexcept : at_(at), set_(true) {}
+    explicit constexpr Deadline(Timestamp at) noexcept : At_(at), Set_(true) {}
 
-    [[nodiscard]] constexpr bool IsSet() const noexcept { return set_; }
+    [[nodiscard]] constexpr bool IsSet() const noexcept { return Set_; }
 
-    [[nodiscard]] constexpr Timestamp At() const noexcept { return at_; }
+    [[nodiscard]] constexpr Timestamp At() const noexcept { return At_; }
 
     [[nodiscard]] constexpr bool HasExpired(Timestamp now) const noexcept {
-        return set_ && now >= at_;
+        return Set_ && now >= At_;
     }
 
     /// The earlier of two deadlines, treating "not set" as infinitely far.
     [[nodiscard]] friend constexpr Deadline Earliest(Deadline a,
                                                      Deadline b) noexcept {
-        if (!a.set_) {
+        if (!a.Set_) {
             return b;
         }
-        if (!b.set_) {
+        if (!b.Set_) {
             return a;
         }
-        return a.at_ <= b.at_ ? a : b;
+        return a.At_ <= b.At_ ? a : b;
     }
 
 private:
-    Timestamp at_{};
-    bool set_{false};
+    Timestamp At_{};
+    bool Set_{false};
 };
 
 }  // namespace zet

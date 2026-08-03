@@ -23,8 +23,8 @@ ProtoResult<MutableByteSpan> ByteWriter::Reserve(std::size_t count) noexcept {
     if (count > Remaining()) {
         return std::unexpected(EProtoError::BufferTooSmall);
     }
-    const MutableByteSpan slot = out_.subspan(pos_, count);
-    pos_ += count;
+    const MutableByteSpan slot = Out_.subspan(Pos_, count);
+    Pos_ += count;
     return slot;
 }
 

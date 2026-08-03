@@ -29,7 +29,7 @@ class Secret {
 public:
     Secret() noexcept = default;
 
-    explicit Secret(TValue value) noexcept : value_(std::move(value)) {}
+    explicit Secret(TValue value) noexcept : Value_(std::move(value)) {}
 
     ~Secret() { Wipe(); }
 
@@ -38,32 +38,32 @@ public:
     Secret(const Secret&) = delete;
     Secret& operator=(const Secret&) = delete;
 
-    Secret(Secret&& other) noexcept : value_(std::move(other.value_)) {
+    Secret(Secret&& other) noexcept : Value_(std::move(other.Value_)) {
         other.Wipe();
     }
 
     Secret& operator=(Secret&& other) noexcept {
         if (this != &other) {
             Wipe();
-            value_ = std::move(other.value_);
+            Value_ = std::move(other.Value_);
             other.Wipe();
         }
         return *this;
     }
 
     /// The one way in. Named so that `grep Expose` finds every use.
-    [[nodiscard]] const TValue& Expose() const noexcept { return value_; }
-    [[nodiscard]] TValue& Expose() noexcept { return value_; }
+    [[nodiscard]] const TValue& Expose() const noexcept { return Value_; }
+    [[nodiscard]] TValue& Expose() noexcept { return Value_; }
 
     void Wipe() noexcept {
-        auto* raw = reinterpret_cast<volatile unsigned char*>(&value_);
+        auto* raw = reinterpret_cast<volatile unsigned char*>(&Value_);
         for (std::size_t i = 0; i < sizeof(TValue); ++i) {
             raw[i] = 0;
         }
     }
 
 private:
-    TValue value_{};
+    TValue Value_{};
 };
 
 }  // namespace zet

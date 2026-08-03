@@ -48,59 +48,59 @@ public:
     [[nodiscard]] static constexpr Field Text(std::string_view key,
                                               std::string_view value) noexcept {
         Field f;
-        f.key_ = key;
-        f.kind_ = EKind::Text;
-        f.text_ = value;
+        f.Key_ = key;
+        f.Kind_ = EKind::Text;
+        f.Text_ = value;
         return f;
     }
 
     [[nodiscard]] static constexpr Field Unsigned(
         std::string_view key, std::uint64_t value) noexcept {
         Field f;
-        f.key_ = key;
-        f.kind_ = EKind::Unsigned;
-        f.unsigned_ = value;
+        f.Key_ = key;
+        f.Kind_ = EKind::Unsigned;
+        f.Unsigned_ = value;
         return f;
     }
 
     [[nodiscard]] static constexpr Field Signed(std::string_view key,
                                                 std::int64_t value) noexcept {
         Field f;
-        f.key_ = key;
-        f.kind_ = EKind::Signed;
-        f.signed_ = value;
+        f.Key_ = key;
+        f.Kind_ = EKind::Signed;
+        f.Signed_ = value;
         return f;
     }
 
     [[nodiscard]] constexpr std::string_view Key() const noexcept {
-        return key_;
+        return Key_;
     }
-    [[nodiscard]] constexpr EKind Kind() const noexcept { return kind_; }
+    [[nodiscard]] constexpr EKind Kind() const noexcept { return Kind_; }
     [[nodiscard]] constexpr std::string_view AsText() const noexcept {
-        return text_;
+        return Text_;
     }
     [[nodiscard]] constexpr std::uint64_t AsUnsigned() const noexcept {
-        return unsigned_;
+        return Unsigned_;
     }
     [[nodiscard]] constexpr std::int64_t AsSigned() const noexcept {
-        return signed_;
+        return Signed_;
     }
 
 private:
     constexpr Field() noexcept = default;
 
-    std::string_view key_;
-    EKind kind_{EKind::Text};
-    std::string_view text_;
-    std::uint64_t unsigned_{0};
-    std::int64_t signed_{0};
+    std::string_view Key_;
+    EKind Kind_{EKind::Text};
+    std::string_view Text_;
+    std::uint64_t Unsigned_{0};
+    std::int64_t Signed_{0};
 };
 
 struct Record {
-    ELevel level{ELevel::Info};
-    std::string_view message;
-    std::span<const Field> fields;
-    Timestamp at;
+    ELevel Level{ELevel::Info};
+    std::string_view Message;
+    std::span<const Field> Fields;
+    Timestamp At;
 };
 
 /// Where records go. Rendering to text is the sink's job, not the core's:

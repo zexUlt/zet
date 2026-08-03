@@ -7,9 +7,11 @@ namespace {
 /// Kept behind an accessor rather than as three loose globals so that the
 /// state has a name and a single point of definition.
 struct State {
-    Sink sink{nullptr};
-    void* context{nullptr};
-    ELevel minLevel{ELevel::Info};
+    // Not named Sink or MinLevel: a member would shadow the type and the free
+    // function of those names inside this scope.
+    Sink ActiveSink{nullptr};
+    void* ActiveContext{nullptr};
+    ELevel Threshold{ELevel::Info};
 };
 
 [[nodiscard]] State& Current() noexcept {
@@ -21,17 +23,17 @@ struct State {
 }  // namespace
 
 void SetSink(Sink sink, void* context) noexcept {
-    Current().sink = sink;
-    Current().context = context;
+    Current().ActiveSink = sink;
+    Current().ActiveContext = context;
 }
 
-void SetMinLevel(ELevel level) noexcept { Current().minLevel = level; }
+void SetMinLevel(ELevel level) noexcept { Current().Threshold = level; }
 
-ELevel MinLevel() noexcept { return Current().minLevel; }
+ELevel MinLevel() noexcept { return Current().Threshold; }
 
 bool IsEnabled(ELevel level) noexcept {
     const State& state = Current();
-    return state.sink != nullptr && level >= state.minLevel;
+    return state.ActiveSink != nullptr && level >= state.Threshold;
 }
 
 void Emit(ELevel level, std::string_view message, std::span<const Field> fields,
@@ -40,9 +42,9 @@ void Emit(ELevel level, std::string_view message, std::span<const Field> fields,
         return;
     }
     const Record record{
-        .level = level, .message = message, .fields = fields, .at = at};
+        .Level = level, .Message = message, .Fields = fields, .At = at};
     const State& state = Current();
-    state.sink(record, state.context);
+    state.ActiveSink(record, state.ActiveContext);
 }
 
 }  // namespace zet::log

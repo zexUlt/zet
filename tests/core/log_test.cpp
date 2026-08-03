@@ -14,26 +14,26 @@ using zet::log::Field;
 using zet::log::Record;
 
 struct Captured {
-    ELevel level;
-    std::string message;
-    std::vector<std::string> keys;
-    Timestamp at;
+    ELevel Level;
+    std::string Message;
+    std::vector<std::string> Keys;
+    Timestamp At;
 };
 
 struct Capture {
-    std::vector<Captured> records;
+    std::vector<Captured> Records;
 };
 
 void CaptureSink(const Record& record, void* context) noexcept {
     auto* capture = static_cast<Capture*>(context);
-    Captured c{.level = record.level,
-               .message = std::string{record.message},
-               .keys = {},
-               .at = record.at};
-    for (const auto& field : record.fields) {
-        c.keys.emplace_back(field.Key());
+    Captured c{.Level = record.Level,
+               .Message = std::string{record.Message},
+               .Keys = {},
+               .At = record.At};
+    for (const auto& field : record.Fields) {
+        c.Keys.emplace_back(field.Key());
     }
-    capture->records.push_back(std::move(c));
+    capture->Records.push_back(std::move(c));
 }
 
 /// Installs a sink for one test and takes it away afterwards, so a leftover
@@ -71,11 +71,11 @@ TEST_CASE("records reach the installed sink") {
     zet::log::Emit(ELevel::Warn, "reconnecting", fields,
                    Timestamp::FromNanos(7));
 
-    REQUIRE(capture.records.size() == 1);
-    CHECK(capture.records[0].level == ELevel::Warn);
-    CHECK(capture.records[0].message == "reconnecting");
-    CHECK(capture.records[0].keys == std::vector<std::string>{"sid", "bytes"});
-    CHECK(capture.records[0].at == Timestamp::FromNanos(7));
+    REQUIRE(capture.Records.size() == 1);
+    CHECK(capture.Records[0].Level == ELevel::Warn);
+    CHECK(capture.Records[0].Message == "reconnecting");
+    CHECK(capture.Records[0].Keys == std::vector<std::string>{"sid", "bytes"});
+    CHECK(capture.Records[0].At == Timestamp::FromNanos(7));
 }
 
 TEST_CASE("nothing is emitted until a sink is installed") {
@@ -100,9 +100,9 @@ TEST_CASE("records below the minimum level are dropped") {
     zet::log::Emit(ELevel::Warn, "notable");
     zet::log::Emit(ELevel::Error, "bad");
 
-    REQUIRE(capture.records.size() == 2);
-    CHECK(capture.records[0].message == "notable");
-    CHECK(capture.records[1].message == "bad");
+    REQUIRE(capture.Records.size() == 2);
+    CHECK(capture.Records[0].Message == "notable");
+    CHECK(capture.Records[1].Message == "bad");
 }
 
 TEST_CASE("IsEnabled agrees with what Emit actually does") {
@@ -115,7 +115,7 @@ TEST_CASE("IsEnabled agrees with what Emit actually does") {
     CHECK(zet::log::MinLevel() == ELevel::Info);
 
     zet::log::Emit(ELevel::Trace, "dropped");
-    CHECK(capture.records.empty());
+    CHECK(capture.Records.empty());
 }
 
 TEST_CASE("fields carry their type through to the sink") {
