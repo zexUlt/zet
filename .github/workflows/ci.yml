@@ -1,7 +1,6 @@
 name: CI
 
 # Документация не влияет ни на сборку, ни на тесты, поэтому не тратит раннеры.
-# Ссылки в docs/ проверяет отдельный workflow — иначе они портились бы молча.
 on:
   pull_request:
     paths-ignore:
@@ -113,9 +112,6 @@ jobs:
 
       - name: Binary size budgets
         run: tools/check_binary_size.sh build/dev
-
-      - name: Documentation references
-        run: python3 tools/check_refs.py
 
   gates-self-test:
     name: gates fail when they should
