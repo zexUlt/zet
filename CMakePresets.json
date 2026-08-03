@@ -13,7 +13,8 @@
       "binaryDir": "${sourceDir}/build/${presetName}",
       "cacheVariables": {
         "CMAKE_CXX_COMPILER": "clang++",
-        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON"
+        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
+        "CMAKE_CXX_COMPILER_LAUNCHER": "$env{ZET_COMPILER_LAUNCHER}"
       }
     },
     {
