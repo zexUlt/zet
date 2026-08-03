@@ -75,23 +75,24 @@ class Deadline {
 public:
     constexpr Deadline() noexcept = default;
 
-    explicit constexpr Deadline(Timestamp at) noexcept : At_(at), Set_(true) {}
+    explicit constexpr Deadline(Timestamp at) noexcept
+        : At_(at), IsSet_(true) {}
 
-    [[nodiscard]] constexpr bool IsSet() const noexcept { return Set_; }
+    [[nodiscard]] constexpr bool IsSet() const noexcept { return IsSet_; }
 
     [[nodiscard]] constexpr Timestamp At() const noexcept { return At_; }
 
     [[nodiscard]] constexpr bool HasExpired(Timestamp now) const noexcept {
-        return Set_ && now >= At_;
+        return IsSet_ && now >= At_;
     }
 
     /// The earlier of two deadlines, treating "not set" as infinitely far.
     [[nodiscard]] friend constexpr Deadline Earliest(Deadline a,
                                                      Deadline b) noexcept {
-        if (!a.Set_) {
+        if (!a.IsSet_) {
             return b;
         }
-        if (!b.Set_) {
+        if (!b.IsSet_) {
             return a;
         }
         return a.At_ <= b.At_ ? a : b;
@@ -99,7 +100,7 @@ public:
 
 private:
     Timestamp At_{};
-    bool Set_{false};
+    bool IsSet_{false};
 };
 
 }  // namespace zet

@@ -4,6 +4,8 @@
 #include <type_traits>
 #include <utility>
 
+#include "zet/core/secure_zero.hpp"
+
 namespace zet {
 
 /// What Secret is allowed to hold, and not as a formality: the wipe clears the
@@ -21,9 +23,8 @@ concept CSecretPayload = std::is_trivially_copyable_v<TValue>;
 /// grep for. A reviewer looking for places where a key could leak has a finite
 /// list to read.
 ///
-/// The value is wiped when the object dies. From M1 this becomes
-/// sodium_memzero; until libsodium arrives the wipe goes through a volatile
-/// pointer, which the compiler is not allowed to elide as a dead store.
+/// The value is wiped when the object dies, through SecureZero, which is the
+/// one place that guarantees the write survives optimisation.
 template <CSecretPayload TValue>
 class Secret {
 public:
@@ -55,12 +56,7 @@ public:
     [[nodiscard]] const TValue& Expose() const noexcept { return Value_; }
     [[nodiscard]] TValue& Expose() noexcept { return Value_; }
 
-    void Wipe() noexcept {
-        auto* raw = reinterpret_cast<volatile unsigned char*>(&Value_);
-        for (std::size_t i = 0; i < sizeof(TValue); ++i) {
-            raw[i] = 0;
-        }
-    }
+    void Wipe() noexcept { SecureZero(&Value_, sizeof(TValue)); }
 
 private:
     TValue Value_{};
