@@ -33,6 +33,11 @@ jobs:
       - name: Install toolchain
         uses: ./.github/actions/toolchain
 
+      - name: Restore the compiler cache
+        uses: ./.github/actions/ccache
+        with:
+          key: ${{ matrix.preset }}
+
       - name: Configure
         run: cmake --preset ${{ matrix.preset }}
 
@@ -41,6 +46,10 @@ jobs:
 
       - name: Test
         run: ctest --preset ${{ matrix.preset }}
+
+      - name: Compiler cache statistics
+        if: always()
+        run: ccache --show-stats
 
   format:
     name: clang-format
@@ -92,6 +101,11 @@ jobs:
       - name: Install toolchain
         uses: ./.github/actions/toolchain
 
+      - name: Restore the compiler cache
+        uses: ./.github/actions/ccache
+        with:
+          key: dev
+
       - name: Build
         run: |
           cmake --preset dev
@@ -120,6 +134,11 @@ jobs:
 
       - name: Install toolchain
         uses: ./.github/actions/toolchain
+
+      - name: Restore the compiler cache
+        uses: ./.github/actions/ccache
+        with:
+          key: dev
 
       # A gate that cannot fail is decoration. Break each invariant on purpose
       # and require the gate to notice.

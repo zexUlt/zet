@@ -1,5 +1,5 @@
 name: Toolchain
-description: Installs the Clang version zet is developed against, plus CMake and Ninja.
+description: Installs the Clang version zet is developed against, plus CMake, Ninja and ccache.
 
 # Ubuntu 24.04 ships Clang 18, whose pairing with the distribution libstdc++
 # has no usable <expected>. Pinning the toolchain is pointless if CI builds
@@ -16,13 +16,21 @@ inputs:
 runs:
   using: composite
   steps:
-    - name: Install LLVM ${{ inputs.version }}
+    - name: Restore the downloaded packages
+      id: apt-cache
+      uses: actions/cache@v4
+      with:
+        path: ${{ runner.temp }}/apt-packages
+        key: apt-llvm${{ inputs.version }}-${{ runner.os }}-${{ hashFiles('.github/actions/toolchain/action.yml') }}
+
+    - name: Download packages
+      if: steps.apt-cache.outputs.cache-hit != 'true'
       shell: bash
       run: |
         set -euo pipefail
         sudo apt-get update
         sudo apt-get install -y --no-install-recommends \
-          ninja-build cmake wget gnupg lsb-release software-properties-common
+          wget gnupg lsb-release software-properties-common
 
         wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key \
           | sudo tee /etc/apt/trusted.gpg.d/apt.llvm.org.asc >/dev/null
@@ -31,13 +39,30 @@ runs:
           | sudo tee /etc/apt/sources.list.d/llvm.list >/dev/null
 
         sudo apt-get update
+
+        dir="$RUNNER_TEMP/apt-packages"
+        mkdir -p "$dir/partial"
         # libclang-rt carries the sanitizer and fuzzer runtimes. The clang
         # package alone compiles -fsanitize=... fine and then fails at link.
-        sudo apt-get install -y --no-install-recommends \
+        sudo apt-get install -y --no-install-recommends --download-only \
+          -o Dir::Cache::archives="$dir" \
+          ninja-build cmake ccache \
           "clang-${{ inputs.version }}" \
           "clang-tidy-${{ inputs.version }}" \
           "clang-format-${{ inputs.version }}" \
           "libclang-rt-${{ inputs.version }}-dev"
+        sudo chown -R "$(id -u):$(id -g)" "$dir"
+        rm -rf "$dir/partial" "$dir/lock"
+        echo "пакетов скачано: $(ls "$dir"/*.deb | wc -l)"
+
+    - name: Install packages
+      shell: bash
+      run: |
+        set -euo pipefail
+        # apt, not dpkg -i: it works out the installation order from the
+        # dependencies. Nothing is fetched — every .deb is already local.
+        sudo apt-get install -y --no-install-recommends \
+          "$RUNNER_TEMP"/apt-packages/*.deb
 
     - name: Put the pinned tools first on PATH
       shell: bash
@@ -57,3 +82,4 @@ runs:
         clang++ --version | head -1
         clang-tidy --version | head -2 | tail -1
         cmake --version | head -1
+        ccache --version | head -1

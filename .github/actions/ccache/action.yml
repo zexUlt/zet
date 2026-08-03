@@ -1,0 +1,47 @@
+name: Compiler cache
+description: Restores ccache and points the presets at it.
+
+# The build directory itself is deliberately not cached: CMake bakes absolute
+# paths and timestamps into it, so a restored one is a source of stale-state
+# bugs. ccache keys on the preprocessed source instead, which survives a
+# different build directory, a different preset and a reordered file list.
+
+inputs:
+  key:
+    description: Cache key discriminator — normally the preset name
+    required: true
+  max-size:
+    description: Upper bound on the cache
+    required: false
+    default: "400M"
+
+runs:
+  using: composite
+  steps:
+    - name: Restore ccache
+      uses: actions/cache@v4
+      with:
+        path: ${{ runner.temp }}/ccache
+        key: ccache-${{ runner.os }}-${{ inputs.key }}-${{ github.run_id }}
+        restore-keys: |
+          ccache-${{ runner.os }}-${{ inputs.key }}-
+
+    - name: Configure ccache
+      shell: bash
+      run: |
+        set -euo pipefail
+        {
+          echo "CCACHE_DIR=$RUNNER_TEMP/ccache"
+          echo "CCACHE_MAXSIZE=${{ inputs.max-size }}"
+          # Timestamps differ on every checkout; the content does not.
+          echo "CCACHE_COMPILERCHECK=content"
+          # Lets objects built under different build directories hit.
+          echo "CCACHE_BASEDIR=$GITHUB_WORKSPACE"
+          # A debug build puts the working directory into the object, so
+          # without this every preset misses everything the others built. The
+          # cost is debug paths pointing at whichever build directory came
+          # first, which matters to a debugger, not to CI.
+          echo "CCACHE_NOHASHDIR=true"
+          echo "ZET_COMPILER_LAUNCHER=ccache"
+        } >> "$GITHUB_ENV"
+        ccache --zero-stats >/dev/null
