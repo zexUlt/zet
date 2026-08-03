@@ -26,12 +26,10 @@
 - `docs/prior-art.md` — разбор EternalTerminal, mosh, tmux/dtach/abduco, WireGuard, QUIC: как устроено, где болит, что забираем. Со ссылками `файл:строка` на исходники изучаемых проектов.
 - `docs/design.md` — архитектура zet и ADR. Источник истины по решениям; расхождение кода с ним — повод править одно из двух осознанно.
 
-Чекауты изучаемых проектов лежат вне репозитория. Проверка ссылок: `ZET_REF_ROOT=<каталог> tools/check_refs.py`.
-
 ## Стек
 
 - C++23, **только clang** (17+). Один компилятор — один набор диагностик, и libFuzzer у GCC аналога не имеет. CMake проверяет это и падает на GCC.
-- Сборка только через пресеты: `cmake --preset dev`, `ctest --preset dev`. Пресеты: `dev`, `asan-ubsan`, `tsan`, `fuzz`, `coverage`, `release`.
+- Сборка только через пресеты: `cmake --preset dev`, `ctest --preset dev`. Пресеты: `dev`, `asan-ubsan`, `fuzz`, `coverage`, `release`.
 - Форматирование — `.clang-format` (google, 4 пробела). Нейминг — `.clang-tidy`, `readability-identifier-naming`, требует `clang-tidy-20`.
 - Рантайм-зависимость одна: libsodium (нужна с M1).
 - Тесты: pytest для сценарных и интеграционных, doctest для мелких C++-юнитов, libFuzzer для фаззеров.
