@@ -126,6 +126,10 @@ jobs:
       - name: Binary size budgets
         run: tools/check_binary_size.sh build/dev
 
+      - name: Compiler cache statistics
+        if: always()
+        run: ccache --show-stats
+
   gates-self-test:
     name: gates fail when they should
     runs-on: ubuntu-24.04
@@ -174,3 +178,7 @@ jobs:
             exit 1
           fi
           git checkout src/core/CMakeLists.txt
+
+      - name: Compiler cache statistics
+        if: always()
+        run: ccache --show-stats
