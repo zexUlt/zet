@@ -20,7 +20,7 @@ namespace zet {
 /// to unwind a partial consume.
 class ByteReader {
 public:
-    explicit constexpr ByteReader(ByteSpan data) noexcept : data_(data) {}
+    explicit constexpr ByteReader(ByteSpan data) noexcept : Data_(data) {}
 
     [[nodiscard]] ProtoResult<std::uint8_t> ReadU8() noexcept;
     [[nodiscard]] ProtoResult<std::uint16_t> ReadU16BE() noexcept;
@@ -35,20 +35,20 @@ public:
 
     /// Everything not yet consumed, without consuming it.
     [[nodiscard]] constexpr ByteSpan Rest() const noexcept {
-        return data_.subspan(pos_);
+        return Data_.subspan(Pos_);
     }
 
-    [[nodiscard]] constexpr std::size_t Offset() const noexcept { return pos_; }
+    [[nodiscard]] constexpr std::size_t Offset() const noexcept { return Pos_; }
     [[nodiscard]] constexpr std::size_t Remaining() const noexcept {
-        return data_.size() - pos_;
+        return Data_.size() - Pos_;
     }
     [[nodiscard]] constexpr bool Exhausted() const noexcept {
-        return pos_ == data_.size();
+        return Pos_ == Data_.size();
     }
 
 private:
-    ByteSpan data_;
-    std::size_t pos_{0};
+    ByteSpan Data_;
+    std::size_t Pos_{0};
 };
 
 }  // namespace zet

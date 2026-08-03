@@ -12,6 +12,9 @@ add_executable(zet_tests
     main.cpp
     core/byte_reader_test.cpp
     core/byte_writer_test.cpp
+    core/log_test.cpp
+    core/secret_test.cpp
+    core/time_test.cpp
 )
 
 target_link_libraries(zet_tests PRIVATE

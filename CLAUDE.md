@@ -43,7 +43,7 @@
 | классы, функции, методы | PascalCase | `ByteReader`, `ReadU16BE` |
 | аргументы и переменные | camelCase | `count`, `messageLength` |
 | глобальные константы, `static constexpr` члены | ALL_CAPS | `MAX_FRAME` |
-| приватные члены | camelCase с `_` | `pos_`, `data_` |
+| члены класса | PascalCase, приватные и защищённые с `_` | `Pos_`, `Data_`, публичный `Level` |
 | перечисления | префикс `E` | `EProtoError`, значения `EProtoError::Truncated` |
 | концепты | префикс `C` | `CByteSource` |
 | параметры шаблонов | префикс `T` | `TValue`, `TWidth` |

@@ -20,7 +20,7 @@ namespace zet {
 /// not a half-written frame.
 class ByteWriter {
 public:
-    explicit constexpr ByteWriter(MutableByteSpan out) noexcept : out_(out) {}
+    explicit constexpr ByteWriter(MutableByteSpan out) noexcept : Out_(out) {}
 
     [[nodiscard]] ProtoResult<void> WriteU8(std::uint8_t value) noexcept;
     [[nodiscard]] ProtoResult<void> WriteU16BE(std::uint16_t value) noexcept;
@@ -35,20 +35,20 @@ public:
 
     /// What has been written so far.
     [[nodiscard]] constexpr ByteSpan Written() const noexcept {
-        return ByteSpan{out_.subspan(0, pos_)};
+        return ByteSpan{Out_.subspan(0, Pos_)};
     }
 
-    [[nodiscard]] constexpr std::size_t Size() const noexcept { return pos_; }
+    [[nodiscard]] constexpr std::size_t Size() const noexcept { return Pos_; }
     [[nodiscard]] constexpr std::size_t Capacity() const noexcept {
-        return out_.size();
+        return Out_.size();
     }
     [[nodiscard]] constexpr std::size_t Remaining() const noexcept {
-        return out_.size() - pos_;
+        return Out_.size() - Pos_;
     }
 
 private:
-    MutableByteSpan out_;
-    std::size_t pos_{0};
+    MutableByteSpan Out_;
+    std::size_t Pos_{0};
 };
 
 }  // namespace zet
