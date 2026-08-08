@@ -22,14 +22,15 @@ namespace {
 
 }  // namespace
 
-FrameSealer::FrameSealer(crypto::Key key, DirectionSalt salt) noexcept
-    : Key_(std::move(key)), Salt_(salt) {}
+FrameSealer::FrameSealer(crypto::Key key, DirectionSalt salt,
+                         std::uint64_t frameLimit) noexcept
+    : Key_(std::move(key)), Salt_(salt), FrameLimit_(frameLimit) {}
 
 ProtoResult<std::size_t> FrameSealer::Seal(MutableByteSpan out,
                                            ByteSpan plaintext) noexcept {
     // Refuse before doing anything else: past this point the counter would have
     // to move, and reusing one with the same key is the failure this guards.
-    if (Counter_ >= MAX_FRAMES_PER_EPOCH) {
+    if (Counter_ >= FrameLimit_) {
         return std::unexpected(EProtoError::RekeyRequired);
     }
 
@@ -65,12 +66,13 @@ ProtoResult<std::size_t> FrameSealer::Seal(MutableByteSpan out,
     return HEADER_SIZE + *sealed;
 }
 
-FrameOpener::FrameOpener(crypto::Key key, DirectionSalt salt) noexcept
-    : Key_(std::move(key)), Salt_(salt) {}
+FrameOpener::FrameOpener(crypto::Key key, DirectionSalt salt,
+                         std::uint64_t frameLimit) noexcept
+    : Key_(std::move(key)), Salt_(salt), FrameLimit_(frameLimit) {}
 
 ProtoResult<ByteSpan> FrameOpener::Open(MutableByteSpan out,
                                         const FrameView& frame) noexcept {
-    if (Counter_ >= MAX_FRAMES_PER_EPOCH) {
+    if (Counter_ >= FrameLimit_) {
         return std::unexpected(EProtoError::RekeyRequired);
     }
 

@@ -30,7 +30,12 @@ inline constexpr std::uint64_t MAX_FRAMES_PER_EPOCH = 1ULL << 24;
 /// decrypting something plausible.
 class FrameSealer {
 public:
-    FrameSealer(crypto::Key key, DirectionSalt salt) noexcept;
+    /// `frameLimit` is the policy for this connection, not a property of the
+    /// class: the default is the figure from §8, and a test can hand in a small
+    /// one to reach the exhausted-key path without sealing sixteen million
+    /// frames.
+    FrameSealer(crypto::Key key, DirectionSalt salt,
+                std::uint64_t frameLimit = MAX_FRAMES_PER_EPOCH) noexcept;
 
     /// Writes header and sealed body into `out` and returns the total length.
     /// `out` needs HEADER_SIZE + plaintext + TAG_SIZE bytes.
@@ -43,6 +48,7 @@ public:
 private:
     crypto::Key Key_;
     DirectionSalt Salt_;
+    std::uint64_t FrameLimit_;
     std::uint64_t Counter_{0};
     std::uint8_t Epoch_{0};
 };
@@ -50,7 +56,8 @@ private:
 /// Opens frames for one direction of one connection.
 class FrameOpener {
 public:
-    FrameOpener(crypto::Key key, DirectionSalt salt) noexcept;
+    FrameOpener(crypto::Key key, DirectionSalt salt,
+                std::uint64_t frameLimit = MAX_FRAMES_PER_EPOCH) noexcept;
 
     /// Verifies and decrypts the body of `frame` into `out`.
     ///
@@ -65,6 +72,7 @@ public:
 private:
     crypto::Key Key_;
     DirectionSalt Salt_;
+    std::uint64_t FrameLimit_;
     std::uint64_t Counter_{0};
 };
 
