@@ -47,6 +47,8 @@ jobs:
   musl:
     name: musl
     runs-on: ubuntu-24.04
+    env:
+      ZET_APK_CACHE: ${{ github.workspace }}/../apk-cache
     steps:
       - uses: actions/checkout@v4
 
@@ -54,6 +56,15 @@ jobs:
         uses: ./.github/actions/ccache
         with:
           key: musl
+
+      # Same shape as the .deb cache the Ubuntu jobs use: the packages are
+      # cached, not an image. Keyed by the package list, so editing it
+      # refreshes the cache by construction.
+      - name: Restore the Alpine packages
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/../apk-cache
+          key: apk-${{ runner.os }}-${{ hashFiles('tools/alpine-packages.txt', 'tools/musl_build.sh') }}
 
       - name: Build and test
         run: tools/musl_build.sh musl-dev test
