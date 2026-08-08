@@ -11,10 +11,10 @@ cd "$root" || exit 2
 
 # name:why
 allowed=(
-    "doctest:тесты, header-only, в поставляемые бинари не попадает"
-    "sodium:единственная рантайм-зависимость (с M1)"
-    "PkgConfig:механизм поиска libsodium, не зависимость"
-    "Threads:системная"
+    "doctest:tests, header-only, never lands in the shipped binaries"
+    "sodium:the one runtime dependency (from M1)"
+    "PkgConfig:how libsodium is located, not a dependency of its own"
+    "Threads:system"
 )
 
 mapfile -t cmake_files < <(find . -name 'CMakeLists.txt' -o -name '*.cmake' \
@@ -36,20 +36,20 @@ for dep in "${found[@]}"; do
     if [ "$ok" -eq 1 ]; then
         printf '  ok   %s\n' "$dep"
     else
-        printf '  НЕТ  %s — не в списке разрешённых\n' "$dep"
+        printf '  FAIL %s — not on the allowed list\n' "$dep"
         violations=$((violations + 1))
     fi
 done
 
-printf 'файлов CMake: %d, зависимостей: %d, незаявленных: %d\n' \
+printf 'CMake files: %d, dependencies: %d, undeclared: %d\n' \
     "${#cmake_files[@]}" "${#found[@]}" "$violations"
 
 if [ "$violations" -ne 0 ]; then
     echo
-    echo "Новая зависимость добавляется только после обсуждения:"
-    echo "что даёт, что весит в байтах и секундах сборки, чем заменяется"
-    echo "своим кодом. Затем — в список в этом скрипте и ADR в docs/design.md."
+    echo "A new dependency is only added after a discussion:"
+    echo "what it buys, what it costs in bytes and build seconds, what it"
+    echo "would take to write instead. Then: this list, and an ADR in docs/design.md."
     exit 1
 fi
 
-echo "незаявленных зависимостей нет"
+echo "no undeclared dependencies"

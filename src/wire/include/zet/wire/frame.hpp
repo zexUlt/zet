@@ -11,20 +11,20 @@
 
 namespace zet::wire {
 
-/// Открытая часть кадра. Оба поля покрыты AD, поэтому подмена любого из них
-/// проваливает тег, а не приводит к разбору чужой длины.
+/// The cleartext part of a frame. Both fields are covered by the AD, so
+/// tampering with either fails the tag instead of steering the parse.
 struct FrameHeader {
-    /// Длина тела: ciphertext вместе с тегом.
+    /// Body length: ciphertext together with the tag.
     std::uint32_t Length{0};
-    /// Поколение ключа. Растёт при rekey.
+    /// Key generation. Grows on rekey.
     std::uint8_t Epoch{0};
 };
 
-/// Кадр, найденный в буфере. Тело — вид на входные байты, копий не делается.
+/// A frame found in a buffer. The body is a view over the input, never a copy.
 struct FrameView {
     FrameHeader Header;
     ByteSpan Body;
-    /// Сколько байт буфера занял кадр целиком, вместе с заголовком.
+    /// How many bytes of the buffer the whole frame took, header included.
     std::size_t Consumed{0};
 };
 
@@ -34,13 +34,13 @@ struct FrameView {
 [[nodiscard]] ProtoResult<void> WriteFrameHeader(ByteWriter& writer,
                                                  FrameHeader header) noexcept;
 
-/// Выделяет один кадр из начала буфера.
+/// Extracts one frame from the front of the buffer.
 ///
-/// `maxBodyLength` — потолок стадии: MAX_HANDSHAKE_FRAME до аутентификации,
-/// MAX_FRAME после. Длина сверяется с ним до того, как кто-либо решит выделять
-/// под неё память.
+/// `maxBodyLength` is the limit for the stage: MAX_HANDSHAKE_FRAME before
+/// authentication, MAX_FRAME after. The declared length is checked against it
+/// before anyone decides to allocate for it.
 ///
-/// `Truncated` означает «данных пока мало, дочитай и позови снова», а не порчу.
+/// `Truncated` means "read more and call again", not damage.
 [[nodiscard]] ProtoResult<FrameView> ReadFrame(
     ByteSpan buffer, std::uint32_t maxBodyLength) noexcept;
 

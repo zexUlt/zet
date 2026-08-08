@@ -28,7 +28,7 @@ for entry in "${budgets[@]}"; do
     path=$(find "$build" -type f -name "$name" -perm -u+x 2>/dev/null | head -1)
 
     if [ -z "$path" ]; then
-        printf '  skip %-10s ещё не собирается\n' "$name"
+        printf '  skip %-10s not built yet\n' "$name"
         continue
     fi
 
@@ -44,18 +44,18 @@ for entry in "${budgets[@]}"; do
     fi
 done
 
-printf 'бинарей проверено: %d, превышений: %d\n' "$checked" "$violations"
+printf 'binaries checked: %d, over budget: %d\n' "$checked" "$violations"
 
 if [ "$checked" -eq 0 ]; then
-    echo "нечего измерять: бинари появятся на M4"
+    echo "nothing to measure: the binaries arrive in M4"
     exit 0
 fi
 
 if [ "$violations" -ne 0 ]; then
     echo
-    echo "Не раздувай бюджет молча и не выкидывай фичу молча."
-    echo "Вынеси расхождение в docs/design.md §18 с цифрами."
+    echo "Do not inflate the budget silently, and do not drop a feature silently."
+    echo "Write the discrepancy down in docs/design.md §18, with the numbers."
     exit 1
 fi
 
-echo "все бинари в бюджете"
+echo "every binary is within budget"

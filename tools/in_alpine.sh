@@ -1,24 +1,24 @@
 #!/usr/bin/env bash
-# Выполняет команду в Alpine с установленным тулчейном.
+# Runs a command in Alpine with the toolchain installed.
 #
-# Тулчейн ставится из кешированных .apk, а не берётся из готового образа:
-# базовый образ 3.5 МБ, установка из тёплого кеша — десять секунд без сети.
-# Так же устроены были джобы под Ubuntu, которые кешировали .deb.
+# The toolchain comes from cached .apk files rather than from a prebuilt image:
+# the base image is 3.5 MB, and installing from a warm cache takes ten seconds
+# with no network. The Ubuntu jobs that cached .deb files worked the same way.
 #
-# Использование: tools/in_alpine.sh 'команда для shell'
+# Usage: tools/in_alpine.sh 'shell command'
 set -euo pipefail
 
 ALPINE_IMAGE=alpine:3.22
 
-[ $# -gt 0 ] || { echo "нечего выполнять: tools/in_alpine.sh 'команда'" >&2; exit 2; }
+[ $# -gt 0 ] || { echo "nothing to run: tools/in_alpine.sh 'command'" >&2; exit 2; }
 
 root=$(cd "$(dirname "$0")/.." && pwd)
 packages=$(grep -v '^#' "$root/tools/alpine-packages.txt" | tr '\n' ' ')
 apk_cache=${ZET_APK_CACHE:-$root/build/.apk-cache}
 mkdir -p "$apk_cache"
 
-# Root внутри контейнера, потому что иначе apk не поставит пакеты. Результаты
-# сборки возвращаются вызывающему в конце.
+# Root inside the container, because apk will not install packages otherwise.
+# The build results are handed back to the caller at the end.
 args=(
     --rm
     -v "$root:/src"
@@ -36,8 +36,8 @@ docker run "${args[@]}" "$ALPINE_IMAGE" sh -c "
 set -e
 apk add --no-progress --cache-dir /apk-cache --update-cache $packages >/dev/null
 
-# Команда идёт отдельными строками, а не через '||': многострочный аргумент
-# унёс бы оператор на новую строку, и sh упал бы на синтаксисе.
+# The command gets its own lines instead of an '||': a multi-line argument
+# would carry the operator onto a new line and sh would fail on the syntax.
 set +e
 $*
 status=\$?

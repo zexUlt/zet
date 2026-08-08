@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Сборка пресета в Alpine — на ноутбуке и в CI одной и той же командой.
+# Builds a preset in Alpine — the same command on a laptop and in CI.
 #
-# Использование: tools/musl_build.sh [preset] [ctest]
+# Usage: tools/musl_build.sh [preset] [ctest]
 set -euo pipefail
 
 preset=${1:-musl-release}
