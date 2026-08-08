@@ -111,8 +111,8 @@ CheckOptions:
     value: UPPER_CASE
   - key: readability-identifier-naming.StaticConstantCase
     value: UPPER_CASE
-# ConstexprVariableCase намеренно не задан: он перекрыл бы и глобальные
-# константы, и локальные разом. Без него каждая попадает под своё правило —
-# UPPER_CASE для namespace-scope, camelBack для локальных.
+# ConstexprVariableCase is deliberately unset: it would cover global constants
+# and local ones alike. Without it each falls under its own rule — UPPER_CASE at
+# namespace scope, camelBack for locals.
   - key: readability-identifier-naming.MacroDefinitionCase
     value: UPPER_CASE
