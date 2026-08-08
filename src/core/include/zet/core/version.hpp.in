@@ -1,0 +1,16 @@
+#pragma once
+
+#include <cstdint>
+
+namespace zet {
+
+/// The version of the whole tree: client, agent and mux ship together and are
+/// versioned as one number. It is not a semantic version — there is nothing to
+/// promise compatibility for per component, and the protocol negotiates its own
+/// range separately (design.md §7).
+///
+/// The value comes from the `project()` call in the top-level CMakeLists.txt,
+/// substituted here at configure time.
+inline constexpr std::uint32_t VERSION = @PROJECT_VERSION@;
+
+}  // namespace zet
