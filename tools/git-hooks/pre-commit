@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+# Refuses a commit that still carries an unresolved merge conflict.
+#
+# git reports conflicts once, when the merge stops. Resolving two files out of
+# three and then staging everything with `git add -A` is enough to commit the
+# third with its markers intact, and nothing complains until someone reads it.
+#
+# Only the angle brackets are matched. The `=======` line of a conflict is
+# indistinguishable from a markdown heading underlined with seven equals signs,
+# and a conflict never appears without `<<<<<<<` and `>>>>>>>` anyway.
+set -uo pipefail
+
+marker='^\+(<{7}|>{7})( .*)?$'
+
+if ! git diff --cached -U0 | grep -qE "$marker"; then
+    exit 0
+fi
+
+echo "Отказ: в индексе остались маркеры конфликта." >&2
+echo >&2
+git diff --cached --name-only -G'^(<{7}|>{7})( .*)?$' \
+    | sed 's/^/    /' >&2
+echo >&2
+echo "Порезолвь их и проверь остальные файлы: git сообщает о конфликтах" >&2
+echo "один раз, а add -A забирает всё, что лежит в дереве." >&2
+exit 1

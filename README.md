@@ -43,6 +43,15 @@ from a cached set of `.apk` files.
 The first argument is a CMake preset (`musl-dev`, `musl-asan-ubsan`,
 `musl-coverage`, `musl-release`); the second, if present, runs `ctest`.
 
+## Git hooks
+
+One command after cloning, and a merge conflict can no longer be committed by
+accident:
+
+```sh
+git config core.hooksPath tools/git-hooks
+```
+
 ## Layout
 
 - `src/core` — `zet_core`: byte reader and writer, logging, secrets, time. No
