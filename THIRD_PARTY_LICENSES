@@ -1,15 +1,15 @@
-Стороннее в поставляемых бинарях
-===============================
+Third-party code in the shipped binaries
+========================================
 
 libsodium 1.0.20
 ----------------
 https://github.com/jedisct1/libsodium
-Лицензия ISC.
+ISC licence.
 
-Линкуется статически в бинари, которые терминируют криптографию. Берётся
-пакетом Alpine с закреплённой версией (tools/alpine-packages.txt); Alpine
-накладывает патч на CVE-2025-69277 и прогоняет тест-сьют библиотеки при сборке
-пакета.
+Linked statically into the binaries that terminate cryptography. Taken from the
+Alpine package at a pinned version (tools/alpine-packages.txt); Alpine carries a
+patch for CVE-2025-69277 and runs the library's own test suite when building the
+package.
 
     ISC License
 
@@ -28,14 +28,14 @@ https://github.com/jedisct1/libsodium
     ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
     OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 
-LLVM libc++ и libc++abi, musl
------------------------------
-Рантайм C++ и libc, с которыми бинари линкуются статически: libc++/libc++abi
-под Apache 2.0 с исключением для LLVM, musl под MIT. Тексты лицензий едут в
-базовом образе Alpine (/usr/share/licenses).
+LLVM libc++ and libc++abi, musl
+-------------------------------
+The C++ runtime and the libc the binaries link against statically:
+libc++/libc++abi under Apache 2.0 with the LLVM exception, musl under MIT. The
+licence texts ship in the Alpine base image under /usr/share/licenses.
 
 
-Не попадает в поставляемые бинари
-=================================
+Not in the shipped binaries
+===========================
 
-doctest 2.4.12 — MIT, только тестовая сборка.
+doctest 2.4.12 — MIT, test builds only.

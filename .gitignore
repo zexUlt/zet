@@ -30,9 +30,5 @@ oom-*
 # Local agent overrides
 .claude/settings.local.json
 
-<<<<<<< HEAD
-# Рабочие копии фоновых агентов
-=======
 # Working copies of background agents
->>>>>>> origin/trunk
 .claude/worktrees/
