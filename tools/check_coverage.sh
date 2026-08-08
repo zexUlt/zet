@@ -65,9 +65,10 @@ llvm-cov export -format=lcov "$tests" -instr-profile="$profdata" >"$lcov"
 checked=0
 violations=0
 
-# A machine-readable copy for the pull request comment. Written only when asked
-# for, so a local run stays plain text.
-markdown=${ZET_COVERAGE_MARKDOWN:-}
+# A machine-readable copy for the pull request comment. It lives next to the
+# build rather than at a path handed in from outside: this script re-enters the
+# container, where a host path such as RUNNER_TEMP does not exist.
+markdown=$root/$build/coverage.md
 markdown_rows=()
 
 for entry in "${GATED_TARGETS[@]}"; do
@@ -108,9 +109,7 @@ for entry in "${GATED_TARGETS[@]}"; do
         file_percent=$(awk -v c="$covered" -v t="$total" 'BEGIN { printf "%.2f", c * 100 / t }')
         printf '    %-44s %4d/%-4d %6s%%\n' "${file#"$root"/}" \
             "$covered" "$total" "$file_percent"
-        if [ -n "$markdown" ]; then
-            markdown_rows+=("| \`${file#"$root"/}\` | $covered/$total | $file_percent% |")
-        fi
+        markdown_rows+=("| \`${file#"$root"/}\` | $covered/$total | $file_percent% |")
     done
 
     checked=$((checked + 1))
@@ -118,9 +117,7 @@ for entry in "${GATED_TARGETS[@]}"; do
 
     # Scaled integers: the threshold is whole percent, and 89.99% must not
     # round its way past it.
-    if [ -n "$markdown" ]; then
-        markdown_rows+=("| **$target** | **$target_covered/$target_total** | **$percent%** |")
-    fi
+    markdown_rows+=("| **$target** | **$target_covered/$target_total** | **$percent%** |")
 
     if [ $((target_covered * 10000 / target_total)) -lt $((LINE_COVERAGE_THRESHOLD_PERCENT * 100)) ]; then
         printf '  FAIL %-12s %d/%d lines, %s%% < %d%%\n' \
@@ -134,8 +131,7 @@ done
 
 printf 'targets checked: %d, below threshold: %d\n' "$checked" "$violations"
 
-if [ -n "$markdown" ]; then
-    {
+{
         # The marker is how the workflow finds its own comment to update
         # instead of leaving a new one on every push.
         echo "<!-- zet-coverage -->"
@@ -150,8 +146,7 @@ if [ -n "$markdown" ]; then
         else
             echo "Threshold ${LINE_COVERAGE_THRESHOLD_PERCENT}%, from docs/design.md §16."
         fi
-    } >"$markdown"
-fi
+} >"$markdown"
 
 if [ "$checked" -eq 0 ]; then
     echo "nothing to measure: the gate wakes up with the targets from §16"

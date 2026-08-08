@@ -55,11 +55,9 @@ jobs:
         uses: ./.github/actions/apk
 
       - name: Line coverage of the protocol core
-        env:
-          ZET_COVERAGE_MARKDOWN: ${{ runner.temp }}/coverage.md
         run: |
           tools/check_coverage.sh
-          cat "$ZET_COVERAGE_MARKDOWN" >> "$GITHUB_STEP_SUMMARY"
+          cat build/musl-coverage/coverage.md >> "$GITHUB_STEP_SUMMARY"
 
       # Updates its own comment rather than leaving one per push; the marker in
       # the body is how it finds it. Runs even when the gate failed — a missed
@@ -68,7 +66,7 @@ jobs:
         if: always() && github.event_name == 'pull_request'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          BODY: ${{ runner.temp }}/coverage.md
+          BODY: build/musl-coverage/coverage.md
         run: |
           [ -s "$BODY" ] || exit 0
           existing=$(gh api "repos/${{ github.repository }}/issues/${{ github.event.number }}/comments" \
