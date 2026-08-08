@@ -1,0 +1,41 @@
+Стороннее в поставляемых бинарях
+===============================
+
+libsodium 1.0.20
+----------------
+https://github.com/jedisct1/libsodium
+Лицензия ISC.
+
+Линкуется статически в бинари, которые терминируют криптографию. Берётся
+пакетом Alpine с закреплённой версией (tools/alpine-packages.txt); Alpine
+накладывает патч на CVE-2025-69277 и прогоняет тест-сьют библиотеки при сборке
+пакета.
+
+    ISC License
+
+    Copyright (c) 2013-2025
+    Frank Denis <j at pureftpd dot org>
+
+    Permission to use, copy, modify, and/or distribute this software for any
+    purpose with or without fee is hereby granted, provided that the above
+    copyright notice and this permission notice appear in all copies.
+
+    THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
+    WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
+    MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
+    ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
+    WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
+    ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
+    OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
+
+LLVM libc++ и libc++abi, musl
+-----------------------------
+Рантайм C++ и libc, с которыми бинари линкуются статически: libc++/libc++abi
+под Apache 2.0 с исключением для LLVM, musl под MIT. Тексты лицензий едут в
+базовом образе Alpine (/usr/share/licenses).
+
+
+Не попадает в поставляемые бинари
+=================================
+
+doctest 2.4.12 — MIT, только тестовая сборка.

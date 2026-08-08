@@ -29,3 +29,6 @@ oom-*
 
 # Local agent overrides
 .claude/settings.local.json
+
+# Рабочие копии фоновых агентов
+.claude/worktrees/
