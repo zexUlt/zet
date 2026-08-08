@@ -44,4 +44,5 @@ runs:
           echo "CCACHE_NOHASHDIR=true"
           echo "ZET_COMPILER_LAUNCHER=ccache"
         } >> "$GITHUB_ENV"
-        ccache --zero-stats >/dev/null
+        # The musl job has no host toolchain — its ccache lives in the container.
+        ccache --zero-stats >/dev/null 2>&1 || true

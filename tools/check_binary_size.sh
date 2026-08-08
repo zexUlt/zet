@@ -8,7 +8,7 @@
 # Usage: tools/check_binary_size.sh [build-dir]
 set -uo pipefail
 
-build=${1:-build/release}
+build=${1:-build/musl-release}
 root=$(cd "$(dirname "$0")/.." && pwd)
 cd "$root" || exit 2
 

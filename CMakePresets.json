@@ -66,6 +66,36 @@
         "CMAKE_INTERPROCEDURAL_OPTIMIZATION": "ON",
         "ZET_BUILD_TESTS": "OFF"
       }
+    },
+    {
+      "name": "musl-base",
+      "hidden": true,
+      "inherits": "base",
+      "cacheVariables": {
+        "CMAKE_CXX_FLAGS": "-stdlib=libc++",
+        "CMAKE_EXE_LINKER_FLAGS": "-static -fuse-ld=lld",
+        "CMAKE_CXX_STANDARD_LIBRARIES": "-lc++abi -lunwind"
+      }
+    },
+    {
+      "name": "musl-dev",
+      "inherits": "musl-base",
+      "displayName": "musl-dev — tests against the libc the binaries ship with",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug"
+      }
+    },
+    {
+      "name": "musl-release",
+      "inherits": "musl-base",
+      "displayName": "musl-release — what ships, and what the size gate measures",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "CMAKE_CXX_FLAGS": "-stdlib=libc++ -O2 -ffunction-sections -fdata-sections",
+        "CMAKE_EXE_LINKER_FLAGS": "-static -fuse-ld=lld -Wl,--gc-sections -Wl,-s",
+        "CMAKE_INTERPROCEDURAL_OPTIMIZATION": "ON",
+        "ZET_BUILD_TESTS": "OFF"
+      }
     }
   ],
   "buildPresets": [
@@ -88,6 +118,14 @@
     {
       "name": "release",
       "configurePreset": "release"
+    },
+    {
+      "name": "musl-dev",
+      "configurePreset": "musl-dev"
+    },
+    {
+      "name": "musl-release",
+      "configurePreset": "musl-release"
     }
   ],
   "testPresets": [
@@ -115,6 +153,11 @@
       "name": "coverage",
       "inherits": "common",
       "configurePreset": "coverage"
+    },
+    {
+      "name": "musl-dev",
+      "inherits": "common",
+      "configurePreset": "musl-dev"
     }
   ]
 }

@@ -41,6 +41,40 @@ jobs:
         if: always()
         run: ccache --show-stats
 
+  # The Ubuntu jobs above are the development environment. This one is the
+  # shipping environment, and the two differ in libc — so the tests run here as
+  # well, against the library the binaries are actually linked with.
+  musl:
+    name: musl
+    runs-on: ubuntu-24.04
+    env:
+      ZET_APK_CACHE: ${{ github.workspace }}/../apk-cache
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Restore the compiler cache
+        uses: ./.github/actions/ccache
+        with:
+          key: musl
+
+      # Same shape as the .deb cache the Ubuntu jobs use: the packages are
+      # cached, not an image. Keyed by the package list, so editing it
+      # refreshes the cache by construction.
+      - name: Restore the Alpine packages
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/../apk-cache
+          key: apk-${{ runner.os }}-${{ hashFiles('tools/alpine-packages.txt', 'tools/musl_build.sh') }}
+
+      - name: Build and test
+        run: tools/musl_build.sh musl-dev test
+
+      - name: Build what ships
+        run: tools/musl_build.sh musl-release
+
+      - name: Binary size budgets
+        run: tools/check_binary_size.sh build/musl-release
+
   checks:
     name: checks
     runs-on: ubuntu-24.04
@@ -94,9 +128,6 @@ jobs:
 
       - name: No undeclared dependencies
         run: tools/check_deps.sh
-
-      - name: Binary size budgets
-        run: tools/check_binary_size.sh build/dev
 
       # A gate that cannot fail is decoration. Break each invariant on purpose
       # and require the gate to notice. These come last: they dirty the working
