@@ -15,10 +15,12 @@ add_executable(zet_tests
     core/log_test.cpp
     core/secret_test.cpp
     core/time_test.cpp
+    wire/frame_test.cpp
 )
 
 target_link_libraries(zet_tests PRIVATE
     zet::core
+    zet::wire
     zet::compile_options
     doctest::doctest
 )
