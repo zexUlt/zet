@@ -16,11 +16,11 @@ if ! git diff --cached -U0 | grep -qE "$marker"; then
     exit 0
 fi
 
-echo "Отказ: в индексе остались маркеры конфликта." >&2
+echo "Refused: the index still carries conflict markers." >&2
 echo >&2
 git diff --cached --name-only -G'^(<{7}|>{7})( .*)?$' \
     | sed 's/^/    /' >&2
 echo >&2
-echo "Порезолвь их и проверь остальные файлы: git сообщает о конфликтах" >&2
-echo "один раз, а add -A забирает всё, что лежит в дереве." >&2
+echo "Resolve them, and check the other files while you are at it: git" >&2
+echo "reports conflicts once, and add -A stages whatever is in the tree." >&2
 exit 1
