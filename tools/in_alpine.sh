@@ -35,8 +35,13 @@ fi
 docker run "${args[@]}" "$ALPINE_IMAGE" sh -c "
 set -e
 apk add --no-progress --cache-dir /apk-cache --update-cache $packages >/dev/null
-status=0
-$* || status=\$?
+
+# Команда идёт отдельными строками, а не через '||': многострочный аргумент
+# унёс бы оператор на новую строку, и sh упал бы на синтаксисе.
+set +e
+$*
+status=\$?
+set -e
 chown -R \$ZET_UID:\$ZET_GID build /apk-cache 2>/dev/null || true
 chmod -R a+rw /apk-cache 2>/dev/null || true
 exit \$status
