@@ -15,6 +15,7 @@ add_executable(zet_tests
     core/log_test.cpp
     core/secret_test.cpp
     core/time_test.cpp
+    core/version_test.cpp
     crypto/crypto_test.cpp
     wire/frame_test.cpp
     wire/sealed_frame_test.cpp

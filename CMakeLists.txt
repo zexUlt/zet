@@ -1,7 +1,10 @@
 cmake_minimum_required(VERSION 3.24)
 
+# A single integer, bumped as a whole. Semantic versioning would promise
+# compatibility per component, and there is only one thing to be compatible
+# with: the protocol, which negotiates its own range (design.md §7).
 project(zet
-    VERSION 0.1.0
+    VERSION 1
     DESCRIPTION "A terminal session that survives the network"
     LANGUAGES CXX
 )
