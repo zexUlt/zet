@@ -2,6 +2,7 @@
 
 #include <doctest/doctest.h>
 
+#include <algorithm>
 #include <array>
 #include <cstddef>
 #include <cstdint>
@@ -63,11 +64,24 @@ TEST_CASE_FIXTURE(SodiumFixture, "a sealed frame opens back to the plaintext") {
 
     const auto frame = ReadFrame(ByteSpan{wire}.first(*sealed), MAX_FRAME);
     REQUIRE(frame.has_value());
+    CHECK(frame->Header.Length == plaintext.size() + crypto::TAG_SIZE);
+
+    // A round trip alone would stay green if sealing and opening both degraded
+    // into a copy, which is the shape of ET's entire crypto test. So: the body
+    // is longer than the plaintext by exactly a tag, and none of the plaintext
+    // shows through it.
+    const auto body = frame->Body;
+    REQUIRE(body.size() == plaintext.size() + crypto::TAG_SIZE);
+    CHECK_FALSE(std::equal(plaintext.begin(), plaintext.end(), body.begin()));
 
     std::vector<std::byte> out(plaintext.size());
     const auto opened = pair.Opener.Open(MutableByteSpan{out}, *frame);
     REQUIRE(opened.has_value());
     CHECK(std::vector<std::byte>(opened->begin(), opened->end()) == plaintext);
+
+    // And the plaintext came out of the opener, not out of a buffer that was
+    // never written: a no-op Open would leave the zeros it started with.
+    CHECK(out != std::vector<std::byte>(plaintext.size(), std::byte{0}));
 }
 
 TEST_CASE_FIXTURE(SodiumFixture,
@@ -274,17 +288,22 @@ TEST_CASE_FIXTURE(SodiumFixture, "sealing into too small a buffer is refused") {
     CHECK(pair.Sealer.Counter() == 0);
 }
 
-TEST_CASE_FIXTURE(SodiumFixture, "a key that has sealed its limit refuses to seal again") {
+TEST_CASE_FIXTURE(SodiumFixture,
+                  "a key that has sealed its limit refuses to seal again") {
     // The real limit is sixteen million frames, so the test hands in a small
     // one: what is being checked is the refusal, not the size of the number.
     FrameSealer sealer{MakeKey(1), MakeSalt(1), 2};
     const auto plaintext = Bytes("ok");
-    std::vector<std::byte> wire(HEADER_SIZE + plaintext.size() + crypto::TAG_SIZE);
+    std::vector<std::byte> wire(HEADER_SIZE + plaintext.size() +
+                                crypto::TAG_SIZE);
 
-    REQUIRE(sealer.Seal(MutableByteSpan{wire}, ByteSpan{plaintext}).has_value());
-    REQUIRE(sealer.Seal(MutableByteSpan{wire}, ByteSpan{plaintext}).has_value());
+    REQUIRE(
+        sealer.Seal(MutableByteSpan{wire}, ByteSpan{plaintext}).has_value());
+    REQUIRE(
+        sealer.Seal(MutableByteSpan{wire}, ByteSpan{plaintext}).has_value());
 
-    const auto exhausted = sealer.Seal(MutableByteSpan{wire}, ByteSpan{plaintext});
+    const auto exhausted =
+        sealer.Seal(MutableByteSpan{wire}, ByteSpan{plaintext});
     REQUIRE_FALSE(exhausted.has_value());
     CHECK(exhausted.error() == EProtoError::RekeyRequired);
     CHECK(sealer.Counter() == 2);
@@ -295,15 +314,19 @@ TEST_CASE_FIXTURE(SodiumFixture, "a key that has sealed its limit refuses to sea
           EProtoError::RekeyRequired);
 }
 
-TEST_CASE_FIXTURE(SodiumFixture, "a receiver at its limit refuses to open further frames") {
+TEST_CASE_FIXTURE(SodiumFixture,
+                  "a receiver at its limit refuses to open further frames") {
     FrameSealer sealer{MakeKey(1), MakeSalt(1)};
     FrameOpener opener{MakeKey(1), MakeSalt(1), 1};
     const auto plaintext = Bytes("second one is too many");
 
-    std::vector<std::byte> first(HEADER_SIZE + plaintext.size() + crypto::TAG_SIZE);
+    std::vector<std::byte> first(HEADER_SIZE + plaintext.size() +
+                                 crypto::TAG_SIZE);
     std::vector<std::byte> second(first.size());
-    REQUIRE(sealer.Seal(MutableByteSpan{first}, ByteSpan{plaintext}).has_value());
-    REQUIRE(sealer.Seal(MutableByteSpan{second}, ByteSpan{plaintext}).has_value());
+    REQUIRE(
+        sealer.Seal(MutableByteSpan{first}, ByteSpan{plaintext}).has_value());
+    REQUIRE(
+        sealer.Seal(MutableByteSpan{second}, ByteSpan{plaintext}).has_value());
 
     std::vector<std::byte> out(plaintext.size());
     const auto firstFrame = ReadFrame(ByteSpan{first}, MAX_FRAME);
@@ -321,8 +344,10 @@ TEST_CASE_FIXTURE(SodiumFixture, "opening into too small a buffer is refused") {
     Pair pair;
     const auto plaintext = Bytes("longer than the buffer given back");
 
-    std::vector<std::byte> wire(HEADER_SIZE + plaintext.size() + crypto::TAG_SIZE);
-    REQUIRE(pair.Sealer.Seal(MutableByteSpan{wire}, ByteSpan{plaintext}).has_value());
+    std::vector<std::byte> wire(HEADER_SIZE + plaintext.size() +
+                                crypto::TAG_SIZE);
+    REQUIRE(pair.Sealer.Seal(MutableByteSpan{wire}, ByteSpan{plaintext})
+                .has_value());
 
     const auto frame = ReadFrame(ByteSpan{wire}, MAX_FRAME);
     REQUIRE(frame.has_value());
@@ -334,12 +359,15 @@ TEST_CASE_FIXTURE(SodiumFixture, "opening into too small a buffer is refused") {
     CHECK(pair.Opener.Counter() == 0);
 }
 
-TEST_CASE_FIXTURE(SodiumFixture, "the sealer reports the epoch it stamps into the header") {
+TEST_CASE_FIXTURE(SodiumFixture,
+                  "the sealer reports the epoch it stamps into the header") {
     Pair pair;
     const auto plaintext = Bytes("epoch zero");
-    std::vector<std::byte> wire(HEADER_SIZE + plaintext.size() + crypto::TAG_SIZE);
+    std::vector<std::byte> wire(HEADER_SIZE + plaintext.size() +
+                                crypto::TAG_SIZE);
 
-    REQUIRE(pair.Sealer.Seal(MutableByteSpan{wire}, ByteSpan{plaintext}).has_value());
+    REQUIRE(pair.Sealer.Seal(MutableByteSpan{wire}, ByteSpan{plaintext})
+                .has_value());
     const auto frame = ReadFrame(ByteSpan{wire}, MAX_FRAME);
     REQUIRE(frame.has_value());
     CHECK(frame->Header.Epoch == pair.Sealer.Epoch());
