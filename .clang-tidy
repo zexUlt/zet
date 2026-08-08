@@ -18,13 +18,18 @@
 #   namespaces           lower_case  — never confusable with a type
 #   enum values          PascalCase  — members of a type, not global constants,
 #                                      and already qualified by the enum name
-#   private members      camelCase_  — the suffix is what separates a member
-#                                      from a parameter of the same name, which
-#                                      is exactly the -Wshadow class of bug
+#   members              PascalCase  — private and protected keep a trailing
+#                                      underscore, which is what separates a
+#                                      member from a parameter of the same
+#                                      name: exactly the -Wshadow class of bug
 #   local constexpr      camelCase   — scoped, so not a "global constant"
 
+# The static analyser comes along by default and is worth keeping: it caught a
+# real read of a moved-from object on the first run. Listed explicitly so that
+# the set of checks is visible here rather than inherited silently.
 Checks: >
-  readability-identifier-naming
+  readability-identifier-naming,
+  clang-analyzer-*
 
 WarningsAsErrors: 'readability-identifier-naming'
 
@@ -88,15 +93,15 @@ CheckOptions:
     value: camelBack
 
   - key: readability-identifier-naming.PrivateMemberCase
-    value: camelBack
+    value: CamelCase
   - key: readability-identifier-naming.PrivateMemberSuffix
     value: _
   - key: readability-identifier-naming.ProtectedMemberCase
-    value: camelBack
+    value: CamelCase
   - key: readability-identifier-naming.ProtectedMemberSuffix
     value: _
   - key: readability-identifier-naming.PublicMemberCase
-    value: camelBack
+    value: CamelCase
 
   - key: readability-identifier-naming.GlobalConstantCase
     value: UPPER_CASE

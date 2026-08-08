@@ -27,8 +27,8 @@ ProtoResult<ByteSpan> ByteReader::ReadBytes(std::size_t count) noexcept {
     if (count > Remaining()) {
         return std::unexpected(EProtoError::Truncated);
     }
-    const ByteSpan taken = data_.subspan(pos_, count);
-    pos_ += count;
+    const ByteSpan taken = Data_.subspan(Pos_, count);
+    Pos_ += count;
     return taken;
 }
 
@@ -36,7 +36,7 @@ ProtoResult<void> ByteReader::Skip(std::size_t count) noexcept {
     if (count > Remaining()) {
         return std::unexpected(EProtoError::Truncated);
     }
-    pos_ += count;
+    Pos_ += count;
     return {};
 }
 

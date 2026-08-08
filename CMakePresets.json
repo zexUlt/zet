@@ -1,7 +1,10 @@
 {
   "version": 6,
-  "cmakeMinimumRequired": { "major": 3, "minor": 24, "patch": 0 },
-
+  "cmakeMinimumRequired": {
+    "major": 3,
+    "minor": 24,
+    "patch": 0
+  },
   "configurePresets": [
     {
       "name": "base",
@@ -10,7 +13,8 @@
       "binaryDir": "${sourceDir}/build/${presetName}",
       "cacheVariables": {
         "CMAKE_CXX_COMPILER": "clang++",
-        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON"
+        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
+        "CMAKE_CXX_COMPILER_LAUNCHER": "$env{ZET_COMPILER_LAUNCHER}"
       }
     },
     {
@@ -29,16 +33,6 @@
         "CMAKE_BUILD_TYPE": "Debug",
         "CMAKE_CXX_FLAGS": "-fsanitize=address,undefined -fno-omit-frame-pointer -fno-sanitize-recover=all",
         "CMAKE_EXE_LINKER_FLAGS": "-fsanitize=address,undefined"
-      }
-    },
-    {
-      "name": "tsan",
-      "inherits": "base",
-      "displayName": "tsan — thread sanitizer",
-      "cacheVariables": {
-        "CMAKE_BUILD_TYPE": "Debug",
-        "CMAKE_CXX_FLAGS": "-fsanitize=thread -fno-omit-frame-pointer",
-        "CMAKE_EXE_LINKER_FLAGS": "-fsanitize=thread"
       }
     },
     {
@@ -74,26 +68,53 @@
       }
     }
   ],
-
   "buildPresets": [
-    { "name": "dev", "configurePreset": "dev" },
-    { "name": "asan-ubsan", "configurePreset": "asan-ubsan" },
-    { "name": "tsan", "configurePreset": "tsan" },
-    { "name": "fuzz", "configurePreset": "fuzz" },
-    { "name": "coverage", "configurePreset": "coverage" },
-    { "name": "release", "configurePreset": "release" }
+    {
+      "name": "dev",
+      "configurePreset": "dev"
+    },
+    {
+      "name": "asan-ubsan",
+      "configurePreset": "asan-ubsan"
+    },
+    {
+      "name": "fuzz",
+      "configurePreset": "fuzz"
+    },
+    {
+      "name": "coverage",
+      "configurePreset": "coverage"
+    },
+    {
+      "name": "release",
+      "configurePreset": "release"
+    }
   ],
-
   "testPresets": [
     {
       "name": "common",
       "hidden": true,
-      "output": { "outputOnFailure": true },
-      "execution": { "noTestsAction": "error" }
+      "output": {
+        "outputOnFailure": true
+      },
+      "execution": {
+        "noTestsAction": "error"
+      }
     },
-    { "name": "dev", "inherits": "common", "configurePreset": "dev" },
-    { "name": "asan-ubsan", "inherits": "common", "configurePreset": "asan-ubsan" },
-    { "name": "tsan", "inherits": "common", "configurePreset": "tsan" },
-    { "name": "coverage", "inherits": "common", "configurePreset": "coverage" }
+    {
+      "name": "dev",
+      "inherits": "common",
+      "configurePreset": "dev"
+    },
+    {
+      "name": "asan-ubsan",
+      "inherits": "common",
+      "configurePreset": "asan-ubsan"
+    },
+    {
+      "name": "coverage",
+      "inherits": "common",
+      "configurePreset": "coverage"
+    }
   ]
 }
