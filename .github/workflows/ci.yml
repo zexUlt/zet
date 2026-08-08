@@ -37,11 +37,15 @@ jobs:
   coverage:
     name: coverage
     runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      pull-requests: write
     steps:
       - uses: actions/checkout@v4
 
-      # Своя запись кеша: инструментированные объекты не совпадают ни с одним
-      # объектом из musl-dev, и общий кеш обе джобы только вытеснял бы.
+      # Its own cache entry: instrumented objects match nothing built for
+      # musl-dev, and a shared one would just have the two jobs evict each
+      # other.
       - name: Restore the compiler cache
         uses: ./.github/actions/ccache
         with:
@@ -51,21 +55,45 @@ jobs:
         uses: ./.github/actions/apk
 
       - name: Line coverage of the protocol core
-        run: tools/check_coverage.sh
+        env:
+          ZET_COVERAGE_MARKDOWN: ${{ runner.temp }}/coverage.md
+        run: |
+          tools/check_coverage.sh
+          cat "$ZET_COVERAGE_MARKDOWN" >> "$GITHUB_STEP_SUMMARY"
 
-      # Порог 101 недостижим по построению, поэтому самотест не сломается в тот
-      # день, когда покрытие честно дойдёт до 100%.
+      # Updates its own comment rather than leaving one per push; the marker in
+      # the body is how it finds it. Runs even when the gate failed — a missed
+      # threshold is exactly when the numbers are worth reading.
+      - name: Report coverage on the pull request
+        if: always() && github.event_name == 'pull_request'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          BODY: ${{ runner.temp }}/coverage.md
+        run: |
+          [ -s "$BODY" ] || exit 0
+          existing=$(gh api "repos/${{ github.repository }}/issues/${{ github.event.number }}/comments" \
+            --jq '.[] | select(.body | startswith("<!-- zet-coverage -->")) | .id' | head -1)
+          if [ -n "$existing" ]; then
+            gh api -X PATCH "repos/${{ github.repository }}/issues/comments/$existing" \
+              -F body=@"$BODY" >/dev/null
+          else
+            gh api -X POST "repos/${{ github.repository }}/issues/${{ github.event.number }}/comments" \
+              -F body=@"$BODY" >/dev/null
+          fi
+
+      # A threshold of 101 is unreachable by construction, so this self-test
+      # will not break on the day coverage honestly reaches 100%.
       - name: check_coverage catches a threshold miss
         run: |
           sed -i 's/^readonly LINE_COVERAGE_THRESHOLD_PERCENT=.*/readonly LINE_COVERAGE_THRESHOLD_PERCENT=101/' \
             tools/check_coverage.sh
           if ! grep -q 'LINE_COVERAGE_THRESHOLD_PERCENT=101' tools/check_coverage.sh; then
-            echo "инъекция не применилась — самотест ничего не проверяет"
+            echo "the injection did not apply — this self-test checks nothing"
             git checkout tools/check_coverage.sh
             exit 1
           fi
           if tools/check_coverage.sh; then
-            echo "гейт пропустил покрытие ниже порога"
+            echo "the gate passed coverage that is below the threshold"
             exit 1
           fi
           git checkout tools/check_coverage.sh
@@ -92,24 +120,24 @@ jobs:
         run: |
           tools/in_alpine.sh '
             files=$(find src tests -name "*.cpp" -o -name "*.hpp" | sort)
-            [ -n "$files" ] || { echo "нет C++ файлов"; exit 0; }
+            [ -n "$files" ] || { echo "no C++ files"; exit 0; }
             clang-format --dry-run --Werror $files
           '
 
       - name: Check naming and run the static analyser
         if: always()
         run: |
-          # find, а не git ls-files: последний перечисляет только отслеживаемые
-          # файлы, и свеженаписанный исходник молча остался бы непроверенным.
+          # find, not git ls-files: the latter only lists tracked files, so a
+          # newly written source would be silently skipped.
           tools/in_alpine.sh '
             files=$(find src tests -name "*.cpp" | sort)
-            [ -n "$files" ] || { echo "нет исходников"; exit 0; }
+            [ -n "$files" ] || { echo "no sources"; exit 0; }
             clang-tidy -p build/musl-dev --warnings-as-errors="*" $files
           '
 
-      # Гейты — скрипты, поэтому на ноутбуке они запускаются той же командой.
-      # Смысл их присутствия в CI в том, что нарушение останавливает pull
-      # request, а не в том, что его заметят на ревью.
+      # Each gate is a script, so it runs identically on a laptop. The point of
+      # having them in CI is that a violation stops a pull request, not that it
+      # is noticed during review.
       - name: No abort in the protocol core
         run: tools/check_no_abort.sh build/musl-dev
 
@@ -125,38 +153,37 @@ jobs:
       - name: Binary size budgets
         run: tools/check_binary_size.sh build/musl-release
 
-      # Гейт, который не может упасть, — украшение. Ломаем инвариант нарочно и
-      # требуем, чтобы гейт это заметил. Идёт последним: пачкает рабочее дерево
-      # и пересобирает, поэтому всё после него мерило бы не то.
+      # A gate that cannot fail is decoration. Break each invariant on purpose
+      # and require the gate to notice. These come last: they dirty the working
+      # tree and rebuild, so anything after them would measure the wrong thing.
       #
-      # Инъекция дописывается в конец файла и ни к чему в нём не привязана.
-      # Прошлая версия цеплялась за имя члена, переименование сделало sed
-      # холостым, и самотест позеленел бы на пустом месте — а сообщение об
-      # ошибке обвинило бы гейт. Поэтому сначала проверяем, что инъекция
-      # вообще состоялась.
+      # The injection is appended at the end of the file and anchored to nothing
+      # in it. The previous version keyed on a member name, a rename made the sed
+      # a no-op, and the self-test would have gone green on nothing — while the
+      # error message blamed the gate. Hence the check that it applied at all.
       - name: check_no_abort catches a deliberate abort
         run: |
           printf '\nnamespace zet {\nvoid GateSelfTestCanary() { std::abort(); }\n}  // namespace zet\n' \
             >> src/core/byte_writer.cpp
           sed -i '1i #include <cstdlib>' src/core/byte_writer.cpp
           if ! grep -q GateSelfTestCanary src/core/byte_writer.cpp; then
-            echo "инъекция не применилась — самотест ничего не проверяет"
+            echo "the injection did not apply — this self-test checks nothing"
             git checkout src/core/byte_writer.cpp
             exit 1
           fi
           tools/musl_build.sh musl-dev
           if tools/check_no_abort.sh build/musl-dev; then
-            echo "гейт пропустил std::abort в ядре"
+            echo "the gate passed a std::abort in the core"
             exit 1
           fi
           git checkout src/core/byte_writer.cpp
 
       - name: check_deps catches an undeclared dependency
         run: |
-          test -f src/core/CMakeLists.txt || { echo "цель инъекции переехала"; exit 1; }
+          test -f src/core/CMakeLists.txt || { echo "the injection target moved"; exit 1; }
           echo 'find_package(Boost REQUIRED)' >> src/core/CMakeLists.txt
           if tools/check_deps.sh; then
-            echo "гейт пропустил незаявленную зависимость"
+            echo "the gate passed an undeclared dependency"
             exit 1
           fi
           git checkout src/core/CMakeLists.txt

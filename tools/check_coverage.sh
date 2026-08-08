@@ -9,8 +9,8 @@
 # Usage: tools/check_coverage.sh [preset]
 set -euo pipefail
 
-# docs/design.md §16 — «zet_wire и zet_session не ниже 90% строк, без единого
-# исключения».
+# docs/design.md §16: zet_wire and zet_session at 90% of lines or better, with
+# no exception for any file.
 readonly LINE_COVERAGE_THRESHOLD_PERCENT=90
 
 # Gated targets, name:source-dir. A target that does not exist yet is skipped:
@@ -38,7 +38,7 @@ cmake --preset "$preset" >/dev/null
 cmake --build --preset "$preset" >/dev/null
 
 tests=$build/tests/zet_tests
-[ -x "$tests" ] || { echo "нет $tests — сборка тестов не дала бинаря" >&2; exit 2; }
+[ -x "$tests" ] || { echo "no $tests — the test build produced no binary" >&2; exit 2; }
 
 # %p keeps the raw profiles apart: ctest runs every doctest case as its own
 # process, and a single file would be overwritten by whoever exits last.
@@ -48,7 +48,7 @@ mkdir -p "$profraw"
 ctest_log=$root/$build/ctest.log
 if ! LLVM_PROFILE_FILE="$profraw/%p.profraw" ctest --preset "$preset" >"$ctest_log" 2>&1; then
     cat "$ctest_log" >&2
-    echo "тесты упали — покрытие считать не по чему" >&2
+    echo "tests failed — there is nothing to measure coverage over" >&2
     exit 2
 fi
 
@@ -65,12 +65,17 @@ llvm-cov export -format=lcov "$tests" -instr-profile="$profdata" >"$lcov"
 checked=0
 violations=0
 
+# A machine-readable copy for the pull request comment. Written only when asked
+# for, so a local run stays plain text.
+markdown=${ZET_COVERAGE_MARKDOWN:-}
+markdown_rows=()
+
 for entry in "${GATED_TARGETS[@]}"; do
     target=${entry%%:*}
     dir=${entry##*:}
 
     if [ ! -d "$dir" ]; then
-        printf '  skip %-12s %s ещё нет\n' "$target" "$dir"
+        printf '  skip %-12s %s does not exist yet\n' "$target" "$dir"
         continue
     fi
 
@@ -86,7 +91,7 @@ for entry in "${GATED_TARGETS[@]}"; do
     # never got linked into the tests. That is an exclusion by accident, and
     # silently passing it is the failure mode this gate is about.
     if [ ${#rows[@]} -eq 0 ]; then
-        printf '  FAIL %-12s не попал в тестовый бинарь — измерять нечего\n' "$target"
+        printf '  FAIL %-12s not linked into the test binary — nothing to measure\n' "$target"
         checked=$((checked + 1))
         violations=$((violations + 1))
         continue
@@ -100,9 +105,12 @@ for entry in "${GATED_TARGETS[@]}"; do
         read -r file covered total <<<"$row"
         target_covered=$((target_covered + covered))
         target_total=$((target_total + total))
-        printf '    %-44s %4d/%-4d %6.2f%%\n' "${file#"$root"/}" \
-            "$covered" "$total" \
-            "$(awk -v c="$covered" -v t="$total" 'BEGIN { print c * 100 / t }')"
+        file_percent=$(awk -v c="$covered" -v t="$total" 'BEGIN { printf "%.2f", c * 100 / t }')
+        printf '    %-44s %4d/%-4d %6s%%\n' "${file#"$root"/}" \
+            "$covered" "$total" "$file_percent"
+        if [ -n "$markdown" ]; then
+            markdown_rows+=("| \`${file#"$root"/}\` | $covered/$total | $file_percent% |")
+        fi
     done
 
     checked=$((checked + 1))
@@ -110,29 +118,52 @@ for entry in "${GATED_TARGETS[@]}"; do
 
     # Scaled integers: the threshold is whole percent, and 89.99% must not
     # round its way past it.
+    if [ -n "$markdown" ]; then
+        markdown_rows+=("| **$target** | **$target_covered/$target_total** | **$percent%** |")
+    fi
+
     if [ $((target_covered * 10000 / target_total)) -lt $((LINE_COVERAGE_THRESHOLD_PERCENT * 100)) ]; then
-        printf '  FAIL %-12s %d/%d строк, %s%% < %d%%\n' \
+        printf '  FAIL %-12s %d/%d lines, %s%% < %d%%\n' \
             "$target" "$target_covered" "$target_total" "$percent" "$LINE_COVERAGE_THRESHOLD_PERCENT"
         violations=$((violations + 1))
     else
-        printf '  ok   %-12s %d/%d строк, %s%% при пороге %d%%\n' \
+        printf '  ok   %-12s %d/%d lines, %s%% against a %d%% threshold\n' \
             "$target" "$target_covered" "$target_total" "$percent" "$LINE_COVERAGE_THRESHOLD_PERCENT"
     fi
 done
 
-printf 'целей проверено: %d, недоборов: %d\n' "$checked" "$violations"
+printf 'targets checked: %d, below threshold: %d\n' "$checked" "$violations"
+
+if [ -n "$markdown" ]; then
+    {
+        # The marker is how the workflow finds its own comment to update
+        # instead of leaving a new one on every push.
+        echo "<!-- zet-coverage -->"
+        echo "### Line coverage of the protocol core"
+        echo
+        echo "| | lines | |"
+        echo "|---|---|---|"
+        printf '%s\n' "${markdown_rows[@]}"
+        echo
+        if [ "$violations" -ne 0 ]; then
+            echo "Below the ${LINE_COVERAGE_THRESHOLD_PERCENT}% threshold from docs/design.md §16."
+        else
+            echo "Threshold ${LINE_COVERAGE_THRESHOLD_PERCENT}%, from docs/design.md §16."
+        fi
+    } >"$markdown"
+fi
 
 if [ "$checked" -eq 0 ]; then
-    echo "нечего измерять: гейт оживёт вместе с целями из docs/design.md §16"
+    echo "nothing to measure: the gate wakes up with the targets from §16"
     exit 0
 fi
 
 if [ "$violations" -ne 0 ]; then
     echo
-    echo "Покрытие ниже порога. Исключать файлы из измерения нельзя —"
-    echo "именно так у ET из отчёта выпал разбор недоверенного ввода."
-    echo "Дописывай тесты; см. docs/design.md §16."
+    echo "Coverage is below the threshold. Excluding a file from the measurement"
+    echo "is not an option — that is how ET dropped its untrusted-input parser"
+    echo "from the report. Write the tests; see docs/design.md §16."
     exit 1
 fi
 
-echo "покрытие ядра протокола выше порога"
+echo "the protocol core is above the coverage threshold"
