@@ -13,7 +13,7 @@ build=${1:-build/release}
 root=$(cd "$(dirname "$0")/.." && pwd)
 cd "$root" || exit 2
 
-command -v nm >/dev/null 2>&1 || { echo "нет nm, гейт пропущен" >&2; exit 2; }
+command -v nm >/dev/null 2>&1 || { echo "no nm, gate skipped" >&2; exit 2; }
 
 # Anything that could carry data off the machine on its own.
 banned='^(curl_easy_init|curl_easy_perform|SSL_connect|SSL_write|gnutls_handshake|sentry_init|sentry_capture_event)$'
@@ -24,7 +24,7 @@ mapfile -t objects < <(find "$build" -name '*.o' \
     -not -path '*zet_io.dir*' -not -path '*_deps*' 2>/dev/null | sort)
 
 if [ ${#objects[@]} -eq 0 ]; then
-    echo "в $build нет объектных файлов — собери сначала" >&2
+    echo "no object files in $build — build first" >&2
     exit 2
 fi
 
@@ -38,14 +38,14 @@ for obj in "${objects[@]}"; do
              awk '{print $1}' | sed 's/@.*//' | grep -E "$banned")
 done
 
-printf 'объектов вне zet_io: %d, исходящих сетевых примитивов: %d\n' \
+printf 'objects outside zet_io: %d, outbound network primitives: %d\n' \
     "${#objects[@]}" "$violations"
 
 if [ "$violations" -ne 0 ]; then
     echo
-    echo "Ничего, кроме транспорта, не имеет права ходить в сеть."
-    echo "Телеметрии в zet нет и не будет; см. docs/design.md §15."
+    echo "Nothing but the transport is allowed to reach the network."
+    echo "zet has no telemetry and never will; see docs/design.md §15."
     exit 1
 fi
 
-echo "исходящих сетевых вызовов вне транспорта нет"
+echo "no outbound network calls outside the transport"

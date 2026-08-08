@@ -91,8 +91,8 @@ TEST_CASE(
 }
 
 TEST_CASE("declared length above the stage limit is refused") {
-    // Тело не выделяется: в буфере только заголовок, и его достаточно, чтобы
-    // отказать. Проверка длины обязана идти раньше чтения тела.
+    // No body is allocated: the buffer holds only the header, and that is
+    // enough to refuse. The length check has to come before reading the body.
     const auto bytes = Frame(MAX_FRAME + 1, 0, 0);
 
     const auto frame = ReadFrame(ByteSpan{bytes}, MAX_FRAME);

@@ -14,7 +14,7 @@ root=$(cd "$(dirname "$0")/.." && pwd)
 cd "$root" || exit 2
 
 if ! command -v nm >/dev/null 2>&1; then
-    echo "нет nm, гейт пропущен" >&2
+    echo "no nm, gate skipped" >&2
     exit 2
 fi
 
@@ -27,7 +27,7 @@ mapfile -t objects < <(find "$build" \
     -o -path "*zet_crypto.dir*" -name '*.o' 2>/dev/null | sort)
 
 if [ ${#objects[@]} -eq 0 ]; then
-    echo "в $build нет объектных файлов ядра — собери сначала" >&2
+    echo "no core object files in $build — build first" >&2
     exit 2
 fi
 
@@ -45,13 +45,13 @@ for obj in "${objects[@]}"; do
              awk '{print $1}' | sed 's/@.*//' | grep -E "$banned")
 done
 
-printf 'объектов ядра: %d, запрещённых символов: %d\n' "${#objects[@]}" "$violations"
+printf 'core objects: %d, banned symbols: %d\n' "${#objects[@]}" "$violations"
 
 if [ "$violations" -ne 0 ]; then
     echo
-    echo "Ядро протокола не имеет права завершать процесс на данных из сети."
-    echo "Верни ошибку через std::expected; см. .claude/rules/invariants.md."
+    echo "The protocol core may not end the process over data from the network."
+    echo "Return the error via std::expected; see .claude/rules/invariants.md."
     exit 1
 fi
 
-echo "ядро не может завершить процесс"
+echo "the core cannot end the process"

@@ -31,16 +31,16 @@ ProtoResult<FrameView> ReadFrame(ByteSpan buffer,
         return std::unexpected(header.error());
     }
 
-    // До выделения памяти и до попытки прочитать тело. Порядок здесь и есть
-    // защита: пир объявляет длину, мы сверяем её с потолком стадии, и только
-    // потом смотрим, сколько байт пришло.
+    // Before any allocation and before reaching for the body. The order is the
+    // defence: the peer declares a length, we check it against the stage limit,
+    // and only then look at how many bytes actually arrived.
     if (header->Length > maxBodyLength) {
         return std::unexpected(EProtoError::LengthLimitExceeded);
     }
 
-    // Пустое тело не бывает валидным: в нём нет места даже под тег AEAD.
-    // Отвергаем на этом слое, чтобы кадр нулевой длины не дошёл до разбора —
-    // однобайтовый пакет ровно так уронил роутер EternalTerminal.
+    // An empty body is never valid: it has no room even for the AEAD tag.
+    // Rejected at this layer so a zero-length frame never reaches parsing — a
+    // one-byte packet took down EternalTerminal's router in exactly that way.
     if (header->Length == 0) {
         return std::unexpected(EProtoError::MalformedField);
     }

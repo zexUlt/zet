@@ -1,9 +1,9 @@
 name: Alpine packages
-description: Восстанавливает кеш .apk, из которого ставится тулчейн.
+description: Restores the .apk cache the toolchain is installed from.
 
-# Кешируются пакеты, а не образ: базовый alpine весит 3.5 МБ, а установка из
-# тёплого кеша занимает десять секунд и не ходит в сеть. Ключ — хеш списка
-# пакетов и скрипта запуска, поэтому правка любого из них обновляет кеш сама.
+# Packages are cached, not an image: the base alpine is 3.5 MB, and installing
+# from a warm cache takes ten seconds and touches no network. The key hashes the
+# package list and the runner script, so editing either refreshes the cache.
 
 runs:
   using: composite
