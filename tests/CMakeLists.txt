@@ -16,11 +16,13 @@ add_executable(zet_tests
     core/secret_test.cpp
     core/time_test.cpp
     crypto/crypto_test.cpp
+    wire/frame_test.cpp
 )
 
 target_link_libraries(zet_tests PRIVATE
     zet::core
     zet::crypto
+    zet::wire
     zet::compile_options
     doctest::doctest
 )
