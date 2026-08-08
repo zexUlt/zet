@@ -86,6 +86,16 @@
       }
     },
     {
+      "name": "musl-asan-ubsan",
+      "inherits": "musl-base",
+      "displayName": "musl-asan-ubsan — sanitizers against the shipping libc",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "CMAKE_CXX_FLAGS": "-stdlib=libc++ -fsanitize=address,undefined -fno-omit-frame-pointer -fno-sanitize-recover=all",
+        "CMAKE_EXE_LINKER_FLAGS": "-fsanitize=address,undefined -fuse-ld=lld"
+      }
+    },
+    {
       "name": "musl-release",
       "inherits": "musl-base",
       "displayName": "musl-release — what ships, and what the size gate measures",
@@ -124,6 +134,10 @@
       "configurePreset": "musl-dev"
     },
     {
+      "name": "musl-asan-ubsan",
+      "configurePreset": "musl-asan-ubsan"
+    },
+    {
       "name": "musl-release",
       "configurePreset": "musl-release"
     }
@@ -158,6 +172,11 @@
       "name": "musl-dev",
       "inherits": "common",
       "configurePreset": "musl-dev"
+    },
+    {
+      "name": "musl-asan-ubsan",
+      "inherits": "common",
+      "configurePreset": "musl-asan-ubsan"
     }
   ]
 }
