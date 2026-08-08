@@ -20,7 +20,7 @@
     {
       "name": "dev",
       "inherits": "base",
-      "displayName": "dev — debug build with assertions",
+      "displayName": "dev \u2014 debug build with assertions",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Debug"
       }
@@ -28,7 +28,7 @@
     {
       "name": "asan-ubsan",
       "inherits": "base",
-      "displayName": "asan-ubsan — address and undefined behaviour sanitizers",
+      "displayName": "asan-ubsan \u2014 address and undefined behaviour sanitizers",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Debug",
         "CMAKE_CXX_FLAGS": "-fsanitize=address,undefined -fno-omit-frame-pointer -fno-sanitize-recover=all",
@@ -38,7 +38,7 @@
     {
       "name": "fuzz",
       "inherits": "base",
-      "displayName": "fuzz — libFuzzer targets, clang only",
+      "displayName": "fuzz \u2014 libFuzzer targets, clang only",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "RelWithDebInfo",
         "CMAKE_CXX_FLAGS": "-fsanitize=fuzzer-no-link,address,undefined -fno-omit-frame-pointer",
@@ -48,7 +48,7 @@
     {
       "name": "coverage",
       "inherits": "base",
-      "displayName": "coverage — line coverage for the protocol core",
+      "displayName": "coverage \u2014 line coverage for the protocol core",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Debug",
         "CMAKE_CXX_FLAGS": "--coverage -fprofile-update=atomic",
@@ -58,11 +58,41 @@
     {
       "name": "release",
       "inherits": "base",
-      "displayName": "release — what ships, and what the size gate measures",
+      "displayName": "release \u2014 what ships, and what the size gate measures",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Release",
         "CMAKE_CXX_FLAGS": "-O2 -ffunction-sections -fdata-sections",
         "CMAKE_EXE_LINKER_FLAGS": "-Wl,--gc-sections -Wl,-s",
+        "CMAKE_INTERPROCEDURAL_OPTIMIZATION": "ON",
+        "ZET_BUILD_TESTS": "OFF"
+      }
+    },
+    {
+      "name": "musl-base",
+      "hidden": true,
+      "inherits": "base",
+      "cacheVariables": {
+        "CMAKE_CXX_FLAGS": "-stdlib=libc++",
+        "CMAKE_EXE_LINKER_FLAGS": "-static -fuse-ld=lld",
+        "CMAKE_CXX_STANDARD_LIBRARIES": "-lc++abi -lunwind"
+      }
+    },
+    {
+      "name": "musl-dev",
+      "inherits": "musl-base",
+      "displayName": "musl-dev \u2014 tests against the libc the binaries ship with",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug"
+      }
+    },
+    {
+      "name": "musl-release",
+      "inherits": "musl-base",
+      "displayName": "musl-release \u2014 what ships, and what the size gate measures",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "CMAKE_CXX_FLAGS": "-stdlib=libc++ -O2 -ffunction-sections -fdata-sections",
+        "CMAKE_EXE_LINKER_FLAGS": "-static -fuse-ld=lld -Wl,--gc-sections -Wl,-s",
         "CMAKE_INTERPROCEDURAL_OPTIMIZATION": "ON",
         "ZET_BUILD_TESTS": "OFF"
       }
@@ -88,6 +118,14 @@
     {
       "name": "release",
       "configurePreset": "release"
+    },
+    {
+      "name": "musl-dev",
+      "configurePreset": "musl-dev"
+    },
+    {
+      "name": "musl-release",
+      "configurePreset": "musl-release"
     }
   ],
   "testPresets": [
@@ -115,6 +153,11 @@
       "name": "coverage",
       "inherits": "common",
       "configurePreset": "coverage"
+    },
+    {
+      "name": "musl-dev",
+      "inherits": "common",
+      "configurePreset": "musl-dev"
     }
   ]
 }

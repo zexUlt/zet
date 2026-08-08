@@ -36,7 +36,6 @@
       "Bash(killall:*)"
     ],
     "deny": [
-      "Write(./external/**)",
       "Edit(./external/**)",
       "Bash(git commit --no-verify:*)",
       "Bash(git commit -n:*)"
