@@ -24,7 +24,10 @@ found=()
 while read -r line; do
     [ -n "$line" ] || continue
     found+=("$line")
-done < <(grep -hoE '(find_package|FetchContent_Declare)\s*\(\s*[A-Za-z0-9_]+' "${cmake_files[@]}" 2>/dev/null \
+# pkg_check_modules is on the list because that is how libsodium actually
+# arrives: it named no find_package, so the gate saw nothing and would have let
+# the next dependency in the same way through unnoticed.
+done < <(grep -hoE '(find_package|FetchContent_Declare|pkg_check_modules)\s*\(\s*[A-Za-z0-9_]+' "${cmake_files[@]}" 2>/dev/null \
          | sed -E 's/.*\(\s*//' | sort -u)
 
 violations=0
