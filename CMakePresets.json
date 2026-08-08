@@ -20,7 +20,7 @@
     {
       "name": "dev",
       "inherits": "base",
-      "displayName": "dev \u2014 debug build with assertions",
+      "displayName": "dev — debug build with assertions",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Debug"
       }
@@ -28,7 +28,7 @@
     {
       "name": "asan-ubsan",
       "inherits": "base",
-      "displayName": "asan-ubsan \u2014 address and undefined behaviour sanitizers",
+      "displayName": "asan-ubsan — address and undefined behaviour sanitizers",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Debug",
         "CMAKE_CXX_FLAGS": "-fsanitize=address,undefined -fno-omit-frame-pointer -fno-sanitize-recover=all",
@@ -38,7 +38,7 @@
     {
       "name": "fuzz",
       "inherits": "base",
-      "displayName": "fuzz \u2014 libFuzzer targets, clang only",
+      "displayName": "fuzz — libFuzzer targets, clang only",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "RelWithDebInfo",
         "CMAKE_CXX_FLAGS": "-fsanitize=fuzzer-no-link,address,undefined -fno-omit-frame-pointer",
@@ -48,7 +48,7 @@
     {
       "name": "coverage",
       "inherits": "base",
-      "displayName": "coverage \u2014 line coverage for the protocol core",
+      "displayName": "coverage — line coverage for the protocol core",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Debug",
         "CMAKE_CXX_FLAGS": "--coverage -fprofile-update=atomic",
@@ -58,7 +58,7 @@
     {
       "name": "release",
       "inherits": "base",
-      "displayName": "release \u2014 what ships, and what the size gate measures",
+      "displayName": "release — what ships, and what the size gate measures",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Release",
         "CMAKE_CXX_FLAGS": "-O2 -ffunction-sections -fdata-sections",
@@ -80,7 +80,7 @@
     {
       "name": "musl-dev",
       "inherits": "musl-base",
-      "displayName": "musl-dev \u2014 tests against the libc the binaries ship with",
+      "displayName": "musl-dev — tests against the libc the binaries ship with",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Debug"
       }
@@ -88,7 +88,7 @@
     {
       "name": "musl-release",
       "inherits": "musl-base",
-      "displayName": "musl-release \u2014 what ships, and what the size gate measures",
+      "displayName": "musl-release — what ships, and what the size gate measures",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Release",
         "CMAKE_CXX_FLAGS": "-stdlib=libc++ -O2 -ffunction-sections -fdata-sections",
