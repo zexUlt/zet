@@ -17,6 +17,7 @@ add_executable(zet_tests
     core/time_test.cpp
     crypto/crypto_test.cpp
     wire/frame_test.cpp
+    wire/sealed_frame_test.cpp
 )
 
 target_link_libraries(zet_tests PRIVATE

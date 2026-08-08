@@ -35,6 +35,9 @@ enum class EProtoError : std::uint16_t {
     AuthenticationFailed,
     /// Output buffer is smaller than the encoded message.
     BufferTooSmall,
+    /// The key has sealed as many frames as it is allowed to. Nothing is wrong
+    /// with the message; the sender has to rekey before it can send again.
+    RekeyRequired,
 };
 
 template <typename TValue>
@@ -51,6 +54,7 @@ using ProtoResult = std::expected<TValue, EProtoError>;
         case EProtoError::UnexpectedMessage:
         case EProtoError::AuthenticationFailed:
         case EProtoError::BufferTooSmall:
+        case EProtoError::RekeyRequired:
             return EDisposition::CloseConnection;
 
         // A version mismatch will not resolve itself on a retry, so there is
@@ -79,6 +83,8 @@ using ProtoResult = std::expected<TValue, EProtoError>;
             return "authentication failed";
         case EProtoError::BufferTooSmall:
             return "buffer too small";
+        case EProtoError::RekeyRequired:
+            return "rekey required";
     }
     return "unknown error";
 }
