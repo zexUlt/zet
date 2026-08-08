@@ -155,9 +155,8 @@ fi
 
 if [ "$violations" -ne 0 ]; then
     echo
-    echo "Coverage is below the threshold. Excluding a file from the measurement"
-    echo "is not an option — that is how ET dropped its untrusted-input parser"
-    echo "from the report. Write the tests; see docs/design.md §16."
+    echo "Coverage is below the threshold. Excluding a file from the"
+    echo "measurement is not an option. Write the tests; see docs/design.md §16."
     exit 1
 fi
 
