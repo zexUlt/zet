@@ -51,8 +51,8 @@
       "displayName": "coverage — line coverage for the protocol core",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Debug",
-        "CMAKE_CXX_FLAGS": "--coverage -fprofile-update=atomic",
-        "CMAKE_EXE_LINKER_FLAGS": "--coverage"
+        "CMAKE_CXX_FLAGS": "-fprofile-instr-generate -fcoverage-mapping",
+        "CMAKE_EXE_LINKER_FLAGS": "-fprofile-instr-generate"
       }
     },
     {
@@ -93,6 +93,16 @@
         "CMAKE_BUILD_TYPE": "Debug",
         "CMAKE_CXX_FLAGS": "-stdlib=libc++ -fsanitize=address,undefined -fno-omit-frame-pointer -fno-sanitize-recover=all",
         "CMAKE_EXE_LINKER_FLAGS": "-fsanitize=address,undefined -fuse-ld=lld"
+      }
+    },
+    {
+      "name": "musl-coverage",
+      "inherits": "musl-base",
+      "displayName": "musl-coverage — line coverage measured on the shipping libc",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "CMAKE_CXX_FLAGS": "-stdlib=libc++ -fprofile-instr-generate -fcoverage-mapping",
+        "CMAKE_EXE_LINKER_FLAGS": "-static -fuse-ld=lld -fprofile-instr-generate"
       }
     },
     {
@@ -138,6 +148,10 @@
       "configurePreset": "musl-asan-ubsan"
     },
     {
+      "name": "musl-coverage",
+      "configurePreset": "musl-coverage"
+    },
+    {
       "name": "musl-release",
       "configurePreset": "musl-release"
     }
@@ -177,6 +191,11 @@
       "name": "musl-asan-ubsan",
       "inherits": "common",
       "configurePreset": "musl-asan-ubsan"
+    },
+    {
+      "name": "musl-coverage",
+      "inherits": "common",
+      "configurePreset": "musl-coverage"
     }
   ]
 }
