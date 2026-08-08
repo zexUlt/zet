@@ -20,9 +20,9 @@ ninja
 ccache
 bash
 git
-# Версия пинится намеренно: обновление единственной рантайм-зависимости должно
-# быть отдельным коммитом с ревью, а не приезжать молча с базовым образом.
-# 1.0.20-r1 несёт патч Alpine на CVE-2025-69277; собран без LTO (инвариант 6a),
-# и дистрибутив прогоняет на нём make check.
+# The version is pinned on purpose: bumping the one runtime dependency should be
+# a separate reviewed commit, not something that arrives silently with the base
+# image. 1.0.20-r1 carries Alpine's patch for CVE-2025-69277; it is built without
+# LTO (invariant 6a), and the distribution runs make check against it.
 libsodium-static=1.0.20-r1
 libsodium-dev=1.0.20-r1

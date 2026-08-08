@@ -7,8 +7,8 @@
 namespace zet::crypto {
 namespace {
 
-// Размеры продублированы в заголовке, чтобы libsodium не протекала наружу.
-// Здесь единственное место, где два набора обязаны совпасть.
+// The sizes are duplicated in the header so that libsodium does not leak out.
+// This is the only place where the two sets are required to agree.
 static_assert(KEY_SIZE == crypto_kx_SESSIONKEYBYTES);
 static_assert(KEY_SIZE == crypto_kdf_KEYBYTES);
 static_assert(PUBLIC_KEY_SIZE == crypto_kx_PUBLICKEYBYTES);
@@ -57,7 +57,7 @@ ProtoResult<SessionKeys> DeriveClientKeys(const KeyPair& own,
         Raw(own.Private.Expose()),
         reinterpret_cast<const unsigned char*>(peer.data()));
     if (rc != 0) {
-        // Единственная причина отказа — публичный ключ пира не на кривой.
+        // The only way this fails: the peer's public key is not on the curve.
         return std::unexpected(EProtoError::MalformedField);
     }
     return keys;
@@ -122,8 +122,8 @@ ProtoResult<std::size_t> AeadOpen(MutableByteSpan out, ByteSpan ciphertext,
     if (nonce.size() != NONCE_SIZE) {
         return std::unexpected(EProtoError::MalformedField);
     }
-    // Шифротекст короче тега не может быть валидным. Проверка до вызова, иначе
-    // длина ушла бы в вычитание без знака.
+    // A ciphertext shorter than the tag cannot be valid. Checked before the
+    // call, otherwise the length would go into an unsigned subtraction.
     if (ciphertext.size() < TAG_SIZE) {
         return std::unexpected(EProtoError::AuthenticationFailed);
     }

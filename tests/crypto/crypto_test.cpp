@@ -13,12 +13,12 @@ namespace {
 using namespace zet;
 using namespace zet::crypto;
 
-/// Векторы сняты с libsodium 1.0.20 и зафиксированы здесь намеренно.
+/// The vectors were taken from libsodium 1.0.20 and frozen here on purpose.
 ///
-/// Они не доказывают корректность самой libsodium — её тест-сьют гоняет
-/// дистрибутив при сборке пакета. Они ловят другое: перепутанные местами
-/// аргументы в обёртке и молчаливое расхождение при замене библиотеки, ради
-/// которой этот модуль и отделён.
+/// They do not prove libsodium itself correct — the distribution runs its test
+/// suite when building the package. They catch something else: arguments
+/// swapped in the wrapper, and a silent divergence when the library is
+/// replaced, which is what this module was split off for.
 constexpr std::array<std::uint8_t, KEY_SIZE> KAT_KEY = {
     0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A,
     0x0B, 0x0C, 0x0D, 0x0E, 0x0F, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15,
@@ -28,7 +28,7 @@ constexpr std::array<std::uint8_t, NONCE_SIZE> KAT_NONCE = {
     0x40, 0x41, 0x42, 0x43, 0x44, 0x45, 0x46, 0x47, 0x48, 0x49, 0x4A, 0x4B,
     0x4C, 0x4D, 0x4E, 0x4F, 0x50, 0x51, 0x52, 0x53, 0x54, 0x55, 0x56, 0x57};
 
-/// Заголовок кадра: len = 0x11, epoch = 7. Он же идёт в AD.
+/// A frame header: len = 0x11, epoch = 7. The same bytes go into the AD.
 constexpr std::array<std::uint8_t, 5> KAT_AD = {0x00, 0x00, 0x00, 0x11, 0x07};
 
 constexpr std::string_view KAT_PLAINTEXT = "zet frame payload";
@@ -113,8 +113,8 @@ TEST_CASE_FIXTURE(SodiumFixture, "sealed text opens back to the plaintext") {
 
 TEST_CASE_FIXTURE(SodiumFixture,
                   "flipping any bit of the ciphertext fails the tag") {
-    // Перебор исчерпывающий, а не случайный: случайные флипы дают тест, который
-    // при падении не воспроизвести, а вектор короткий и полный перебор дёшев.
+    // Exhaustive rather than random: random flips give a test whose failures
+    // cannot be reproduced, and the vector is short enough to walk in full.
     const auto key = KeyFrom(KAT_KEY);
     const auto nonce = Bytes(KAT_NONCE);
     const auto associatedData = Bytes(KAT_AD);
@@ -142,10 +142,10 @@ TEST_CASE_FIXTURE(SodiumFixture,
 
 TEST_CASE_FIXTURE(SodiumFixture,
                   "flipping any bit of the header fails the tag") {
-    // Ради этого заголовок и кладётся в AD целиком: подмена объявленной длины
-    // или поколения ключа обязана провалить тег, а не увести разбор в сторону.
-    // У EternalTerminal тип сообщения лежал вне MAC, и флип бита давал
-    // гарантированный удалённый abort.
+    // This is why the whole header goes into the AD: tampering with the
+    // declared length or the key generation has to fail the tag rather than
+    // steer the parse. In EternalTerminal the message type sat outside the MAC,
+    // and a bit flip bought a guaranteed remote abort.
     const auto key = KeyFrom(KAT_KEY);
     const auto nonce = Bytes(KAT_NONCE);
     const auto ciphertext = Bytes(KAT_CIPHERTEXT);
@@ -184,9 +184,9 @@ TEST_CASE_FIXTURE(SodiumFixture, "a wrong nonce fails the tag") {
 }
 
 TEST_CASE_FIXTURE(SodiumFixture, "a failed open is an error, never a crash") {
-    // Мусор в потоке не должен ронять ничего: диспозиция — закрыть соединение,
-    // сессия переживает. У ET здесь стоял STFATAL, то есть падение процесса со
-    // всеми чужими сессиями.
+    // Garbage in the stream must bring nothing down: the disposition is to
+    // close the connection, and the session survives. ET had an STFATAL here,
+    // i.e. the process died along with everyone else's sessions.
     const auto key = KeyFrom(KAT_KEY);
     const auto nonce = Bytes(KAT_NONCE);
     const std::vector<std::byte> garbage(64, std::byte{0xAB});
@@ -199,7 +199,7 @@ TEST_CASE_FIXTURE(SodiumFixture, "a failed open is an error, never a crash") {
         CHECK(DispositionOf(opened.error()) == EDisposition::CloseConnection);
     }
 
-    // И после сотни отвергнутых валидный кадр по-прежнему разбирается.
+    // And after a hundred rejections a valid frame still parses.
     const auto associatedData = Bytes(KAT_AD);
     const auto ciphertext = Bytes(KAT_CIPHERTEXT);
     std::vector<std::byte> good(ciphertext.size() - TAG_SIZE);
@@ -270,8 +270,8 @@ TEST_CASE_FIXTURE(SodiumFixture, "KDF separates by both id and context") {
     REQUIRE(otherId.has_value());
     REQUIRE(otherContext.has_value());
 
-    // Детерминированность — иначе после реконнекта стороны выведут разные
-    // ключи.
+    // Determinism — otherwise the two sides derive different keys after a
+    // reconnect.
     CHECK(first->Expose() == sameAgain->Expose());
     CHECK(first->Expose() != otherId->Expose());
     CHECK(first->Expose() != otherContext->Expose());
@@ -326,13 +326,13 @@ TEST_CASE_FIXTURE(SodiumFixture,
     REQUIRE(clientKeys.has_value());
     REQUIRE(serverKeys.has_value());
 
-    // Зеркальность — то, чем стороны вообще могут разговаривать: чем клиент
-    // шифрует, тем сервер расшифровывает.
+    // The mirroring is what lets the sides talk at all: what the client
+    // encrypts with is what the server decrypts with.
     CHECK(clientKeys->Transmit.Expose() == serverKeys->Receive.Expose());
     CHECK(clientKeys->Receive.Expose() == serverKeys->Transmit.Expose());
 
-    // И направления не совпадают между собой, иначе отражённый кадр прошёл бы
-    // как свой.
+    // And the two directions differ, otherwise a reflected frame would pass as
+    // one of our own.
     CHECK(clientKeys->Transmit.Expose() != clientKeys->Receive.Expose());
 }
 
@@ -357,8 +357,8 @@ TEST_CASE_FIXTURE(SodiumFixture, "generated key pairs differ") {
 }
 
 TEST_CASE_FIXTURE(SodiumFixture, "random bytes fill the whole span") {
-    // Не тест на качество энтропии — на то, что буфер вообще заполняется и
-    // границы не перепутаны.
+    // Not a test of entropy quality — of the buffer being filled at all and the
+    // bounds not being mixed up.
     std::vector<std::byte> buffer(64, std::byte{0});
     RandomBytes(MutableByteSpan{buffer});
 
