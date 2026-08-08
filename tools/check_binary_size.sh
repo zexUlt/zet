@@ -14,9 +14,9 @@ cd "$root" || exit 2
 
 # binary:budget in KiB
 budgets=(
-    "zet:1229"
-    "zet-agent:1536"
-    "zet-muxd:614"
+    "zet:950"
+    "zet-agent:1229"
+    "zet-muxd:450"
 )
 
 checked=0
