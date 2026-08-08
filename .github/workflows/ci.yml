@@ -34,6 +34,42 @@ jobs:
       - name: Build and test
         run: tools/musl_build.sh ${{ matrix.preset }} test
 
+  coverage:
+    name: coverage
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      # Своя запись кеша: инструментированные объекты не совпадают ни с одним
+      # объектом из musl-dev, и общий кеш обе джобы только вытеснял бы.
+      - name: Restore the compiler cache
+        uses: ./.github/actions/ccache
+        with:
+          key: musl-coverage
+
+      - name: Restore the Alpine packages
+        uses: ./.github/actions/apk
+
+      - name: Line coverage of the protocol core
+        run: tools/check_coverage.sh
+
+      # Порог 101 недостижим по построению, поэтому самотест не сломается в тот
+      # день, когда покрытие честно дойдёт до 100%.
+      - name: check_coverage catches a threshold miss
+        run: |
+          sed -i 's/^readonly LINE_COVERAGE_THRESHOLD_PERCENT=.*/readonly LINE_COVERAGE_THRESHOLD_PERCENT=101/' \
+            tools/check_coverage.sh
+          if ! grep -q 'LINE_COVERAGE_THRESHOLD_PERCENT=101' tools/check_coverage.sh; then
+            echo "инъекция не применилась — самотест ничего не проверяет"
+            git checkout tools/check_coverage.sh
+            exit 1
+          fi
+          if tools/check_coverage.sh; then
+            echo "гейт пропустил покрытие ниже порога"
+            exit 1
+          fi
+          git checkout tools/check_coverage.sh
+
   checks:
     name: checks
     runs-on: ubuntu-24.04
