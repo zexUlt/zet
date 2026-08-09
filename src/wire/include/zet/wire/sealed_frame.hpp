@@ -29,7 +29,7 @@ inline constexpr std::uint64_t MAX_BYTES_PER_EPOCH = 1ULL << 30;
 
 /// The KDF context that ratchets a key forward. Its only job is to separate
 /// this derivation from every other use of the same master.
-inline constexpr char REKEY_CONTEXT[] = "zet-rkey";
+inline constexpr crypto::KdfContext REKEY_CONTEXT = std::to_array("zet-rkey");
 
 /// Seals frames for one direction of one connection.
 ///

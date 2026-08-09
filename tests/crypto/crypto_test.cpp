@@ -24,6 +24,9 @@ constexpr std::array<std::uint8_t, KEY_SIZE> KAT_KEY = {
     0x0B, 0x0C, 0x0D, 0x0E, 0x0F, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15,
     0x16, 0x17, 0x18, 0x19, 0x1A, 0x1B, 0x1C, 0x1D, 0x1E, 0x1F};
 
+constexpr KdfContext CONNECTION_CONTEXT = std::to_array("zet-conn");
+constexpr KdfContext AUTH_CONTEXT = std::to_array("zet-auth");
+
 constexpr std::array<std::uint8_t, NONCE_SIZE> KAT_NONCE = {
     0x40, 0x41, 0x42, 0x43, 0x44, 0x45, 0x46, 0x47, 0x48, 0x49, 0x4A, 0x4B,
     0x4C, 0x4D, 0x4E, 0x4F, 0x50, 0x51, 0x52, 0x53, 0x54, 0x55, 0x56, 0x57};
@@ -247,7 +250,7 @@ TEST_CASE_FIXTURE(SodiumFixture, "sealing into too small a buffer is refused") {
 
 TEST_CASE_FIXTURE(SodiumFixture, "KDF matches the recorded vector") {
     const auto master = KeyFrom(KAT_KEY);
-    const auto subkey = DeriveSubkey(master, 1, "zet-conn");
+    const auto subkey = DeriveSubkey(master, 1, CONNECTION_CONTEXT);
 
     KeyBytes expected{};
     for (std::size_t i = 0; i < KEY_SIZE; ++i) {
@@ -259,10 +262,10 @@ TEST_CASE_FIXTURE(SodiumFixture, "KDF matches the recorded vector") {
 TEST_CASE_FIXTURE(SodiumFixture, "KDF separates by both id and context") {
     const auto master = KeyFrom(KAT_KEY);
 
-    const auto first = DeriveSubkey(master, 1, "zet-conn");
-    const auto sameAgain = DeriveSubkey(master, 1, "zet-conn");
-    const auto otherId = DeriveSubkey(master, 2, "zet-conn");
-    const auto otherContext = DeriveSubkey(master, 1, "zet-auth");
+    const auto first = DeriveSubkey(master, 1, CONNECTION_CONTEXT);
+    const auto sameAgain = DeriveSubkey(master, 1, CONNECTION_CONTEXT);
+    const auto otherId = DeriveSubkey(master, 2, CONNECTION_CONTEXT);
+    const auto otherContext = DeriveSubkey(master, 1, AUTH_CONTEXT);
 
     // Determinism — otherwise the two sides derive different keys after a
     // reconnect.
@@ -271,19 +274,19 @@ TEST_CASE_FIXTURE(SodiumFixture, "KDF separates by both id and context") {
     CHECK(first.Expose() != otherContext.Expose());
 }
 
-// A context of the wrong length is not tested: the signature takes a reference
-// to a literal of exactly CONTEXT_SIZE characters, so "short" or "much too
-// long" is refused by the compiler and never reaches a test.
+// A context of the wrong length is not tested: KdfContext is an array of a
+// fixed width, so "short" or "much too long" is refused by the compiler where
+// the constant is declared and never reaches a test.
 TEST_CASE_FIXTURE(SodiumFixture,
                   "derived bytes fill a buffer wider than a key") {
     const auto master = KeyFrom(KAT_KEY);
 
     std::array<std::byte, 16> salt{};
-    DeriveBytes(salt, master, 1, "zet-conn");
+    DeriveBytes(salt, master, 1, CONNECTION_CONTEXT);
 
     // Same master, same label, different subkey number: independent output.
     std::array<std::byte, 16> other{};
-    DeriveBytes(other, master, 2, "zet-conn");
+    DeriveBytes(other, master, 2, CONNECTION_CONTEXT);
 
     CHECK(salt != other);
     CHECK(salt != std::array<std::byte, 16>{});

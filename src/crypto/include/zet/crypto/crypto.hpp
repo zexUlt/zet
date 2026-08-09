@@ -29,6 +29,12 @@ inline constexpr std::size_t CONTEXT_SIZE = 8;
 inline constexpr std::size_t MIN_DERIVED_SIZE = 16;
 inline constexpr std::size_t MAX_DERIVED_SIZE = 64;
 
+/// A KDF label, one character wider than what libsodium reads so that a string
+/// literal fits. Build one with `std::to_array("zet-conn")`: a label of the
+/// wrong width has a different type and fails to convert, so the width is
+/// checked where the constant is written rather than where it is used.
+using KdfContext = std::array<char, CONTEXT_SIZE + 1>;
+
 using KeyBytes = std::array<std::byte, KEY_SIZE>;
 using Key = Secret<KeyBytes>;
 using PublicKey = std::array<std::byte, PUBLIC_KEY_SIZE>;
@@ -59,30 +65,29 @@ void RandomBytes(MutableByteSpan out) noexcept;
 [[nodiscard]] ProtoResult<SessionKeys> DeriveServerKeys(
     const KeyPair& own, const PublicKey& peer) noexcept;
 
+namespace detail {
+
+/// The single call into libsodium's KDF, behind the two wrappers below. It
+/// refuses nothing they can hand it: the label is a KdfContext and the output
+/// width is bounded by the caller's type, so there is no failure to report.
+void DeriveInto(MutableByteSpan out, const Key& master, std::uint64_t subkeyId,
+                const KdfContext& context) noexcept;
+
+}  // namespace detail
+
 /// A subkey from a master. The context separates key purposes, so the same
 /// master under two different labels yields subkeys that say nothing about each
 /// other.
-///
-/// The label arrives as a reference to a string literal of exactly the right
-/// width, which is what makes a wrong one a compile error instead of a runtime
-/// branch nothing can reach. Neither this nor DeriveBytes can fail: libsodium
-/// rejects only sizes, and every size here is fixed by a type.
-[[nodiscard]] Key DeriveSubkey(
-    const Key& master, std::uint64_t subkeyId,
-    const char (&context)[CONTEXT_SIZE + 1]) noexcept;
+[[nodiscard]] Key DeriveSubkey(const Key& master, std::uint64_t subkeyId,
+                               const KdfContext& context) noexcept;
 
 /// The same derivation for the things that are not keys — nonce salts, session
 /// identifiers. The bounds libsodium imposes are checked at compile time.
-void DeriveBytesUnchecked(MutableByteSpan out, const Key& master,
-                          std::uint64_t subkeyId,
-                          const char (&context)[CONTEXT_SIZE + 1]) noexcept;
-
 template <std::size_t tSize>
     requires(tSize >= MIN_DERIVED_SIZE && tSize <= MAX_DERIVED_SIZE)
 void DeriveBytes(std::array<std::byte, tSize>& out, const Key& master,
-                 std::uint64_t subkeyId,
-                 const char (&context)[CONTEXT_SIZE + 1]) noexcept {
-    DeriveBytesUnchecked(MutableByteSpan{out}, master, subkeyId, context);
+                 std::uint64_t subkeyId, const KdfContext& context) noexcept {
+    detail::DeriveInto(MutableByteSpan{out}, master, subkeyId, context);
 }
 
 /// A key bound to data that both sides contributed.

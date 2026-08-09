@@ -77,23 +77,25 @@ ProtoResult<SessionKeys> DeriveServerKeys(const KeyPair& own,
     return keys;
 }
 
-Key DeriveSubkey(const Key& master, std::uint64_t subkeyId,
-                 const char (&context)[CONTEXT_SIZE + 1]) noexcept {
-    Key subkey;
+namespace detail {
+
+void DeriveInto(MutableByteSpan out, const Key& master, std::uint64_t subkeyId,
+                const KdfContext& context) noexcept {
     // The only way crypto_kdf_derive_from_key refuses is a length outside its
-    // bounds, and every length here comes from a type: KEY_SIZE is 32, the
-    // context is a literal of exactly CONTEXT_SIZE characters.
-    std::ignore =
-        crypto_kdf_derive_from_key(Raw(subkey.Expose()), KEY_SIZE, subkeyId,
-                                   context, Raw(master.Expose()));
-    return subkey;
+    // bounds, and every length here comes from a type: the context is a
+    // KdfContext, the width is KEY_SIZE or one the caller's array declared.
+    std::ignore = crypto_kdf_derive_from_key(
+        Raw(out), out.size(), subkeyId, context.data(), Raw(master.Expose()));
 }
 
-void DeriveBytesUnchecked(MutableByteSpan out, const Key& master,
-                          std::uint64_t subkeyId,
-                          const char (&context)[CONTEXT_SIZE + 1]) noexcept {
-    std::ignore = crypto_kdf_derive_from_key(Raw(out), out.size(), subkeyId,
-                                             context, Raw(master.Expose()));
+}  // namespace detail
+
+Key DeriveSubkey(const Key& master, std::uint64_t subkeyId,
+                 const KdfContext& context) noexcept {
+    Key subkey;
+    detail::DeriveInto(MutableByteSpan{subkey.Expose()}, master, subkeyId,
+                       context);
+    return subkey;
 }
 
 Key DeriveFromInfo(const Key& master, ByteSpan info) noexcept {

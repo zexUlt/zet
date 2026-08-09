@@ -8,11 +8,11 @@
 namespace zet::wire {
 namespace {
 
-// Eight characters each, which the derivation signature enforces at compile
-// time. Distinct labels are what keep the branches of the tree independent: the
-// same master under two of these yields keys that say nothing about each other.
-constexpr char SESSION_CONTEXT[] = "zet-sess";
-constexpr char CONNECTION_CONTEXT[] = "zet-conn";
+// Eight characters each, which KdfContext enforces at compile time. Distinct
+// labels are what keep the branches of the tree independent: the same master
+// under two of these yields keys that say nothing about each other.
+constexpr crypto::KdfContext SESSION_CONTEXT = std::to_array("zet-sess");
+constexpr crypto::KdfContext CONNECTION_CONTEXT = std::to_array("zet-conn");
 
 // Subkey numbers within a context. They are as much part of the wire contract
 // as the labels: change one and the two ends stop agreeing.
