@@ -2,7 +2,7 @@
 
 #include <sodium.h>
 
-#include <cstring>
+#include <tuple>
 
 namespace zet::crypto {
 namespace {
@@ -77,22 +77,35 @@ ProtoResult<SessionKeys> DeriveServerKeys(const KeyPair& own,
     return keys;
 }
 
-ProtoResult<Key> DeriveSubkey(const Key& master, std::uint64_t subkeyId,
-                              std::string_view context) noexcept {
-    if (context.size() != CONTEXT_SIZE) {
-        return std::unexpected(EProtoError::MalformedField);
-    }
+namespace detail {
 
+void DeriveInto(MutableByteSpan out, const Key& master, std::uint64_t subkeyId,
+                const KdfContext& context) noexcept {
+    // The only way crypto_kdf_derive_from_key refuses is a length outside its
+    // bounds, and every length here comes from a type: the context is a
+    // KdfContext, the width is KEY_SIZE or one the caller's array declared.
+    std::ignore = crypto_kdf_derive_from_key(
+        Raw(out), out.size(), subkeyId, context.data(), Raw(master.Expose()));
+}
+
+}  // namespace detail
+
+Key DeriveSubkey(const Key& master, std::uint64_t subkeyId,
+                 const KdfContext& context) noexcept {
     Key subkey;
-    char padded[CONTEXT_SIZE];
-    std::memcpy(padded, context.data(), CONTEXT_SIZE);
-
-    const int rc = crypto_kdf_derive_from_key(
-        Raw(subkey.Expose()), KEY_SIZE, subkeyId, padded, Raw(master.Expose()));
-    if (rc != 0) {
-        return std::unexpected(EProtoError::MalformedField);
-    }
+    detail::DeriveInto(MutableByteSpan{subkey.Expose()}, master, subkeyId,
+                       context);
     return subkey;
+}
+
+Key DeriveFromInfo(const Key& master, ByteSpan info) noexcept {
+    // Keyed BLAKE2b, the same construction Noise and WireGuard use to fold
+    // handshake data into a key. crypto_kdf cannot: its inputs are a counter
+    // and a fixed label, neither of which the peers can contribute to.
+    Key derived;
+    crypto_generichash(Raw(derived.Expose()), KEY_SIZE, Raw(info), info.size(),
+                       Raw(master.Expose()), KEY_SIZE);
+    return derived;
 }
 
 ProtoResult<std::size_t> AeadSeal(MutableByteSpan out, ByteSpan plaintext,

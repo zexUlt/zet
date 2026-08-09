@@ -3,7 +3,6 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
-#include <string_view>
 
 #include "zet/core/bytes.hpp"
 #include "zet/core/error.hpp"
@@ -25,6 +24,16 @@ inline constexpr std::size_t MAC_SIZE = 32;
 
 /// KDF context: exactly eight bytes, as crypto_kdf_derive_from_key demands.
 inline constexpr std::size_t CONTEXT_SIZE = 8;
+
+/// Bounds crypto_kdf_derive_from_key imposes on what it will produce.
+inline constexpr std::size_t MIN_DERIVED_SIZE = 16;
+inline constexpr std::size_t MAX_DERIVED_SIZE = 64;
+
+/// A KDF label, one character wider than what libsodium reads so that a string
+/// literal fits. Build one with `std::to_array("zet-conn")`: a label of the
+/// wrong width has a different type and fails to convert, so the width is
+/// checked where the constant is written rather than where it is used.
+using KdfContext = std::array<char, CONTEXT_SIZE + 1>;
 
 using KeyBytes = std::array<std::byte, KEY_SIZE>;
 using Key = Secret<KeyBytes>;
@@ -56,12 +65,38 @@ void RandomBytes(MutableByteSpan out) noexcept;
 [[nodiscard]] ProtoResult<SessionKeys> DeriveServerKeys(
     const KeyPair& own, const PublicKey& peer) noexcept;
 
-/// A subkey from a master. `context` is exactly CONTEXT_SIZE characters; it
-/// separates key purposes, so the same master under different contexts yields
-/// independent subkeys.
-[[nodiscard]] ProtoResult<Key> DeriveSubkey(const Key& master,
-                                            std::uint64_t subkeyId,
-                                            std::string_view context) noexcept;
+namespace detail {
+
+/// The single call into libsodium's KDF, behind the two wrappers below. It
+/// refuses nothing they can hand it: the label is a KdfContext and the output
+/// width is bounded by the caller's type, so there is no failure to report.
+void DeriveInto(MutableByteSpan out, const Key& master, std::uint64_t subkeyId,
+                const KdfContext& context) noexcept;
+
+}  // namespace detail
+
+/// A subkey from a master. The context separates key purposes, so the same
+/// master under two different labels yields subkeys that say nothing about each
+/// other.
+[[nodiscard]] Key DeriveSubkey(const Key& master, std::uint64_t subkeyId,
+                               const KdfContext& context) noexcept;
+
+/// The same derivation for the things that are not keys — nonce salts, session
+/// identifiers. The bounds libsodium imposes are checked at compile time.
+template <std::size_t tSize>
+    requires(tSize >= MIN_DERIVED_SIZE && tSize <= MAX_DERIVED_SIZE)
+void DeriveBytes(std::array<std::byte, tSize>& out, const Key& master,
+                 std::uint64_t subkeyId, const KdfContext& context) noexcept {
+    detail::DeriveInto(MutableByteSpan{out}, master, subkeyId, context);
+}
+
+/// A key bound to data that both sides contributed.
+///
+/// DeriveSubkey cannot do this: its inputs are a number and a fixed-size label,
+/// so nothing that arrives during a handshake can reach the output. Here the
+/// peers' nonces go in, which is what makes the per-connection key fresh even
+/// when the master behind it is the same as last time.
+[[nodiscard]] Key DeriveFromInfo(const Key& master, ByteSpan info) noexcept;
 
 /// Encrypts and authenticates. `out` must be TAG_SIZE longer than the
 /// plaintext; returns the actual ciphertext length, tag included.
