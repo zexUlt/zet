@@ -43,6 +43,11 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 option(ZET_BUILD_TESTS "Build the test suite" ON)
 option(ZET_WERROR "Treat warnings as errors" ON)
 
+# Off by default because the targets only link under a preset that compiles
+# with -fsanitize=fuzzer-no-link; switching it on anywhere else fails at the
+# link step rather than producing something runnable.
+option(ZET_BUILD_FUZZERS "Build the libFuzzer targets" OFF)
+
 include(cmake/CompileOptions.cmake)
 
 add_subdirectory(src)
@@ -50,4 +55,8 @@ add_subdirectory(src)
 if(ZET_BUILD_TESTS)
     enable_testing()
     add_subdirectory(tests)
+endif()
+
+if(ZET_BUILD_FUZZERS)
+    add_subdirectory(fuzz)
 endif()

@@ -96,6 +96,18 @@
       }
     },
     {
+      "name": "musl-fuzz",
+      "inherits": "musl-base",
+      "displayName": "musl-fuzz — libFuzzer targets against the shipping libc",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "RelWithDebInfo",
+        "CMAKE_CXX_FLAGS": "-stdlib=libc++ -fsanitize=fuzzer-no-link,address,undefined -fno-omit-frame-pointer -fno-sanitize-recover=all",
+        "CMAKE_EXE_LINKER_FLAGS": "-fsanitize=address,undefined -fuse-ld=lld",
+        "ZET_BUILD_FUZZERS": "ON",
+        "ZET_BUILD_TESTS": "OFF"
+      }
+    },
+    {
       "name": "musl-coverage",
       "inherits": "musl-base",
       "displayName": "musl-coverage — line coverage measured on the shipping libc",
@@ -146,6 +158,10 @@
     {
       "name": "musl-asan-ubsan",
       "configurePreset": "musl-asan-ubsan"
+    },
+    {
+      "name": "musl-fuzz",
+      "configurePreset": "musl-fuzz"
     },
     {
       "name": "musl-coverage",

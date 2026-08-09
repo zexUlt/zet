@@ -20,6 +20,9 @@ crash-*
 leak-*
 timeout-*
 oom-*
+# A finding becomes a regression seed under its own name, which is the one
+# above. Without this the file would be added, ignored and quietly missing.
+!fuzz/corpus/**
 
 # Editors / OS
 .vscode/

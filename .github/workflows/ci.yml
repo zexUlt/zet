@@ -34,6 +34,40 @@ jobs:
       - name: Build and test
         run: tools/musl_build.sh ${{ matrix.preset }} test
 
+  fuzz:
+    name: fuzz
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      # Instrumented objects match nothing the other jobs built, so the fuzz
+      # build gets a cache entry of its own rather than evicting theirs.
+      - name: Restore the compiler cache
+        uses: ./.github/actions/ccache
+        with:
+          key: musl-fuzz
+
+      - name: Restore the Alpine packages
+        uses: ./.github/actions/apk
+
+      # A minute per target, which is what catches "does not build" and "dies
+      # on the first input" — the two things ET's fuzzers would have caught had
+      # anyone ever run them. The ten minutes per target from the M1 criterion
+      # are in fuzz-soak.yml, where they do not sit on every pull request.
+      - name: Build and run every fuzzer briefly
+        run: tools/fuzz_run.sh 60
+
+      # Without the artifact a finding is a red tick and a stack trace: the
+      # input that produced it lives only on a runner that is about to be
+      # deleted.
+      - name: Keep what the fuzzers found
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-findings
+          path: build/musl-fuzz/findings/
+          if-no-files-found: ignore
+
   coverage:
     name: coverage
     runs-on: ubuntu-24.04
@@ -117,7 +151,7 @@ jobs:
         if: always()
         run: |
           tools/in_alpine.sh '
-            files=$(find src tests -name "*.cpp" -o -name "*.hpp" | sort)
+            files=$(find src tests fuzz -name "*.cpp" -o -name "*.hpp" | sort)
             [ -n "$files" ] || { echo "no C++ files"; exit 0; }
             clang-format --dry-run --Werror $files
           '
