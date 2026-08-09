@@ -95,6 +95,37 @@ ProtoResult<Key> DeriveSubkey(const Key& master, std::uint64_t subkeyId,
     return subkey;
 }
 
+ProtoResult<void> DeriveBytes(MutableByteSpan out, const Key& master,
+                              std::uint64_t subkeyId,
+                              std::string_view context) noexcept {
+    if (context.size() != CONTEXT_SIZE) {
+        return std::unexpected(EProtoError::MalformedField);
+    }
+    if (out.size() < MIN_DERIVED_SIZE || out.size() > MAX_DERIVED_SIZE) {
+        return std::unexpected(EProtoError::MalformedField);
+    }
+
+    char padded[CONTEXT_SIZE];
+    std::memcpy(padded, context.data(), CONTEXT_SIZE);
+
+    const int rc = crypto_kdf_derive_from_key(Raw(out), out.size(), subkeyId,
+                                              padded, Raw(master.Expose()));
+    if (rc != 0) {
+        return std::unexpected(EProtoError::MalformedField);
+    }
+    return {};
+}
+
+Key DeriveFromInfo(const Key& master, ByteSpan info) noexcept {
+    // Keyed BLAKE2b, the same construction Noise and WireGuard use to fold
+    // handshake data into a key. crypto_kdf cannot: its inputs are a counter
+    // and a fixed label, neither of which the peers can contribute to.
+    Key derived;
+    crypto_generichash(Raw(derived.Expose()), KEY_SIZE, Raw(info), info.size(),
+                       Raw(master.Expose()), KEY_SIZE);
+    return derived;
+}
+
 ProtoResult<std::size_t> AeadSeal(MutableByteSpan out, ByteSpan plaintext,
                                   ByteSpan associatedData, const Key& key,
                                   ByteSpan nonce) noexcept {
