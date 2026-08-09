@@ -33,7 +33,12 @@ readonly INPUT_TIMEOUT_SECONDS=25
 # than no leak detection at all — a gate that cries wolf gets switched off for
 # real. The core allocates nothing that outlives a call anyway; ASan and UBSan
 # stay on.
+#
+# Both switches are needed: libFuzzer's own flag governs the check it runs
+# between inputs, ASAN_OPTIONS the one ASan runs at exit, and it was the latter
+# that failed the run.
 readonly DETECT_LEAKS=0
+export ASAN_OPTIONS="detect_leaks=$DETECT_LEAKS"
 
 root=$(cd "$(dirname "$0")/.." && pwd)
 cd "$root" || exit 2
