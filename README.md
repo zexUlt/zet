@@ -46,11 +46,18 @@ The first argument is a CMake preset (`musl-dev`, `musl-asan-ubsan`,
 ## Git hooks
 
 One command after cloning, and a merge conflict can no longer be committed by
-accident:
+accident, while unformatted code is fixed before it becomes a commit:
 
 ```sh
 git config core.hooksPath tools/git-hooks
 ```
+
+The formatting step runs `clang-format` over the staged `.cpp` and `.hpp`
+files, rewrites the ones it disagrees with and stages them again — so a commit
+never fails CI over whitespace. It names every file it touched: clang-format
+works on whole files, and a source staged hunk by hunk with `git add -p` ends
+up fully staged. Without `clang-format` on `PATH` the step warns and lets the
+commit through; CI checks the formatting either way.
 
 ## Layout
 
