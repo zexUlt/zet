@@ -12,18 +12,36 @@ set -uo pipefail
 # Only the angle brackets are matched. The `=======` line of a conflict is
 # indistinguishable from a markdown heading underlined with seven equals signs,
 # and a conflict never appears without `<<<<<<<` and `>>>>>>>` anyway.
+#
+# The staged content is searched, not the diff. A marker that reached HEAD once
+# — because a commit was pushed through with --no-verify, or predates the hook
+# — never shows up as an added line again, so editing a neighbouring line in
+# that file used to sail past. Files this commit does not touch are left out:
+# the gate is about what the commit carries, not about auditing the tree.
+#
+# :(literal) disables pathspec globbing, so a file named with a `*` or a `[`
+# stays a filename.
 
-marker='^\+(<{7}|>{7})( .*)?$'
+marker='^(<{7}|>{7})( .*)?$'
 
-if git diff --cached -U0 | grep -qE "$marker"; then
-    echo "Refused: the index still carries conflict markers." >&2
-    echo >&2
-    git diff --cached --name-only -G'^(<{7}|>{7})( .*)?$' \
-        | sed 's/^/    /' >&2
-    echo >&2
-    echo "Resolve them, and check the other files while you are at it: git" >&2
-    echo "reports conflicts once, and add -A stages whatever is in the tree." >&2
-    exit 1
+staged=()
+while IFS= read -r -d '' file; do
+    staged+=(":(literal)$file")
+done < <(git diff --cached --name-only --diff-filter=ACMR -z)
+
+if [ ${#staged[@]} -gt 0 ]; then
+    # -I keeps a binary that happens to hold the byte pattern out of it.
+    conflicted=$(git grep --cached -I -l -E "$marker" -- "${staged[@]}")
+
+    if [ -n "$conflicted" ]; then
+        echo "Refused: the index still carries conflict markers." >&2
+        echo >&2
+        printf '%s\n' "$conflicted" | sed 's/^/    /' >&2
+        echo >&2
+        echo "Resolve them, and check the other files while you are at it: git" >&2
+        echo "reports conflicts once, and add -A stages whatever is in the tree." >&2
+        exit 1
+    fi
 fi
 
 # --- formatting -------------------------------------------------------------
