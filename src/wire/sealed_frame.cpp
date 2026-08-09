@@ -1,6 +1,7 @@
 #include "zet/wire/sealed_frame.hpp"
 
 #include <algorithm>
+#include <tuple>
 
 #include "zet/core/byte_writer.hpp"
 
@@ -16,7 +17,7 @@ namespace {
     ByteWriter writer{MutableByteSpan{nonce}.subspan(SALT_SIZE)};
     // The span is exactly eight bytes wide, so the write cannot fail; the
     // result is discarded rather than checked to keep that visible.
-    static_cast<void>(writer.WriteU64BE(counter));
+    std::ignore = writer.WriteU64BE(counter);
     return nonce;
 }
 
@@ -78,9 +79,10 @@ bool FrameSealer::NeedsRekey() const noexcept {
 ProtoResult<void> FrameSealer::Rekey() noexcept {
     // The epoch is a byte on the wire, so it wraps at 256. Wrapping would put
     // an old epoch number on a new key, and a receiver holding the previous one
-    // would try it against the wrong generation.
+    // would try it against the wrong generation. Nothing local fixes this: the
+    // connection has spent every generation it had.
     if (Epoch_ == 0xFF) {
-        return std::unexpected(EProtoError::RekeyRequired);
+        return std::unexpected(EProtoError::EpochsExhausted);
     }
 
     auto next = crypto::DeriveSubkey(Key_, Epoch_ + 1U, REKEY_CONTEXT);
@@ -122,7 +124,8 @@ ProtoResult<ByteSpan> FrameOpener::Open(MutableByteSpan out,
     // stood up in advance and only becomes current once a frame actually opens
     // under it — the two-phase change from WireGuard, which is what keeps the
     // frames already on the wire from being lost.
-    const bool isNextEpoch = frame.Header.Epoch == static_cast<std::uint8_t>(Epoch_ + 1U);
+    const bool isNextEpoch =
+        frame.Header.Epoch == static_cast<std::uint8_t>(Epoch_ + 1U);
     if (isNextEpoch) {
         if (auto prepared = PrepareNext(); !prepared) {
             return std::unexpected(prepared.error());
@@ -142,7 +145,7 @@ ProtoResult<ByteSpan> FrameOpener::Open(MutableByteSpan out,
     // is discarded rather than checked to keep that visible.
     std::array<std::byte, HEADER_SIZE> headerBytes{};
     ByteWriter writer{MutableByteSpan{headerBytes}};
-    static_cast<void>(WriteFrameHeader(writer, frame.Header));
+    std::ignore = WriteFrameHeader(writer, frame.Header);
 
     const crypto::Key& key = isNextEpoch ? NextKey_ : Key_;
     const auto nonce = MakeNonce(Salt_, counter);

@@ -529,7 +529,13 @@ TEST_CASE_FIXTURE(SodiumFixture,
         REQUIRE(sealer.Rekey().has_value());
     }
     CHECK(sealer.Epoch() == 255);
-    CHECK(sealer.Rekey().error() == EProtoError::RekeyRequired);
+
+    // Not RekeyRequired: that one asks the caller to rekey, and answering a
+    // rekey with "please rekey" says nothing. Here there is no local remedy at
+    // all — only a fresh handshake gets the session moving again.
+    CHECK(sealer.Rekey().error() == EProtoError::EpochsExhausted);
+    CHECK(DispositionOf(EProtoError::EpochsExhausted) ==
+          EDisposition::CloseConnection);
     CHECK(sealer.Epoch() == 255);
 }
 

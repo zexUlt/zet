@@ -38,6 +38,10 @@ enum class EProtoError : std::uint16_t {
     /// The key has sealed as many frames as it is allowed to. Nothing is wrong
     /// with the message; the sender has to rekey before it can send again.
     RekeyRequired,
+    /// Every key generation of this connection has been used. Unlike
+    /// RekeyRequired there is no local remedy: only a fresh handshake, which
+    /// derives new keys, gets the session moving again.
+    EpochsExhausted,
 };
 
 template <typename TValue>
@@ -55,6 +59,7 @@ using ProtoResult = std::expected<TValue, EProtoError>;
         case EProtoError::AuthenticationFailed:
         case EProtoError::BufferTooSmall:
         case EProtoError::RekeyRequired:
+        case EProtoError::EpochsExhausted:
             return EDisposition::CloseConnection;
 
         // A version mismatch will not resolve itself on a retry, so there is
@@ -85,6 +90,8 @@ using ProtoResult = std::expected<TValue, EProtoError>;
             return "buffer too small";
         case EProtoError::RekeyRequired:
             return "rekey required";
+        case EProtoError::EpochsExhausted:
+            return "key generations exhausted";
     }
     return "unknown error";
 }
