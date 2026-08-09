@@ -85,14 +85,9 @@ ProtoResult<void> FrameSealer::Rekey() noexcept {
         return std::unexpected(EProtoError::EpochsExhausted);
     }
 
-    auto next = crypto::DeriveSubkey(Key_, Epoch_ + 1U, REKEY_CONTEXT);
-    if (!next) {
-        return std::unexpected(next.error());
-    }
-
     // Assignment wipes what the key held, so the previous generation is gone
     // rather than merely unreferenced.
-    Key_ = std::move(*next);
+    Key_ = crypto::DeriveSubkey(Key_, Epoch_ + 1U, REKEY_CONTEXT);
     ++Epoch_;
     Counter_ = 0;
     BytesSealed_ = 0;
@@ -103,18 +98,13 @@ FrameOpener::FrameOpener(crypto::Key key, DirectionSalt salt,
                          std::uint64_t frameLimit) noexcept
     : Key_(std::move(key)), Salt_(salt), FrameLimit_(frameLimit) {}
 
-ProtoResult<void> FrameOpener::PrepareNext() noexcept {
+void FrameOpener::PrepareNext() noexcept {
     if (NextReady_ || Epoch_ == 0xFF) {
-        return {};
+        return;
     }
-    auto next = crypto::DeriveSubkey(Key_, Epoch_ + 1U, REKEY_CONTEXT);
-    if (!next) {
-        return std::unexpected(next.error());
-    }
-    NextKey_ = std::move(*next);
+    NextKey_ = crypto::DeriveSubkey(Key_, Epoch_ + 1U, REKEY_CONTEXT);
     NextCounter_ = 0;
     NextReady_ = true;
-    return {};
 }
 
 ProtoResult<ByteSpan> FrameOpener::Open(MutableByteSpan out,
@@ -127,9 +117,7 @@ ProtoResult<ByteSpan> FrameOpener::Open(MutableByteSpan out,
     const bool isNextEpoch =
         frame.Header.Epoch == static_cast<std::uint8_t>(Epoch_ + 1U);
     if (isNextEpoch) {
-        if (auto prepared = PrepareNext(); !prepared) {
-            return std::unexpected(prepared.error());
-        }
+        PrepareNext();
     } else if (frame.Header.Epoch != Epoch_) {
         // Neither the current generation nor the next one. Nothing here can be
         // opened, and guessing which key to try would be an oracle.

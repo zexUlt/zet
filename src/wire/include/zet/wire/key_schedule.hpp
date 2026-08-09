@@ -3,10 +3,8 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
-#include <string_view>
 
 #include "zet/core/bytes.hpp"
-#include "zet/core/error.hpp"
 #include "zet/crypto/crypto.hpp"
 #include "zet/wire/sealed_frame.hpp"
 
@@ -49,13 +47,16 @@ struct ConnectionKeys {
     DirectionSalt SaltServerToClient{};
 };
 
-[[nodiscard]] ProtoResult<SessionSecrets> DeriveSessionSecrets(
+/// Neither derivation can fail: every length involved is fixed by a type, and
+/// the labels are literals the signature checks at compile time. Returning
+/// expected here would add branches no caller could ever take.
+[[nodiscard]] SessionSecrets DeriveSessionSecrets(
     const crypto::Key& master) noexcept;
 
 /// `sequence` counts connections within the session and never repeats: it is
 /// what keeps two connections that happened to exchange the same nonces from
 /// arriving at the same keys.
-[[nodiscard]] ProtoResult<ConnectionKeys> DeriveConnectionKeys(
+[[nodiscard]] ConnectionKeys DeriveConnectionKeys(
     const crypto::Key& connectionSeed, std::uint64_t sequence,
     const HandshakeNonce& clientNonce,
     const HandshakeNonce& serverNonce) noexcept;

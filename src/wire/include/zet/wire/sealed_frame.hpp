@@ -3,7 +3,6 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
-#include <string_view>
 
 #include "zet/core/bytes.hpp"
 #include "zet/core/error.hpp"
@@ -30,8 +29,7 @@ inline constexpr std::uint64_t MAX_BYTES_PER_EPOCH = 1ULL << 30;
 
 /// The KDF context that ratchets a key forward. Its only job is to separate
 /// this derivation from every other use of the same master.
-inline constexpr std::string_view REKEY_CONTEXT = "zet-rkey";
-static_assert(REKEY_CONTEXT.size() == crypto::CONTEXT_SIZE);
+inline constexpr char REKEY_CONTEXT[] = "zet-rkey";
 
 /// Seals frames for one direction of one connection.
 ///
@@ -97,7 +95,7 @@ public:
 
 private:
     /// Derives the next epoch's key and stands it up alongside the current one.
-    [[nodiscard]] ProtoResult<void> PrepareNext() noexcept;
+    void PrepareNext() noexcept;
 
     crypto::Key Key_;
     crypto::Key NextKey_;

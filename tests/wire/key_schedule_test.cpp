@@ -47,23 +47,20 @@ TEST_CASE_FIXTURE(SodiumFixture,
     const auto first = DeriveSessionSecrets(MakeMaster(1));
     const auto second = DeriveSessionSecrets(MakeMaster(1));
 
-    REQUIRE(first.has_value());
-    REQUIRE(second.has_value());
-    CHECK(first->Id == second->Id);
-    CHECK(Bytes(first->Auth) == Bytes(second->Auth));
-    CHECK(Bytes(first->ConnectionSeed) == Bytes(second->ConnectionSeed));
+    CHECK(first.Id == second.Id);
+    CHECK(Bytes(first.Auth) == Bytes(second.Auth));
+    CHECK(Bytes(first.ConnectionSeed) == Bytes(second.ConnectionSeed));
 }
 
 TEST_CASE_FIXTURE(SodiumFixture,
                   "the branches of the session tree are independent") {
     const auto secrets = DeriveSessionSecrets(MakeMaster(1));
-    REQUIRE(secrets.has_value());
 
     // The identifier travels in the clear. If it shared bytes with either key,
     // publishing it would publish part of a secret.
-    const std::vector<std::byte> id{secrets->Id.begin(), secrets->Id.end()};
-    const auto auth = Bytes(secrets->Auth);
-    const auto seed = Bytes(secrets->ConnectionSeed);
+    const std::vector<std::byte> id{secrets.Id.begin(), secrets.Id.end()};
+    const auto auth = Bytes(secrets.Auth);
+    const auto seed = Bytes(secrets.ConnectionSeed);
 
     CHECK(auth != seed);
     CHECK_FALSE(std::equal(id.begin(), id.end(), auth.begin()));
@@ -75,31 +72,25 @@ TEST_CASE_FIXTURE(SodiumFixture,
     const auto mine = DeriveSessionSecrets(MakeMaster(1));
     const auto theirs = DeriveSessionSecrets(MakeMaster(2));
 
-    REQUIRE(mine.has_value());
-    REQUIRE(theirs.has_value());
-    CHECK(mine->Id != theirs->Id);
-    CHECK(Bytes(mine->Auth) != Bytes(theirs->Auth));
-    CHECK(Bytes(mine->ConnectionSeed) != Bytes(theirs->ConnectionSeed));
+    CHECK(mine.Id != theirs.Id);
+    CHECK(Bytes(mine.Auth) != Bytes(theirs.Auth));
+    CHECK(Bytes(mine.ConnectionSeed) != Bytes(theirs.ConnectionSeed));
 }
 
 TEST_CASE_FIXTURE(SodiumFixture, "both ends derive the same connection keys") {
     const auto secrets = DeriveSessionSecrets(MakeMaster(1));
-    REQUIRE(secrets.has_value());
-
     const auto client = MakeNonce(1);
     const auto server = MakeNonce(2);
 
     const auto here =
-        DeriveConnectionKeys(secrets->ConnectionSeed, 0, client, server);
+        DeriveConnectionKeys(secrets.ConnectionSeed, 0, client, server);
     const auto there =
-        DeriveConnectionKeys(secrets->ConnectionSeed, 0, client, server);
+        DeriveConnectionKeys(secrets.ConnectionSeed, 0, client, server);
 
-    REQUIRE(here.has_value());
-    REQUIRE(there.has_value());
-    CHECK(Bytes(here->ClientToServer) == Bytes(there->ClientToServer));
-    CHECK(Bytes(here->ServerToClient) == Bytes(there->ServerToClient));
-    CHECK(here->SaltClientToServer == there->SaltClientToServer);
-    CHECK(here->SaltServerToClient == there->SaltServerToClient);
+    CHECK(Bytes(here.ClientToServer) == Bytes(there.ClientToServer));
+    CHECK(Bytes(here.ServerToClient) == Bytes(there.ServerToClient));
+    CHECK(here.SaltClientToServer == there.SaltClientToServer);
+    CHECK(here.SaltServerToClient == there.SaltServerToClient);
 }
 
 TEST_CASE_FIXTURE(SodiumFixture,
@@ -107,14 +98,11 @@ TEST_CASE_FIXTURE(SodiumFixture,
     // Sharing either would make a frame sent one way openable when reflected
     // back the other.
     const auto secrets = DeriveSessionSecrets(MakeMaster(1));
-    REQUIRE(secrets.has_value());
-
-    const auto keys = DeriveConnectionKeys(secrets->ConnectionSeed, 0,
+    const auto keys = DeriveConnectionKeys(secrets.ConnectionSeed, 0,
                                            MakeNonce(1), MakeNonce(2));
-    REQUIRE(keys.has_value());
 
-    CHECK(Bytes(keys->ClientToServer) != Bytes(keys->ServerToClient));
-    CHECK(keys->SaltClientToServer != keys->SaltServerToClient);
+    CHECK(Bytes(keys.ClientToServer) != Bytes(keys.ServerToClient));
+    CHECK(keys.SaltClientToServer != keys.SaltServerToClient);
 }
 
 TEST_CASE_FIXTURE(SodiumFixture,
@@ -122,14 +110,12 @@ TEST_CASE_FIXTURE(SodiumFixture,
     // This is what makes a reconnect safe: fresh keys and a counter from zero,
     // so no nonce is ever reused across connections.
     const auto secrets = DeriveSessionSecrets(MakeMaster(1));
-    REQUIRE(secrets.has_value());
 
     std::set<std::vector<std::byte>> seen;
     for (std::uint64_t sequence = 0; sequence < 50; ++sequence) {
-        const auto keys = DeriveConnectionKeys(
-            secrets->ConnectionSeed, sequence, MakeNonce(1), MakeNonce(2));
-        REQUIRE(keys.has_value());
-        seen.insert(Bytes(keys->ClientToServer));
+        const auto keys = DeriveConnectionKeys(secrets.ConnectionSeed, sequence,
+                                               MakeNonce(1), MakeNonce(2));
+        seen.insert(Bytes(keys.ClientToServer));
     }
 
     // Same nonces every time, so only the sequence number kept them apart.
@@ -138,23 +124,18 @@ TEST_CASE_FIXTURE(SodiumFixture,
 
 TEST_CASE_FIXTURE(SodiumFixture, "either nonce changes the connection keys") {
     const auto secrets = DeriveSessionSecrets(MakeMaster(1));
-    REQUIRE(secrets.has_value());
 
-    const auto base = DeriveConnectionKeys(secrets->ConnectionSeed, 0,
+    const auto base = DeriveConnectionKeys(secrets.ConnectionSeed, 0,
                                            MakeNonce(1), MakeNonce(2));
-    const auto otherClient = DeriveConnectionKeys(secrets->ConnectionSeed, 0,
+    const auto otherClient = DeriveConnectionKeys(secrets.ConnectionSeed, 0,
                                                   MakeNonce(9), MakeNonce(2));
-    const auto otherServer = DeriveConnectionKeys(secrets->ConnectionSeed, 0,
+    const auto otherServer = DeriveConnectionKeys(secrets.ConnectionSeed, 0,
                                                   MakeNonce(1), MakeNonce(9));
-
-    REQUIRE(base.has_value());
-    REQUIRE(otherClient.has_value());
-    REQUIRE(otherServer.has_value());
 
     // Neither side alone decides the key, so a peer that replays its own nonce
     // cannot force a repeat of a previous connection.
-    CHECK(Bytes(base->ClientToServer) != Bytes(otherClient->ClientToServer));
-    CHECK(Bytes(base->ClientToServer) != Bytes(otherServer->ClientToServer));
+    CHECK(Bytes(base.ClientToServer) != Bytes(otherClient.ClientToServer));
+    CHECK(Bytes(base.ClientToServer) != Bytes(otherServer.ClientToServer));
 }
 
 TEST_CASE_FIXTURE(SodiumFixture, "swapping the nonces gives different keys") {
@@ -162,57 +143,46 @@ TEST_CASE_FIXTURE(SodiumFixture, "swapping the nonces gives different keys") {
     // symmetrically, a peer could hand back what it received and land on the
     // same key.
     const auto secrets = DeriveSessionSecrets(MakeMaster(1));
-    REQUIRE(secrets.has_value());
 
-    const auto forward = DeriveConnectionKeys(secrets->ConnectionSeed, 0,
+    const auto forward = DeriveConnectionKeys(secrets.ConnectionSeed, 0,
                                               MakeNonce(1), MakeNonce(2));
-    const auto swapped = DeriveConnectionKeys(secrets->ConnectionSeed, 0,
+    const auto swapped = DeriveConnectionKeys(secrets.ConnectionSeed, 0,
                                               MakeNonce(2), MakeNonce(1));
 
-    REQUIRE(forward.has_value());
-    REQUIRE(swapped.has_value());
-    CHECK(Bytes(forward->ClientToServer) != Bytes(swapped->ClientToServer));
+    CHECK(Bytes(forward.ClientToServer) != Bytes(swapped.ClientToServer));
 }
 
 TEST_CASE_FIXTURE(SodiumFixture, "connection keys say nothing about the seed") {
     const auto secrets = DeriveSessionSecrets(MakeMaster(1));
-    REQUIRE(secrets.has_value());
-
-    const auto keys = DeriveConnectionKeys(secrets->ConnectionSeed, 0,
+    const auto keys = DeriveConnectionKeys(secrets.ConnectionSeed, 0,
                                            MakeNonce(1), MakeNonce(2));
-    REQUIRE(keys.has_value());
 
-    CHECK(Bytes(keys->ClientToServer) != Bytes(secrets->ConnectionSeed));
-    CHECK(Bytes(keys->ServerToClient) != Bytes(secrets->ConnectionSeed));
-    CHECK(Bytes(keys->ClientToServer) != Bytes(secrets->Auth));
+    CHECK(Bytes(keys.ClientToServer) != Bytes(secrets.ConnectionSeed));
+    CHECK(Bytes(keys.ServerToClient) != Bytes(secrets.ConnectionSeed));
+    CHECK(Bytes(keys.ClientToServer) != Bytes(secrets.Auth));
 }
 
 TEST_CASE_FIXTURE(SodiumFixture,
                   "the derived salt is the size the sealer wants") {
     const auto secrets = DeriveSessionSecrets(MakeMaster(1));
-    REQUIRE(secrets.has_value());
-
-    const auto keys = DeriveConnectionKeys(secrets->ConnectionSeed, 0,
+    const auto keys = DeriveConnectionKeys(secrets.ConnectionSeed, 0,
                                            MakeNonce(1), MakeNonce(2));
-    REQUIRE(keys.has_value());
 
     // The salt fills everything in the nonce that the counter does not.
-    CHECK(keys->SaltClientToServer.size() == SALT_SIZE);
+    CHECK(keys.SaltClientToServer.size() == SALT_SIZE);
     CHECK(SALT_SIZE + sizeof(std::uint64_t) == crypto::NONCE_SIZE);
 }
 
 TEST_CASE_FIXTURE(SodiumFixture,
                   "the keys go straight into a sealer and open") {
     const auto secrets = DeriveSessionSecrets(MakeMaster(1));
-    REQUIRE(secrets.has_value());
-    const auto keys = DeriveConnectionKeys(secrets->ConnectionSeed, 0,
+    const auto keys = DeriveConnectionKeys(secrets.ConnectionSeed, 0,
                                            MakeNonce(1), MakeNonce(2));
-    REQUIRE(keys.has_value());
 
-    auto clientKey = crypto::Key{keys->ClientToServer.Expose()};
-    auto serverKey = crypto::Key{keys->ClientToServer.Expose()};
-    FrameSealer sealer{std::move(clientKey), keys->SaltClientToServer};
-    FrameOpener opener{std::move(serverKey), keys->SaltClientToServer};
+    crypto::Key sealerKey{keys.ClientToServer.Expose()};
+    crypto::Key openerKey{keys.ClientToServer.Expose()};
+    FrameSealer sealer{std::move(sealerKey), keys.SaltClientToServer};
+    FrameOpener opener{std::move(openerKey), keys.SaltClientToServer};
 
     const std::array<std::byte, 4> plaintext{std::byte{'p'}, std::byte{'i'},
                                              std::byte{'n'}, std::byte{'g'}};

@@ -3,7 +3,6 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
-#include <string_view>
 
 #include "zet/core/bytes.hpp"
 #include "zet/core/error.hpp"
@@ -60,20 +59,31 @@ void RandomBytes(MutableByteSpan out) noexcept;
 [[nodiscard]] ProtoResult<SessionKeys> DeriveServerKeys(
     const KeyPair& own, const PublicKey& peer) noexcept;
 
-/// A subkey from a master. `context` is exactly CONTEXT_SIZE characters; it
-/// separates key purposes, so the same master under different contexts yields
-/// independent subkeys.
-[[nodiscard]] ProtoResult<Key> DeriveSubkey(const Key& master,
-                                            std::uint64_t subkeyId,
-                                            std::string_view context) noexcept;
+/// A subkey from a master. The context separates key purposes, so the same
+/// master under two different labels yields subkeys that say nothing about each
+/// other.
+///
+/// The label arrives as a reference to a string literal of exactly the right
+/// width, which is what makes a wrong one a compile error instead of a runtime
+/// branch nothing can reach. Neither this nor DeriveBytes can fail: libsodium
+/// rejects only sizes, and every size here is fixed by a type.
+[[nodiscard]] Key DeriveSubkey(
+    const Key& master, std::uint64_t subkeyId,
+    const char (&context)[CONTEXT_SIZE + 1]) noexcept;
 
-/// The same derivation into a caller-sized buffer, for the things that are not
-/// keys — nonce salts, session identifiers. Length must be between
-/// MIN_DERIVED_SIZE and MAX_DERIVED_SIZE.
-[[nodiscard]] ProtoResult<void> DeriveBytes(MutableByteSpan out,
-                                            const Key& master,
-                                            std::uint64_t subkeyId,
-                                            std::string_view context) noexcept;
+/// The same derivation for the things that are not keys — nonce salts, session
+/// identifiers. The bounds libsodium imposes are checked at compile time.
+void DeriveBytesUnchecked(MutableByteSpan out, const Key& master,
+                          std::uint64_t subkeyId,
+                          const char (&context)[CONTEXT_SIZE + 1]) noexcept;
+
+template <std::size_t tSize>
+    requires(tSize >= MIN_DERIVED_SIZE && tSize <= MAX_DERIVED_SIZE)
+void DeriveBytes(std::array<std::byte, tSize>& out, const Key& master,
+                 std::uint64_t subkeyId,
+                 const char (&context)[CONTEXT_SIZE + 1]) noexcept {
+    DeriveBytesUnchecked(MutableByteSpan{out}, master, subkeyId, context);
+}
 
 /// A key bound to data that both sides contributed.
 ///

@@ -2,7 +2,7 @@
 
 #include <sodium.h>
 
-#include <cstring>
+#include <tuple>
 
 namespace zet::crypto {
 namespace {
@@ -77,43 +77,23 @@ ProtoResult<SessionKeys> DeriveServerKeys(const KeyPair& own,
     return keys;
 }
 
-ProtoResult<Key> DeriveSubkey(const Key& master, std::uint64_t subkeyId,
-                              std::string_view context) noexcept {
-    if (context.size() != CONTEXT_SIZE) {
-        return std::unexpected(EProtoError::MalformedField);
-    }
-
+Key DeriveSubkey(const Key& master, std::uint64_t subkeyId,
+                 const char (&context)[CONTEXT_SIZE + 1]) noexcept {
     Key subkey;
-    char padded[CONTEXT_SIZE];
-    std::memcpy(padded, context.data(), CONTEXT_SIZE);
-
-    const int rc = crypto_kdf_derive_from_key(
-        Raw(subkey.Expose()), KEY_SIZE, subkeyId, padded, Raw(master.Expose()));
-    if (rc != 0) {
-        return std::unexpected(EProtoError::MalformedField);
-    }
+    // The only way crypto_kdf_derive_from_key refuses is a length outside its
+    // bounds, and every length here comes from a type: KEY_SIZE is 32, the
+    // context is a literal of exactly CONTEXT_SIZE characters.
+    std::ignore =
+        crypto_kdf_derive_from_key(Raw(subkey.Expose()), KEY_SIZE, subkeyId,
+                                   context, Raw(master.Expose()));
     return subkey;
 }
 
-ProtoResult<void> DeriveBytes(MutableByteSpan out, const Key& master,
-                              std::uint64_t subkeyId,
-                              std::string_view context) noexcept {
-    if (context.size() != CONTEXT_SIZE) {
-        return std::unexpected(EProtoError::MalformedField);
-    }
-    if (out.size() < MIN_DERIVED_SIZE || out.size() > MAX_DERIVED_SIZE) {
-        return std::unexpected(EProtoError::MalformedField);
-    }
-
-    char padded[CONTEXT_SIZE];
-    std::memcpy(padded, context.data(), CONTEXT_SIZE);
-
-    const int rc = crypto_kdf_derive_from_key(Raw(out), out.size(), subkeyId,
-                                              padded, Raw(master.Expose()));
-    if (rc != 0) {
-        return std::unexpected(EProtoError::MalformedField);
-    }
-    return {};
+void DeriveBytesUnchecked(MutableByteSpan out, const Key& master,
+                          std::uint64_t subkeyId,
+                          const char (&context)[CONTEXT_SIZE + 1]) noexcept {
+    std::ignore = crypto_kdf_derive_from_key(Raw(out), out.size(), subkeyId,
+                                             context, Raw(master.Expose()));
 }
 
 Key DeriveFromInfo(const Key& master, ByteSpan info) noexcept {

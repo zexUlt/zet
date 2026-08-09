@@ -249,12 +249,11 @@ TEST_CASE_FIXTURE(SodiumFixture, "KDF matches the recorded vector") {
     const auto master = KeyFrom(KAT_KEY);
     const auto subkey = DeriveSubkey(master, 1, "zet-conn");
 
-    REQUIRE(subkey.has_value());
     KeyBytes expected{};
     for (std::size_t i = 0; i < KEY_SIZE; ++i) {
         expected[i] = static_cast<std::byte>(KAT_SUBKEY[i]);
     }
-    CHECK(subkey->Expose() == expected);
+    CHECK(subkey.Expose() == expected);
 }
 
 TEST_CASE_FIXTURE(SodiumFixture, "KDF separates by both id and context") {
@@ -265,26 +264,29 @@ TEST_CASE_FIXTURE(SodiumFixture, "KDF separates by both id and context") {
     const auto otherId = DeriveSubkey(master, 2, "zet-conn");
     const auto otherContext = DeriveSubkey(master, 1, "zet-auth");
 
-    REQUIRE(first.has_value());
-    REQUIRE(sameAgain.has_value());
-    REQUIRE(otherId.has_value());
-    REQUIRE(otherContext.has_value());
-
     // Determinism — otherwise the two sides derive different keys after a
     // reconnect.
-    CHECK(first->Expose() == sameAgain->Expose());
-    CHECK(first->Expose() != otherId->Expose());
-    CHECK(first->Expose() != otherContext->Expose());
+    CHECK(first.Expose() == sameAgain.Expose());
+    CHECK(first.Expose() != otherId.Expose());
+    CHECK(first.Expose() != otherContext.Expose());
 }
 
-TEST_CASE_FIXTURE(SodiumFixture, "a context of the wrong length is refused") {
+// A context of the wrong length is not tested: the signature takes a reference
+// to a literal of exactly CONTEXT_SIZE characters, so "short" or "much too
+// long" is refused by the compiler and never reaches a test.
+TEST_CASE_FIXTURE(SodiumFixture,
+                  "derived bytes fill a buffer wider than a key") {
     const auto master = KeyFrom(KAT_KEY);
 
-    CHECK(DeriveSubkey(master, 1, "short").error() ==
-          EProtoError::MalformedField);
-    CHECK(DeriveSubkey(master, 1, "much too long").error() ==
-          EProtoError::MalformedField);
-    CHECK(DeriveSubkey(master, 1, "").error() == EProtoError::MalformedField);
+    std::array<std::byte, 16> salt{};
+    DeriveBytes(salt, master, 1, "zet-conn");
+
+    // Same master, same label, different subkey number: independent output.
+    std::array<std::byte, 16> other{};
+    DeriveBytes(other, master, 2, "zet-conn");
+
+    CHECK(salt != other);
+    CHECK(salt != std::array<std::byte, 16>{});
 }
 
 TEST_CASE_FIXTURE(SodiumFixture,
