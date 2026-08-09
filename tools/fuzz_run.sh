@@ -27,6 +27,14 @@ readonly MAX_INPUT_LENGTH=8192
 # a finding in its own right.
 readonly INPUT_TIMEOUT_SECONDS=25
 
+# LeakSanitizer cannot read the main thread's stack under musl: it reported the
+# vector libFuzzer allocates in its own main() as leaked, symbolising the frame
+# below it as "[stack]". Every run would end in a false finding, which is worse
+# than no leak detection at all — a gate that cries wolf gets switched off for
+# real. The core allocates nothing that outlives a call anyway; ASan and UBSan
+# stay on.
+readonly DETECT_LEAKS=0
+
 root=$(cd "$(dirname "$0")/.." && pwd)
 cd "$root" || exit 2
 
@@ -85,6 +93,7 @@ while read -r name binary corpus; do
         -max_total_time="$seconds" \
         -max_len="$MAX_INPUT_LENGTH" \
         -timeout="$INPUT_TIMEOUT_SECONDS" \
+        -detect_leaks="$DETECT_LEAKS" \
         -print_final_stats=1 \
         -artifact_prefix="$findings/$name-"; then
         echo "FAIL $name"
