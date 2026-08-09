@@ -1,5 +1,6 @@
 add_library(zet_wire STATIC
     frame.cpp
+    frame_stream.cpp
     key_schedule.cpp
     sealed_frame.cpp
 )
