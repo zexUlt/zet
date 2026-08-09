@@ -64,7 +64,9 @@ public:
 
     [[nodiscard]] std::uint64_t Counter() const noexcept { return Counter_; }
     [[nodiscard]] std::uint8_t Epoch() const noexcept { return Epoch_; }
-    [[nodiscard]] std::uint64_t BytesSealed() const noexcept { return BytesSealed_; }
+    [[nodiscard]] std::uint64_t BytesSealed() const noexcept {
+        return BytesSealed_;
+    }
 
 private:
     crypto::Key Key_;
