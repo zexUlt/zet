@@ -1,5 +1,9 @@
 #!/usr/bin/env bash
-# Refuses a commit that still carries an unresolved merge conflict.
+# Two things a commit must not carry: an unresolved merge conflict, and code
+# that clang-format would rewrite. The first is refused, the second is fixed.
+set -uo pipefail
+
+# --- unresolved merge conflicts ---------------------------------------------
 #
 # git reports conflicts once, when the merge stops. Resolving two files out of
 # three and then staging everything with `git add -A` is enough to commit the
@@ -8,19 +12,67 @@
 # Only the angle brackets are matched. The `=======` line of a conflict is
 # indistinguishable from a markdown heading underlined with seven equals signs,
 # and a conflict never appears without `<<<<<<<` and `>>>>>>>` anyway.
-set -uo pipefail
 
 marker='^\+(<{7}|>{7})( .*)?$'
 
-if ! git diff --cached -U0 | grep -qE "$marker"; then
+if git diff --cached -U0 | grep -qE "$marker"; then
+    echo "Refused: the index still carries conflict markers." >&2
+    echo >&2
+    git diff --cached --name-only -G'^(<{7}|>{7})( .*)?$' \
+        | sed 's/^/    /' >&2
+    echo >&2
+    echo "Resolve them, and check the other files while you are at it: git" >&2
+    echo "reports conflicts once, and add -A stages whatever is in the tree." >&2
+    exit 1
+fi
+
+# --- formatting -------------------------------------------------------------
+#
+# CI rejects a branch whose sources clang-format would rewrite, and finding
+# that out after a push costs a round trip for something a machine can fix on
+# the spot. So the hook fixes it instead of refusing.
+#
+# What gets checked is the staged content, not the file on disk: those differ
+# whenever a source was edited after `git add`, and it is the staged version
+# that becomes the commit.
+#
+# A missing clang-format is a warning, not a refusal. Formatting is CI's call
+# to make; the hook only saves the trip.
+
+if ! command -v clang-format >/dev/null 2>&1; then
+    echo "Warning: clang-format is not installed, so nothing was formatted." >&2
+    echo "CI checks the formatting regardless." >&2
     exit 0
 fi
 
-echo "Refused: the index still carries conflict markers." >&2
+reformatted=()
+
+while IFS= read -r -d '' file; do
+    # Staged as added, then removed from the tree: there is nothing to rewrite.
+    [ -f "$file" ] || continue
+
+    # --assume-filename is what makes clang-format pick up .clang-format for
+    # this path and read the content as C++ rather than guessing.
+    if git show ":$file" \
+        | clang-format --assume-filename="$file" --dry-run --Werror \
+            >/dev/null 2>&1; then
+        continue
+    fi
+
+    clang-format -i -- "$file" || continue
+    git add -- "$file" || continue
+    reformatted+=("$file")
+done < <(git diff --cached --name-only --diff-filter=ACMR -z -- '*.cpp' '*.hpp')
+
+if [ ${#reformatted[@]} -eq 0 ]; then
+    exit 0
+fi
+
+# Said out loud, because clang-format rewrites a whole file: a source staged
+# hunk by hunk with `add -p` has just had the rest of its changes staged too.
+echo "Reformatted and staged:" >&2
+printf '    %s\n' "${reformatted[@]}" >&2
 echo >&2
-git diff --cached --name-only -G'^(<{7}|>{7})( .*)?$' \
-    | sed 's/^/    /' >&2
-echo >&2
-echo "Resolve them, and check the other files while you are at it: git" >&2
-echo "reports conflicts once, and add -A stages whatever is in the tree." >&2
-exit 1
+echo "The whole file was staged, not only the hunks you picked. Check the" >&2
+echo "commit with git diff --cached if you were staging selectively." >&2
+exit 0
