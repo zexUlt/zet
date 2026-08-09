@@ -320,10 +320,12 @@ TEST_CASE("an unknown critical option is refused") {
     const auto bytes = HelloWithRawOptions(ByteSpan{options});
     const auto parsed = ParseAny(ByteSpan{bytes});
     REQUIRE_FALSE(parsed.has_value());
-    CHECK(parsed.error() == EProtoError::VersionMismatch);
-    // Nothing about a retry makes us understand the option, so the session goes
-    // rather than the connection.
-    CHECK(DispositionOf(parsed.error()) == EDisposition::KillSession);
+    CHECK(parsed.error() == EProtoError::UnsupportedCriticalOption);
+    // A retry will not teach us the option, but the connection is still all
+    // that may go: Hello is cleartext and unauthenticated, so a disposition of
+    // KillSession here would let anyone who read a sid off the wire end that
+    // session.
+    CHECK(DispositionOf(parsed.error()) == EDisposition::CloseConnection);
 }
 
 TEST_CASE("a cut inside an option is an error, not the end of the list") {
@@ -436,4 +438,65 @@ TEST_CASE("a version range that runs backwards is refused") {
     const auto parsed = ParseAny(ByteSpan{bytes});
     REQUIRE_FALSE(parsed.has_value());
     CHECK(parsed.error() == EProtoError::MalformedField);
+}
+
+TEST_CASE("nothing a handshake message can say reaps the session") {
+    // These messages are cleartext and prove nothing: a sid is a routing label
+    // anyone on the path can read (§5). If any way of malforming one came back
+    // with KillSession, that label would become a way to end the session it
+    // names. The sweep is over outcomes rather than a list of error codes so
+    // that a new one added to the parser is covered the day it appears.
+    std::vector<std::vector<std::byte>> corpus;
+
+    for (const auto& whole :
+         {Encode(MakeHello()), Encode(MakeChallenge()), Encode(MakeAuth()),
+          Encode(MakeAuthOk()), Encode(MakeResume())}) {
+        for (std::size_t prefix = 0; prefix < whole.size(); ++prefix) {
+            corpus.emplace_back(
+                whole.begin(),
+                whole.begin() + static_cast<std::ptrdiff_t>(prefix));
+        }
+        auto trailing = whole;
+        trailing.push_back(std::byte{0x00});
+        corpus.push_back(std::move(trailing));
+    }
+
+    for (const std::uint8_t type :
+         std::array<std::uint8_t, 4>{0x00, 0x06, 0x10, 0xFF}) {
+        corpus.push_back({std::byte{type}});
+    }
+
+    const std::vector<std::byte> value{std::byte{0xAA}, std::byte{0xBB}};
+    std::vector<std::byte> critical;
+    AppendOption(critical, static_cast<std::uint16_t>(TLV_CRITICAL_BIT | 1),
+                 ByteSpan{});
+    std::vector<std::byte> repeated;
+    AppendOption(repeated, 1, ByteSpan{value});
+    AppendOption(repeated, 1, ByteSpan{value});
+    std::vector<std::byte> overrun;
+    AppendOption(overrun, 1, ByteSpan{value});
+    overrun.at(3) = std::byte{0xFF};
+    std::vector<std::byte> crowded;
+    for (std::uint16_t i = 0; i <= MAX_TLV_OPTIONS; ++i) {
+        AppendOption(crowded, static_cast<std::uint16_t>(i + 1), ByteSpan{});
+    }
+
+    for (const auto& options : {critical, repeated, overrun, crowded}) {
+        corpus.push_back(HelloWithRawOptions(ByteSpan{options}));
+    }
+
+    std::size_t refused = 0;
+    for (const auto& bytes : corpus) {
+        const auto parsed = ParseAny(ByteSpan{bytes});
+        if (parsed) {
+            continue;
+        }
+        ++refused;
+        INFO("error: " << Describe(parsed.error()));
+        CHECK(DispositionOf(parsed.error()) != EDisposition::KillSession);
+    }
+
+    // Guards the sweep itself: a corpus the parser happens to accept whole
+    // would pass the check above without testing anything.
+    CHECK(refused > 0);
 }

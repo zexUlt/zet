@@ -92,13 +92,13 @@ ProtoResult<TlvList> ParseOptions(ByteReader& reader) noexcept {
         }
 
         const TlvOption option{.Type = *type, .Value = *value};
-        // v1 defines no options at all, so every critical one is unknown. The
-        // error is VersionMismatch and not MalformedField: the message is well
-        // formed and understood, we simply do not implement what the sender
-        // insists on. Retrying will not change that, and its disposition —
-        // KillSession — says so.
+        // v1 defines no options at all, so every critical one is unknown. Not
+        // MalformedField: the message is well formed and understood, we simply
+        // do not implement what the sender insists on. Not VersionMismatch
+        // either — that one reaps the session, and this option arrived in a
+        // cleartext Hello that proved nothing.
         if (option.IsCritical()) {
-            return std::unexpected(EProtoError::VersionMismatch);
+            return std::unexpected(EProtoError::UnsupportedCriticalOption);
         }
         if (auto appended = options.Append(option); !appended) {
             return std::unexpected(appended.error());
