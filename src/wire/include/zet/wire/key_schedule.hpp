@@ -53,6 +53,17 @@ struct ConnectionKeys {
 [[nodiscard]] SessionSecrets DeriveSessionSecrets(
     const crypto::Key& master) noexcept;
 
+/// Secrets for a `sid` no session answers to, per §5 rule two.
+///
+/// Deterministic on purpose: a decoy drawn afresh each time is itself the
+/// oracle it was meant to remove, because a real session answers two identical
+/// probes alike and a random one does not. `localSecret` is made when the agent
+/// starts and dies with it — there is nothing worth remembering here between
+/// runs. The returned `Id` is the sid asked about, so that what the automaton
+/// receives is the same shape either way.
+[[nodiscard]] SessionSecrets DeriveDecoySecrets(const crypto::Key& localSecret,
+                                                const SessionId& id) noexcept;
+
 /// Both nonces go in, and only they: thirty-two bytes neither side chooses
 /// alone are what keeps two connections of a session apart.
 [[nodiscard]] ConnectionKeys DeriveConnectionKeys(

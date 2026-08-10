@@ -34,6 +34,11 @@ enum class EProtoError : std::uint16_t {
     /// An option marked critical that this build does not implement. The
     /// message parsed cleanly; we simply cannot honour what it asks for.
     UnsupportedCriticalOption,
+    /// A handshake nonce this session has already used. Not an attack in
+    /// itself — a peer gains nothing by replaying one — but the sign of a
+    /// generator that has started repeating, and the keys it would collide
+    /// with must not be derived.
+    NonceReused,
     /// AEAD tag did not verify.
     AuthenticationFailed,
     /// Output buffer is smaller than the encoded message.
@@ -68,6 +73,7 @@ using ProtoResult = std::expected<TValue, EProtoError>;
         // and unauthenticated, so anything that reaps a session on one hands
         // whoever read a sid off the wire a way to end that session.
         case EProtoError::UnsupportedCriticalOption:
+        case EProtoError::NonceReused:
             return EDisposition::CloseConnection;
 
         // A version mismatch will not resolve itself on a retry, so there is
@@ -94,6 +100,8 @@ using ProtoResult = std::expected<TValue, EProtoError>;
             return "version mismatch";
         case EProtoError::UnsupportedCriticalOption:
             return "unsupported critical option";
+        case EProtoError::NonceReused:
+            return "handshake nonce reused";
         case EProtoError::AuthenticationFailed:
             return "authentication failed";
         case EProtoError::BufferTooSmall:

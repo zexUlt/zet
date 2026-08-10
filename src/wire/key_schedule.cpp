@@ -40,6 +40,18 @@ SessionSecrets DeriveSessionSecrets(const crypto::Key& master) noexcept {
     return secrets;
 }
 
+SessionSecrets DeriveDecoySecrets(const crypto::Key& localSecret,
+                                  const SessionId& id) noexcept {
+    // The sid is what varies, so it goes in as info rather than as a subkey
+    // number: crypto_kdf takes a counter, and sixteen bytes do not fit in one.
+    const crypto::Key master =
+        crypto::DeriveFromInfo(localSecret, ByteSpan{id});
+
+    SessionSecrets secrets = DeriveSessionSecrets(master);
+    secrets.Id = id;
+    return secrets;
+}
+
 ConnectionKeys DeriveConnectionKeys(
     const crypto::Key& connectionSeed, const HandshakeNonce& clientNonce,
     const HandshakeNonce& serverNonce) noexcept {
