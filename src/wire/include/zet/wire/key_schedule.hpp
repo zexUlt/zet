@@ -53,12 +53,21 @@ struct ConnectionKeys {
 [[nodiscard]] SessionSecrets DeriveSessionSecrets(
     const crypto::Key& master) noexcept;
 
-/// `sequence` counts connections within the session and never repeats: it is
-/// what keeps two connections that happened to exchange the same nonces from
-/// arriving at the same keys.
+/// Both nonces go in, and only they: thirty-two bytes neither side chooses
+/// alone are what keeps two connections of a session apart.
 [[nodiscard]] ConnectionKeys DeriveConnectionKeys(
-    const crypto::Key& connectionSeed, std::uint64_t sequence,
-    const HandshakeNonce& clientNonce,
+    const crypto::Key& connectionSeed, const HandshakeNonce& clientNonce,
     const HandshakeNonce& serverNonce) noexcept;
+
+/// The seed for the next connection, per §8. Whoever reads the returned key out
+/// of memory cannot walk back to the connections that came before it, which is
+/// the whole point: sid and both nonces travel in the clear, so a seed that
+/// outlived the session would decrypt every recorded connection of it.
+///
+/// The caller wipes the old seed only once the new generation is confirmed —
+/// the two-phase change of §8. Deriving it is this function; deciding when it
+/// becomes the only one is session state and lives with the session.
+[[nodiscard]] crypto::Key AdvanceConnectionSeed(
+    const crypto::Key& connectionSeed) noexcept;
 
 }  // namespace zet::wire

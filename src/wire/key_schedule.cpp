@@ -13,6 +13,10 @@ namespace {
 // under two of these yields keys that say nothing about each other.
 constexpr crypto::KdfContext SESSION_CONTEXT = std::to_array("zet-sess");
 constexpr crypto::KdfContext CONNECTION_CONTEXT = std::to_array("zet-conn");
+constexpr crypto::KdfContext SEED_RATCHET_CONTEXT = std::to_array("zet-rtch");
+
+// The ratchet has one output, so its subkey number carries no choice.
+constexpr std::uint64_t SEED_RATCHET_SUBKEY = 1;
 
 // Subkey numbers within a context. They are as much part of the wire contract
 // as the labels: change one and the two ends stop agreeing.
@@ -37,20 +41,16 @@ SessionSecrets DeriveSessionSecrets(const crypto::Key& master) noexcept {
 }
 
 ConnectionKeys DeriveConnectionKeys(
-    const crypto::Key& connectionSeed, std::uint64_t sequence,
-    const HandshakeNonce& clientNonce,
+    const crypto::Key& connectionSeed, const HandshakeNonce& clientNonce,
     const HandshakeNonce& serverNonce) noexcept {
     // Both nonces go in, so neither side alone decides what the connection key
     // will be, and they go in a fixed order: folded symmetrically, a peer could
-    // hand back what it received and land on the same key. The sequence number
-    // separates two connections that happened to exchange identical nonces.
+    // hand back what it received and land on the same key.
     //
     // The buffer is exactly as wide as what goes into it, so the writes cannot
     // fail and their results are discarded rather than checked.
-    std::array<std::byte, sizeof(std::uint64_t) + 2 * HANDSHAKE_NONCE_SIZE>
-        info{};
+    std::array<std::byte, 2 * HANDSHAKE_NONCE_SIZE> info{};
     ByteWriter writer{MutableByteSpan{info}};
-    std::ignore = writer.WriteU64BE(sequence);
     std::ignore = writer.WriteBytes(ByteSpan{clientNonce});
     std::ignore = writer.WriteBytes(ByteSpan{serverNonce});
 
@@ -67,6 +67,11 @@ ConnectionKeys DeriveConnectionKeys(
     crypto::DeriveBytes(keys.SaltServerToClient, connection, SERVER_SALT_SUBKEY,
                         CONNECTION_CONTEXT);
     return keys;
+}
+
+crypto::Key AdvanceConnectionSeed(const crypto::Key& connectionSeed) noexcept {
+    return crypto::DeriveSubkey(connectionSeed, SEED_RATCHET_SUBKEY,
+                                SEED_RATCHET_CONTEXT);
 }
 
 }  // namespace zet::wire
