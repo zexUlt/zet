@@ -1,6 +1,7 @@
 add_library(zet_wire STATIC
     frame.cpp
     key_schedule.cpp
+    message.cpp
     sealed_frame.cpp
 )
 add_library(zet::wire ALIAS zet_wire)

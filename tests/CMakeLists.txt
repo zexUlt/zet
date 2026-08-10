@@ -19,6 +19,7 @@ add_executable(zet_tests
     crypto/crypto_test.cpp
     wire/frame_test.cpp
     wire/key_schedule_test.cpp
+    wire/message_test.cpp
     wire/sealed_frame_test.cpp
 )
 

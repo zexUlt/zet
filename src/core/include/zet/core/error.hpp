@@ -31,6 +31,9 @@ enum class EProtoError : std::uint16_t {
     UnexpectedMessage,
     /// No overlap between the peer's version range and ours.
     VersionMismatch,
+    /// An option marked critical that this build does not implement. The
+    /// message parsed cleanly; we simply cannot honour what it asks for.
+    UnsupportedCriticalOption,
     /// AEAD tag did not verify.
     AuthenticationFailed,
     /// Output buffer is smaller than the encoded message.
@@ -60,6 +63,11 @@ using ProtoResult = std::expected<TValue, EProtoError>;
         case EProtoError::BufferTooSmall:
         case EProtoError::RekeyRequired:
         case EProtoError::EpochsExhausted:
+        // Deliberately not KillSession, even though a retry will not teach us
+        // the option either. Critical options ride in Hello, which is cleartext
+        // and unauthenticated, so anything that reaps a session on one hands
+        // whoever read a sid off the wire a way to end that session.
+        case EProtoError::UnsupportedCriticalOption:
             return EDisposition::CloseConnection;
 
         // A version mismatch will not resolve itself on a retry, so there is
@@ -84,6 +92,8 @@ using ProtoResult = std::expected<TValue, EProtoError>;
             return "unexpected message";
         case EProtoError::VersionMismatch:
             return "version mismatch";
+        case EProtoError::UnsupportedCriticalOption:
+            return "unsupported critical option";
         case EProtoError::AuthenticationFailed:
             return "authentication failed";
         case EProtoError::BufferTooSmall:
