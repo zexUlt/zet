@@ -1,0 +1,77 @@
+name: fuzz soak (release gate)
+
+# The M1 criterion from docs/design.md §17: every fuzzer, ten minutes, clean.
+# Separate from CI on purpose — an hour of fuzzing on every pull request buys
+# nothing the one-minute smoke run there does not already catch, and the thing
+# a release needs to know is not answered in sixty seconds either way.
+#
+# Dispatch it with the default of 600 seconds to run the M1 gate; the nightly
+# run takes the 30 minutes per target that §17 asks for.
+
+on:
+  workflow_dispatch:
+    inputs:
+      seconds:
+        description: Seconds per fuzzer
+        required: false
+        default: "600"
+  schedule:
+    - cron: "0 3 * * *"
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+env:
+  ZET_APK_CACHE: ${{ github.workspace }}/../apk-cache
+
+jobs:
+  soak:
+    name: soak
+    runs-on: ubuntu-24.04
+    timeout-minutes: 300
+    env:
+      # Through the environment rather than straight into the run script: a
+      # dispatch input is text someone typed, and interpolating it into a shell
+      # line is how it becomes a command.
+      ZET_FUZZ_SECONDS: ${{ github.event.inputs.seconds || 1800 }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Restore the compiler cache
+        uses: ./.github/actions/ccache
+        with:
+          key: musl-fuzz
+
+      - name: Restore the Alpine packages
+        uses: ./.github/actions/apk
+
+      - name: Soak every fuzzer
+        run: |
+          case "$ZET_FUZZ_SECONDS" in
+            '' | *[!0-9]*)
+              echo "seconds must be a whole number, got '$ZET_FUZZ_SECONDS'"
+              exit 2
+              ;;
+          esac
+          tools/fuzz_run.sh "$ZET_FUZZ_SECONDS"
+
+      - name: Keep what the fuzzers found
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-soak-findings
+          path: build/musl-fuzz/findings/
+          if-no-files-found: ignore
+
+      # The corpus the run grew is worth more than the seconds that produced
+      # it: the next soak starts from it instead of rediscovering the header
+      # layout. It is not committed — only what crashed goes into the tree.
+      - name: Keep the corpus the run grew
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-soak-corpus
+          path: build/musl-fuzz/work/
+          if-no-files-found: ignore
+          retention-days: 14
