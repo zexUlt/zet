@@ -508,6 +508,115 @@ TEST_CASE_FIXTURE(SodiumFixture,
     CHECK(refused.error().Error() == EProtoError::BufferTooSmall);
 }
 
+TEST_CASE_FIXTURE(SodiumFixture,
+                  "a refusal ends the handshake instead of rewinding it") {
+    // A step that failed part way has already folded its message into the
+    // transcript. Answering the same message again with a wider buffer would
+    // fold it twice, and the two ends would compute different tags for the
+    // rest of the exchange.
+    Harness peers;
+    NonceMemory clientSeen;
+    NonceMemory serverSeen;
+    std::vector<std::byte> scratch(SCRATCH);
+    std::vector<std::byte> tiny(4);
+
+    ClientHandshake client{peers.Id, Clone(peers.ClientAuth),
+                           Clone(peers.ClientSeed), peers.ClientNonce,
+                           clientSeen};
+    ServerHandshake server{Clone(peers.ServerAuth), Clone(peers.ServerSeed),
+                           peers.ServerNonce, SERVER_OFFSET, serverSeen};
+
+    const auto hello = client.Start(MutableByteSpan{scratch});
+    REQUIRE(hello.has_value());
+    const auto helloBytes = Taken(scratch, *hello);
+
+    // The agent has nowhere to put the Challenge.
+    const auto cramped =
+        server.Handle(ByteSpan{helloBytes}, MutableByteSpan{tiny});
+    REQUIRE_FALSE(cramped.has_value());
+    CHECK(cramped.error().Error() == EProtoError::BufferTooSmall);
+
+    // And it stays dead rather than absorbing the same Hello a second time.
+    const auto retried =
+        server.Handle(ByteSpan{helloBytes}, MutableByteSpan{scratch});
+    REQUIRE_FALSE(retried.has_value());
+    CHECK(retried.error().Error() == EProtoError::UnexpectedMessage);
+    CHECK_FALSE(server.TakeResult().has_value());
+}
+
+TEST_CASE_FIXTURE(SodiumFixture,
+                  "the client refuses when it cannot write its answer") {
+    Harness peers;
+    NonceMemory clientSeen;
+    NonceMemory serverSeen;
+    std::vector<std::byte> scratch(SCRATCH);
+    std::vector<std::byte> tiny(4);
+
+    ClientHandshake client{peers.Id, Clone(peers.ClientAuth),
+                           Clone(peers.ClientSeed), peers.ClientNonce,
+                           clientSeen};
+    ServerHandshake server{Clone(peers.ServerAuth), Clone(peers.ServerSeed),
+                           peers.ServerNonce, SERVER_OFFSET, serverSeen};
+
+    const auto hello = client.Start(MutableByteSpan{scratch});
+    REQUIRE(hello.has_value());
+    const auto helloBytes = Taken(scratch, *hello);
+
+    const auto challenge =
+        server.Handle(ByteSpan{helloBytes}, MutableByteSpan{scratch});
+    REQUIRE(challenge.has_value());
+    const auto challengeBytes = Taken(scratch, challenge->Written);
+
+    // Both ends negotiated before anyone failed at anything.
+    CHECK(client.Version() == 0);
+    CHECK(server.Version() == PROTOCOL_VERSION_MAX);
+
+    const auto cramped =
+        client.Handle(ByteSpan{challengeBytes}, MutableByteSpan{tiny});
+    REQUIRE_FALSE(cramped.has_value());
+    CHECK(cramped.error().Error() == EProtoError::BufferTooSmall);
+    CHECK_FALSE(client.TakeResult().has_value());
+}
+
+TEST_CASE_FIXTURE(SodiumFixture,
+                  "the agent refuses when it cannot write AuthOk") {
+    Harness peers;
+    NonceMemory clientSeen;
+    NonceMemory serverSeen;
+    std::vector<std::byte> scratch(SCRATCH);
+    std::vector<std::byte> tiny(8);
+
+    ClientHandshake client{peers.Id, Clone(peers.ClientAuth),
+                           Clone(peers.ClientSeed), peers.ClientNonce,
+                           clientSeen};
+    ServerHandshake server{Clone(peers.ServerAuth), Clone(peers.ServerSeed),
+                           peers.ServerNonce, SERVER_OFFSET, serverSeen};
+
+    const auto hello = client.Start(MutableByteSpan{scratch});
+    REQUIRE(hello.has_value());
+    const auto helloBytes = Taken(scratch, *hello);
+
+    const auto challenge =
+        server.Handle(ByteSpan{helloBytes}, MutableByteSpan{scratch});
+    REQUIRE(challenge.has_value());
+    const auto challengeBytes = Taken(scratch, challenge->Written);
+
+    const auto auth =
+        client.Handle(ByteSpan{challengeBytes}, MutableByteSpan{scratch});
+    REQUIRE(auth.has_value());
+    CHECK(client.Version() == PROTOCOL_VERSION_MAX);
+    const auto authBytes = Taken(scratch, auth->Written);
+
+    const auto cramped =
+        server.Handle(ByteSpan{authBytes}, MutableByteSpan{tiny});
+    REQUIRE_FALSE(cramped.has_value());
+    CHECK(cramped.error().Error() == EProtoError::BufferTooSmall);
+
+    // The tag verified, but nothing was sent, so no session may be handed out.
+    CHECK_FALSE(server.TakeResult().has_value());
+    CHECK(serverSeen.Size() == 0);
+}
+
 TEST_CASE_FIXTURE(SodiumFixture, "the result is available once and only once") {
     Harness peers;
     NonceMemory seen;

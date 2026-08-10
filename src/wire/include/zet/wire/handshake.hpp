@@ -144,6 +144,11 @@ public:
     ClientHandshake& operator=(const ClientHandshake&) = delete;
 
     /// Writes Hello. Valid once, before anything is handled.
+    ///
+    /// A refusal from this or from Handle ends the handshake for good: a step
+    /// that failed part way has already folded its message into the transcript,
+    /// so retrying it — with a wider buffer, say — would fold it twice and
+    /// leave the two ends computing different tags.
     [[nodiscard]] PreAuthResult<std::size_t> Start(
         MutableByteSpan out) noexcept;
 
@@ -166,6 +171,10 @@ private:
         Spent
     };
 
+    [[nodiscard]] PreAuthResult<std::size_t> StartStep(
+        MutableByteSpan out) noexcept;
+    [[nodiscard]] PreAuthResult<HandshakeStep> HandleStep(
+        ByteSpan body, MutableByteSpan out) noexcept;
     [[nodiscard]] PreAuthResult<HandshakeStep> OnChallenge(
         ByteReader& reader, ByteSpan body, MutableByteSpan out) noexcept;
     [[nodiscard]] PreAuthResult<HandshakeStep> OnAuthOk(
@@ -207,6 +216,8 @@ public:
 private:
     enum class EStage : std::uint8_t { Fresh, SentChallenge, Done, Spent };
 
+    [[nodiscard]] PreAuthResult<HandshakeStep> HandleStep(
+        ByteSpan body, MutableByteSpan out) noexcept;
     [[nodiscard]] PreAuthResult<HandshakeStep> OnHello(
         ByteReader& reader, ByteSpan body, MutableByteSpan out) noexcept;
     [[nodiscard]] PreAuthResult<HandshakeStep> OnAuth(

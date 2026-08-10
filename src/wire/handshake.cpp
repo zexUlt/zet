@@ -143,6 +143,15 @@ ClientHandshake::ClientHandshake(SessionId id, crypto::Key auth,
 
 PreAuthResult<std::size_t> ClientHandshake::Start(
     MutableByteSpan out) noexcept {
+    auto step = StartStep(out);
+    if (!step) {
+        Stage_ = EStage::Spent;
+    }
+    return step;
+}
+
+PreAuthResult<std::size_t> ClientHandshake::StartStep(
+    MutableByteSpan out) noexcept {
     if (Stage_ != EStage::Fresh) {
         return std::unexpected(Fail(EProtoError::UnexpectedMessage));
     }
@@ -169,6 +178,19 @@ PreAuthResult<std::size_t> ClientHandshake::Start(
 }
 
 PreAuthResult<HandshakeStep> ClientHandshake::Handle(
+    ByteSpan body, MutableByteSpan out) noexcept {
+    // Any refusal ends the handshake for good. A step that failed part way has
+    // already folded the incoming message into the transcript, so letting the
+    // caller try again — with a wider buffer, say — would fold it twice and
+    // leave the two ends computing different tags.
+    auto step = HandleStep(body, out);
+    if (!step) {
+        Stage_ = EStage::Spent;
+    }
+    return step;
+}
+
+PreAuthResult<HandshakeStep> ClientHandshake::HandleStep(
     ByteSpan body, MutableByteSpan out) noexcept {
     ByteReader reader{body};
     const auto type = ParseMessageType(reader);
@@ -258,6 +280,15 @@ ServerHandshake::ServerHandshake(crypto::Key auth, crypto::Key connectionSeed,
       Seen_(seen) {}
 
 PreAuthResult<HandshakeStep> ServerHandshake::Handle(
+    ByteSpan body, MutableByteSpan out) noexcept {
+    auto step = HandleStep(body, out);
+    if (!step) {
+        Stage_ = EStage::Spent;
+    }
+    return step;
+}
+
+PreAuthResult<HandshakeStep> ServerHandshake::HandleStep(
     ByteSpan body, MutableByteSpan out) noexcept {
     ByteReader reader{body};
     const auto type = ParseMessageType(reader);
