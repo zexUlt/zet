@@ -403,29 +403,45 @@ TEST_CASE_FIXTURE(SodiumFixture, "messages out of order are refused") {
     NonceMemory seen;
     std::vector<std::byte> scratch(SCRATCH);
 
-    ClientHandshake client{peers.Id, Clone(peers.ClientAuth),
-                           Clone(peers.ClientSeed), peers.ClientNonce, seen};
+    // Each case gets its own automaton: a refusal is terminal, so chaining
+    // them through one object would only ever test the first.
 
     // Nothing has been sent, so there is nothing an answer could answer.
-    const auto early = client.Handle(ByteSpan{}, MutableByteSpan{scratch});
-    REQUIRE_FALSE(early.has_value());
-    CHECK(early.error().Error() == EProtoError::UnexpectedMessage);
-
-    REQUIRE(client.Start(MutableByteSpan{scratch}).has_value());
+    {
+        ClientHandshake client{peers.Id, Clone(peers.ClientAuth),
+                               Clone(peers.ClientSeed), peers.ClientNonce,
+                               seen};
+        const auto early = client.Handle(ByteSpan{}, MutableByteSpan{scratch});
+        REQUIRE_FALSE(early.has_value());
+        CHECK(early.error().Error() == EProtoError::UnexpectedMessage);
+    }
 
     // Hello twice would restart the transcript under the peer.
-    const auto again = client.Start(MutableByteSpan{scratch});
-    REQUIRE_FALSE(again.has_value());
-    CHECK(again.error().Error() == EProtoError::UnexpectedMessage);
+    {
+        ClientHandshake client{peers.Id, Clone(peers.ClientAuth),
+                               Clone(peers.ClientSeed), peers.ClientNonce,
+                               seen};
+        REQUIRE(client.Start(MutableByteSpan{scratch}).has_value());
+        const auto again = client.Start(MutableByteSpan{scratch});
+        REQUIRE_FALSE(again.has_value());
+        CHECK(again.error().Error() == EProtoError::UnexpectedMessage);
+    }
 
     // An AuthOk before the Challenge it answers.
-    std::vector<std::byte> authOk(SCRATCH);
-    ByteWriter writer{MutableByteSpan{authOk}};
-    REQUIRE(WriteAuthOk(writer, AuthOkMessage{}).has_value());
-    const auto skipped = client.Handle(ByteSpan{authOk}.first(writer.Size()),
-                                       MutableByteSpan{scratch});
-    REQUIRE_FALSE(skipped.has_value());
-    CHECK(skipped.error().Error() == EProtoError::UnexpectedMessage);
+    {
+        ClientHandshake client{peers.Id, Clone(peers.ClientAuth),
+                               Clone(peers.ClientSeed), peers.ClientNonce,
+                               seen};
+        REQUIRE(client.Start(MutableByteSpan{scratch}).has_value());
+
+        std::vector<std::byte> authOk(SCRATCH);
+        ByteWriter writer{MutableByteSpan{authOk}};
+        REQUIRE(WriteAuthOk(writer, AuthOkMessage{}).has_value());
+        const auto skipped = client.Handle(
+            ByteSpan{authOk}.first(writer.Size()), MutableByteSpan{scratch});
+        REQUIRE_FALSE(skipped.has_value());
+        CHECK(skipped.error().Error() == EProtoError::UnexpectedMessage);
+    }
 }
 
 TEST_CASE_FIXTURE(
