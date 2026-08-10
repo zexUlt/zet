@@ -34,6 +34,7 @@ function(zet_add_fuzzer name)
 endfunction()
 
 zet_add_fuzzer(frame_fuzz zet::wire)
+zet_add_fuzzer(frame_stream_fuzz zet::wire)
 zet_add_fuzzer(sealed_frame_fuzz zet::wire zet::crypto)
 
 # One line per target: name, binary, seed corpus. file(GENERATE) is what
