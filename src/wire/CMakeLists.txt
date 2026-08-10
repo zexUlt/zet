@@ -1,6 +1,7 @@
 add_library(zet_wire STATIC
     frame.cpp
     frame_stream.cpp
+    handshake.cpp
     key_schedule.cpp
     message.cpp
     sealed_frame.cpp

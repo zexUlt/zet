@@ -37,4 +37,13 @@ inline constexpr std::size_t MAX_TLV_OPTIONS = 16;
 /// MAX_HANDSHAKE_FRAME refuses an option this wide long before it is reached.
 inline constexpr std::size_t MAX_TLV_VALUE_SIZE = 0xFFFF;
 
+/// Handshake nonces a session keeps to catch a repeat, per §5 rule three.
+///
+/// Sixty-four of them is a kilobyte per session and covers far more reconnects
+/// than the window in which a generator that has started repeating would go
+/// unnoticed. The buffer forgets, which is deliberate: what it defends against
+/// is a broken generator, not a peer replaying an old nonce — a replay earns
+/// nothing, since the other side still contributes a fresh one.
+inline constexpr std::size_t MAX_REMEMBERED_NONCES = 64;
+
 }  // namespace zet::wire
