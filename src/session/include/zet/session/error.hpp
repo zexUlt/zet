@@ -48,6 +48,10 @@ enum class ESessionError : std::uint8_t {
     /// A newer connection of the same session authenticated and took over.
     /// This one is left with nothing to carry.
     Superseded,
+    /// Nothing at all arrived for PeerSilenceTimeout, keepalives included:
+    /// the path is gone without a reset, the half-open of §9. A new
+    /// connection is the way back.
+    PeerSilent,
 };
 
 template <typename TValue>
@@ -64,6 +68,7 @@ using SessionResult = std::expected<TValue, ESessionError>;
         case ESessionError::UnknownSeed:
         case ESessionError::HandshakeTimeout:
         case ESessionError::Superseded:
+        case ESessionError::PeerSilent:
             return EDisposition::CloseConnection;
 
         case ESessionError::DisconnectBufferOverflow:

@@ -10,6 +10,7 @@
 #include "zet/session/stream_state.hpp"
 #include "zet/wire/handshake.hpp"
 #include "zet/wire/key_schedule.hpp"
+#include "zet/wire/message.hpp"
 
 /// The client's side of a session and the one way to change it, per
 /// docs/design.md §5 rule one: until tag_s verifies (AuthOk), not one byte of
@@ -81,6 +82,14 @@ public:
         return Streams_.ReceiveOffset();
     }
 
+    /// How the agent's shell ended, once a SessionEnd has arrived. The client
+    /// holds the whole of the agent's stream by then (§9), so there is
+    /// nothing left to reconnect for.
+    [[nodiscard]] std::optional<wire::SessionEndMessage> EndedWith()
+        const noexcept {
+        return End_;
+    }
+
 private:
     friend class ClientSessionHandle;
     friend class ClientResumeAttempt;
@@ -90,6 +99,7 @@ private:
     crypto::Key Seed_;
     wire::NonceMemory Seen_;
     StreamState Streams_;
+    std::optional<wire::SessionEndMessage> End_;
 };
 
 /// Proof that the handshake succeeded with an agent that knows K_auth, and the
@@ -129,6 +139,13 @@ public:
 
     [[nodiscard]] SendBuffer& Output() noexcept;
     [[nodiscard]] ReceiveCursor& Input() noexcept;
+
+    /// See SessionHandle::Liveness.
+    [[nodiscard]] LivenessLimits Liveness() const noexcept;
+
+    /// Records the agent's SessionEnd. The first one decides: the agent sends
+    /// the same message on every connection.
+    void RecordEnd(wire::SessionEndMessage end) noexcept;
 
 private:
     friend class ClientResumeAttempt;

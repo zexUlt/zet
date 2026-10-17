@@ -117,6 +117,10 @@ std::size_t ShortScenario() {
     return std::min(size, FULL_SHORT_SCENARIO);
 }
 
+/// The script of the ending scenario: a few frames, so that cutting at
+/// every offset of it and of the SessionEnd after it stays cheap.
+constexpr std::size_t ENDING_SCENARIO = 4 * 1024;
+
 enum class EDirection : std::uint8_t { AgentToClient, ClientToAgent };
 
 /// One frame about to cross the cut direction of the link.
@@ -165,13 +169,23 @@ std::size_t StorageFor(std::size_t script, const SessionLimits& limits) {
     return std::min(limits.DisconnectMax, script + 1);
 }
 
+/// Whether the agent's shell ends once the script is written: the session
+/// then runs until the client hears SessionEnd, not just until the bytes are
+/// in.
+enum class EEnding : std::uint8_t { Open, ShellExits };
+
+/// What the shell exits with in the ending scenarios.
+constexpr wire::SessionEndMessage SHELL_EXIT{
+    .Kind = wire::ESessionEndKind::Exited, .Value = 3};
+
 /// Runs one scenario: `script` written by the local side of `from`, cut by
 /// `plan`, reconnecting until all of it has arrived. Returns what arrived.
 class Rig {
 public:
     Rig(EDirection direction, std::vector<std::byte> script, CutPlan plan,
-        SessionLimits limits)
+        SessionLimits limits, EEnding ending = EEnding::Open)
         : Direction_(direction),
+          Ending_(ending),
           Script_(std::move(script)),
           Plan_(std::move(plan)),
           AgentStorage_(StorageFor(Script_.size(), limits)),
@@ -186,7 +200,7 @@ public:
                                  .Limits = limits}) {}
 
     std::vector<std::byte> Run() {
-        while (Received_.size() < Script_.size()) {
+        while (!Done()) {
             RunConnection();
             Now_ += 1s;
             REQUIRE_MESSAGE(Agent_.State() != ESessionState::Reaped,
@@ -217,7 +231,17 @@ public:
 
     [[nodiscard]] const Trace& Seen() const { return Trace_; }
 
+    /// How many SessionEnds the client heard, over all connections.
+    [[nodiscard]] std::size_t EndsHeard() const { return EndsHeard_; }
+
 private:
+    [[nodiscard]] bool Done() const {
+        if (Ending_ == EEnding::ShellExits) {
+            return Client_.EndedWith().has_value();
+        }
+        return Received_.size() == Script_.size();
+    }
+
     void RunConnection() {
         const std::size_t index = Trace_.Connections++;
         std::uint64_t carried = 0;
@@ -264,6 +288,14 @@ private:
                                std::get_if<Deliver>(&*fromClient)) {
                     busy = true;
                     Take(got->Bytes, EDirection::AgentToClient);
+                } else if (const auto* ended =
+                               std::get_if<Ended>(&*fromClient)) {
+                    // §9: never ahead of the shell's last byte.
+                    REQUIRE(Ending_ == EEnding::ShellExits);
+                    REQUIRE(Received_.size() == Script_.size());
+                    REQUIRE(ended->End == SHELL_EXIT);
+                    ++EndsHeard_;
+                    busy = true;
                 }
             }
 
@@ -273,7 +305,7 @@ private:
                 Trace_.CarriedPerConnection.push_back(carried);
                 return;
             }
-            if (Received_.size() == Script_.size()) {
+            if (Done()) {
                 Trace_.CarriedPerConnection.push_back(carried);
                 agent.Close(Now_);
                 client.Close(Now_);
@@ -297,6 +329,9 @@ private:
     /// session takes it.
     void FeedLocalWriter() {
         if (Written_ == Script_.size()) {
+            if (Ending_ == EEnding::ShellExits) {
+                Agent_.End(SHELL_EXIT);
+            }
             return;
         }
         const std::size_t size =
@@ -349,6 +384,8 @@ private:
     }
 
     EDirection Direction_;
+    EEnding Ending_;
+    std::size_t EndsHeard_{0};
     std::vector<std::byte> Script_;
     CutPlan Plan_;
     std::vector<std::byte> AgentStorage_;
@@ -483,6 +520,28 @@ TEST_CASE_FIXTURE(SodiumFixture,
 TEST_CASE_FIXTURE(SodiumFixture,
                   "a cut at every byte of the client's stream loses nothing") {
     EveryOffset(EDirection::ClientToAgent);
+}
+
+TEST_CASE_FIXTURE(
+    SodiumFixture,
+    "the shell's end reaches the client after its last byte, cut anywhere") {
+    // Every offset of a short stream and of the SessionEnd behind it: a cut
+    // inside that frame has the next connection send it again.
+    const auto script = Script(ENDING_SCENARIO, SEED);
+    Rig reference{EDirection::AgentToClient, script, NeverCut(),
+                  SessionLimits{}, EEnding::ShellExits};
+    REQUIRE(reference.Run() == script);
+    CHECK(reference.EndsHeard() == 1);
+    REQUIRE(reference.Seen().CarriedPerConnection.size() == 1);
+    const std::uint64_t total = reference.Seen().CarriedPerConnection.front();
+
+    for (std::uint64_t offset = 0; offset < total; ++offset) {
+        CAPTURE(offset);
+        Rig rig{EDirection::AgentToClient, script, CutOnceAt(offset),
+                SessionLimits{}, EEnding::ShellExits};
+        CHECK(rig.Run() == script);
+        CHECK(rig.EndsHeard() >= 1);
+    }
 }
 
 TEST_CASE_FIXTURE(SodiumFixture,

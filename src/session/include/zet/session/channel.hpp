@@ -45,10 +45,15 @@ struct DeliveredResize {
     wire::ResizeMessage Resize;
 };
 
+/// The agent's shell is gone and the client holds all it wrote. Client only.
+struct DeliveredSessionEnd {
+    wire::SessionEndMessage End;
+};
+
 struct DeliveredNothing {};
 
-using IncomingEvent =
-    std::variant<DeliveredData, DeliveredResize, DeliveredNothing>;
+using IncomingEvent = std::variant<DeliveredData, DeliveredResize,
+                                   DeliveredSessionEnd, DeliveredNothing>;
 
 /// The sealed, post-authentication traffic of one connection, symmetric for
 /// client and agent. §9.
@@ -71,7 +76,14 @@ using IncomingEvent =
 /// between calls; they may be stack or heap as the caller sees fit.
 ///
 /// **NextDeadline:** reports the next time-driven event (idle Ack, time-based
-/// rekey) so the event loop can set a real timer instead of polling.
+/// rekey, keepalive, peer silence) so the event loop can set a real timer
+/// instead of polling.
+///
+/// **Liveness (§9):** a Ping goes out once nothing has been sent for
+/// KeepaliveInterval, and Poll fails with PeerSilent once nothing at all —
+/// not a Data, not a Pong — has opened for PeerSilenceTimeout. That is how a
+/// path that drops packets without a reset ends in seconds rather than in
+/// TCP's quarter of an hour.
 ///
 /// Memory bound: the channel never reads past SendBuffer::Room() == 0 (§9
 /// backpressure). The caller is responsible for filling the buffer; the channel
@@ -81,6 +93,8 @@ using IncomingEvent =
 struct DirectionFrames {
     wire::FrameSealer Sealer;
     wire::FrameOpener Opener;
+    /// Which end these are for: some messages go one way only.
+    ERole Role{ERole::Client};
 };
 
 /// Builds both halves for `role` from the connection keys, counters at zero.
@@ -106,8 +120,11 @@ public:
     ///
     /// `sendBuf` and `recvCursor` are borrowed; they must outlive this object.
     /// `now` anchors the epoch timer for time-triggered rekey (§8).
+    /// `liveness` sets the keepalive and peer-silence timers; both run from
+    /// `now`.
     Channel(DirectionFrames frames, SendBuffer& sendBuf,
-            ReceiveCursor& recvCursor, Timestamp now) noexcept;
+            ReceiveCursor& recvCursor, Timestamp now,
+            LivenessLimits liveness = {}) noexcept;
 
     /// Builds a Channel straight from connection keys, counters at zero.
     ///
@@ -119,7 +136,8 @@ public:
     Channel(const wire::ConnectionKeys& keys, ERole role, SendBuffer& sendBuf,
             ReceiveCursor& recvCursor, Timestamp now,
             std::uint64_t frameLimit = wire::MAX_FRAMES_PER_EPOCH,
-            std::uint64_t byteLimit = wire::MAX_BYTES_PER_EPOCH) noexcept;
+            std::uint64_t byteLimit = wire::MAX_BYTES_PER_EPOCH,
+            LivenessLimits liveness = {}) noexcept;
 
     Channel(const Channel&) = delete;
     Channel& operator=(const Channel&) = delete;
@@ -135,9 +153,11 @@ public:
     ///
     /// Errors carry a disposition (CloseConnection or KillSession). The channel
     /// makes no state changes on error: a rejected frame does not move any
-    /// cursor or acknowledge anything.
+    /// cursor or acknowledge anything. A frame that opens, whatever it says,
+    /// counts as hearing from the peer at `now`.
     [[nodiscard]] ChannelResult<IncomingEvent> Receive(
-        const wire::FrameView& frame, MutableByteSpan scratch) noexcept;
+        Timestamp now, const wire::FrameView& frame,
+        MutableByteSpan scratch) noexcept;
 
     /// Write one outgoing sealed frame into `out` and return its length.
     ///
@@ -148,7 +168,11 @@ public:
     /// the plaintext for Data frames (§1 forbids internal allocation in the
     /// protocol core; the caller provides storage instead).
     ///
-    /// Priority: Pong > Data (with piggybacked Ack) > Resize > bare Ack.
+    /// Fails with PeerSilent, before writing anything, once nothing has been
+    /// heard for PeerSilenceTimeout.
+    ///
+    /// Priority: Pong > Data (with piggybacked Ack) > SessionEnd > Resize >
+    /// bare Ack > keepalive Ping.
     /// §9: "кумулятивные ACK ... пиггибэком в заголовке plaintext каждого
     /// кадра данных плюс отдельным Ack при простое дольше 200 мс".
     [[nodiscard]] ChannelResult<std::size_t> Poll(
@@ -159,7 +183,10 @@ public:
     /// Returns the earlier of:
     ///   - the idle-Ack deadline (ACK_IDLE_DELAY after the first Poll() that
     ///     saw un-acked bytes and had nothing to send);
-    ///   - the time-rekey deadline (REKEY_INTERVAL after the epoch began, §8).
+    ///   - the time-rekey deadline (REKEY_INTERVAL after the epoch began, §8);
+    ///   - the keepalive (KeepaliveInterval after the last frame sent);
+    ///   - the peer-silence limit (PeerSilenceTimeout after the last frame
+    ///     heard), at which Poll fails.
     ///
     /// Returns an unset Deadline when nothing is pending.
     [[nodiscard]] Deadline NextDeadline() const noexcept;
@@ -170,6 +197,15 @@ public:
     /// replaces an unanswered one. §9.
     void QueueResize(wire::ResizeMessage resize) noexcept;
 
+    /// Has SessionEnd go out once the outgoing stream is fully acknowledged:
+    /// nothing unsent, nothing unacknowledged, so it can never overtake the
+    /// shell's last bytes (§9). Agent only. Once per channel — later calls
+    /// change nothing; the next connection's channel sends it again.
+    void QueueSessionEnd(wire::SessionEndMessage end) noexcept;
+
+    /// Whether this channel has sent the SessionEnd it was given.
+    [[nodiscard]] bool SessionEndSent() const noexcept { return EndSent_; }
+
     /// How many post-auth frames with unknown types have been received.
     /// Counted rather than errored per §7: "unknown post-auth type → ignored
     /// and counted".
@@ -178,6 +214,15 @@ public:
     }
 
 private:
+    /// Poll without the liveness bookkeeping around it.
+    [[nodiscard]] ChannelResult<std::size_t> PollOnce(
+        Timestamp now, MutableByteSpan out, MutableByteSpan scratch) noexcept;
+
+    /// Seals a fixed-size control message built by `write` into `out`.
+    template <std::size_t tSize, typename TWrite>
+    [[nodiscard]] ChannelResult<std::size_t> SealControl(
+        MutableByteSpan out, TWrite&& write) noexcept;
+
     /// Rekey if the sealer reports NeedsRekey() or REKEY_INTERVAL has elapsed
     /// since the epoch began. Returns false only on EpochsExhausted — the
     /// connection cannot send another frame and must be closed. §8.
@@ -191,6 +236,8 @@ private:
 
     wire::FrameSealer Sealer_;
     wire::FrameOpener Opener_;
+    ERole Role_;
+    LivenessLimits Liveness_;
 
     SendBuffer& SendBuf_;
     ReceiveCursor& RecvCursor_;
@@ -215,6 +262,18 @@ private:
     std::optional<wire::ResizeMessage> PendingResize_;
 
     std::uint64_t UnknownTypeCount_{0};
+
+    /// When a frame last opened, and when one last went out. §9 liveness.
+    Timestamp LastHeard_;
+    Timestamp LastSent_;
+    /// The token of the next keepalive Ping. Its value means nothing to the
+    /// peer, which only echoes it.
+    std::uint64_t NextPingToken_{1};
+
+    /// The SessionEnd to send once the stream is acknowledged, and whether it
+    /// has gone.
+    std::optional<wire::SessionEndMessage> PendingEnd_;
+    bool EndSent_{false};
 };
 
 }  // namespace zet::session

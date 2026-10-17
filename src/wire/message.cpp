@@ -73,6 +73,7 @@ ProtoResult<EMessageType> ParseMessageType(ByteReader& reader) noexcept {
         case EMessageType::Resize:
         case EMessageType::Ping:
         case EMessageType::Pong:
+        case EMessageType::SessionEnd:
             return static_cast<EMessageType>(*type);
     }
     // Reserved and unassigned types alike. The disposition attached to this
@@ -546,6 +547,53 @@ ProtoResult<void> WritePong(ByteWriter& writer,
         return type;
     }
     return writer.WriteU64BE(message.Token);
+}
+
+namespace {
+
+[[nodiscard]] bool IsSessionEndKind(std::uint8_t kind) noexcept {
+    switch (static_cast<ESessionEndKind>(kind)) {
+        case ESessionEndKind::Exited:
+        case ESessionEndKind::Signaled:
+            return true;
+    }
+    return false;
+}
+
+}  // namespace
+
+ProtoResult<SessionEndMessage> ParseSessionEnd(ByteReader& reader) noexcept {
+    auto kind = reader.ReadU8();
+    if (!kind) {
+        return std::unexpected(kind.error());
+    }
+    auto value = reader.ReadU8();
+    if (!value) {
+        return std::unexpected(value.error());
+    }
+    if (!IsSessionEndKind(*kind)) {
+        return std::unexpected(EProtoError::MalformedField);
+    }
+    if (auto rest = RequireExhausted(reader); !rest) {
+        return std::unexpected(rest.error());
+    }
+    return SessionEndMessage{.Kind = static_cast<ESessionEndKind>(*kind),
+                             .Value = *value};
+}
+
+ProtoResult<void> WriteSessionEnd(ByteWriter& writer,
+                                  const SessionEndMessage& message) noexcept {
+    if (!IsSessionEndKind(static_cast<std::uint8_t>(message.Kind))) {
+        return std::unexpected(EProtoError::MalformedField);
+    }
+    if (auto type = WriteMessageType(writer, EMessageType::SessionEnd); !type) {
+        return type;
+    }
+    if (auto kind = writer.WriteU8(static_cast<std::uint8_t>(message.Kind));
+        !kind) {
+        return kind;
+    }
+    return writer.WriteU8(message.Value);
 }
 
 }  // namespace zet::wire

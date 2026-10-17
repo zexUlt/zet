@@ -45,6 +45,7 @@ enum class EMessageType : std::uint8_t {
     Resize = 0x12,
     Ping = 0x13,
     Pong = 0x14,
+    SessionEnd = 0x15,
 };
 
 /// Upper bound on the stream bytes a Data message may carry (§7).
@@ -189,6 +190,25 @@ struct PongMessage {
     std::uint64_t Token{0};
 };
 
+/// How the shell on the agent ended.
+enum class ESessionEndKind : std::uint8_t {
+    /// Value is the exit code.
+    Exited = 0,
+    /// Value is the number of the signal that ended it.
+    Signaled = 1,
+};
+
+/// The agent's shell is gone and every byte it wrote has been acknowledged
+/// (§9). Idempotent: the agent sends it on every connection until the client
+/// stops coming back.
+struct SessionEndMessage {
+    ESessionEndKind Kind{ESessionEndKind::Exited};
+    std::uint8_t Value{0};
+
+    [[nodiscard]] friend bool operator==(
+        const SessionEndMessage&, const SessionEndMessage&) noexcept = default;
+};
+
 /// Reads the byte every frame body opens with.
 ///
 /// Parse* below pick up where this left off: dispatching on the type is what
@@ -260,5 +280,12 @@ struct PongMessage {
 [[nodiscard]] ProtoResult<PongMessage> ParsePong(ByteReader& reader) noexcept;
 [[nodiscard]] ProtoResult<void> WritePong(ByteWriter& writer,
                                           const PongMessage& message) noexcept;
+
+/// A kind outside ESessionEndKind is MalformedField, on both sides: a newer
+/// agent ending a session some new way would need a new version to say so.
+[[nodiscard]] ProtoResult<SessionEndMessage> ParseSessionEnd(
+    ByteReader& reader) noexcept;
+[[nodiscard]] ProtoResult<void> WriteSessionEnd(
+    ByteWriter& writer, const SessionEndMessage& message) noexcept;
 
 }  // namespace zet::wire

@@ -70,11 +70,19 @@ struct Resized {
     wire::ResizeMessage Size;
 };
 
+/// The agent's shell has ended, and the client holds every byte it wrote.
+/// Client only; the session has recorded it too (ClientSession::EndedWith),
+/// so the caller restores the terminal, closes the connection and exits
+/// rather than reconnecting.
+struct Ended {
+    wire::SessionEndMessage End;
+};
+
 /// Nothing to do until more bytes arrive or NextDeadline passes.
 struct Idle {};
 
 using ConnectionEvent =
-    std::variant<NeedsSession, SendFrame, Deliver, Resized, Idle>;
+    std::variant<NeedsSession, SendFrame, Deliver, Resized, Ended, Idle>;
 
 using ConnectionResult = ChannelResult<ConnectionEvent>;
 
@@ -126,7 +134,9 @@ protected:
 
     /// The live half, shared by both ends once Resume has gone through: one
     /// incoming frame, else one outgoing one. `onOpened` runs after a frame
-    /// opened, which is where the client confirms the seed.
+    /// opened, which is where the client confirms the seed. A connection that
+    /// hears nothing for the session's PeerSilenceTimeout fails here with
+    /// PeerSilent (§9).
     template <typename TOnOpened>
     [[nodiscard]] ConnectionResult PumpLive(Timestamp now, MutableByteSpan out,
                                             MutableByteSpan scratch,
@@ -183,6 +193,8 @@ private:
                                               MutableByteSpan out,
                                               MutableByteSpan scratch) noexcept;
     [[nodiscard]] ConnectionResult Refuse(SessionError error) noexcept;
+    /// Hands the session's SessionEnd, if any, to the live channel.
+    void QueueEnd() noexcept;
 
     EStage Stage_{EStage::AwaitHello};
     /// Hello is copied out of the frame buffer: the caller routes it between

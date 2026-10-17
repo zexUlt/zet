@@ -34,7 +34,8 @@ struct Fixture {
             .Now = START,
             .Limits = SessionLimits{.ResendMax = RESEND_MAX,
                                     .DisconnectMax = DISCONNECT_MAX,
-                                    .OrphanTimeout = orphan}};
+                                    .OrphanTimeout = orphan,
+                                    .Liveness = {}}};
     }
 };
 

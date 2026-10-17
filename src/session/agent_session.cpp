@@ -129,6 +129,15 @@ ReceiveCursor& SessionHandle::Input() noexcept {
     return Session_->Streams_.Input();
 }
 
+LivenessLimits SessionHandle::Liveness() const noexcept {
+    return Session_->Streams_.Limits().Liveness;
+}
+
+std::optional<wire::SessionEndMessage> SessionHandle::EndedWith()
+    const noexcept {
+    return Session_->End_;
+}
+
 ResumeAttempt::ResumeAttempt(AgentSession* session, crypto::Key auth,
                              crypto::Key seed,
                              std::optional<crypto::Key> previousSeed,

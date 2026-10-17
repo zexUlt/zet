@@ -24,6 +24,8 @@ std::string_view Describe(ESessionError error) noexcept {
             return "the resume handshake took too long";
         case ESessionError::Superseded:
             return "a newer connection took the session over";
+        case ESessionError::PeerSilent:
+            return "nothing heard from the peer for too long";
     }
     return "unknown session error";
 }

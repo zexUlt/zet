@@ -1,6 +1,7 @@
 #include "zet/session/channel.hpp"
 
 #include <algorithm>
+#include <array>
 #include <tuple>
 #include <utility>
 
@@ -36,29 +37,38 @@ DirectionFrames MakeDirectionFrames(const wire::ConnectionKeys& keys,
                 Clone(client ? keys.ClientToServer : keys.ServerToClient),
                 client ? keys.SaltClientToServer : keys.SaltServerToClient,
                 frameLimit, byteLimit},
-        .Opener = wire::FrameOpener{
-            Clone(client ? keys.ServerToClient : keys.ClientToServer),
-            client ? keys.SaltServerToClient : keys.SaltClientToServer,
-            frameLimit}};
+        .Opener =
+            wire::FrameOpener{
+                Clone(client ? keys.ServerToClient : keys.ClientToServer),
+                client ? keys.SaltServerToClient : keys.SaltClientToServer,
+                frameLimit},
+        .Role = role};
 }
 
 Channel::Channel(DirectionFrames frames, SendBuffer& sendBuf,
-                 ReceiveCursor& recvCursor, Timestamp now) noexcept
+                 ReceiveCursor& recvCursor, Timestamp now,
+                 LivenessLimits liveness) noexcept
     : Sealer_{std::move(frames.Sealer)},
       Opener_{std::move(frames.Opener)},
+      Role_{frames.Role},
+      Liveness_{liveness},
       SendBuf_{sendBuf},
       RecvCursor_{recvCursor},
       EpochStart_{now},
-      LastAckedOffset_{recvCursor.RecvOffset()} {}
+      LastAckedOffset_{recvCursor.RecvOffset()},
+      LastHeard_{now},
+      LastSent_{now} {}
 
 Channel::Channel(const wire::ConnectionKeys& keys, ERole role,
                  SendBuffer& sendBuf, ReceiveCursor& recvCursor, Timestamp now,
-                 std::uint64_t frameLimit, std::uint64_t byteLimit) noexcept
+                 std::uint64_t frameLimit, std::uint64_t byteLimit,
+                 LivenessLimits liveness) noexcept
     : Channel(MakeDirectionFrames(keys, role, frameLimit, byteLimit), sendBuf,
-              recvCursor, now) {}
+              recvCursor, now, liveness) {}
 
 ChannelResult<IncomingEvent> Channel::Receive(
-    const wire::FrameView& frame, MutableByteSpan scratch) noexcept {
+    Timestamp now, const wire::FrameView& frame,
+    MutableByteSpan scratch) noexcept {
     // Open the frame. A tag failure does not move the opener's counter per §8:
     // "A frame that fails to open leaves the counter untouched". This means a
     // bit flip from the network closes the connection but the session survives.
@@ -66,6 +76,8 @@ ChannelResult<IncomingEvent> Channel::Receive(
     if (!opened) {
         return std::unexpected(SessionError{opened.error()});
     }
+    // It opened, so the peer is there, whatever the frame turns out to say.
+    LastHeard_ = now;
 
     // The plaintext starts with a type byte (§7).
     ByteReader reader{*opened};
@@ -149,8 +161,22 @@ ChannelResult<IncomingEvent> Channel::Receive(
             if (!msg) {
                 return std::unexpected(SessionError{msg.error()});
             }
-            // We sent a Ping; the peer echoed it. Nothing further to deliver.
+            // We sent a Ping; the peer echoed it. Hearing it is the point,
+            // and Receive has noted that already.
             return DeliveredNothing{};
+        }
+
+        case wire::EMessageType::SessionEnd: {
+            // The agent's to say; an agent hearing it from a client is
+            // talking to something out of step.
+            if (Role_ != ERole::Client) {
+                break;
+            }
+            const auto msg = wire::ParseSessionEnd(reader);
+            if (!msg) {
+                return std::unexpected(SessionError{msg.error()});
+            }
+            return DeliveredSessionEnd{*msg};
         }
 
         // Resume is the one sealed message that is not the channel's: the
@@ -173,6 +199,32 @@ ChannelResult<IncomingEvent> Channel::Receive(
 
 ChannelResult<std::size_t> Channel::Poll(Timestamp now, MutableByteSpan out,
                                          MutableByteSpan scratch) noexcept {
+    // §9: a path that has gone quiet in both directions, keepalives included,
+    // is gone. Checked first so a dead connection does not go on sealing.
+    if (Liveness_.PeerSilenceTimeout > Duration::zero() &&
+        now >= LastHeard_ + Liveness_.PeerSilenceTimeout) {
+        return std::unexpected(SessionError{ESessionError::PeerSilent});
+    }
+    auto written = PollOnce(now, out, scratch);
+    if (written && *written > 0) {
+        LastSent_ = now;
+    }
+    return written;
+}
+
+template <std::size_t tSize, typename TWrite>
+ChannelResult<std::size_t> Channel::SealControl(MutableByteSpan out,
+                                                TWrite&& write) noexcept {
+    std::array<std::byte, tSize> plain{};
+    ByteWriter writer{MutableByteSpan{plain}};
+    if (auto encoded = std::forward<TWrite>(write)(writer); !encoded) {
+        return std::unexpected(SessionError{encoded.error()});
+    }
+    return SealInto(out, writer.Written());
+}
+
+ChannelResult<std::size_t> Channel::PollOnce(Timestamp now, MutableByteSpan out,
+                                             MutableByteSpan scratch) noexcept {
     // Rekey before sending if the sealer has hit its limits. §8: "by 2^24
     // frames, 1 GiB or 1 hour". A failed rekey (EpochsExhausted) means this
     // connection cannot produce another frame, and the caller has to hear
@@ -255,6 +307,21 @@ ChannelResult<std::size_t> Channel::Poll(Timestamp now, MutableByteSpan out,
         }
     }
 
+    // Priority 2b: SessionEnd, and only once every byte of the stream is
+    // acknowledged — what the client holds is then the whole of it, and the
+    // message cannot arrive ahead of a resend. §9.
+    if (PendingEnd_ && !EndSent_ && SendBuf_.Size() == 0) {
+        // type(1) + kind(1) + value(1).
+        const auto n = SealControl<3>(out, [this](ByteWriter& writer) {
+            return wire::WriteSessionEnd(writer, *PendingEnd_);
+        });
+        if (!n) {
+            return std::unexpected(n.error());
+        }
+        EndSent_ = true;
+        return *n;
+    }
+
     // Priority 3: a Resize queued by the client. Sent after Data so that Data
     // carries the piggybacked Ack promptly; Resize is idempotent and the agent
     // will apply whatever dimensions arrive. §9.
@@ -279,12 +346,9 @@ ChannelResult<std::size_t> Channel::Poll(Timestamp now, MutableByteSpan out,
     if (recvOff > LastAckedOffset_) {
         if (!AckPendingSince_.has_value()) {
             // First Poll that sees un-acked bytes with nothing to send:
-            // arm the idle-Ack timer.
+            // arm the idle-Ack timer. The Ack goes when the deadline fires.
             AckPendingSince_ = now;
-            // Return 0: the Ack will be sent when the deadline fires.
-            return 0;
-        }
-        if (now >= *AckPendingSince_ + ACK_IDLE_DELAY) {
+        } else if (now >= *AckPendingSince_ + ACK_IDLE_DELAY) {
             // Encode type(1) + ack(8) = 9 bytes.
             std::array<std::byte, 1 + sizeof(std::uint64_t)> plain{};
             ByteWriter writer{MutableByteSpan{plain}};
@@ -302,6 +366,23 @@ ChannelResult<std::size_t> Channel::Poll(Timestamp now, MutableByteSpan out,
         }
     }
 
+    // Priority 5: a keepalive once nothing has gone out for a while, so that
+    // the peer's silence timer hears us through an idle session. §9.
+    if (Liveness_.KeepaliveInterval > Duration::zero() &&
+        now >= LastSent_ + Liveness_.KeepaliveInterval) {
+        // type(1) + token(8).
+        const wire::PingMessage ping{.Token = NextPingToken_};
+        const auto n = SealControl<1 + sizeof(std::uint64_t)>(
+            out, [&ping](ByteWriter& writer) {
+                return wire::WritePing(writer, ping);
+            });
+        if (!n) {
+            return std::unexpected(n.error());
+        }
+        ++NextPingToken_;
+        return *n;
+    }
+
     return 0;
 }
 
@@ -315,11 +396,29 @@ Deadline Channel::NextDeadline() const noexcept {
     // Time-rekey deadline: REKEY_INTERVAL after the epoch began. §8.
     const Deadline rekeyDeadline{EpochStart_ + REKEY_INTERVAL};
 
-    return Earliest(ackDeadline, rekeyDeadline);
+    // Liveness, §9: when a keepalive is due, and when silence ends the
+    // connection.
+    const Deadline keepaliveDeadline =
+        Liveness_.KeepaliveInterval > Duration::zero()
+            ? Deadline{LastSent_ + Liveness_.KeepaliveInterval}
+            : Deadline{};
+    const Deadline silenceDeadline =
+        Liveness_.PeerSilenceTimeout > Duration::zero()
+            ? Deadline{LastHeard_ + Liveness_.PeerSilenceTimeout}
+            : Deadline{};
+
+    return Earliest(Earliest(ackDeadline, rekeyDeadline),
+                    Earliest(keepaliveDeadline, silenceDeadline));
 }
 
 void Channel::QueueResize(wire::ResizeMessage resize) noexcept {
     PendingResize_ = resize;
+}
+
+void Channel::QueueSessionEnd(wire::SessionEndMessage end) noexcept {
+    if (!PendingEnd_) {
+        PendingEnd_ = end;
+    }
 }
 
 ChannelResult<void> Channel::RekeyIfNeeded(Timestamp now) noexcept {

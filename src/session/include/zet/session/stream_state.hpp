@@ -125,6 +125,11 @@ public:
     void Kill(ESessionError reason) noexcept;
 
     [[nodiscard]] SendBuffer& Output() noexcept { return Output_; }
+
+    /// The policy the session was given.
+    [[nodiscard]] const SessionLimits& Limits() const noexcept {
+        return Limits_;
+    }
     [[nodiscard]] ReceiveCursor& Input() noexcept { return Input_; }
 
 private:

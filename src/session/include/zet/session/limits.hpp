@@ -43,6 +43,32 @@ inline constexpr Duration REKEY_INTERVAL = std::chrono::hours{1};
 /// in a few round trips.
 inline constexpr Duration HANDSHAKE_TIMEOUT = std::chrono::seconds{5};
 
+/// How long a connection may send nothing before it sends a Ping, per §9.
+///
+/// Keepalives are what lets PEER_SILENCE_TIMEOUT tell a quiet session from a
+/// dead path: an idle shell sends nothing, and neither would its client. Five
+/// seconds is a 40-byte frame each way per interval, nothing next to typing,
+/// and four of them fit in the silence timeout, so a single lost Ping does
+/// not end a connection.
+inline constexpr Duration KEEPALIVE_INTERVAL = std::chrono::seconds{5};
+
+/// How long a connection waits without hearing a single frame before it
+/// gives up on the path, per §9.
+///
+/// The half-open case: a cut that drops packets instead of resetting leaves
+/// TCP retransmitting for a quarter of an hour, and neither end learns of it
+/// from the socket. Twenty seconds is four keepalive intervals — long enough
+/// to ride out a Wi-Fi handover or a lost Ping, short enough that a user who
+/// closed the lid notices a reconnect, not a hang.
+inline constexpr Duration PEER_SILENCE_TIMEOUT = std::chrono::seconds{20};
+
+/// The two liveness timers of one connection. Zero switches either off,
+/// which only tests and fuzzers want.
+struct LivenessLimits {
+    Duration KeepaliveInterval{KEEPALIVE_INTERVAL};
+    Duration PeerSilenceTimeout{PEER_SILENCE_TIMEOUT};
+};
+
 /// The policy one session runs under, defaulting to the figures above.
 ///
 /// A value rather than the constants themselves, the way FrameSealer takes its
@@ -53,6 +79,9 @@ struct SessionLimits {
     std::size_t DisconnectMax{DISCONNECT_BUFFER_MAX};
     /// Zero means forever, as `--orphan-timeout 0` does.
     Duration OrphanTimeout{DEFAULT_ORPHAN_TIMEOUT};
+    /// For every connection of the session. An integration test shortens
+    /// these to watch a half-open path end in seconds.
+    LivenessLimits Liveness{};
 };
 
 }  // namespace zet::session

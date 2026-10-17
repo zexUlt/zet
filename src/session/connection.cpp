@@ -113,7 +113,7 @@ ConnectionResult ConnectionBase::PumpLive(Timestamp now, MutableByteSpan out,
         if (!*next) {
             break;
         }
-        auto event = Channel_->Receive(**next, scratch);
+        auto event = Channel_->Receive(now, **next, scratch);
         if (!event) {
             return std::unexpected(Fail(event.error()));
         }
@@ -123,6 +123,9 @@ ConnectionResult ConnectionBase::PumpLive(Timestamp now, MutableByteSpan out,
         }
         if (const auto* resize = std::get_if<DeliveredResize>(&*event)) {
             return Resized{.Size = resize->Resize};
+        }
+        if (const auto* end = std::get_if<DeliveredSessionEnd>(&*event)) {
+            return Ended{.End = end->End};
         }
     }
 
@@ -186,9 +189,18 @@ ConnectionResult AgentConnection::Pump(Timestamp now, MutableByteSpan out,
             if (!Handle_->IsCurrent()) {
                 return Refuse(ESessionError::Superseded);
             }
+            QueueEnd();
             return PumpLive(now, out, scratch, [] {});
     }
     return Idle{};
+}
+
+void AgentConnection::QueueEnd() noexcept {
+    // Every Pump rather than once: the shell may end while this connection
+    // is live. The channel sends it once the stream is acknowledged.
+    if (const auto end = Handle_->EndedWith()) {
+        Channel_->QueueSessionEnd(*end);
+    }
 }
 
 ConnectionResult AgentConnection::PumpHello() noexcept {
@@ -312,8 +324,9 @@ ConnectionResult AgentConnection::PumpResume(Timestamp now, MutableByteSpan out,
     Current_.reset();
     Fallback_.reset();
     Channel_.emplace(std::move(chosen), Handle_->Output(), Handle_->Input(),
-                     now);
+                     now, Handle_->Liveness());
     Stage_ = EStage::Live;
+    QueueEnd();
     // Straight on: the resend is waiting, and an Idle here would tell the
     // caller there is nothing to do until the client speaks again.
     return PumpLive(now, out, scratch, [] {});
@@ -384,8 +397,16 @@ ConnectionResult ClientConnection::Pump(Timestamp now, MutableByteSpan out,
             // §8: the client moves to the next seed once a frame of the
             // agent's opens, which proves the agent opened Resume and moved
             // first. ConfirmAgentFrame does it once per connection.
-            return PumpLive(now, out, scratch,
-                            [this] { Handle_->ConfirmAgentFrame(); });
+            {
+                auto event = PumpLive(now, out, scratch,
+                                      [this] { Handle_->ConfirmAgentFrame(); });
+                if (event) {
+                    if (const auto* ended = std::get_if<Ended>(&*event)) {
+                        Handle_->RecordEnd(ended->End);
+                    }
+                }
+                return event;
+            }
     }
     return Idle{};
 }
@@ -445,7 +466,7 @@ ConnectionResult ClientConnection::SendResume(Timestamp now,
         return Refuse(SessionError{sealed.error()});
     }
     Channel_.emplace(std::move(frames), Handle_->Output(), Handle_->Input(),
-                     now);
+                     now, Handle_->Liveness());
     if (PendingResize_) {
         Channel_->QueueResize(*PendingResize_);
         PendingResize_.reset();

@@ -67,10 +67,10 @@ std::vector<std::byte> Pattern(std::size_t size, std::uint8_t seed) {
     return bytes;
 }
 
-SessionStreams Streams(std::vector<std::byte>& storage) {
-    return SessionStreams{.Storage = MutableByteSpan{storage},
-                          .Now = START,
-                          .Limits = SessionLimits{}};
+SessionStreams Streams(std::vector<std::byte>& storage,
+                       SessionLimits limits = {}) {
+    return SessionStreams{
+        .Storage = MutableByteSpan{storage}, .Now = START, .Limits = limits};
 }
 
 /// Both ends of one session, as they live across connections.
@@ -86,12 +86,16 @@ struct Ends {
     std::vector<std::byte> AtPty;
     std::vector<std::byte> AtTerminal;
     std::optional<wire::ResizeMessage> LastResize;
+    /// Every SessionEnd the client heard, and how much of the agent's stream
+    /// it held at each.
+    std::vector<std::pair<wire::SessionEndMessage, std::size_t>> EndsHeard;
 
-    explicit Ends(std::uint8_t agentMaster = 1, std::uint8_t clientMaster = 1)
+    explicit Ends(std::uint8_t agentMaster = 1, std::uint8_t clientMaster = 1,
+                  SessionLimits limits = {})
         : Agent(DeriveSessionSecrets(MakeKey(agentMaster)),
-                Streams(AgentStorage)),
+                Streams(AgentStorage, limits)),
           Client(DeriveSessionSecrets(MakeKey(clientMaster)),
-                 Streams(ClientStorage)) {}
+                 Streams(ClientStorage, limits)) {}
 };
 
 /// What a direction of the link does to the frames it carries.
@@ -194,6 +198,11 @@ struct Link {
             Session.AtTerminal.insert(Session.AtTerminal.end(),
                                       deliver->Bytes.begin(),
                                       deliver->Bytes.end());
+            return true;
+        }
+        if (const auto* ended = std::get_if<Ended>(&*event)) {
+            Session.EndsHeard.emplace_back(ended->End,
+                                           Session.AtTerminal.size());
             return true;
         }
         return false;
@@ -712,13 +721,19 @@ TEST_CASE_FIXTURE(SodiumFixture,
 TEST_CASE_FIXTURE(
     SodiumFixture,
     "a live connection reports its channel's deadline and resizes") {
-    Ends ends;
+    // Liveness timers past the handshake's, so that the deadline seen once
+    // live can only be the channel's.
+    SessionLimits limits;
+    limits.Liveness = {.KeepaliveInterval = 2 * HANDSHAKE_TIMEOUT,
+                       .PeerSilenceTimeout = 4 * HANDSHAKE_TIMEOUT};
+    Ends ends{1, 1, limits};
     Link link{ends, START};
     BringUp(link, START);
     // Live: no handshake deadline any more, only the channel's own.
     CHECK_FALSE(
         link.Agent.NextDeadline().HasExpired(START + HANDSHAKE_TIMEOUT));
-    CHECK(link.Agent.NextDeadline().HasExpired(START + REKEY_INTERVAL));
+    CHECK(link.Agent.NextDeadline().At() ==
+          START + limits.Liveness.KeepaliveInterval);
 
     link.Client.QueueResize(
         wire::ResizeMessage{.Rows = 24, .Cols = 80, .XPixel = 0, .YPixel = 0});
@@ -832,4 +847,94 @@ TEST_CASE_FIXTURE(SodiumFixture,
     CHECK(refusal->Disposition() == EDisposition::KillSession);
     CHECK(ends.Agent.State() == ESessionState::Reaped);
     CHECK(ends.Agent.ReapReason() == ESessionError::PeerBehindBuffer);
+}
+
+// ── The shell's end and liveness, across connections ───────────────────
+
+namespace {
+
+constexpr wire::SessionEndMessage SHELL_EXIT{
+    .Kind = wire::ESessionEndKind::Exited, .Value = 42};
+
+}  // namespace
+
+TEST_CASE_FIXTURE(
+    SodiumFixture,
+    "the shell's end follows its last byte, on every connection") {
+    Ends ends;
+    const auto output = Pattern(4000, 5);
+    REQUIRE(ends.Agent.Write(ByteSpan{output}) == output.size());
+    ends.Agent.End(SHELL_EXIT);
+    CHECK(ends.Agent.HasEnded());
+
+    {
+        Link first{ends, START};
+        first.Shuttle(START);
+        // The data is in, the end waits for the client's Ack.
+        CHECK(ends.AtTerminal == output);
+        CHECK(ends.EndsHeard.empty());
+        first.Shuttle(START + ACK_IDLE_DELAY);
+        REQUIRE(ends.EndsHeard.size() == 1);
+        CHECK(ends.EndsHeard[0].first == SHELL_EXIT);
+        CHECK(ends.EndsHeard[0].second == output.size());
+        CHECK(ends.Client.EndedWith() == SHELL_EXIT);
+        first.Close(START + 1s);
+    }
+    // A client that lost the first one gets it again, and nothing else.
+    Link second{ends, START + 2s};
+    second.Shuttle(START + 2s);
+    REQUIRE(ends.EndsHeard.size() == 2);
+    CHECK(ends.EndsHeard[1].second == output.size());
+    CHECK(ends.AtTerminal == output);
+    CHECK_FALSE(second.AgentError.has_value());
+    CHECK_FALSE(second.ClientError.has_value());
+}
+
+TEST_CASE_FIXTURE(SodiumFixture,
+                  "a shell that ends while connected ends that connection's "
+                  "session") {
+    Ends ends;
+    Link link{ends, START};
+    BringUp(link, START);
+    const auto last = Pattern(10, 6);
+    REQUIRE(ends.Agent.Write(ByteSpan{last}) == last.size());
+    ends.Agent.End(SHELL_EXIT);
+    ends.Agent.End({.Kind = wire::ESessionEndKind::Signaled, .Value = 1});
+    link.Shuttle(START + 1ms);
+    link.Shuttle(START + 1ms + ACK_IDLE_DELAY);
+    REQUIRE(ends.EndsHeard.size() == 1);
+    // The first End decides.
+    CHECK(ends.EndsHeard[0].first == SHELL_EXIT);
+    CHECK(ends.AtTerminal == last);
+}
+
+TEST_CASE_FIXTURE(SodiumFixture,
+                  "keepalives hold an idle connection up, silence ends it") {
+    using namespace std::chrono_literals;
+    SessionLimits limits;
+    limits.Liveness = {.KeepaliveInterval = 1s, .PeerSilenceTimeout = 3s};
+    Ends ends{1, 1, limits};
+    Link link{ends, START};
+    BringUp(link, START);
+
+    // Both ends idle for ten seconds, pumped every half: the Pings carry it.
+    for (int half = 1; half <= 20; ++half) {
+        link.Shuttle(START + half * 500ms);
+    }
+    CHECK_FALSE(link.AgentError.has_value());
+    CHECK_FALSE(link.ClientError.has_value());
+
+    // The path goes quiet: the agent stops hearing the client.
+    const Timestamp quietFrom = START + 10s;
+    auto event = link.Agent.Pump(quietFrom + 3s, MutableByteSpan{link.Out},
+                                 MutableByteSpan{link.Scratch});
+    for (int step = 0; event && step < 4; ++step) {
+        event = link.Agent.Pump(quietFrom + 3s, MutableByteSpan{link.Out},
+                                MutableByteSpan{link.Scratch});
+    }
+    REQUIRE_FALSE(event.has_value());
+    CHECK(event.error().Session() == ESessionError::PeerSilent);
+    CHECK(event.error().Disposition() == EDisposition::CloseConnection);
+    link.Close(quietFrom + 3s);
+    CHECK(ends.Agent.State() == ESessionState::Detached);
 }
