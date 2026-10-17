@@ -34,6 +34,30 @@ jobs:
       - name: Build and test
         run: tools/musl_build.sh ${{ matrix.preset }} test
 
+  # design.md §16: a real sshd on localhost, a real pty, iptables for
+  # half-open cuts. Its own container flags (NET_ADMIN) and package list, so
+  # the other jobs stay as they are.
+  integration:
+    name: integration (${{ matrix.preset }})
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        preset: [musl-dev, musl-asan-ubsan]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Restore the compiler cache
+        uses: ./.github/actions/ccache
+        with:
+          key: ${{ matrix.preset }}
+
+      - name: Restore the Alpine packages
+        uses: ./.github/actions/apk
+
+      - name: Build and run the integration suite
+        run: tools/integration.sh ${{ matrix.preset }} -rs
+
   coverage:
     name: coverage
     runs-on: ubuntu-24.04

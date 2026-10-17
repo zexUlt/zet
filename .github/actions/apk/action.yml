@@ -3,7 +3,7 @@ description: Restores the .apk cache the toolchain is installed from.
 
 # Packages are cached, not an image: the base alpine is 3.5 MB, and installing
 # from a warm cache takes ten seconds and touches no network. The key hashes the
-# package list and the runner script, so editing either refreshes the cache.
+# package lists and the runner script, so editing any refreshes the cache.
 
 runs:
   using: composite
@@ -11,4 +11,4 @@ runs:
     - uses: actions/cache@v4
       with:
         path: ${{ github.workspace }}/../apk-cache
-        key: apk-${{ runner.os }}-${{ hashFiles('tools/alpine-packages.txt', 'tools/in_alpine.sh') }}
+        key: apk-${{ runner.os }}-${{ hashFiles('tools/alpine-packages.txt', 'tools/integration-packages.txt', 'tools/in_alpine.sh') }}
