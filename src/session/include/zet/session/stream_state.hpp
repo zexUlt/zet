@@ -18,7 +18,9 @@ namespace zet::session {
 
 /// What a session is given to hold its outgoing stream in, and the policy it
 /// runs under. The storage is borrowed, as everywhere in the core: the I/O
-/// layer allocates it once per session and the session never grows it.
+/// layer allocates it once per session and the session never grows it. It
+/// must outlive the session: a buffer that dies first leaves the session
+/// writing into freed memory.
 struct SessionStreams {
     MutableByteSpan Storage;
     /// When the session came to be. The orphan timeout runs from here until
@@ -74,7 +76,10 @@ public:
     /// EDetachedOverflow. A reaped session takes nothing: SessionReaped.
     [[nodiscard]] SessionResult<std::size_t> Write(ByteSpan bytes) noexcept;
 
-    /// Whether reading the local source is worth it right now.
+    /// Whether reading the local source is worth it right now. A detached
+    /// session that reaps on overflow always says yes: the shell must not
+    /// block on a client that may never return, and the Write that crosses
+    /// DisconnectMax is what ends it.
     [[nodiscard]] bool AcceptsWrites() const noexcept;
 
     [[nodiscard]] ESessionState State() const noexcept { return State_; }
