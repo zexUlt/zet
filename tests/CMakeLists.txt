@@ -43,6 +43,15 @@ target_link_libraries(zet_tests PRIVATE
     doctest::doctest
 )
 
+# zet_io is Linux-only for now (src/CMakeLists.txt), and so are its tests.
+if(ZET_HAVE_IO)
+    target_sources(zet_tests PRIVATE
+        io/clock_test.cpp
+        io/fd_test.cpp
+    )
+    target_link_libraries(zet_tests PRIVATE zet::io)
+endif()
+
 include(${doctest_SOURCE_DIR}/scripts/cmake/doctest.cmake)
 doctest_discover_tests(zet_tests)
 
