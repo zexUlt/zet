@@ -1,0 +1,17 @@
+#include "zet/session/error.hpp"
+
+namespace zet::session {
+
+std::string_view Describe(ESessionError error) noexcept {
+    switch (error) {
+        case ESessionError::AckBeyondSent:
+            return "peer acknowledged bytes that were never sent";
+        case ESessionError::StreamGap:
+            return "data arrived past the end of the stream";
+        case ESessionError::DisconnectBufferOverflow:
+            return "too much output while disconnected";
+    }
+    return "unknown session error";
+}
+
+}  // namespace zet::session

@@ -17,6 +17,7 @@ add_executable(zet_tests
     core/time_test.cpp
     core/version_test.cpp
     crypto/crypto_test.cpp
+    session/error_test.cpp
     wire/frame_test.cpp
     wire/handshake_test.cpp
     wire/frame_stream_test.cpp
@@ -29,6 +30,7 @@ target_link_libraries(zet_tests PRIVATE
     zet::core
     zet::crypto
     zet::wire
+    zet::session
     zet::compile_options
     doctest::doctest
 )
