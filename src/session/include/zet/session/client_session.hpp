@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 
 #include "zet/core/bytes.hpp"
 #include "zet/crypto/crypto.hpp"
@@ -69,6 +70,9 @@ public:
     }
     [[nodiscard]] ESessionState State() const noexcept {
         return Streams_.State();
+    }
+    [[nodiscard]] std::optional<ESessionError> ReapReason() const noexcept {
+        return Streams_.ReapReason();
     }
 
     /// How much of the agent's stream the client holds: what Resume tells the
