@@ -34,6 +34,10 @@ enum class ESessionError : std::uint8_t {
     /// Only a defect on our side gets here — the fallback keys exist exactly
     /// when the previous seed does — and the connection is not to be trusted.
     UnknownSeed,
+    /// The peer resumes from below what it has already acknowledged. Those
+    /// bytes were trimmed when the acknowledgement came, so the stream cannot
+    /// continue whole; the peer has lost state it once confirmed holding.
+    PeerBehindBuffer,
 };
 
 template <typename TValue>
@@ -51,6 +55,7 @@ using SessionResult = std::expected<TValue, ESessionError>;
             return EDisposition::CloseConnection;
 
         case ESessionError::DisconnectBufferOverflow:
+        case ESessionError::PeerBehindBuffer:
             return EDisposition::KillSession;
     }
     return EDisposition::CloseConnection;

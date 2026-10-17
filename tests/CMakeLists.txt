@@ -20,6 +20,8 @@ add_executable(zet_tests
     session/agent_session_test.cpp
     session/client_session_test.cpp
     session/error_test.cpp
+    session/send_buffer_test.cpp
+    session/receive_cursor_test.cpp
     wire/frame_test.cpp
     wire/handshake_test.cpp
     wire/frame_stream_test.cpp
