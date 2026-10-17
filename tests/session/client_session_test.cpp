@@ -353,8 +353,10 @@ TEST_CASE_FIXTURE(SodiumFixture,
     CHECK(client.State() == ESessionState::Detached);
     CHECK_FALSE(handle.IsCurrent());
 
+    CHECK_FALSE(client.ReapReason().has_value());
     handle.Kill(ESessionError::SessionReaped);
     CHECK(client.State() == ESessionState::Reaped);
+    CHECK(client.ReapReason() == ESessionError::SessionReaped);
     const auto late = client.Write(ByteSpan{typed});
     REQUIRE_FALSE(late.has_value());
     CHECK(late.error() == ESessionError::SessionReaped);
