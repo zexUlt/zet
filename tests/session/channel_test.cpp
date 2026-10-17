@@ -81,6 +81,12 @@ std::size_t PollOk(Channel& channel, Timestamp now, MutableByteSpan out,
     return *n;
 }
 
+/// Keepalive and peer silence off: most tests here move time by hours to
+/// reach a rekey, and would otherwise watch the connection die of silence.
+/// The liveness tests switch them on.
+constexpr LivenessLimits LIVENESS_OFF{.KeepaliveInterval = Duration::zero(),
+                                      .PeerSilenceTimeout = Duration::zero()};
+
 /// A pair of Channels on the same ConnectionKeys, wired back to back.
 ///
 /// Drive the pair manually with Pump() to transfer one frame at a time, or
@@ -91,7 +97,8 @@ struct ChannelPair {
 
     explicit ChannelPair(Timestamp start = Timestamp{},
                          std::uint64_t frameLimit = MAX_FRAMES_PER_EPOCH,
-                         std::uint64_t byteLimit = MAX_BYTES_PER_EPOCH)
+                         std::uint64_t byteLimit = MAX_BYTES_PER_EPOCH,
+                         LivenessLimits liveness = LIVENESS_OFF)
         : Keys{DeriveConnectionKeys(
               DeriveSessionSecrets(MakeMaster(1)).ConnectionSeed, MakeNonce(1),
               MakeNonce(2))},
@@ -102,9 +109,9 @@ struct ChannelPair {
           ClientRecv{0},
           AgentRecv{0},
           Client{Keys,  ERole::Client, ClientSendBuf, ClientRecv,
-                 start, frameLimit,    byteLimit},
+                 start, frameLimit,    byteLimit,     liveness},
           Agent{Keys,  ERole::Agent, AgentSendBuf, AgentRecv,
-                start, frameLimit,   byteLimit} {}
+                start, frameLimit,   byteLimit,    liveness} {}
 
     ConnectionKeys Keys;
 
@@ -135,7 +142,7 @@ struct ChannelPair {
         }
         const auto frame = ReadFrame(ByteSpan{Out}.first(n), wire::MAX_FRAME);
         REQUIRE(frame.has_value());
-        auto result = dst.Receive(*frame, MutableByteSpan{OpenScratch});
+        auto result = dst.Receive(now, *frame, MutableByteSpan{OpenScratch});
         REQUIRE(result.has_value());
         return *result;
     }
@@ -307,7 +314,8 @@ TEST_CASE_FIXTURE(SodiumFixture,
         ReadFrame(ByteSpan{out}.first(ackFrame), wire::MAX_FRAME);
     REQUIRE(frame.has_value());
     std::vector<std::byte> openBuf(wire::MAX_FRAME);
-    const auto ev = pair.Client.Receive(*frame, MutableByteSpan{openBuf});
+    const auto ev =
+        pair.Client.Receive(Timestamp{}, *frame, MutableByteSpan{openBuf});
     REQUIRE(ev.has_value());
     // Ack is silent on the receive side (DeliveredNothing).
     CHECK(std::holds_alternative<DeliveredNothing>(*ev));
@@ -379,7 +387,8 @@ TEST_CASE_FIXTURE(SodiumFixture,
     REQUIRE(pingFv.has_value());
 
     std::vector<std::byte> recvBuf(wire::MAX_FRAME);
-    const auto event = pair.Client.Receive(*pingFv, MutableByteSpan{recvBuf});
+    const auto event =
+        pair.Client.Receive(now, *pingFv, MutableByteSpan{recvBuf});
     REQUIRE(event.has_value());
     CHECK(std::holds_alternative<DeliveredNothing>(*event));
 
@@ -396,7 +405,7 @@ TEST_CASE_FIXTURE(SodiumFixture,
     REQUIRE(pongFv.has_value());
     std::vector<std::byte> pongRecvBuf(wire::MAX_FRAME);
     const auto pongEv =
-        pair.Agent.Receive(*pongFv, MutableByteSpan{pongRecvBuf});
+        pair.Agent.Receive(Timestamp{}, *pongFv, MutableByteSpan{pongRecvBuf});
     REQUIRE(pongEv.has_value());
     CHECK(std::holds_alternative<DeliveredNothing>(*pongEv));
 }
@@ -422,7 +431,7 @@ TEST_CASE_FIXTURE(SodiumFixture,
     REQUIRE(frame.has_value());
 
     std::vector<std::byte> recvBuf(wire::MAX_FRAME);
-    const auto ev = pair.Agent.Receive(*frame, MutableByteSpan{recvBuf});
+    const auto ev = pair.Agent.Receive(now, *frame, MutableByteSpan{recvBuf});
     REQUIRE(ev.has_value());
     REQUIRE(std::holds_alternative<DeliveredResize>(*ev));
 
@@ -449,7 +458,8 @@ TEST_CASE_FIXTURE(SodiumFixture,
     REQUIRE(fv.has_value());
 
     std::vector<std::byte> recvBuf(wire::MAX_FRAME);
-    const auto ev = pair.Client.Receive(*fv, MutableByteSpan{recvBuf});
+    const auto ev =
+        pair.Client.Receive(Timestamp{}, *fv, MutableByteSpan{recvBuf});
     REQUIRE(ev.has_value());
     CHECK(std::holds_alternative<DeliveredNothing>(*ev));
     CHECK(pair.Client.UnknownTypeCount() == 1);
@@ -482,7 +492,7 @@ TEST_CASE_FIXTURE(
     const std::uint64_t cursorBefore = pair.AgentRecv.RecvOffset();
 
     std::vector<std::byte> recvBuf(wire::MAX_FRAME);
-    const auto ev = pair.Agent.Receive(*frame, MutableByteSpan{recvBuf});
+    const auto ev = pair.Agent.Receive(now, *frame, MutableByteSpan{recvBuf});
     REQUIRE_FALSE(ev.has_value());
     CHECK(ev.error().Disposition() == EDisposition::CloseConnection);
 
@@ -522,7 +532,8 @@ TEST_CASE_FIXTURE(
     REQUIRE(fv.has_value());
 
     std::vector<std::byte> recvBuf(wire::MAX_FRAME);
-    const auto ev = pair.Client.Receive(*fv, MutableByteSpan{recvBuf});
+    const auto ev =
+        pair.Client.Receive(Timestamp{}, *fv, MutableByteSpan{recvBuf});
     REQUIRE_FALSE(ev.has_value());
     CHECK(ev.error().Session() == ESessionError::StreamGap);
     CHECK(ev.error().Disposition() == EDisposition::CloseConnection);
@@ -720,7 +731,8 @@ ChannelResult<IncomingEvent> InjectToClient(ChannelPair& pair,
     const auto view =
         ReadFrame(ByteSpan{frame}.first(*sealed), wire::MAX_FRAME);
     REQUIRE(view.has_value());
-    return pair.Client.Receive(*view, MutableByteSpan{pair.OpenScratch});
+    return pair.Client.Receive(Timestamp{}, *view,
+                               MutableByteSpan{pair.OpenScratch});
 }
 
 ChannelResult<IncomingEvent> InjectToClient(ChannelPair& pair, ByteSpan plain) {
@@ -929,8 +941,10 @@ TEST_CASE_FIXTURE(SodiumFixture,
     SendBuffer agentOut{MutableByteSpan{agentStore}};
     ReceiveCursor clientIn;
     ReceiveCursor agentIn;
-    Channel client{std::move(clientFrames), clientOut, clientIn, Timestamp{}};
-    Channel agent{std::move(agentFrames), agentOut, agentIn, Timestamp{}};
+    Channel client{std::move(clientFrames), clientOut, clientIn, Timestamp{},
+                   LIVENESS_OFF};
+    Channel agent{std::move(agentFrames), agentOut, agentIn, Timestamp{},
+                  LIVENESS_OFF};
 
     const auto typed = MakeBytes(5, 0x30);
     REQUIRE(clientOut.Append(ByteSpan{typed}) == typed.size());
@@ -942,7 +956,7 @@ TEST_CASE_FIXTURE(SodiumFixture,
     const auto frame = ReadFrame(ByteSpan{out}.first(n), MAX_FRAME);
     REQUIRE(frame.has_value());
 
-    const auto ev = agent.Receive(*frame, MutableByteSpan{opened});
+    const auto ev = agent.Receive(Timestamp{}, *frame, MutableByteSpan{opened});
     REQUIRE(ev.has_value());
     REQUIRE(std::holds_alternative<DeliveredData>(*ev));
     CHECK(std::get<DeliveredData>(*ev).Bytes.size() == typed.size());
@@ -958,7 +972,243 @@ TEST_CASE_FIXTURE(SodiumFixture,
     const auto replayFrame =
         ReadFrame(ByteSpan{replay}.first(*again), MAX_FRAME);
     REQUIRE(replayFrame.has_value());
-    const auto refused = agent.Receive(*replayFrame, MutableByteSpan{opened});
+    const auto refused =
+        agent.Receive(Timestamp{}, *replayFrame, MutableByteSpan{opened});
     REQUIRE_FALSE(refused.has_value());
     CHECK(refused.error().Proto() == EProtoError::AuthenticationFailed);
+}
+
+// ── Liveness: keepalive and peer silence (§9) ─────────────────────────
+
+namespace {
+
+using namespace std::chrono_literals;
+
+constexpr Duration TEST_KEEPALIVE = 5s;
+constexpr Duration TEST_SILENCE = 20s;
+
+/// What one Poll of `src` puts on the wire, opened by `dst`: the event, or
+/// nullopt when there was nothing to send.
+std::optional<IncomingEvent> Carry(ChannelPair& pair, Channel& src,
+                                   Channel& dst, Timestamp now) {
+    return pair.PumpOne(src, dst, now);
+}
+
+/// Hands the client a Pong from the agent at `now`, as a reply to a Ping it
+/// never needed to send: the client cannot tell, and need not.
+void InjectPongForClient(ChannelPair& pair, Timestamp now) {
+    FrameSealer sealer{crypto::Key{pair.Keys.ServerToClient.Expose()},
+                       pair.Keys.SaltServerToClient};
+    std::array<std::byte, 1 + sizeof(std::uint64_t)> plain{};
+    ByteWriter writer{MutableByteSpan{plain}};
+    REQUIRE(wire::WritePong(writer, wire::PongMessage{.Token = 1}));
+    std::vector<std::byte> frame(HEADER_SIZE + plain.size() + crypto::TAG_SIZE);
+    const auto sealed = sealer.Seal(MutableByteSpan{frame}, ByteSpan{plain});
+    REQUIRE(sealed.has_value());
+    const auto view = ReadFrame(ByteSpan{frame}.first(*sealed), MAX_FRAME);
+    REQUIRE(view.has_value());
+    const auto ev =
+        pair.Client.Receive(now, *view, MutableByteSpan{pair.OpenScratch});
+    REQUIRE(ev.has_value());
+}
+
+ChannelPair LivePair(LivenessLimits liveness) {
+    return ChannelPair{Timestamp{}, MAX_FRAMES_PER_EPOCH, MAX_BYTES_PER_EPOCH,
+                       liveness};
+}
+
+}  // namespace
+
+TEST_CASE_FIXTURE(SodiumFixture,
+                  "a keepalive goes out once nothing has, and not before") {
+    auto pair = LivePair({.KeepaliveInterval = TEST_KEEPALIVE,
+                          .PeerSilenceTimeout = Duration::zero()});
+    const Timestamp start{};
+    CHECK(pair.Client.NextDeadline().At() == start + TEST_KEEPALIVE);
+    CHECK_FALSE(
+        Carry(pair, pair.Client, pair.Agent, start + TEST_KEEPALIVE - 1ns)
+            .has_value());
+
+    // At the deadline: a Ping, which the agent owes a Pong for.
+    const auto ping =
+        Carry(pair, pair.Client, pair.Agent, start + TEST_KEEPALIVE);
+    REQUIRE(ping.has_value());
+    CHECK(std::holds_alternative<DeliveredNothing>(*ping));
+    const auto pong =
+        Carry(pair, pair.Agent, pair.Client, start + TEST_KEEPALIVE);
+    REQUIRE(pong.has_value());
+    CHECK(std::holds_alternative<DeliveredNothing>(*pong));
+
+    // Sent just now: the next keepalive is a whole interval away, and a
+    // frame of Data pushes it further.
+    CHECK(pair.Client.NextDeadline().At() == start + 2 * TEST_KEEPALIVE);
+    const auto typed = MakeBytes(3);
+    REQUIRE(pair.ClientSendBuf.Append(ByteSpan{typed}) == typed.size());
+    const Timestamp later = start + TEST_KEEPALIVE + 2s;
+    REQUIRE(Carry(pair, pair.Client, pair.Agent, later).has_value());
+    CHECK(pair.Client.NextDeadline().At() == later + TEST_KEEPALIVE);
+}
+
+TEST_CASE_FIXTURE(SodiumFixture,
+                  "a peer silent for the whole timeout closes the connection") {
+    auto pair = LivePair({.KeepaliveInterval = Duration::zero(),
+                          .PeerSilenceTimeout = TEST_SILENCE});
+    const Timestamp start{};
+    CHECK(pair.Client.NextDeadline().At() == start + TEST_SILENCE);
+
+    std::vector<std::byte> out(HEADER_SIZE + MAX_FRAME);
+    std::vector<std::byte> scratch(Channel::POLL_SCRATCH_SIZE);
+    CHECK(pair.Client.Poll(start + TEST_SILENCE - 1ns, MutableByteSpan{out},
+                           MutableByteSpan{scratch}) == 0U);
+    const auto silent = pair.Client.Poll(
+        start + TEST_SILENCE, MutableByteSpan{out}, MutableByteSpan{scratch});
+    REQUIRE_FALSE(silent.has_value());
+    CHECK(silent.error().Session() == ESessionError::PeerSilent);
+    CHECK(silent.error().Disposition() == EDisposition::CloseConnection);
+}
+
+TEST_CASE_FIXTURE(SodiumFixture,
+                  "any frame heard from the peer starts the silence over") {
+    const Timestamp start{};
+    const Timestamp heard = start + 15s;
+    auto hear = [&](ChannelPair& pair) {
+        SUBCASE("data") {
+            const auto bytes = MakeBytes(4);
+            REQUIRE(pair.AgentSendBuf.Append(ByteSpan{bytes}) == bytes.size());
+            const auto ev = Carry(pair, pair.Agent, pair.Client, heard);
+            REQUIRE(ev.has_value());
+            CHECK(std::holds_alternative<DeliveredData>(*ev));
+        }
+        SUBCASE("a bare ack") {
+            const auto bytes = MakeBytes(4);
+            REQUIRE(pair.ClientSendBuf.Append(ByteSpan{bytes}) == bytes.size());
+            REQUIRE(Carry(pair, pair.Client, pair.Agent, start).has_value());
+            // Arms the idle Ack, then sends it once the delay is up.
+            REQUIRE_FALSE(
+                Carry(pair, pair.Agent, pair.Client, heard - ACK_IDLE_DELAY)
+                    .has_value());
+            REQUIRE(Carry(pair, pair.Agent, pair.Client, heard).has_value());
+        }
+        SUBCASE("a pong") { InjectPongForClient(pair, heard); }
+    };
+    auto pair = LivePair({.KeepaliveInterval = Duration::zero(),
+                          .PeerSilenceTimeout = TEST_SILENCE});
+    hear(pair);
+
+    std::vector<std::byte> out(HEADER_SIZE + MAX_FRAME);
+    std::vector<std::byte> scratch(Channel::POLL_SCRATCH_SIZE);
+    // Past the first silence limit, short of the one counted from `heard`.
+    CHECK(pair.Client
+              .Poll(heard + TEST_SILENCE - 1ns, MutableByteSpan{out},
+                    MutableByteSpan{scratch})
+              .has_value());
+    const auto silent = pair.Client.Poll(
+        heard + TEST_SILENCE, MutableByteSpan{out}, MutableByteSpan{scratch});
+    REQUIRE_FALSE(silent.has_value());
+    CHECK(silent.error().Session() == ESessionError::PeerSilent);
+}
+
+TEST_CASE_FIXTURE(SodiumFixture,
+                  "a frame that fails to open does not count as hearing") {
+    auto pair = LivePair({.KeepaliveInterval = Duration::zero(),
+                          .PeerSilenceTimeout = TEST_SILENCE});
+    const Timestamp start{};
+    const auto bytes = MakeBytes(4);
+    REQUIRE(pair.AgentSendBuf.Append(ByteSpan{bytes}) == bytes.size());
+    std::vector<std::byte> out(HEADER_SIZE + MAX_FRAME);
+    std::vector<std::byte> scratch(Channel::POLL_SCRATCH_SIZE);
+    const std::size_t n = PollOk(pair.Agent, start, MutableByteSpan{out},
+                                 MutableByteSpan{scratch});
+    out[HEADER_SIZE + 1] ^= std::byte{0x01};
+    const auto frame = ReadFrame(ByteSpan{out}.first(n), MAX_FRAME);
+    REQUIRE(frame.has_value());
+    REQUIRE_FALSE(
+        pair.Client
+            .Receive(start + 15s, *frame, MutableByteSpan{pair.OpenScratch})
+            .has_value());
+    const auto silent = pair.Client.Poll(
+        start + TEST_SILENCE, MutableByteSpan{out}, MutableByteSpan{scratch});
+    REQUIRE_FALSE(silent.has_value());
+    CHECK(silent.error().Session() == ESessionError::PeerSilent);
+}
+
+// ── SessionEnd (§9) ────────────────────────────────────────────────────
+
+namespace {
+
+constexpr wire::SessionEndMessage TEST_END{
+    .Kind = wire::ESessionEndKind::Signaled, .Value = 9};
+
+}  // namespace
+
+TEST_CASE_FIXTURE(SodiumFixture,
+                  "SessionEnd waits until the client holds the whole stream") {
+    ChannelPair pair;
+    const Timestamp start{};
+    const auto output = MakeBytes(100, 0x11);
+    REQUIRE(pair.AgentSendBuf.Append(ByteSpan{output}) == output.size());
+    pair.Agent.QueueSessionEnd(TEST_END);
+
+    // The data goes, and the end stays behind it until it is acknowledged.
+    const auto data = Carry(pair, pair.Agent, pair.Client, start);
+    REQUIRE(data.has_value());
+    REQUIRE(std::holds_alternative<DeliveredData>(*data));
+    CHECK_FALSE(Carry(pair, pair.Agent, pair.Client, start).has_value());
+    CHECK_FALSE(pair.Agent.SessionEndSent());
+
+    // The client's idle Ack, and then the end.
+    REQUIRE_FALSE(Carry(pair, pair.Client, pair.Agent, start).has_value());
+    REQUIRE(Carry(pair, pair.Client, pair.Agent, start + ACK_IDLE_DELAY)
+                .has_value());
+    const auto end =
+        Carry(pair, pair.Agent, pair.Client, start + ACK_IDLE_DELAY);
+    REQUIRE(end.has_value());
+    REQUIRE(std::holds_alternative<DeliveredSessionEnd>(*end));
+    CHECK(std::get<DeliveredSessionEnd>(*end).End == TEST_END);
+    CHECK(pair.Agent.SessionEndSent());
+
+    // Once per channel, whatever is queued after.
+    pair.Agent.QueueSessionEnd(
+        {.Kind = wire::ESessionEndKind::Exited, .Value = 0});
+    CHECK_FALSE(Carry(pair, pair.Agent, pair.Client, start + ACK_IDLE_DELAY)
+                    .has_value());
+}
+
+TEST_CASE_FIXTURE(SodiumFixture,
+                  "SessionEnd with nothing written goes out at once") {
+    ChannelPair pair;
+    pair.Agent.QueueSessionEnd(TEST_END);
+    const auto end = Carry(pair, pair.Agent, pair.Client, Timestamp{});
+    REQUIRE(end.has_value());
+    CHECK(std::holds_alternative<DeliveredSessionEnd>(*end));
+}
+
+TEST_CASE_FIXTURE(SodiumFixture, "a SessionEnd from the client is refused") {
+    ChannelPair pair;
+    FrameSealer sealer{crypto::Key{pair.Keys.ClientToServer.Expose()},
+                       pair.Keys.SaltClientToServer};
+    std::array<std::byte, 3> plain{};
+    ByteWriter writer{MutableByteSpan{plain}};
+    REQUIRE(wire::WriteSessionEnd(writer, TEST_END));
+    std::vector<std::byte> frame(HEADER_SIZE + plain.size() + crypto::TAG_SIZE);
+    const auto sealed = sealer.Seal(MutableByteSpan{frame}, ByteSpan{plain});
+    REQUIRE(sealed.has_value());
+    const auto view = ReadFrame(ByteSpan{frame}.first(*sealed), MAX_FRAME);
+    REQUIRE(view.has_value());
+    const auto ev = pair.Agent.Receive(Timestamp{}, *view,
+                                       MutableByteSpan{pair.OpenScratch});
+    REQUIRE_FALSE(ev.has_value());
+    CHECK(ev.error().Proto() == EProtoError::UnexpectedMessage);
+}
+
+TEST_CASE_FIXTURE(SodiumFixture,
+                  "a malformed SessionEnd closes the connection") {
+    ChannelPair pair;
+    const std::array<std::byte, 3> plain{
+        static_cast<std::byte>(
+            static_cast<std::uint8_t>(EMessageType::SessionEnd)),
+        std::byte{0x09}, std::byte{0}};
+    const auto ev = InjectToClient(pair, ByteSpan{plain});
+    REQUIRE_FALSE(ev.has_value());
+    CHECK(ev.error().Proto() == EProtoError::MalformedField);
 }

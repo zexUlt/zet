@@ -126,6 +126,11 @@ void CheckDisposition(EProtoError error) noexcept {
     return left.Token == right.Token;
 }
 
+[[nodiscard]] bool Same(const SessionEndMessage& left,
+                        const SessionEndMessage& right) noexcept {
+    return left == right;
+}
+
 template <typename TMessage>
 using MessageParser = ProtoResult<TMessage> (*)(ByteReader&) noexcept;
 
@@ -229,6 +234,9 @@ void ParseBody(ByteSpan input) noexcept {
             return;
         case EMessageType::Pong:
             ParseThenRoundTrip(reader, *type, ParsePong, WritePong);
+            return;
+        case EMessageType::SessionEnd:
+            ParseThenRoundTrip(reader, *type, ParseSessionEnd, WriteSessionEnd);
             return;
     }
 }

@@ -81,6 +81,16 @@ ReceiveCursor& ClientSessionHandle::Input() noexcept {
     return Session_->Streams_.Input();
 }
 
+LivenessLimits ClientSessionHandle::Liveness() const noexcept {
+    return Session_->Streams_.Limits().Liveness;
+}
+
+void ClientSessionHandle::RecordEnd(wire::SessionEndMessage end) noexcept {
+    if (!Session_->End_) {
+        Session_->End_ = end;
+    }
+}
+
 ClientResumeAttempt::ClientResumeAttempt(
     ClientSession& session, wire::HandshakeNonce clientNonce) noexcept
     : Session_(&session),

@@ -56,6 +56,10 @@ ProtoResult<void> WriteMessage(ByteWriter& writer, const PingMessage& message) {
 ProtoResult<void> WriteMessage(ByteWriter& writer, const PongMessage& message) {
     return WritePong(writer, message);
 }
+ProtoResult<void> WriteMessage(ByteWriter& writer,
+                               const SessionEndMessage& message) {
+    return WriteSessionEnd(writer, message);
+}
 
 template <typename TMessage>
 std::vector<std::byte> Encode(const TMessage& message) {
@@ -109,6 +113,8 @@ ProtoResult<void> ParseAny(ByteSpan bytes) {
             return Discard(ParsePing(reader));
         case EMessageType::Pong:
             return Discard(ParsePong(reader));
+        case EMessageType::SessionEnd:
+            return Discard(ParseSessionEnd(reader));
     }
     return {};
 }
@@ -191,6 +197,10 @@ ResizeMessage MakeResize() {
 PingMessage MakePing() { return PingMessage{.Token = 0xDEAD'BEEF'0102'0304}; }
 
 PongMessage MakePong() { return PongMessage{.Token = 0xDEAD'BEEF'0102'0304}; }
+
+SessionEndMessage MakeEnd() {
+    return SessionEndMessage{.Kind = ESessionEndKind::Signaled, .Value = 15};
+}
 
 void AppendOption(std::vector<std::byte>& out, std::uint16_t type,
                   ByteSpan value) {
@@ -321,7 +331,7 @@ TEST_CASE("cutting a message at any offset is truncation, never a parse") {
         Encode(MakeHello()),  Encode(MakeChallenge()), Encode(MakeAuth()),
         Encode(MakeAuthOk()), Encode(MakeResume()),    Encode(MakeAck()),
         Encode(MakeResize()), Encode(MakePing()),      Encode(MakePong()),
-        Encode(MakeOffer()),  Encode(MakeAccept())};
+        Encode(MakeOffer()),  Encode(MakeAccept()),    Encode(MakeEnd())};
 
     for (const auto& bytes : messages) {
         const std::size_t size = bytes.size();
@@ -374,6 +384,7 @@ TEST_CASE("a writer with too little room refuses instead of overflowing") {
     refusesUpTo(MakePong());
     refusesUpTo(MakeOffer());
     refusesUpTo(MakeAccept());
+    refusesUpTo(MakeEnd());
 }
 
 TEST_CASE("an unknown option that is not critical is carried past") {
@@ -485,7 +496,8 @@ TEST_CASE("bytes past the last field of a fixed message are malformed") {
     for (auto bytes :
          {Encode(MakeAuth()), Encode(MakeAuthOk()), Encode(MakeResume()),
           Encode(MakeAck()), Encode(MakeResize()), Encode(MakePing()),
-          Encode(MakePong()), Encode(MakeOffer()), Encode(MakeAccept())}) {
+          Encode(MakePong()), Encode(MakeOffer()), Encode(MakeAccept()),
+          Encode(MakeEnd())}) {
         bytes.push_back(std::byte{0x00});
         const auto parsed = ParseAny(ByteSpan{bytes});
         REQUIRE_FALSE(parsed.has_value());
@@ -495,10 +507,10 @@ TEST_CASE("bytes past the last field of a fixed message are malformed") {
 
 TEST_CASE("a type byte outside the registry is unknown") {
     // 0x00 is not assigned, 0x08 is the first free one of the bootstrap
-    // range (§7), 0x15 the first unassigned session type, 0xFF is past
+    // range (§7), 0x16 the first unassigned session type, 0xFF is past
     // everything.
     for (const std::uint8_t type :
-         std::array<std::uint8_t, 4>{0x00, 0x08, 0x15, 0xFF}) {
+         std::array<std::uint8_t, 4>{0x00, 0x08, 0x16, 0xFF}) {
         CAPTURE(type);
         const std::vector<std::byte> bytes{std::byte{type}};
         ByteReader reader{ByteSpan{bytes}};
@@ -550,7 +562,7 @@ TEST_CASE("nothing a handshake message can say reaps the session") {
     }
 
     for (const std::uint8_t type :
-         std::array<std::uint8_t, 4>{0x00, 0x08, 0x15, 0xFF}) {
+         std::array<std::uint8_t, 4>{0x00, 0x08, 0x16, 0xFF}) {
         corpus.push_back({std::byte{type}});
     }
 
@@ -713,6 +725,37 @@ TEST_CASE("a pong message survives a round trip") {
     const auto parsed = ParsePong(reader);
     REQUIRE(parsed.has_value());
     CHECK(parsed->Token == pong.Token);
+}
+
+TEST_CASE("a session end survives a round trip") {
+    for (const auto end :
+         {MakeEnd(),
+          SessionEndMessage{.Kind = ESessionEndKind::Exited, .Value = 0},
+          SessionEndMessage{.Kind = ESessionEndKind::Exited, .Value = 255}}) {
+        const auto bytes = Encode(end);
+        REQUIRE(bytes.size() == 3);
+        CHECK(bytes[1] == std::byte{static_cast<std::uint8_t>(end.Kind)});
+        CHECK(bytes[2] == std::byte{end.Value});
+
+        ByteReader reader{ByteSpan{bytes}};
+        REQUIRE(ParseMessageType(reader) == EMessageType::SessionEnd);
+        const auto parsed = ParseSessionEnd(reader);
+        REQUIRE(parsed.has_value());
+        CHECK(*parsed == end);
+    }
+}
+
+TEST_CASE("a session end of a kind nobody defined is refused both ways") {
+    auto bytes = Encode(MakeEnd());
+    bytes.at(1) = std::byte{2};
+    CHECK(ParseAny(ByteSpan{bytes}).error() == EProtoError::MalformedField);
+
+    std::vector<std::byte> out(MAX_FRAME);
+    ByteWriter writer{MutableByteSpan{out}};
+    const SessionEndMessage odd{.Kind = static_cast<ESessionEndKind>(7),
+                                .Value = 0};
+    CHECK(WriteSessionEnd(writer, odd).error() == EProtoError::MalformedField);
+    CHECK(writer.Size() == 0);
 }
 
 TEST_CASE("big-endian layout of session messages is pinned by explicit bytes") {

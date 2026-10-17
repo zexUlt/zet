@@ -9,6 +9,7 @@
 #include "zet/session/stream_state.hpp"
 #include "zet/wire/handshake.hpp"
 #include "zet/wire/key_schedule.hpp"
+#include "zet/wire/message.hpp"
 
 /// The agent's side of a session and the one way to change it, per
 /// docs/design.md §5 rule one: until tag_c verifies, not one byte of session
@@ -82,6 +83,27 @@ public:
     }
     void OnTimer(Timestamp now) noexcept { Streams_.OnTimer(now); }
 
+    /// The shell is gone: called once the pty has been read to its end and
+    /// all of it Written. From then on every live connection sends SessionEnd
+    /// as soon as the client has acknowledged the whole stream, and again on
+    /// each connection after it (§9) — the message is idempotent, and a cut
+    /// may have taken the last one. The first call decides; later ones change
+    /// nothing.
+    ///
+    /// The agent's process exits once HasEnded() and no connection is live:
+    /// a client that got SessionEnd closes its end, and one that never comes
+    /// back is left to the orphan timeout.
+    void End(wire::SessionEndMessage end) noexcept {
+        if (!End_) {
+            End_ = end;
+        }
+    }
+    [[nodiscard]] bool HasEnded() const noexcept { return End_.has_value(); }
+    [[nodiscard]] std::optional<wire::SessionEndMessage> EndedWith()
+        const noexcept {
+        return End_;
+    }
+
 private:
     friend class SessionRef;
     friend class SessionHandle;
@@ -95,6 +117,7 @@ private:
     std::optional<crypto::Key> PreviousSeed_;
     wire::NonceMemory Seen_;
     StreamState Streams_;
+    std::optional<wire::SessionEndMessage> End_;
 };
 
 /// A session as seen before its peer has proved anything.
@@ -164,6 +187,14 @@ public:
 
     [[nodiscard]] SendBuffer& Output() noexcept;
     [[nodiscard]] ReceiveCursor& Input() noexcept;
+
+    /// The liveness timers each connection of the session runs with.
+    [[nodiscard]] LivenessLimits Liveness() const noexcept;
+
+    /// See AgentSession::End: what this connection is to send once the
+    /// stream is acknowledged, if the shell is gone.
+    [[nodiscard]] std::optional<wire::SessionEndMessage> EndedWith()
+        const noexcept;
 
 private:
     friend class ResumeAttempt;

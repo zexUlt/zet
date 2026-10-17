@@ -25,7 +25,7 @@
 // both sealers and openers together when a new Channel is created over the
 // same SendBuffer/ReceiveCursor, which is the natural boundary.
 //
-// Operations (opcode = low 3 bits of the first byte; high bits unused)
+// Operations (opcode = low 4 bits of the first byte; high bits unused)
 // --------------------------------------------------------------------
 //  00 nn           AppendClient  — append nn+1 deterministic bytes to the
 //                                  client's SendBuffer
@@ -39,6 +39,7 @@
 //                                  deliver to Agent.Receive()
 //  06 rr cc        QueueResize   — Client.QueueResize({rr+1, cc+1, 0, 0})
 //  07 dd           AdvanceTime   — now += dd * 100 ms
+//  08 kk vv        QueueSessionEnd — Agent.QueueSessionEnd({kk % 2, vv})
 //
 // Properties (each violation → __builtin_trap())
 // -----------------------------------------------
@@ -53,6 +54,8 @@
 //      connection, and killing the session is the layer above's call.
 //  P7  Poll() return value in [0, HEADER_SIZE + MAX_FRAME].
 //  P8  Operation budget: at most MAX_OPS steps for any input length.
+//  P9  The agent sends SessionEnd only with its SendBuffer empty: nothing
+//      unsent and nothing unacknowledged (§9).
 
 #include <algorithm>
 #include <array>
@@ -295,8 +298,8 @@ void HandleReceiveResult(const ChannelResult<IncomingEvent>& result,
 }
 
 // Perform one inject: seal `plain` and call Receive() on `chan`.
-void DoInject(InjectSealer& injector, Channel& chan, ByteSpan plain,
-              StreamRecord& rec, const ReceiveCursor& cursor,
+void DoInject(Timestamp now, InjectSealer& injector, Channel& chan,
+              ByteSpan plain, StreamRecord& rec, const ReceiveCursor& cursor,
               std::vector<std::byte>& scratch) noexcept {
     const std::uint64_t oldRecvOffset = cursor.RecvOffset();
     const auto frame = injector.Seal(plain);
@@ -308,7 +311,7 @@ void DoInject(InjectSealer& injector, Channel& chan, ByteSpan plain,
     if (scratch.size() < wire::MAX_FRAME) {
         scratch.resize(wire::MAX_FRAME);
     }
-    const auto result = chan.Receive(*frame, MutableByteSpan{scratch});
+    const auto result = chan.Receive(now, *frame, MutableByteSpan{scratch});
     HandleReceiveResult(result, rec, oldRecvOffset, cursor);
 }
 
@@ -395,7 +398,7 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data,
         if (!opByte) {
             break;
         }
-        const std::uint8_t op = static_cast<std::uint8_t>(*opByte & 0x07U);
+        const std::uint8_t op = static_cast<std::uint8_t>(*opByte & 0x0FU);
 
         // Snapshot before the operation for monotonicity checks (P1–P3, P5).
         const Snapshot before{clientRecvCursor.RecvOffset(),
@@ -465,12 +468,18 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data,
                 }
                 now += std::chrono::milliseconds{
                     static_cast<long long>(*deltaByte)};
+                const bool endWasSent = agentChan.SessionEndSent();
                 const auto n = agentChan.Poll(now, MutableByteSpan{pollOut},
                                               MutableByteSpan{pollScratch});
                 if (n) {
                     if (*n > wire::HEADER_SIZE + wire::MAX_FRAME) {
                         __builtin_trap();
                     }
+                }
+                // P9.
+                if (!endWasSent && agentChan.SessionEndSent() &&
+                    agentSendBuf.Size() != 0) {
+                    __builtin_trap();
                 }
                 break;
             }
@@ -487,7 +496,7 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data,
                 if (!payload) {
                     break;
                 }
-                DoInject(s2cInject, clientChan, *payload, clientRecvRec,
+                DoInject(now, s2cInject, clientChan, *payload, clientRecvRec,
                          clientRecvCursor, recvScratch);
                 break;
             }
@@ -504,7 +513,7 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data,
                 if (!payload) {
                     break;
                 }
-                DoInject(c2sInject, agentChan, *payload, agentRecvRec,
+                DoInject(now, c2sInject, agentChan, *payload, agentRecvRec,
                          agentRecvCursor, recvScratch);
                 break;
             }
@@ -533,6 +542,19 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data,
                 // many steps cross REKEY_INTERVAL (1 h).
                 now += std::chrono::milliseconds{static_cast<int>(*deltaByte) *
                                                  100};
+                break;
+            }
+            // ── 08: QueueSessionEnd ──────────────────────────────────────
+            case 0x08: {
+                const auto kindByte = reader.ReadU8();
+                const auto valueByte = reader.ReadU8();
+                if (!kindByte || !valueByte) {
+                    break;
+                }
+                agentChan.QueueSessionEnd(wire::SessionEndMessage{
+                    .Kind = static_cast<wire::ESessionEndKind>(*kindByte % 2U),
+                    .Value = *valueByte,
+                });
                 break;
             }
             default:
