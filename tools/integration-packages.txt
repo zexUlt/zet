@@ -1,0 +1,17 @@
+# What the integration suite needs on top of the toolchain in
+# alpine-packages.txt (design.md §16): a real sshd and ssh on localhost, the
+# programs the M4 criterion is judged on, iptables for half-open cuts, and
+# pytest. A separate list so that the build jobs do not install a mail-sized
+# pile of things they never run.
+#
+# One package per line. The hash of this file keys the package cache in CI
+# alongside the toolchain's.
+openssh-server
+openssh-client-default
+openssh-keygen
+bash
+vim
+htop
+iptables
+python3
+py3-pytest

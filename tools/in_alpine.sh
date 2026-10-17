@@ -6,6 +6,10 @@
 # with no network. The Ubuntu jobs that cached .deb files worked the same way.
 #
 # Usage: tools/in_alpine.sh 'shell command'
+#
+# Two variables widen the container for the integration suite and nothing
+# else: ZET_EXTRA_PACKAGES names a second package list to install, and
+# ZET_DOCKER_ARGS adds flags to docker run (iptables needs NET_ADMIN).
 set -euo pipefail
 
 ALPINE_IMAGE=alpine:3.22
@@ -14,6 +18,9 @@ ALPINE_IMAGE=alpine:3.22
 
 root=$(cd "$(dirname "$0")/.." && pwd)
 packages=$(grep -v '^#' "$root/tools/alpine-packages.txt" | tr '\n' ' ')
+if [ -n "${ZET_EXTRA_PACKAGES:-}" ]; then
+    packages="$packages $(grep -v '^#' "$root/$ZET_EXTRA_PACKAGES" | tr '\n' ' ')"
+fi
 apk_cache=${ZET_APK_CACHE:-$root/build/.apk-cache}
 mkdir -p "$apk_cache"
 
@@ -27,6 +34,11 @@ args=(
     -e "ZET_UID=$(id -u)"
     -e "ZET_GID=$(id -g)"
 )
+if [ -n "${ZET_DOCKER_ARGS:-}" ]; then
+    # Word-split on purpose: it is a list of flags.
+    # shellcheck disable=SC2206
+    args+=($ZET_DOCKER_ARGS)
+fi
 if [ -n "${CCACHE_DIR:-}" ]; then
     mkdir -p "$CCACHE_DIR"
     args+=(-v "$CCACHE_DIR:/ccache" -e CCACHE_DIR=/ccache -e ZET_COMPILER_LAUNCHER=ccache)
