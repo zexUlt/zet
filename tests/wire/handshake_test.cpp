@@ -104,6 +104,8 @@ struct Harness {
     HandshakeNonce ServerNonce{MakeNonce(0x90)};
     NonceMemory ClientSeen;
     NonceMemory ServerSeen;
+    /// The seed §8 has the agent keep while the client may still be on it.
+    std::optional<crypto::Key> ServerPreviousSeed;
 
     explicit Harness(std::uint8_t clientMaster = 1,
                      std::uint8_t serverMaster = 1) {
@@ -120,8 +122,15 @@ struct Harness {
         Exchange out;
         ClientHandshake client{Id, Clone(ClientAuth), Clone(ClientSeed),
                                ClientNonce, ClientSeen};
-        ServerHandshake server{Clone(ServerAuth), Clone(ServerSeed),
-                               ServerNonce, SERVER_OFFSET, ServerSeen};
+        ServerHandshake server{
+            Clone(ServerAuth),
+            Clone(ServerSeed),
+            ServerNonce,
+            SERVER_OFFSET,
+            ServerSeen,
+            ServerPreviousSeed
+                ? std::optional<crypto::Key>{Clone(*ServerPreviousSeed)}
+                : std::nullopt};
 
         std::vector<std::byte> scratch(SCRATCH);
 
@@ -377,15 +386,59 @@ TEST_CASE_FIXTURE(SodiumFixture, "a repeated nonce is refused on both sides") {
 }
 
 TEST_CASE_FIXTURE(SodiumFixture,
-                  "a finished handshake remembers what it used") {
+                  "a finished handshake hands its nonces back and keeps none") {
     Harness peers;
     const auto run = peers.Run();
     REQUIRE(run.Completed);
+    REQUIRE(run.FromClient.has_value());
+    REQUIRE(run.FromServer.has_value());
 
-    CHECK(peers.ClientSeen.Seen(peers.ClientNonce));
-    CHECK(peers.ClientSeen.Seen(peers.ServerNonce));
-    CHECK(peers.ServerSeen.Seen(peers.ClientNonce));
-    CHECK(peers.ServerSeen.Seen(peers.ServerNonce));
+    // Recording them is the session's job, done once it holds proof of the
+    // peer: the automata see the memory through a const reference only.
+    for (const HandshakeResult* result : {&*run.FromClient, &*run.FromServer}) {
+        CHECK(result->ClientNonce == peers.ClientNonce);
+        CHECK(result->ServerNonce == peers.ServerNonce);
+    }
+    CHECK(peers.ClientSeen.Size() == 0);
+    CHECK(peers.ServerSeen.Size() == 0);
+}
+
+TEST_CASE_FIXTURE(SodiumFixture,
+                  "an agent keeping the previous seed also has the keys of a "
+                  "client still on it") {
+    // §8: the agent moved on when Resume opened, its answer was cut, and the
+    // client came back on the seed before. The tags do not involve the seed,
+    // so the handshake itself succeeds; what differs is which keys open Resume.
+    Harness peers;
+    peers.ServerPreviousSeed = Clone(peers.ServerSeed);
+    peers.ServerSeed = AdvanceConnectionSeed(peers.ServerSeed);
+
+    const auto run = peers.Run();
+    REQUIRE(run.Completed);
+    REQUIRE(run.FromClient.has_value());
+    REQUIRE(run.FromServer.has_value());
+    REQUIRE(run.FromServer->FallbackKeys.has_value());
+
+    const auto& client = run.FromClient->Keys;
+    const auto& current = run.FromServer->Keys;
+    const auto& fallback = *run.FromServer->FallbackKeys;
+    CHECK(Bytes(client.ClientToServer) != Bytes(current.ClientToServer));
+    CHECK(Bytes(client.ClientToServer) == Bytes(fallback.ClientToServer));
+    CHECK(Bytes(client.ServerToClient) == Bytes(fallback.ServerToClient));
+    CHECK(client.SaltClientToServer == fallback.SaltClientToServer);
+    CHECK(client.SaltServerToClient == fallback.SaltServerToClient);
+}
+
+TEST_CASE_FIXTURE(SodiumFixture,
+                  "without a previous seed there are no fallback keys") {
+    Harness peers;
+    const auto run = peers.Run();
+    REQUIRE(run.Completed);
+    REQUIRE(run.FromClient.has_value());
+    REQUIRE(run.FromServer.has_value());
+    CHECK_FALSE(run.FromServer->FallbackKeys.has_value());
+    // The client never keeps one: §8 has it move only once the agent has.
+    CHECK_FALSE(run.FromClient->FallbackKeys.has_value());
 }
 
 TEST_CASE_FIXTURE(SodiumFixture, "an unfinished handshake remembers nothing") {
