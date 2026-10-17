@@ -84,6 +84,9 @@ ChannelResult<IncomingEvent> Channel::Receive(
             if (const auto ackRes = SendBuf_.Acknowledge(msg->Ack); !ackRes) {
                 return std::unexpected(SessionError{ackRes.error()});
             }
+            // A resend may straddle recv_offset: the cursor hands back only
+            // the new tail, which starts here and not at msg->Offset.
+            const std::uint64_t tailOffset = RecvCursor_.RecvOffset();
             // Deliver through the cursor. Returns a sub-span of *opened (which
             // is a sub-span of scratch), so no copy. §9.
             const auto delivered =
@@ -96,7 +99,7 @@ ChannelResult<IncomingEvent> Channel::Receive(
             if (delivered->empty()) {
                 return DeliveredNothing{};
             }
-            return DeliveredData{*delivered, msg->Offset};
+            return DeliveredData{*delivered, tailOffset};
         }
 
         case wire::EMessageType::Ack: {
