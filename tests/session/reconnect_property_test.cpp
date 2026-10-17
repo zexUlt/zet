@@ -15,6 +15,7 @@
 
 #include <algorithm>
 #include <array>
+#include <charconv>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -24,6 +25,8 @@
 #include <optional>
 #include <random>
 #include <string>
+#include <string_view>
+#include <system_error>
 #include <variant>
 #include <vector>
 
@@ -100,10 +103,18 @@ std::vector<std::byte> Script(std::size_t size, std::uint64_t seed) {
 }
 
 std::size_t ShortScenario() {
-    if (const char* size = std::getenv("ZET_CUT_SCENARIO_BYTES")) {
-        return std::min<std::size_t>(std::stoul(size), FULL_SHORT_SCENARIO);
+    const char* raw = std::getenv("ZET_CUT_SCENARIO_BYTES");
+    if (raw == nullptr) {
+        return SHORT_SCENARIO;
     }
-    return SHORT_SCENARIO;
+    const std::string_view text{raw};
+    std::size_t size = 0;
+    const auto [end, error] =
+        std::from_chars(text.data(), text.data() + text.size(), size);
+    if (error != std::errc{} || end != text.data() + text.size()) {
+        FAIL("ZET_CUT_SCENARIO_BYTES is not a byte count: " << text);
+    }
+    return std::min(size, FULL_SHORT_SCENARIO);
 }
 
 enum class EDirection : std::uint8_t { AgentToClient, ClientToAgent };
@@ -324,6 +335,7 @@ private:
     }
 
     void Take(ByteSpan bytes, EDirection direction) {
+        CAPTURE(Received_.size());
         REQUIRE(direction == Direction_);
         Received_.insert(Received_.end(), bytes.begin(), bytes.end());
         // Any byte that differs fails here rather than at the end, so the
@@ -389,8 +401,8 @@ constexpr std::size_t MAX_FRAMES_BEFORE_CUT = 3;
 /// Bytes into a connection a sampled cut may land at.
 constexpr std::uint64_t SAMPLED_CUT_RANGE = 16 * 1024;
 
-/// Cuts every connection, the way §16 lays out for the long scenario, until
-/// `budget` connections have died; the rest of the stream then goes whole.
+/// Cuts every connection, the way §16 lays out for the long scenario, and
+/// counts into `counts` how many died of each kind.
 /// How many connections died of each kind of cut.
 using CutCounts = std::array<std::size_t, BOUNDARY_CUT_KINDS>;
 
@@ -420,6 +432,7 @@ CutPlan CutAtBoundaries(std::uint64_t seed,
             1 + (frame.Connection / BOUNDARY_CUT_KINDS) % MAX_FRAMES_BEFORE_CUT;
         switch (kind) {
             case EBoundaryCut::Before:
+                // Size counts the header, so Size - 1 is never below zero.
                 if (frame.Index == whole) {
                     return die(frame.Size - 1);
                 }
