@@ -36,7 +36,7 @@ fi
 
 # shellcheck disable=SC2086 # the list is one path per line, without spaces
 matches=$(grep -nE "$banned" $files)
-violations=$(printf '%s' "$matches" | grep -c .)
+violations=$(printf '%s' "$matches" | grep -c .) || true
 
 [ -z "$matches" ] || printf '%s\n' "$matches" | sed 's/^/  /'
 
