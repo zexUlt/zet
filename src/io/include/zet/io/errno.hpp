@@ -19,7 +19,8 @@ struct Errno {
 
     /// What the C library says the code means. Good until the next call:
     /// musl answers from a static table, but glibc writes an unknown code's
-    /// text into a buffer the next strerror reuses.
+    /// text into a buffer the next strerror reuses. A getaddrinfo failure is
+    /// described from its own EAI_* table.
     [[nodiscard]] std::string_view Description() const noexcept;
 
     [[nodiscard]] friend bool operator==(const Errno& a,
