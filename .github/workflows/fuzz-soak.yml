@@ -19,23 +19,59 @@ on:
   schedule:
     - cron: "0 3 * * *"
 
+# Per ref: a soak of one branch has no reason to wait for another's.
 concurrency:
-  group: ${{ github.workflow }}
+  group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: false
 
 env:
   ZET_APK_CACHE: ${{ github.workspace }}/../apk-cache
 
 jobs:
-  soak:
-    name: soak
+  # The targets, read off the zet_add_fuzzer lines so that the matrix below
+  # follows fuzz/CMakeLists.txt with no list of its own. A line the pattern
+  # does not take fails here instead of leaving its target out of the soak.
+  list:
+    name: list fuzzers
     runs-on: ubuntu-24.04
-    timeout-minutes: 300
+    outputs:
+      fuzzers: ${{ steps.list.outputs.fuzzers }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Read fuzz/CMakeLists.txt
+        id: list
+        run: |
+          file=fuzz/CMakeLists.txt
+          calls=$(grep -c '^zet_add_fuzzer(' "$file")
+          names=$(sed -n 's/^zet_add_fuzzer(\([a-z0-9_]*\)[ )].*/\1/p' "$file")
+          if [ "$calls" -eq 0 ] || [ "$(printf '%s\n' "$names" | grep -c .)" -ne "$calls" ]; then
+            echo "read $calls zet_add_fuzzer lines but $(printf '%s\n' "$names" | grep -c .) names:"
+            printf '%s\n' "$names"
+            exit 2
+          fi
+          json=$(printf '%s\n' "$names" | jq -R . | jq -sc .)
+          echo "fuzzers=$json" >>"$GITHUB_OUTPUT"
+          echo "$json"
+
+  # One job per target: the gate is wall time per fuzzer, and run one after
+  # another the six of them took an hour at 600 seconds and two and a half at
+  # the nightly 1800.
+  soak:
+    name: soak ${{ matrix.fuzzer }}
+    needs: list
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        fuzzer: ${{ fromJSON(needs.list.outputs.fuzzers) }}
     env:
       # Through the environment rather than straight into the run script: a
       # dispatch input is text someone typed, and interpolating it into a shell
       # line is how it becomes a command.
       ZET_FUZZ_SECONDS: ${{ github.event.inputs.seconds || 1800 }}
+      ZET_FUZZER: ${{ matrix.fuzzer }}
     steps:
       - uses: actions/checkout@v4
 
@@ -47,7 +83,7 @@ jobs:
       - name: Restore the Alpine packages
         uses: ./.github/actions/apk
 
-      - name: Soak every fuzzer
+      - name: Soak ${{ matrix.fuzzer }}
         run: |
           case "$ZET_FUZZ_SECONDS" in
             '' | *[!0-9]*)
@@ -55,13 +91,13 @@ jobs:
               exit 2
               ;;
           esac
-          tools/fuzz_run.sh "$ZET_FUZZ_SECONDS"
+          tools/fuzz_run.sh "$ZET_FUZZ_SECONDS" musl-fuzz "$ZET_FUZZER"
 
       - name: Keep what the fuzzers found
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: fuzz-soak-findings
+          name: fuzz-soak-findings-${{ matrix.fuzzer }}
           path: build/musl-fuzz/findings/
           if-no-files-found: ignore
 
@@ -72,7 +108,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: fuzz-soak-corpus
+          name: fuzz-soak-corpus-${{ matrix.fuzzer }}
           path: build/musl-fuzz/work/
           if-no-files-found: ignore
           retention-days: 14

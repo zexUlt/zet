@@ -11,11 +11,16 @@
 # they are decoded into the build directory here. Anything in a corpus that is
 # not .hex is a crash input kept byte for byte and is copied as it is.
 #
-# Usage: tools/fuzz_run.sh [seconds] [preset]
+# A third argument runs that one target alone, which is how the soak runs
+# its targets side by side, one job each. A name the manifest does not list
+# is an error rather than a run of nothing.
+#
+# Usage: tools/fuzz_run.sh [seconds] [preset] [fuzzer]
 set -euo pipefail
 
 seconds=${1:-60}
 preset=${2:-musl-fuzz}
+only=${3:-}
 build=build/$preset
 
 # 8 KiB: enough for a body that clears MAX_HANDSHAKE_FRAME, which is where the
@@ -47,7 +52,7 @@ cd "$root" || exit 2
 # in the container, so the whole run happens inside it.
 if [ -z "${ZET_IN_ALPINE:-}" ]; then
     exec "$root/tools/in_alpine.sh" \
-        "ZET_IN_ALPINE=1 tools/fuzz_run.sh $seconds $preset"
+        "ZET_IN_ALPINE=1 tools/fuzz_run.sh $seconds $preset $only"
 fi
 
 cmake --preset "$preset" >/dev/null
@@ -68,6 +73,7 @@ count=0
 
 while read -r name binary corpus; do
     [ -n "$name" ] || continue
+    [ -z "$only" ] || [ "$name" = "$only" ] || continue
     count=$((count + 1))
 
     seeds=$build/seeds/$name
@@ -105,6 +111,11 @@ while read -r name binary corpus; do
         status=1
     fi
 done <"$manifest"
+
+if [ -n "$only" ] && [ "$count" -eq 0 ]; then
+    echo "no fuzzer named '$only' in $manifest" >&2
+    exit 2
+fi
 
 printf 'fuzzers run: %d, with findings: %d\n' "$count" "$status"
 
