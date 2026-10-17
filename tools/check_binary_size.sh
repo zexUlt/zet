@@ -32,7 +32,7 @@ for entry in "${budgets[@]}"; do
         continue
     fi
 
-    size=$(( $(stat -c %s "$path") / 1024 ))
+    size=$(( $(wc -c < "$path") / 1024 ))
     checked=$((checked + 1))
     percent=$(( size * 100 / budget ))
 

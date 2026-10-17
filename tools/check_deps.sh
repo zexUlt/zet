@@ -27,8 +27,8 @@ while read -r line; do
 # pkg_check_modules is on the list because that is how libsodium actually
 # arrives: it named no find_package, so the gate saw nothing and would have let
 # the next dependency in the same way through unnoticed.
-done < <(grep -hoE '(find_package|FetchContent_Declare|pkg_check_modules)\s*\(\s*[A-Za-z0-9_]+' "${cmake_files[@]}" 2>/dev/null \
-         | sed -E 's/.*\(\s*//' | sort -u)
+done < <(grep -hoE '(find_package|FetchContent_Declare|pkg_check_modules)[[:space:]]*\([[:space:]]*[A-Za-z0-9_]+' "${cmake_files[@]}" 2>/dev/null \
+         | sed -E 's/.*\([[:space:]]*//' | sort -u)
 
 violations=0
 for dep in "${found[@]}"; do
