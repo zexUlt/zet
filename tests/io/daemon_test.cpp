@@ -45,10 +45,19 @@ TEST_CASE("Detach leaves a child in its own session with stdio on /dev/null") {
     struct stat devNull{};
     REQUIRE(::stat("/dev/null", &devNull) == 0);
 
+    bool closeStdin = false;
+    SUBCASE("with stdio open") {}
+    SUBCASE("with stdin closed, so /dev/null opens as descriptor 0") {
+        closeStdin = true;
+    }
+
     const pid_t launcher = ::fork();
     REQUIRE(launcher >= 0);
     if (launcher == 0) {
         // Stands for the process ssh started.
+        if (closeStdin) {
+            ::close(STDIN_FILENO);
+        }
         const auto role = Detach();
         if (!role) {
             ::_exit(EXIT_FAILURE);

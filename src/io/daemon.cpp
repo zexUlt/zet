@@ -33,6 +33,11 @@ IoResult<EDetached> Detach() noexcept {
             return std::unexpected(LastErrno("fcntl"));
         }
     }
+    // Kept open if it is one of the three: closing it on the way out would
+    // leave the very descriptor it was just made to fill free again.
+    if (null.Get() <= STDERR_FILENO) {
+        static_cast<void>(null.Release());
+    }
     return EDetached::Child;
 }
 
