@@ -16,6 +16,14 @@ namespace {
 /// Resume as it is sealed: the type byte and one offset.
 constexpr std::size_t RESUME_PLAINTEXT_SIZE = 1 + sizeof(std::uint64_t);
 
+// Resume is written with its result ignored because the array is exactly this
+// wide. A field added to ResumeMessage must break the build here, not leave
+// the write failing quietly and the agent opening zeros.
+static_assert(sizeof(wire::ResumeMessage) == sizeof(std::uint64_t) &&
+              RESUME_PLAINTEXT_SIZE ==
+                  sizeof(wire::EMessageType) +
+                      sizeof(wire::ResumeMessage::ClientReceiveOffset));
+
 /// What every cleartext frame must say in its epoch byte (§7).
 constexpr std::uint8_t CLEARTEXT_EPOCH = 0;
 
