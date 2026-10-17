@@ -31,7 +31,12 @@ if [ ${#objects[@]} -eq 0 ]; then
     exit 2
 fi
 
-banned='^(abort|exit|_exit|_Exit|quick_exit|__assert_fail|__assert_perror_fail|_ZSt9terminatev|__cxa_call_terminate)$'
+# The last entry is how libc++ ends the process when built without
+# exceptions: std::get on the wrong alternative, a valueless std::visit, an
+# optional's value() on empty — each calls __libcpp_verbose_abort where it
+# would have thrown. It is a call to abort under another name, and the core
+# reaches it through nothing more than a header.
+banned='^(abort|exit|_exit|_Exit|quick_exit|__assert_fail|__assert_perror_fail|_ZSt9terminatev|__cxa_call_terminate|_ZNSt3__122__libcpp_verbose_abortEPKcz)$'
 
 violations=0
 for obj in "${objects[@]}"; do

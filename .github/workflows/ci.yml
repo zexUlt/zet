@@ -176,6 +176,27 @@ jobs:
           fi
           git checkout src/core/byte_writer.cpp
 
+      # The same gate, broken the way a header breaks it: no abort in sight,
+      # just std::get, which under -fno-exceptions libc++ turns into a call to
+      # __libcpp_verbose_abort. Appended like the canary above, for the same
+      # reason, and checked for having applied.
+      - name: check_no_abort catches abort hidden in a standard header
+        run: |
+          printf '\nnamespace zet {\nint GateSelfTestVariant(const std::variant<int, long>& v) { return std::get<int>(v); }\n}  // namespace zet\n' \
+            >> src/core/byte_writer.cpp
+          sed -i '1i #include <variant>' src/core/byte_writer.cpp
+          if ! grep -q GateSelfTestVariant src/core/byte_writer.cpp; then
+            echo "the injection did not apply — this self-test checks nothing"
+            git checkout src/core/byte_writer.cpp
+            exit 1
+          fi
+          tools/musl_build.sh musl-dev
+          if tools/check_no_abort.sh build/musl-dev; then
+            echo "the gate passed a std::get that can end the process"
+            exit 1
+          fi
+          git checkout src/core/byte_writer.cpp
+
       - name: check_deps catches an undeclared dependency
         run: |
           test -f src/core/CMakeLists.txt || { echo "the injection target moved"; exit 1; }
