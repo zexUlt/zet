@@ -17,7 +17,9 @@ struct Errno {
     /// non-blocking descriptor, only a sign to wait for the poller.
     [[nodiscard]] bool WouldBlock() const noexcept;
 
-    /// What the C library says the code means.
+    /// What the C library says the code means. Good until the next call:
+    /// musl answers from a static table, but glibc writes an unknown code's
+    /// text into a buffer the next strerror reuses.
     [[nodiscard]] std::string_view Description() const noexcept;
 
     [[nodiscard]] friend bool operator==(const Errno& a,
