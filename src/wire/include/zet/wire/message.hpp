@@ -14,13 +14,12 @@
 #include "zet/wire/limits.hpp"
 
 /// The handshake messages of docs/design.md §7 and the TLV options two of them
-/// carry.
+/// carry, plus the sealed session messages that follow authentication.
 ///
-/// Handshake messages travel in the clear: the connection keys are derived from
-/// nonces these very messages exchange, so at Hello time there is nothing to
-/// encrypt with. Their integrity is established afterwards by the transcript
-/// MAC in Auth/AuthOk (§5), which is why nothing here may act on what it
-/// parsed.
+/// Handshake messages (0x01…0x05) travel in the clear; session messages
+/// (0x10…0x14) travel sealed inside an AEAD frame. The two groups share the
+/// same type byte namespace so that a frame parser can route them all before
+/// any decryption happens.
 namespace zet::wire {
 
 /// The registry from §7. 0x06…0x0F are reserved for bootstrap, 0x10…0x1F for
@@ -31,7 +30,26 @@ enum class EMessageType : std::uint8_t {
     Auth = 0x03,
     AuthOk = 0x04,
     Resume = 0x05,
+
+    // Session messages (sealed mode, §7). These arrive only after the
+    // transcript MAC has been verified. The handshake state machine rejects
+    // them pre-auth: ParseMessageType returning a known type is not the same
+    // as the type being valid in the current state.
+    Data = 0x10,
+    Ack = 0x11,
+    Resize = 0x12,
+    Ping = 0x13,
+    Pong = 0x14,
 };
+
+/// Upper bound on the stream bytes a Data message may carry (§7).
+///
+/// Derived as: MAX_FRAME − crypto::TAG_SIZE − 1 (type byte) − 16 (ack:u64be ‖
+/// offset:u64be) = 262144 − 16 − 1 − 16 = 262111.
+/// A Data longer than this is rejected by both ParseData and WriteData.
+inline constexpr std::size_t MAX_DATA_PAYLOAD = MAX_FRAME - crypto::TAG_SIZE -
+                                                sizeof(std::uint8_t) -
+                                                2 * sizeof(std::uint64_t);
 
 /// "ZET1", the four bytes after the type byte of every Hello there will ever
 /// be.
@@ -111,6 +129,38 @@ struct ResumeMessage {
     std::uint64_t ClientReceiveOffset{0};
 };
 
+/// §7. `Payload` is a non-owning view into the buffer the message was parsed
+/// from; it does not outlive it and must not be empty (use Ack for "nothing
+/// new, but I acknowledge").
+struct DataMessage {
+    std::uint64_t Ack{0};
+    std::uint64_t Offset{0};
+    ByteSpan Payload{};
+};
+
+struct AckMessage {
+    std::uint64_t Ack{0};
+};
+
+/// Carries all four fields of struct winsize (§7). Pixel dimensions are needed
+/// for sixel support (M6); putting them in the protocol now costs four bytes
+/// per Resize and avoids a new message type later.
+struct ResizeMessage {
+    std::uint16_t Rows{0};
+    std::uint16_t Cols{0};
+    std::uint16_t XPixel{0};
+    std::uint16_t YPixel{0};
+};
+
+struct PingMessage {
+    std::uint64_t Token{0};
+};
+
+struct PongMessage {
+    /// Must equal the token from the Ping this is answering (§7).
+    std::uint64_t Token{0};
+};
+
 /// Reads the byte every frame body opens with.
 ///
 /// Parse* below pick up where this left off: dispatching on the type is what
@@ -151,5 +201,26 @@ struct ResumeMessage {
     ByteReader& reader) noexcept;
 [[nodiscard]] ProtoResult<void> WriteResume(
     ByteWriter& writer, const ResumeMessage& message) noexcept;
+
+[[nodiscard]] ProtoResult<DataMessage> ParseData(ByteReader& reader) noexcept;
+[[nodiscard]] ProtoResult<void> WriteData(ByteWriter& writer,
+                                          const DataMessage& message) noexcept;
+
+[[nodiscard]] ProtoResult<AckMessage> ParseAck(ByteReader& reader) noexcept;
+[[nodiscard]] ProtoResult<void> WriteAck(ByteWriter& writer,
+                                         const AckMessage& message) noexcept;
+
+[[nodiscard]] ProtoResult<ResizeMessage> ParseResize(
+    ByteReader& reader) noexcept;
+[[nodiscard]] ProtoResult<void> WriteResize(
+    ByteWriter& writer, const ResizeMessage& message) noexcept;
+
+[[nodiscard]] ProtoResult<PingMessage> ParsePing(ByteReader& reader) noexcept;
+[[nodiscard]] ProtoResult<void> WritePing(ByteWriter& writer,
+                                          const PingMessage& message) noexcept;
+
+[[nodiscard]] ProtoResult<PongMessage> ParsePong(ByteReader& reader) noexcept;
+[[nodiscard]] ProtoResult<void> WritePong(ByteWriter& writer,
+                                          const PongMessage& message) noexcept;
 
 }  // namespace zet::wire

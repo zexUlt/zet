@@ -32,10 +32,27 @@ ProtoResult<void> WriteMessage(ByteWriter& writer,
                                const ResumeMessage& message) {
     return WriteResume(writer, message);
 }
+ProtoResult<void> WriteMessage(ByteWriter& writer, const DataMessage& message) {
+    return WriteData(writer, message);
+}
+ProtoResult<void> WriteMessage(ByteWriter& writer, const AckMessage& message) {
+    return WriteAck(writer, message);
+}
+ProtoResult<void> WriteMessage(ByteWriter& writer,
+                               const ResizeMessage& message) {
+    return WriteResize(writer, message);
+}
+ProtoResult<void> WriteMessage(ByteWriter& writer, const PingMessage& message) {
+    return WritePing(writer, message);
+}
+ProtoResult<void> WriteMessage(ByteWriter& writer, const PongMessage& message) {
+    return WritePong(writer, message);
+}
 
 template <typename TMessage>
 std::vector<std::byte> Encode(const TMessage& message) {
-    std::vector<std::byte> out(MAX_HANDSHAKE_FRAME);
+    // MAX_FRAME is enough for any message the codecs in this file produce.
+    std::vector<std::byte> out(MAX_FRAME);
     ByteWriter writer{MutableByteSpan{out}};
     REQUIRE(WriteMessage(writer, message).has_value());
     out.resize(writer.Size());
@@ -70,6 +87,16 @@ ProtoResult<void> ParseAny(ByteSpan bytes) {
             return Discard(ParseAuthOk(reader));
         case EMessageType::Resume:
             return Discard(ParseResume(reader));
+        case EMessageType::Data:
+            return Discard(ParseData(reader));
+        case EMessageType::Ack:
+            return Discard(ParseAck(reader));
+        case EMessageType::Resize:
+            return Discard(ParseResize(reader));
+        case EMessageType::Ping:
+            return Discard(ParsePing(reader));
+        case EMessageType::Pong:
+            return Discard(ParsePong(reader));
     }
     return {};
 }
@@ -115,6 +142,26 @@ AuthOkMessage MakeAuthOk() {
 ResumeMessage MakeResume() {
     return ResumeMessage{.ClientReceiveOffset = 0xFFFF'FFFF'FFFF'FFFF};
 }
+
+// For Data, the payload is a ByteSpan: keep the bytes alongside the message.
+std::pair<std::vector<std::byte>, DataMessage> MakeData() {
+    std::vector<std::byte> payload{std::byte{0xDE}, std::byte{0xAD},
+                                   std::byte{0xBE}};
+    DataMessage msg{.Ack = 0x0102'0304'0506'0708,
+                    .Offset = 0x0807'0605'0403'0201,
+                    .Payload = ByteSpan{payload}};
+    return {std::move(payload), msg};
+}
+
+AckMessage MakeAck() { return AckMessage{.Ack = 0xCAFE'BABE'0000'0001}; }
+
+ResizeMessage MakeResize() {
+    return ResizeMessage{.Rows = 24, .Cols = 80, .XPixel = 960, .YPixel = 384};
+}
+
+PingMessage MakePing() { return PingMessage{.Token = 0xDEAD'BEEF'0102'0304}; }
+
+PongMessage MakePong() { return PongMessage{.Token = 0xDEAD'BEEF'0102'0304}; }
 
 void AppendOption(std::vector<std::byte>& out, std::uint16_t type,
                   ByteSpan value) {
@@ -237,9 +284,14 @@ TEST_CASE("cutting a message at any offset is truncation, never a parse") {
     // Option-free messages: a list of options is variable length by
     // construction, so a prefix ending on an option boundary is a shorter but
     // entirely valid message. That boundary gets its own case below.
+    //
+    // Data is excluded: its payload is variable length, so any prefix at or
+    // beyond the header (type+ack+offset = 17 bytes) is either a valid shorter
+    // Data or MalformedField (empty payload). It has its own test below.
     const std::vector<std::vector<std::byte>> messages{
-        Encode(MakeHello()), Encode(MakeChallenge()), Encode(MakeAuth()),
-        Encode(MakeAuthOk()), Encode(MakeResume())};
+        Encode(MakeHello()),  Encode(MakeChallenge()), Encode(MakeAuth()),
+        Encode(MakeAuthOk()), Encode(MakeResume()),    Encode(MakeAck()),
+        Encode(MakeResize()), Encode(MakePing()),      Encode(MakePong())};
 
     for (const auto& bytes : messages) {
         const std::size_t size = bytes.size();
@@ -262,9 +314,7 @@ TEST_CASE("a writer with too little room refuses instead of overflowing") {
             .Append(TlvOption{.Type = 0x0001, .Value = ByteSpan{optionValue}})
             .has_value());
 
-    const std::vector<std::vector<std::byte>> encoded{
-        Encode(hello), Encode(MakeChallenge()), Encode(MakeAuth()),
-        Encode(MakeAuthOk()), Encode(MakeResume())};
+    auto [dataPayload, dataMsg] = MakeData();
 
     const auto refuses = [](const auto& message, std::size_t capacity) {
         std::vector<std::byte> out(capacity);
@@ -274,23 +324,24 @@ TEST_CASE("a writer with too little room refuses instead of overflowing") {
         CHECK(written.error() == EProtoError::BufferTooSmall);
     };
 
-    for (std::size_t capacity = 0; capacity < encoded.front().size();
-         ++capacity) {
-        CAPTURE(capacity);
-        refuses(hello, capacity);
-    }
-    for (std::size_t capacity = 0; capacity < encoded[1].size(); ++capacity) {
-        refuses(MakeChallenge(), capacity);
-    }
-    for (std::size_t capacity = 0; capacity < encoded[2].size(); ++capacity) {
-        refuses(MakeAuth(), capacity);
-    }
-    for (std::size_t capacity = 0; capacity < encoded[3].size(); ++capacity) {
-        refuses(MakeAuthOk(), capacity);
-    }
-    for (std::size_t capacity = 0; capacity < encoded[4].size(); ++capacity) {
-        refuses(MakeResume(), capacity);
-    }
+    const auto refusesUpTo = [&refuses](const auto& message) {
+        const auto full = Encode(message);
+        for (std::size_t capacity = 0; capacity < full.size(); ++capacity) {
+            CAPTURE(capacity);
+            refuses(message, capacity);
+        }
+    };
+
+    refusesUpTo(hello);
+    refusesUpTo(MakeChallenge());
+    refusesUpTo(MakeAuth());
+    refusesUpTo(MakeAuthOk());
+    refusesUpTo(MakeResume());
+    refusesUpTo(dataMsg);
+    refusesUpTo(MakeAck());
+    refusesUpTo(MakeResize());
+    refusesUpTo(MakePing());
+    refusesUpTo(MakePong());
 }
 
 TEST_CASE("an unknown option that is not critical is carried past") {
@@ -397,8 +448,12 @@ TEST_CASE("an option value too wide for the length field cannot be built") {
 }
 
 TEST_CASE("bytes past the last field of a fixed message are malformed") {
+    // Data is excluded: its "last field" is the variable payload, so a trailing
+    // byte would just extend the payload and remain valid.
     for (auto bytes :
-         {Encode(MakeAuth()), Encode(MakeAuthOk()), Encode(MakeResume())}) {
+         {Encode(MakeAuth()), Encode(MakeAuthOk()), Encode(MakeResume()),
+          Encode(MakeAck()), Encode(MakeResize()), Encode(MakePing()),
+          Encode(MakePong())}) {
         bytes.push_back(std::byte{0x00});
         const auto parsed = ParseAny(ByteSpan{bytes});
         REQUIRE_FALSE(parsed.has_value());
@@ -407,10 +462,10 @@ TEST_CASE("bytes past the last field of a fixed message are malformed") {
 }
 
 TEST_CASE("a type byte outside the registry is unknown") {
-    // 0x00 is not assigned, 0x06 and 0x10 open the reserved ranges of §7, 0xFF
-    // is past everything.
+    // 0x00 is not assigned, 0x06 opens the bootstrap-reserved range (§7),
+    // 0x15 is the first unassigned session type, 0xFF is past everything.
     for (const std::uint8_t type :
-         std::array<std::uint8_t, 4>{0x00, 0x06, 0x10, 0xFF}) {
+         std::array<std::uint8_t, 4>{0x00, 0x06, 0x15, 0xFF}) {
         CAPTURE(type);
         const std::vector<std::byte> bytes{std::byte{type}};
         ByteReader reader{ByteSpan{bytes}};
@@ -462,7 +517,7 @@ TEST_CASE("nothing a handshake message can say reaps the session") {
     }
 
     for (const std::uint8_t type :
-         std::array<std::uint8_t, 4>{0x00, 0x06, 0x10, 0xFF}) {
+         std::array<std::uint8_t, 4>{0x00, 0x06, 0x15, 0xFF}) {
         corpus.push_back({std::byte{type}});
     }
 
@@ -499,4 +554,191 @@ TEST_CASE("nothing a handshake message can say reaps the session") {
     // Guards the sweep itself: a corpus the parser happens to accept whole
     // would pass the check above without testing anything.
     CHECK(refused > 0);
+}
+
+// ─── Session messages ────────────────────────────────────────────────────────
+
+TEST_CASE("a data message survives a round trip") {
+    auto [payload, data] = MakeData();
+    const auto bytes = Encode(data);
+
+    ByteReader reader{ByteSpan{bytes}};
+    REQUIRE(ParseMessageType(reader) == EMessageType::Data);
+    const auto parsed = ParseData(reader);
+    REQUIRE(parsed.has_value());
+    CHECK(parsed->Ack == data.Ack);
+    CHECK(parsed->Offset == data.Offset);
+    CHECK(std::ranges::equal(parsed->Payload, data.Payload));
+    CHECK(reader.Exhausted());
+}
+
+TEST_CASE("an ack message survives a round trip") {
+    const auto ack = MakeAck();
+    const auto bytes = Encode(ack);
+
+    ByteReader reader{ByteSpan{bytes}};
+    REQUIRE(ParseMessageType(reader) == EMessageType::Ack);
+    const auto parsed = ParseAck(reader);
+    REQUIRE(parsed.has_value());
+    CHECK(parsed->Ack == ack.Ack);
+}
+
+TEST_CASE("a resize message survives a round trip") {
+    const auto resize = MakeResize();
+    const auto bytes = Encode(resize);
+
+    ByteReader reader{ByteSpan{bytes}};
+    REQUIRE(ParseMessageType(reader) == EMessageType::Resize);
+    const auto parsed = ParseResize(reader);
+    REQUIRE(parsed.has_value());
+    CHECK(parsed->Rows == resize.Rows);
+    CHECK(parsed->Cols == resize.Cols);
+    CHECK(parsed->XPixel == resize.XPixel);
+    CHECK(parsed->YPixel == resize.YPixel);
+}
+
+TEST_CASE("a ping message survives a round trip") {
+    const auto ping = MakePing();
+    const auto bytes = Encode(ping);
+
+    ByteReader reader{ByteSpan{bytes}};
+    REQUIRE(ParseMessageType(reader) == EMessageType::Ping);
+    const auto parsed = ParsePing(reader);
+    REQUIRE(parsed.has_value());
+    CHECK(parsed->Token == ping.Token);
+}
+
+TEST_CASE("a pong message survives a round trip") {
+    const auto pong = MakePong();
+    const auto bytes = Encode(pong);
+
+    ByteReader reader{ByteSpan{bytes}};
+    REQUIRE(ParseMessageType(reader) == EMessageType::Pong);
+    const auto parsed = ParsePong(reader);
+    REQUIRE(parsed.has_value());
+    CHECK(parsed->Token == pong.Token);
+}
+
+TEST_CASE("big-endian layout of session messages is pinned by explicit bytes") {
+    // Resize: rows=0x0018 cols=0x0050 xpixel=0x03C0 ypixel=0x0180.
+    {
+        const auto bytes = Encode(ResizeMessage{.Rows = 0x0018,
+                                                .Cols = 0x0050,
+                                                .XPixel = 0x03C0,
+                                                .YPixel = 0x0180});
+        const std::vector<std::byte> expected{
+            std::byte{0x12},                   // type = Resize
+            std::byte{0x00}, std::byte{0x18},  // rows
+            std::byte{0x00}, std::byte{0x50},  // cols
+            std::byte{0x03}, std::byte{0xC0},  // xpixel
+            std::byte{0x01}, std::byte{0x80},  // ypixel
+        };
+        CHECK(std::ranges::equal(bytes, expected));
+    }
+
+    // Ack: ack=0x0102030405060708.
+    {
+        const auto bytes = Encode(AckMessage{.Ack = 0x0102'0304'0506'0708});
+        const std::vector<std::byte> expected{
+            std::byte{0x11},                                    // type
+            std::byte{0x01}, std::byte{0x02}, std::byte{0x03},  // ack
+            std::byte{0x04}, std::byte{0x05}, std::byte{0x06},
+            std::byte{0x07}, std::byte{0x08},
+        };
+        CHECK(std::ranges::equal(bytes, expected));
+    }
+
+    // Data: ack=0x01, offset=0x02, payload={0xAB}.
+    {
+        const std::vector<std::byte> pl{std::byte{0xAB}};
+        const auto bytes =
+            Encode(DataMessage{.Ack = 1, .Offset = 2, .Payload = ByteSpan{pl}});
+        const std::vector<std::byte> expected{
+            std::byte{0x10},  // type
+            std::byte{0x00}, std::byte{0x00}, std::byte{0x00},
+            std::byte{0x00}, std::byte{0x00}, std::byte{0x00},
+            std::byte{0x00}, std::byte{0x01},  // ack
+            std::byte{0x00}, std::byte{0x00}, std::byte{0x00},
+            std::byte{0x00}, std::byte{0x00}, std::byte{0x00},
+            std::byte{0x00}, std::byte{0x02},  // offset
+            std::byte{0xAB},                   // payload
+        };
+        CHECK(std::ranges::equal(bytes, expected));
+    }
+}
+
+TEST_CASE("an empty data payload is malformed") {
+    // Write side refuses before producing any bytes.
+    {
+        std::vector<std::byte> out(MAX_FRAME);
+        ByteWriter writer{MutableByteSpan{out}};
+        const auto written = WriteData(writer, DataMessage{});
+        REQUIRE_FALSE(written.has_value());
+        CHECK(written.error() == EProtoError::MalformedField);
+    }
+
+    // Parse side: type + ack + offset, payload absent.
+    {
+        const std::vector<std::byte> bytes{
+            std::byte{0x10},  // type
+            std::byte{0},    std::byte{0}, std::byte{0},
+            std::byte{0},    std::byte{0}, std::byte{0},
+            std::byte{0},    std::byte{0},  // ack
+            std::byte{0},    std::byte{0}, std::byte{0},
+            std::byte{0},    std::byte{0}, std::byte{0},
+            std::byte{0},    std::byte{0},  // offset
+        };
+        const auto parsed = ParseAny(ByteSpan{bytes});
+        REQUIRE_FALSE(parsed.has_value());
+        CHECK(parsed.error() == EProtoError::MalformedField);
+    }
+}
+
+TEST_CASE("a data payload larger than MAX_DATA_PAYLOAD is refused") {
+    // Write side.
+    {
+        const std::vector<std::byte> big(MAX_DATA_PAYLOAD + 1);
+        std::vector<std::byte> out(MAX_FRAME + MAX_DATA_PAYLOAD + 1);
+        ByteWriter writer{MutableByteSpan{out}};
+        const auto written =
+            WriteData(writer, DataMessage{.Payload = ByteSpan{big}});
+        REQUIRE_FALSE(written.has_value());
+        CHECK(written.error() == EProtoError::LengthLimitExceeded);
+    }
+
+    // Parse side: craft a reader that lies about having MAX_DATA_PAYLOAD+1
+    // bytes after the header. We test the size check, not actual byte
+    // consumption, so a sub-span of a large buffer suffices.
+    {
+        std::vector<std::byte> big(1 + 8 + 8 + MAX_DATA_PAYLOAD + 1,
+                                   std::byte{0x00});
+        big.front() = std::byte{0x10};
+        ByteReader reader{ByteSpan{big}.subspan(1)};
+        const auto parsed = ParseData(reader);
+        REQUIRE_FALSE(parsed.has_value());
+        CHECK(parsed.error() == EProtoError::LengthLimitExceeded);
+    }
+}
+
+TEST_CASE("cutting a data message before the payload header is truncation") {
+    // Bytes 0..17 (exclusive) always give Truncated.
+    // Byte 17 (header complete, payload missing) gives MalformedField.
+    // Byte 18+ is a valid Data with 1+ bytes of payload.
+    const std::vector<std::byte> pl{std::byte{0xFF}};
+    const auto full =
+        Encode(DataMessage{.Ack = 0, .Offset = 0, .Payload = ByteSpan{pl}});
+    REQUIRE(full.size() == 18);
+
+    for (std::size_t prefix = 0; prefix < 17; ++prefix) {
+        CAPTURE(prefix);
+        const auto parsed = ParseAny(ByteSpan{full}.first(prefix));
+        REQUIRE_FALSE(parsed.has_value());
+        CHECK(parsed.error() == EProtoError::Truncated);
+    }
+    {
+        const auto parsed = ParseAny(ByteSpan{full}.first(17));
+        REQUIRE_FALSE(parsed.has_value());
+        CHECK(parsed.error() == EProtoError::MalformedField);
+    }
+    CHECK(ParseAny(ByteSpan{full}).has_value());
 }
