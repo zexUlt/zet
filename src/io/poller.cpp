@@ -136,6 +136,11 @@ IoResult<void> Poller::WatchSignal(int signo, std::uint64_t token) noexcept {
     if (signo <= 0 || signo > MAX_SIGNAL) {
         return std::unexpected(Refused("signalfd"));
     }
+    // One token per signal, as one per descriptor: a second subscriber would
+    // silently take the first one's events.
+    if (SignalTokens_[static_cast<std::size_t>(signo)].has_value()) {
+        return std::unexpected(Errno{.Code = EEXIST, .Call = "signalfd"});
+    }
     sigset_t one{};
     sigemptyset(&one);
     sigaddset(&one, signo);
@@ -146,9 +151,18 @@ IoResult<void> Poller::WatchSignal(int signo, std::uint64_t token) noexcept {
     }
     // Only what this call blocked is this poller's to unblock: a signal the
     // caller had blocked already stays blocked after the poller is gone.
-    if (sigismember(&before, signo) == 0) {
+    const bool blockedHere = sigismember(&before, signo) == 0;
+    if (blockedHere) {
         sigaddset(&Blocked_, signo);
     }
+    // A failure below leaves the signal neither delivered nor watched; put
+    // the mask back as the caller had it.
+    const auto undo = [&]() noexcept {
+        if (blockedHere) {
+            static_cast<void>(::pthread_sigmask(SIG_UNBLOCK, &one, nullptr));
+            sigdelset(&Blocked_, signo);
+        }
+    };
 
     // The full set of watched signals, this one included.
     sigset_t watched{};
@@ -164,12 +178,15 @@ IoResult<void> Poller::WatchSignal(int signo, std::uint64_t token) noexcept {
     const int fd = ::signalfd(first ? -1 : Signals_.Get(), &watched,
                               SFD_CLOEXEC | SFD_NONBLOCK);
     if (fd < 0) {
-        return std::unexpected(LastErrno("signalfd"));
+        const Errno error = LastErrno("signalfd");
+        undo();
+        return std::unexpected(error);
     }
     if (first) {
         UniqueFd signals{fd};
         if (auto added = Control(EPOLL_CTL_ADD, fd, EPOLLIN, SIGNAL_SOURCE);
             !added) {
+            undo();
             return added;
         }
         Signals_ = std::move(signals);
@@ -199,7 +216,8 @@ IoResult<Waker> Poller::MakeWaker(std::uint64_t token) noexcept {
 void Poller::DrainWaker() noexcept {
     // One read takes the whole counter, however many wakes it holds.
     std::uint64_t count = 0;
-    static_cast<void>(::read(Waker_.Get(), &count, sizeof(count)));
+    while (::read(Waker_.Get(), &count, sizeof(count)) < 0 && errno == EINTR) {
+    }
 }
 
 IoResult<std::size_t> Poller::TakeSignals(std::span<PollEvent> out) noexcept {
