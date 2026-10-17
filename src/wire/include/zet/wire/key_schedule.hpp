@@ -12,7 +12,7 @@
 ///
 ///     X25519 shared → K_master → { sid, K_auth, K_conn_seed }
 ///     per connection:
-///         K_conn = KDF(K_conn_seed, seq ‖ c_nonce ‖ s_nonce)
+///         K_conn = KDF(K_conn_seed, c_nonce ‖ s_nonce)
 ///                → { K_c2s, K_s2c, salt_c2s, salt_s2c }
 ///
 /// Everything below the master is derived, never transmitted. The master itself
