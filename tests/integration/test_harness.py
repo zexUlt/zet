@@ -16,8 +16,7 @@ import subprocess
 
 import pytest
 
-from harness import STEP_TIMEOUT_SECONDS, PtyProcess, Timeout, wait_process
-from conftest import NOISE_BANNER
+from harness import NOISE_BANNER, PtyProcess, STEP_TIMEOUT_SECONDS, Timeout, wait_process
 
 # More than one pipe buffer each way, so that the copy below has to keep
 # both directions moving instead of writing everything first.
@@ -100,22 +99,21 @@ def test_iptables_drop_makes_an_established_connection_half_open(iptables):
         port = listener.getsockname()[1]
         client = socket.create_connection(("127.0.0.1", port), timeout=STEP_TIMEOUT_SECONDS)
         server, _ = listener.accept()
-        rule = ["INPUT", "-i", "lo", "-p", "tcp", "--dport", str(port), "-j", "DROP"]
-        subprocess.run([iptables, "-I", *rule], check=True, timeout=STEP_TIMEOUT_SECONDS)
-        try:
-            client.sendall(b"into the void")
-            # Neither delivered nor refused: the segment is gone, and the
-            # sender learns nothing. That is the half-open a reset would hide.
-            readable, _, _ = select.select([server], [], [], DROP_WINDOW_SECONDS)
-            assert not readable
-        finally:
-            subprocess.run([iptables, "-D", *rule], check=True, timeout=STEP_TIMEOUT_SECONDS)
-        # TCP retransmits once the path is back, and the bytes arrive whole.
-        readable, _, _ = select.select([server], [], [], STEP_TIMEOUT_SECONDS)
-        assert readable
-        assert server.recv(64) == b"into the void"
-        client.close()
-        server.close()
+        with client, server:
+            rule = ["INPUT", "-i", "lo", "-p", "tcp", "--dport", str(port), "-j", "DROP"]
+            subprocess.run([iptables, "-I", *rule], check=True, timeout=STEP_TIMEOUT_SECONDS)
+            try:
+                client.sendall(b"into the void")
+                # Neither delivered nor refused: the segment is gone, and the
+                # sender learns nothing. That is the half-open a reset would hide.
+                readable, _, _ = select.select([server], [], [], DROP_WINDOW_SECONDS)
+                assert not readable
+            finally:
+                subprocess.run([iptables, "-D", *rule], check=True, timeout=STEP_TIMEOUT_SECONDS)
+            # TCP retransmits once the path is back, and the bytes arrive whole.
+            readable, _, _ = select.select([server], [], [], STEP_TIMEOUT_SECONDS)
+            assert readable
+            assert server.recv(64) == b"into the void"
 
 
 def test_the_binaries_are_there(binaries):

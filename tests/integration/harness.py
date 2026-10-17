@@ -35,6 +35,11 @@ class Finished:
     output: bytes
 
 
+# The first line the noisy .bashrc of conftest.py prints. Here rather than in
+# conftest.py: a test module that imports conftest gets a second copy of it.
+NOISE_BANNER = b"Welcome to the noisy host"
+
+
 def _deadline(timeout: float) -> float:
     return time.monotonic() + timeout
 

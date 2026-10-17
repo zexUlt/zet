@@ -17,7 +17,7 @@ from pathlib import Path
 
 import pytest
 
-from harness import STEP_TIMEOUT_SECONDS, Timeout, read_until
+from harness import NOISE_BANNER, STEP_TIMEOUT_SECONDS, Timeout, read_until
 
 SSHD = "/usr/sbin/sshd"
 
@@ -29,9 +29,8 @@ TEST_USER = "zettest"
 HOST_ALIAS = "zet-test-host"
 
 # Printed by the noisy .bashrc. Everything a careless rc file does to stdout
-# at login: a banner, a lookalike of our own bootstrap block, bytes that are
-# not text, and a line without a newline at the end.
-NOISE_BANNER = b"Welcome to the noisy host"
+# at login: a banner (NOISE_BANNER), a lookalike of our own bootstrap block,
+# bytes that are not text, and a line without a newline at the end.
 NOISY_BASHRC = r"""
 echo 'Welcome to the noisy host'
 echo '-----BEGIN ZET BOOTSTRAP-----'
@@ -62,7 +61,13 @@ def _run(argv: list[str], **kwargs) -> subprocess.CompletedProcess:
     return subprocess.run(argv, check=True, timeout=STEP_TIMEOUT_SECONDS, **kwargs)
 
 
+# How many ports the fixture tries before giving up on starting sshd.
+SSHD_START_ATTEMPTS = 3
+
+
 def _free_port() -> int:
+    # Free when probed, not necessarily when sshd binds it: another process
+    # may take it in between, which is why the fixture retries on a new one.
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
         probe.bind(("127.0.0.1", 0))
         return probe.getsockname()[1]
@@ -128,9 +133,9 @@ def ssh_host(tmp_path_factory) -> SshHost:
     os.chown(authorized, user.pw_uid, user.pw_gid)
     authorized.chmod(0o600)
 
-    port = _free_port()
-    sshd_config = work / "sshd_config"
-    sshd_config.write_text(f"""\
+    def write_configs(port: int) -> tuple[Path, Path]:
+        sshd_config = work / "sshd_config"
+        sshd_config.write_text(f"""\
 ListenAddress 127.0.0.1
 Port {port}
 HostKey {host_key}
@@ -148,10 +153,10 @@ LogLevel INFO
 SetEnv BASH_ENV={home / ".bashrc"}
 """)
 
-    known_hosts = work / "known_hosts"
-    known_hosts.write_text(f"[127.0.0.1]:{port} {(work / 'host_key.pub').read_text()}")
-    client_config = work / "ssh_config"
-    client_config.write_text(f"""\
+        known_hosts = work / "known_hosts"
+        known_hosts.write_text(f"[127.0.0.1]:{port} {(work / 'host_key.pub').read_text()}")
+        client_config = work / "ssh_config"
+        client_config.write_text(f"""\
 Host {HOST_ALIAS}
     HostName 127.0.0.1
     Port {port}
@@ -164,26 +169,44 @@ Host {HOST_ALIAS}
     LogLevel ERROR
 """)
 
+        return sshd_config, client_config
+
     # -D keeps it in the foreground, -e sends the log to stderr, which is how
-    # the fixture learns that it listens: no polling the port.
-    sshd = subprocess.Popen([SSHD, "-D", "-e", "-f", str(sshd_config)],
-                            stderr=subprocess.PIPE)
-    try:
-        read_until(sshd.stderr.fileno(), b"Server listening on 127.0.0.1 port")
-    except (Timeout, AssertionError):
-        sshd.kill()
-        sshd.wait()
-        raise
+    # the fixture learns that it listens: no polling the port. A taken port
+    # shows as sshd exiting before that line, and gets one more try.
+    for attempt in range(SSHD_START_ATTEMPTS):
+        port = _free_port()
+        sshd_config, client_config = write_configs(port)
+        sshd = subprocess.Popen([SSHD, "-D", "-e", "-f", str(sshd_config)],
+                                stderr=subprocess.PIPE)
+        try:
+            read_until(sshd.stderr.fileno(), b"Server listening on 127.0.0.1 port")
+            break
+        except (Timeout, AssertionError):
+            sshd.kill()
+            sshd.wait()
+            if attempt + 1 == SSHD_START_ATTEMPTS:
+                raise
+
+    # Read sshd's log for as long as it runs: every login writes to it, and a
+    # pipe nobody drains would block sshd once its buffer filled. A process
+    # rather than a thread: the suite forks ptys, and a forked threaded
+    # process is how child deadlocks start.
+    log = open(work / "sshd.log", "ab")
+    drain = subprocess.Popen(["cat"], stdin=sshd.stderr, stdout=log)
+    sshd.stderr.close()
+    log.close()
     try:
         yield SshHost(config=client_config, alias=HOST_ALIAS, user=TEST_USER,
                       home=home, port=port)
     finally:
         sshd.terminate()
-        try:
-            sshd.wait(timeout=STEP_TIMEOUT_SECONDS)
-        except subprocess.TimeoutExpired:
-            sshd.kill()
-            sshd.wait()
+        for process in (sshd, drain):
+            try:
+                process.wait(timeout=STEP_TIMEOUT_SECONDS)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait()
 
 
 @pytest.fixture
