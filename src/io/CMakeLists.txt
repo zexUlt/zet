@@ -1,10 +1,13 @@
 add_library(zet_io STATIC
     clock.cpp
+    daemon.cpp
     errno.cpp
     fd.cpp
     poller.cpp
     pty.cpp
     spawn.cpp
+    tcp.cpp
+    terminal.cpp
 )
 add_library(zet::io ALIAS zet_io)
 

@@ -47,6 +47,7 @@ target_link_libraries(zet_tests PRIVATE
 if(ZET_HAVE_IO)
     target_sources(zet_tests PRIVATE
         io/clock_test.cpp
+        io/daemon_test.cpp
         io/fd_test.cpp
         io/poller_test.cpp
         io/pty_test.cpp
@@ -54,6 +55,8 @@ if(ZET_HAVE_IO)
         io/fake_pty.cpp
         io/pty_contract_test.cpp
         io/pty_burst_test.cpp
+        io/tcp_test.cpp
+        io/terminal_test.cpp
     )
 
     # The child the pty contract and the burst run against (design.md §16):
