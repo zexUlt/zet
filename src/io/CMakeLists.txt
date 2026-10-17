@@ -5,6 +5,8 @@ add_library(zet_io STATIC
     pty.cpp
     spawn.cpp
     poller.cpp
+    pty.cpp
+    spawn.cpp
 )
 add_library(zet::io ALIAS zet_io)
 
