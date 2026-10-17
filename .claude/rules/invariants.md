@@ -24,7 +24,7 @@
 
 ## 3. Никаких `sleep` в горячем пути
 
-`sleep`, `usleep`, `nanosleep`, `std::this_thread::sleep_for` вне тестов запрещены — проверяется grep-гейтом.
+`sleep`, `usleep`, `nanosleep`, `clock_nanosleep`, `std::this_thread::sleep_for` и `sleep_until` вне тестов запрещены — проверяется grep-гейтом.
 
 Ожидание — только через таймерную очередь общего event loop. Таймаут `epoll_wait` вычисляется из ближайшего дедлайна; фиксированных тиков нет.
 
