@@ -117,7 +117,9 @@ private:
                 return false;
             }
             if (events == 0) {
-                return (waiting.revents & POLLHUP) != 0;
+                // Only the two poll reports unasked; an error on the master
+                // ends the child's side as surely as a hangup does.
+                return (waiting.revents & (POLLHUP | POLLERR)) != 0;
             }
             // A hangup wakes a wait for either direction, and the read or
             // write that follows is what tells the caller about it.

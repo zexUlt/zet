@@ -122,8 +122,10 @@ TEST_CASE_TEMPLATE(
                                           << echoed.size() << " echoed");
         }
     }
-    REQUIRE(echoed.size() == ROUND_TRIP_BYTES);
-    CHECK(echoed == Pattern(0, ROUND_TRIP_BYTES));
+    // The stall alone may have taken more than ROUND_TRIP_BYTES on a kernel
+    // with generous buffers; what matters is that all of it came back.
+    REQUIRE(echoed.size() == written);
+    CHECK(echoed == Pattern(0, written));
 }
 
 TEST_CASE_TEMPLATE(
