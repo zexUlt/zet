@@ -20,6 +20,10 @@ std::string_view Describe(ESessionError error) noexcept {
             return "no client came back within the orphan timeout";
         case ESessionError::SessionReaped:
             return "the session has already ended";
+        case ESessionError::HandshakeTimeout:
+            return "the resume handshake took too long";
+        case ESessionError::Superseded:
+            return "a newer connection took the session over";
     }
     return "unknown session error";
 }

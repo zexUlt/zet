@@ -17,6 +17,10 @@ TEST_CASE(
           EDisposition::CloseConnection);
     CHECK(DispositionOf(ESessionError::UnknownSeed) ==
           EDisposition::CloseConnection);
+    CHECK(DispositionOf(ESessionError::HandshakeTimeout) ==
+          EDisposition::CloseConnection);
+    CHECK(DispositionOf(ESessionError::Superseded) ==
+          EDisposition::CloseConnection);
 }
 
 TEST_CASE("a resume that did not authenticate cannot end the session") {
@@ -42,7 +46,8 @@ TEST_CASE("every session error has a reason worth showing the user") {
           ESessionError::DisconnectBufferOverflow,
           ESessionError::NotAuthenticated, ESessionError::UnknownSeed,
           ESessionError::PeerBehindBuffer, ESessionError::OrphanTimeout,
-          ESessionError::SessionReaped}) {
+          ESessionError::SessionReaped, ESessionError::HandshakeTimeout,
+          ESessionError::Superseded}) {
         CAPTURE(static_cast<int>(error));
         CHECK_FALSE(Describe(error).empty());
         CHECK(Describe(error) != "unknown session error");

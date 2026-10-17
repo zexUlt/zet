@@ -7,6 +7,7 @@
 
 #include "zet/core/error.hpp"
 #include "zet/session/error.hpp"
+#include "zet/wire/handshake.hpp"
 
 namespace zet::session {
 
@@ -35,7 +36,18 @@ public:
     constexpr SessionError(ESessionError error) noexcept
         : Session_(error), IsProto_(false) {}
 
+    /// Keeps the cap PreAuthError puts on the disposition. Unwrapping it into
+    /// its EProtoError would hand back KillSession for a VersionMismatch read
+    /// out of a cleartext Hello — the one thing §5 says reading a sid off the
+    /// wire must not be able to do.
+    // NOLINTNEXTLINE(google-explicit-constructor)
+    constexpr SessionError(wire::PreAuthError error) noexcept
+        : Proto_(error.Error()), IsProto_(true), PreAuth_(true) {}
+
     [[nodiscard]] constexpr EDisposition Disposition() const noexcept {
+        if (PreAuth_) {
+            return wire::PreAuthError{Proto_}.Disposition();
+        }
         return IsProto_ ? DispositionOf(Proto_) : DispositionOf(Session_);
     }
 
@@ -66,6 +78,7 @@ private:
     EProtoError Proto_{};
     ESessionError Session_{};
     bool IsProto_;
+    bool PreAuth_{false};
 };
 
 template <typename TValue>
