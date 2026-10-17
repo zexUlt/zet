@@ -23,8 +23,6 @@ struct SodiumFixture {
 };
 
 constexpr std::size_t SCRATCH = 256;
-constexpr std::uint64_t RECEIVE_OFFSET = 4096;
-
 crypto::Key MakeKey(std::uint8_t seed) {
     crypto::KeyBytes bytes{};
     std::uint8_t value = seed;
@@ -73,8 +71,7 @@ ConnectResult Connect(ClientSession& client, AgentSession& agent,
                       std::uint8_t serverNonceSeed) {
     ConnectResult out;
     ClientResumeAttempt clientAttempt{client, MakeNonce(clientNonceSeed)};
-    ResumeAttempt agentAttempt{agent.Ref(), MakeNonce(serverNonceSeed),
-                               RECEIVE_OFFSET};
+    ResumeAttempt agentAttempt{agent.Ref(), MakeNonce(serverNonceSeed)};
 
     std::vector<std::byte> a(SCRATCH);
     std::vector<std::byte> b(SCRATCH);
@@ -108,8 +105,8 @@ ConnectResult Connect(ClientSession& client, AgentSession& agent,
 
 TEST_CASE_FIXTURE(SodiumFixture,
                   "a client and an agent complete a resume and agree on keys") {
-    AgentSession agent{DeriveSessionSecrets(MakeKey(1))};
-    ClientSession client{DeriveSessionSecrets(MakeKey(1))};
+    AgentSession agent{DeriveSessionSecrets(MakeKey(1)), SessionStreams{}};
+    ClientSession client{DeriveSessionSecrets(MakeKey(1)), SessionStreams{}};
 
     auto out = Connect(client, agent, 10, 20);
     REQUIRE(out.FromClient.has_value());
@@ -119,7 +116,7 @@ TEST_CASE_FIXTURE(SodiumFixture,
     auto& agentResumed = *out.FromAgent;
     CHECK(clientResumed.Handle.Id() == client.Id());
     CHECK(SameKeys(clientResumed.Result.Keys, agentResumed.Result.Keys));
-    CHECK(clientResumed.Result.PeerReceiveOffset == RECEIVE_OFFSET);
+    CHECK(clientResumed.Result.PeerReceiveOffset == 0);
 }
 
 TEST_CASE_FIXTURE(
@@ -127,12 +124,12 @@ TEST_CASE_FIXTURE(
     "a fake agent without K_auth never yields a client handle and leaves the "
     "client session untouched") {
     // The agent knows the sid (read off the wire) but not K_auth.
-    AgentSession realAgent{DeriveSessionSecrets(MakeKey(1))};
-    ClientSession client{DeriveSessionSecrets(MakeKey(1))};
+    AgentSession realAgent{DeriveSessionSecrets(MakeKey(1)), SessionStreams{}};
+    ClientSession client{DeriveSessionSecrets(MakeKey(1)), SessionStreams{}};
 
     // Build a fake agent session from different secrets; give it the right sid
     // so routing would succeed, but the handshake cannot.
-    AgentSession fakeAgent{DeriveSessionSecrets(MakeKey(2))};
+    AgentSession fakeAgent{DeriveSessionSecrets(MakeKey(2)), SessionStreams{}};
 
     auto out = Connect(client, fakeAgent, 10, 20);
     REQUIRE_FALSE(out.FromClient.has_value());
@@ -144,8 +141,8 @@ TEST_CASE_FIXTURE(
 TEST_CASE_FIXTURE(SodiumFixture,
                   "the client session changes at Finish and not one step "
                   "earlier") {
-    AgentSession agent{DeriveSessionSecrets(MakeKey(1))};
-    ClientSession client{DeriveSessionSecrets(MakeKey(1))};
+    AgentSession agent{DeriveSessionSecrets(MakeKey(1)), SessionStreams{}};
+    ClientSession client{DeriveSessionSecrets(MakeKey(1)), SessionStreams{}};
 
     const auto out = Connect(client, agent, 10, 20);
     REQUIRE(out.FromClient.has_value());
@@ -161,8 +158,8 @@ TEST_CASE_FIXTURE(
     SodiumFixture,
     "after ConfirmAgentFrame the next resume against an agent that confirmed "
     "Current agrees on keys") {
-    AgentSession agent{DeriveSessionSecrets(MakeKey(1))};
-    ClientSession client{DeriveSessionSecrets(MakeKey(1))};
+    AgentSession agent{DeriveSessionSecrets(MakeKey(1)), SessionStreams{}};
+    ClientSession client{DeriveSessionSecrets(MakeKey(1)), SessionStreams{}};
 
     auto first = Connect(client, agent, 10, 20);
     REQUIRE(first.FromClient.has_value());
@@ -182,8 +179,8 @@ TEST_CASE_FIXTURE(
 TEST_CASE_FIXTURE(
     SodiumFixture,
     "calling ConfirmAgentFrame twice for the same handle is harmless") {
-    AgentSession agent{DeriveSessionSecrets(MakeKey(1))};
-    ClientSession client{DeriveSessionSecrets(MakeKey(1))};
+    AgentSession agent{DeriveSessionSecrets(MakeKey(1)), SessionStreams{}};
+    ClientSession client{DeriveSessionSecrets(MakeKey(1)), SessionStreams{}};
 
     auto first = Connect(client, agent, 10, 20);
     REQUIRE(first.FromClient.has_value());
@@ -211,8 +208,8 @@ TEST_CASE_FIXTURE(
     // Connection 1: Both ends do the handshake. The agent confirms (moves to
     // seed n+1, keeps n as Previous). The client does NOT confirm — the agent's
     // first sealed frame was cut.
-    AgentSession agent{DeriveSessionSecrets(MakeKey(1))};
-    ClientSession client{DeriveSessionSecrets(MakeKey(1))};
+    AgentSession agent{DeriveSessionSecrets(MakeKey(1)), SessionStreams{}};
+    ClientSession client{DeriveSessionSecrets(MakeKey(1)), SessionStreams{}};
 
     auto conn1 = Connect(client, agent, 10, 20);
     REQUIRE(conn1.FromClient.has_value());
@@ -259,14 +256,15 @@ TEST_CASE_FIXTURE(SodiumFixture,
     // check. Here the real agent answers and the answer is bent on the way:
     // every byte after the type — the tag and the offset rule five binds
     // into it — must cost the client its handle and change nothing.
-    AgentSession agent{DeriveSessionSecrets(MakeKey(1))};
+    AgentSession agent{DeriveSessionSecrets(MakeKey(1)), SessionStreams{}};
 
     // The length of AuthOk, learned from one untouched exchange.
     std::size_t authOkSize = 0;
     {
-        ClientSession client{DeriveSessionSecrets(MakeKey(1))};
+        ClientSession client{DeriveSessionSecrets(MakeKey(1)),
+                             SessionStreams{}};
         ClientResumeAttempt clientAttempt{client, MakeNonce(1)};
-        ResumeAttempt agentAttempt{agent.Ref(), MakeNonce(2), RECEIVE_OFFSET};
+        ResumeAttempt agentAttempt{agent.Ref(), MakeNonce(2)};
         std::vector<std::byte> a(SCRATCH);
         std::vector<std::byte> b(SCRATCH);
         const auto hello = clientAttempt.Start(MutableByteSpan{a});
@@ -288,10 +286,11 @@ TEST_CASE_FIXTURE(SodiumFixture,
         CAPTURE(offset);
         // A fresh agent session each time: the nonces must not repeat into a
         // NonceReused refusal that would pass this test for the wrong reason.
-        AgentSession fresh{DeriveSessionSecrets(MakeKey(1))};
-        ClientSession client{DeriveSessionSecrets(MakeKey(1))};
+        AgentSession fresh{DeriveSessionSecrets(MakeKey(1)), SessionStreams{}};
+        ClientSession client{DeriveSessionSecrets(MakeKey(1)),
+                             SessionStreams{}};
         ClientResumeAttempt clientAttempt{client, MakeNonce(3)};
-        ResumeAttempt agentAttempt{fresh.Ref(), MakeNonce(4), RECEIVE_OFFSET};
+        ResumeAttempt agentAttempt{fresh.Ref(), MakeNonce(4)};
         std::vector<std::byte> a(SCRATCH);
         std::vector<std::byte> b(SCRATCH);
 
@@ -319,4 +318,46 @@ TEST_CASE_FIXTURE(SodiumFixture,
         CHECK(finished.error() == ESessionError::NotAuthenticated);
         CHECK(client.RememberedNonces() == 0);
     }
+}
+
+TEST_CASE_FIXTURE(SodiumFixture,
+                  "the keyboard's door and the handle reach the same streams") {
+    std::vector<std::byte> storage(64);
+    const SessionLimits limits{
+        .ResendMax = 8, .DisconnectMax = 16, .OrphanTimeout = Duration::zero()};
+    ClientSession client{DeriveSessionSecrets(MakeKey(1)),
+                         SessionStreams{.Storage = MutableByteSpan{storage},
+                                        .Now = Timestamp{},
+                                        .Limits = limits}};
+    AgentSession agent{DeriveSessionSecrets(MakeKey(1)), SessionStreams{}};
+
+    CHECK(client.State() == ESessionState::Detached);
+    CHECK(client.AcceptsWrites());
+    CHECK(client.ReceiveOffset() == 0);
+
+    // Typed while offline: held back at the detached ceiling, never dropped.
+    const std::vector<std::byte> typed(20, std::byte{0x61});
+    REQUIRE(client.Write(ByteSpan{typed}) == 16);
+    CHECK_FALSE(client.AcceptsWrites());
+
+    auto result = Connect(client, agent, 1, 2);
+    REQUIRE(result.FromClient.has_value());
+    auto& handle = result.FromClient->Handle;
+    REQUIRE(handle.Attach(0));
+    CHECK(handle.IsCurrent());
+    CHECK(client.State() == ESessionState::Live);
+    CHECK(handle.Output().End() == 16);
+    CHECK(handle.Input().RecvOffset() == 0);
+
+    handle.Detach(Timestamp::FromNanos(1));
+    CHECK(client.State() == ESessionState::Detached);
+    CHECK_FALSE(handle.IsCurrent());
+
+    CHECK_FALSE(client.ReapReason().has_value());
+    handle.Kill(ESessionError::SessionReaped);
+    CHECK(client.State() == ESessionState::Reaped);
+    CHECK(client.ReapReason() == ESessionError::SessionReaped);
+    const auto late = client.Write(ByteSpan{typed});
+    REQUIRE_FALSE(late.has_value());
+    CHECK(late.error() == ESessionError::SessionReaped);
 }

@@ -891,3 +891,74 @@ TEST_CASE_FIXTURE(SodiumFixture,
     CHECK(refusal->Proto() == EProtoError::EpochsExhausted);
     CHECK(refusal->Disposition() == EDisposition::CloseConnection);
 }
+
+// ── Built from the frames a connection already used ────────────────────
+
+TEST_CASE_FIXTURE(SodiumFixture,
+                  "a channel built after Resume seals under the next nonce") {
+    // Resume is the client's first sealed frame and opens on the agent before
+    // either Channel exists. The Channels must take over those counters: a
+    // Channel built from the keys again would seal its first frame under the
+    // nonce Resume already used.
+    const auto keys =
+        DeriveConnectionKeys(DeriveSessionSecrets(MakeMaster(1)).ConnectionSeed,
+                             MakeNonce(1), MakeNonce(2));
+    auto clientFrames = MakeDirectionFrames(keys, ERole::Client);
+    auto agentFrames = MakeDirectionFrames(keys, ERole::Agent);
+
+    std::array<std::byte, 1 + sizeof(std::uint64_t)> resume{};
+    {
+        ByteWriter writer{MutableByteSpan{resume}};
+        REQUIRE(WriteResume(writer, ResumeMessage{.ClientReceiveOffset = 0}));
+    }
+    std::vector<std::byte> wireBytes(HEADER_SIZE + resume.size() +
+                                     crypto::TAG_SIZE);
+    const auto sealed =
+        clientFrames.Sealer.Seal(MutableByteSpan{wireBytes}, ByteSpan{resume});
+    REQUIRE(sealed.has_value());
+    const auto resumeFrame =
+        ReadFrame(ByteSpan{wireBytes}.first(*sealed), MAX_FRAME);
+    REQUIRE(resumeFrame.has_value());
+    std::vector<std::byte> opened(MAX_FRAME);
+    REQUIRE(agentFrames.Opener.Open(MutableByteSpan{opened}, *resumeFrame)
+                .has_value());
+
+    std::vector<std::byte> clientStore(64);
+    std::vector<std::byte> agentStore(64);
+    SendBuffer clientOut{MutableByteSpan{clientStore}};
+    SendBuffer agentOut{MutableByteSpan{agentStore}};
+    ReceiveCursor clientIn;
+    ReceiveCursor agentIn;
+    Channel client{std::move(clientFrames), clientOut, clientIn, Timestamp{}};
+    Channel agent{std::move(agentFrames), agentOut, agentIn, Timestamp{}};
+
+    const auto typed = MakeBytes(5, 0x30);
+    REQUIRE(clientOut.Append(ByteSpan{typed}) == typed.size());
+    std::vector<std::byte> out(HEADER_SIZE + MAX_FRAME);
+    std::vector<std::byte> scratch(Channel::POLL_SCRATCH_SIZE);
+    const std::size_t n = PollOk(client, Timestamp{}, MutableByteSpan{out},
+                                 MutableByteSpan{scratch});
+    REQUIRE(n > 0);
+    const auto frame = ReadFrame(ByteSpan{out}.first(n), MAX_FRAME);
+    REQUIRE(frame.has_value());
+
+    const auto ev = agent.Receive(*frame, MutableByteSpan{opened});
+    REQUIRE(ev.has_value());
+    REQUIRE(std::holds_alternative<DeliveredData>(*ev));
+    CHECK(std::get<DeliveredData>(*ev).Bytes.size() == typed.size());
+
+    // And the frame really is the second under this key: a fresh sealer at
+    // counter zero produces something the agent, now at counter two, refuses.
+    auto fresh = MakeDirectionFrames(keys, ERole::Client);
+    std::vector<std::byte> replay(HEADER_SIZE + resume.size() +
+                                  crypto::TAG_SIZE);
+    const auto again =
+        fresh.Sealer.Seal(MutableByteSpan{replay}, ByteSpan{resume});
+    REQUIRE(again.has_value());
+    const auto replayFrame =
+        ReadFrame(ByteSpan{replay}.first(*again), MAX_FRAME);
+    REQUIRE(replayFrame.has_value());
+    const auto refused = agent.Receive(*replayFrame, MutableByteSpan{opened});
+    REQUIRE_FALSE(refused.has_value());
+    CHECK(refused.error().Proto() == EProtoError::AuthenticationFailed);
+}

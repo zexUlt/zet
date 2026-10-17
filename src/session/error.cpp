@@ -16,6 +16,10 @@ std::string_view Describe(ESessionError error) noexcept {
             return "resume opened under a seed the session does not hold";
         case ESessionError::PeerBehindBuffer:
             return "peer resumed from bytes it had already acknowledged";
+        case ESessionError::OrphanTimeout:
+            return "no client came back within the orphan timeout";
+        case ESessionError::SessionReaped:
+            return "the session has already ended";
     }
     return "unknown session error";
 }

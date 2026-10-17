@@ -2,10 +2,12 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 
 #include "zet/core/bytes.hpp"
 #include "zet/crypto/crypto.hpp"
 #include "zet/session/error.hpp"
+#include "zet/session/stream_state.hpp"
 #include "zet/wire/handshake.hpp"
 #include "zet/wire/key_schedule.hpp"
 
@@ -40,7 +42,8 @@ class ClientResumeAttempt;
 /// ClientSessionHandle. The class is neither copyable nor movable.
 class ClientSession {
 public:
-    explicit ClientSession(wire::SessionSecrets secrets) noexcept;
+    ClientSession(wire::SessionSecrets secrets,
+                  SessionStreams streams) noexcept;
 
     ClientSession(const ClientSession&) = delete;
     ClientSession& operator=(const ClientSession&) = delete;
@@ -54,6 +57,30 @@ public:
     /// zet-dump; reading it changes nothing.
     [[nodiscard]] std::size_t RememberedNonces() const noexcept;
 
+    // ── The keyboard's door: what the user types goes into the stream. Not a
+    // change the agent can cause, so not behind the handle.
+
+    /// See StreamState::Write. Overflow while detached is backpressure: the
+    /// client stops reading the keyboard rather than ending anything.
+    [[nodiscard]] SessionResult<std::size_t> Write(ByteSpan input) noexcept {
+        return Streams_.Write(input);
+    }
+    [[nodiscard]] bool AcceptsWrites() const noexcept {
+        return Streams_.AcceptsWrites();
+    }
+    [[nodiscard]] ESessionState State() const noexcept {
+        return Streams_.State();
+    }
+    [[nodiscard]] std::optional<ESessionError> ReapReason() const noexcept {
+        return Streams_.ReapReason();
+    }
+
+    /// How much of the agent's stream the client holds: what Resume tells the
+    /// agent to resend from.
+    [[nodiscard]] std::uint64_t ReceiveOffset() const noexcept {
+        return Streams_.ReceiveOffset();
+    }
+
 private:
     friend class ClientSessionHandle;
     friend class ClientResumeAttempt;
@@ -62,6 +89,7 @@ private:
     crypto::Key Auth_;
     crypto::Key Seed_;
     wire::NonceMemory Seen_;
+    StreamState Streams_;
 };
 
 /// Proof that the handshake succeeded with an agent that knows K_auth, and the
@@ -88,12 +116,27 @@ public:
     /// state (double-advancing the seed) is worse than ignoring the repeat.
     void ConfirmAgentFrame() noexcept;
 
+    /// Makes this connection the live one, resending from what AuthOk said
+    /// the agent holds. See SessionHandle::Attach.
+    [[nodiscard]] SessionResult<void> Attach(
+        std::uint64_t agentReceiveOffset) noexcept;
+    /// See SessionHandle::Detach.
+    void Detach(Timestamp now) noexcept;
+    [[nodiscard]] bool IsCurrent() const noexcept;
+    /// Ends the session, for an error whose disposition says so — the agent
+    /// reaped it, or the client gave up on it.
+    void Kill(ESessionError reason) noexcept;
+
+    [[nodiscard]] SendBuffer& Output() noexcept;
+    [[nodiscard]] ReceiveCursor& Input() noexcept;
+
 private:
     friend class ClientResumeAttempt;
 
     explicit ClientSessionHandle(ClientSession& session) noexcept;
 
     ClientSession* Session_;
+    std::uint64_t Generation_{0};
     bool Confirmed_{false};
 };
 

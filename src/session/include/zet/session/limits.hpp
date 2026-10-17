@@ -37,4 +37,16 @@ inline constexpr Duration DEFAULT_ORPHAN_TIMEOUT = std::chrono::minutes{30};
 /// where the clock is handed in.
 inline constexpr Duration REKEY_INTERVAL = std::chrono::hours{1};
 
+/// The policy one session runs under, defaulting to the figures above.
+///
+/// A value rather than the constants themselves, the way FrameSealer takes its
+/// limits: a test can reach backpressure, overflow and the orphan timeout with
+/// kilobytes and virtual seconds instead of sixteen megabytes and half an hour.
+struct SessionLimits {
+    std::size_t ResendMax{RESEND_BUFFER_MAX};
+    std::size_t DisconnectMax{DISCONNECT_BUFFER_MAX};
+    /// Zero means forever, as `--orphan-timeout 0` does.
+    Duration OrphanTimeout{DEFAULT_ORPHAN_TIMEOUT};
+};
+
 }  // namespace zet::session

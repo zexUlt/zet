@@ -38,6 +38,11 @@ enum class ESessionError : std::uint8_t {
     /// bytes were trimmed when the acknowledgement came, so the stream cannot
     /// continue whole; the peer has lost state it once confirmed holding.
     PeerBehindBuffer,
+    /// Nobody came back within the orphan timeout (§9). The reason the shell
+    /// gets its SIGHUP, and the one written to the log.
+    OrphanTimeout,
+    /// The session was reaped already. Whatever arrives for it is too late.
+    SessionReaped,
 };
 
 template <typename TValue>
@@ -56,6 +61,8 @@ using SessionResult = std::expected<TValue, ESessionError>;
 
         case ESessionError::DisconnectBufferOverflow:
         case ESessionError::PeerBehindBuffer:
+        case ESessionError::OrphanTimeout:
+        case ESessionError::SessionReaped:
             return EDisposition::KillSession;
     }
     return EDisposition::CloseConnection;

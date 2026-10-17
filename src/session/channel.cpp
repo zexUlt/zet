@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <tuple>
+#include <utility>
 
 #include "zet/crypto/crypto.hpp"
 
@@ -25,25 +26,36 @@ namespace {
 
 }  // namespace
 
-Channel::Channel(const wire::ConnectionKeys& keys, ERole role,
-                 SendBuffer& sendBuf, ReceiveCursor& recvCursor, Timestamp now,
-                 std::uint64_t frameLimit, std::uint64_t byteLimit) noexcept
-    // Secret<> is move-only, and the keys stay with the caller: each direction
-    // gets its own copy.
-    : Sealer_{Clone(role == ERole::Client ? keys.ClientToServer
-                                          : keys.ServerToClient),
-              role == ERole::Client ? keys.SaltClientToServer
-                                    : keys.SaltServerToClient,
-              frameLimit, byteLimit},
-      Opener_{Clone(role == ERole::Client ? keys.ServerToClient
-                                          : keys.ClientToServer),
-              role == ERole::Client ? keys.SaltServerToClient
-                                    : keys.SaltClientToServer,
-              frameLimit},
+DirectionFrames MakeDirectionFrames(const wire::ConnectionKeys& keys,
+                                    ERole role, std::uint64_t frameLimit,
+                                    std::uint64_t byteLimit) noexcept {
+    const bool client = role == ERole::Client;
+    return DirectionFrames{
+        .Sealer =
+            wire::FrameSealer{
+                Clone(client ? keys.ClientToServer : keys.ServerToClient),
+                client ? keys.SaltClientToServer : keys.SaltServerToClient,
+                frameLimit, byteLimit},
+        .Opener = wire::FrameOpener{
+            Clone(client ? keys.ServerToClient : keys.ClientToServer),
+            client ? keys.SaltServerToClient : keys.SaltClientToServer,
+            frameLimit}};
+}
+
+Channel::Channel(DirectionFrames frames, SendBuffer& sendBuf,
+                 ReceiveCursor& recvCursor, Timestamp now) noexcept
+    : Sealer_{std::move(frames.Sealer)},
+      Opener_{std::move(frames.Opener)},
       SendBuf_{sendBuf},
       RecvCursor_{recvCursor},
       EpochStart_{now},
       LastAckedOffset_{recvCursor.RecvOffset()} {}
+
+Channel::Channel(const wire::ConnectionKeys& keys, ERole role,
+                 SendBuffer& sendBuf, ReceiveCursor& recvCursor, Timestamp now,
+                 std::uint64_t frameLimit, std::uint64_t byteLimit) noexcept
+    : Channel(MakeDirectionFrames(keys, role, frameLimit, byteLimit), sendBuf,
+              recvCursor, now) {}
 
 ChannelResult<IncomingEvent> Channel::Receive(
     const wire::FrameView& frame, MutableByteSpan scratch) noexcept {

@@ -76,6 +76,25 @@ using IncomingEvent =
 /// Memory bound: the channel never reads past SendBuffer::Room() == 0 (§9
 /// backpressure). The caller is responsible for filling the buffer; the channel
 /// is responsible for not sending what the buffer does not contain.
+/// The two halves of one connection's sealed traffic as seen from one end:
+/// what it seals with and what it opens with.
+struct DirectionFrames {
+    wire::FrameSealer Sealer;
+    wire::FrameOpener Opener;
+};
+
+/// Builds both halves for `role` from the connection keys, counters at zero.
+///
+/// The connection, not the Channel, is where these are first used: Resume is
+/// the client's first sealed frame and opens on the agent before any Channel
+/// exists. Both objects are then moved into the Channel with their counters
+/// where Resume left them — building the Channel from the keys instead would
+/// seal its first frame under the nonce Resume already used.
+[[nodiscard]] DirectionFrames MakeDirectionFrames(
+    const wire::ConnectionKeys& keys, ERole role,
+    std::uint64_t frameLimit = wire::MAX_FRAMES_PER_EPOCH,
+    std::uint64_t byteLimit = wire::MAX_BYTES_PER_EPOCH) noexcept;
+
 class Channel {
 public:
     /// Minimum scratch size for the Poll call. One full-size Data plaintext:
@@ -83,12 +102,20 @@ public:
     static constexpr std::size_t POLL_SCRATCH_SIZE =
         1 + 2 * sizeof(std::uint64_t) + wire::MAX_DATA_PAYLOAD;
 
-    /// Build a Channel from already-derived connection keys and a role.
+    /// Takes over the sealer and opener a connection has already used.
     ///
     /// `sendBuf` and `recvCursor` are borrowed; they must outlive this object.
     /// `now` anchors the epoch timer for time-triggered rekey (§8).
-    /// `frameLimit` and `byteLimit` let tests shorten the rekey threshold;
-    /// the defaults are the values from §8 / sealed_frame.hpp.
+    Channel(DirectionFrames frames, SendBuffer& sendBuf,
+            ReceiveCursor& recvCursor, Timestamp now) noexcept;
+
+    /// Builds a Channel straight from connection keys, counters at zero.
+    ///
+    /// Valid only for keys nothing has been sealed under yet, which is never
+    /// true of a real connection — Resume comes first. It exists for tests and
+    /// fuzzers that drive a Channel without one; a connection uses the
+    /// constructor above. `frameLimit` and `byteLimit` let tests shorten the
+    /// rekey threshold; the defaults are the values from §8.
     Channel(const wire::ConnectionKeys& keys, ERole role, SendBuffer& sendBuf,
             ReceiveCursor& recvCursor, Timestamp now,
             std::uint64_t frameLimit = wire::MAX_FRAMES_PER_EPOCH,
