@@ -109,9 +109,15 @@ protected:
     /// The handshake deadline, checked at the top of every Pump.
     [[nodiscard]] bool HandshakeExpired(Timestamp now) const noexcept;
 
+    /// Refuses buffers smaller than Pump's contract. A defect in the caller,
+    /// not the peer, so it is reported without failing the connection.
+    [[nodiscard]] static ChannelResult<void> CheckBuffers(
+        MutableByteSpan out, MutableByteSpan scratch) noexcept;
+
     /// Writes a cleartext frame header in front of `bodyLength` bytes that
-    /// the handshake already wrote at out[HEADER_SIZE..].
-    [[nodiscard]] static ChannelResult<std::size_t> FrameCleartext(
+    /// the handshake already wrote at out[HEADER_SIZE..], and returns the
+    /// length of the whole frame.
+    [[nodiscard]] static std::size_t FrameCleartext(
         MutableByteSpan out, std::size_t bodyLength) noexcept;
 
     /// The room a handshake message may be written into.

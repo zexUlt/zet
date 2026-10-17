@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <span>
+#include <tuple>
 #include <utility>
 
 #include "zet/core/byte_reader.hpp"
@@ -59,15 +60,24 @@ bool ConnectionBase::HandshakeExpired(Timestamp now) const noexcept {
     return !Channel_ && now >= Started_ + HANDSHAKE_TIMEOUT;
 }
 
-ChannelResult<std::size_t> ConnectionBase::FrameCleartext(
-    MutableByteSpan out, std::size_t bodyLength) noexcept {
+ChannelResult<void> ConnectionBase::CheckBuffers(
+    MutableByteSpan out, MutableByteSpan scratch) noexcept {
+    if (out.size() < CONNECTION_OUT_SIZE ||
+        scratch.size() < CONNECTION_SCRATCH_SIZE) {
+        return std::unexpected(SessionError{EProtoError::BufferTooSmall});
+    }
+    return {};
+}
+
+std::size_t ConnectionBase::FrameCleartext(MutableByteSpan out,
+                                           std::size_t bodyLength) noexcept {
+    // The writer spans exactly the header, and CheckBuffers made sure `out`
+    // has one; the body came out of HandshakeBody, so its length is a u32.
     ByteWriter writer{out.first(wire::HEADER_SIZE)};
     const wire::FrameHeader header{
         .Length = static_cast<std::uint32_t>(bodyLength),
         .Epoch = CLEARTEXT_EPOCH};
-    if (auto written = wire::WriteFrameHeader(writer, header); !written) {
-        return std::unexpected(SessionError{written.error()});
-    }
+    std::ignore = wire::WriteFrameHeader(writer, header);
     return wire::HEADER_SIZE + bodyLength;
 }
 
@@ -146,6 +156,9 @@ ConnectionResult AgentConnection::Pump(Timestamp now, MutableByteSpan out,
                                        MutableByteSpan scratch) noexcept {
     if (Failed_) {
         return std::unexpected(*Failed_);
+    }
+    if (auto fits = CheckBuffers(out, scratch); !fits) {
+        return std::unexpected(fits.error());
     }
     if (HandshakeExpired(now)) {
         return Refuse(ESessionError::HandshakeTimeout);
@@ -239,11 +252,7 @@ ConnectionResult AgentConnection::PumpHandshake(MutableByteSpan out) noexcept {
     if (step->Written == 0) {
         return Idle{};
     }
-    auto framed = FrameCleartext(out, step->Written);
-    if (!framed) {
-        return Refuse(framed.error());
-    }
-    return SendFrame{.Written = *framed};
+    return SendFrame{.Written = FrameCleartext(out, step->Written)};
 }
 
 ConnectionResult AgentConnection::PumpResume(Timestamp now, MutableByteSpan out,
@@ -343,6 +352,9 @@ ConnectionResult ClientConnection::Pump(Timestamp now, MutableByteSpan out,
     if (Failed_) {
         return std::unexpected(*Failed_);
     }
+    if (auto fits = CheckBuffers(out, scratch); !fits) {
+        return std::unexpected(fits.error());
+    }
     if (HandshakeExpired(now)) {
         return Refuse(ESessionError::HandshakeTimeout);
     }
@@ -352,12 +364,8 @@ ConnectionResult ClientConnection::Pump(Timestamp now, MutableByteSpan out,
             if (!written) {
                 return Refuse(written.error());
             }
-            auto framed = FrameCleartext(out, *written);
-            if (!framed) {
-                return Refuse(framed.error());
-            }
             Stage_ = EStage::Handshake;
-            return SendFrame{.Written = *framed};
+            return SendFrame{.Written = FrameCleartext(out, *written)};
         }
         case EStage::Handshake:
             return PumpHandshake(now, out);
@@ -396,11 +404,7 @@ ConnectionResult ClientConnection::PumpHandshake(Timestamp now,
     if (step->Written == 0) {
         return Idle{};
     }
-    auto framed = FrameCleartext(out, step->Written);
-    if (!framed) {
-        return Refuse(framed.error());
-    }
-    return SendFrame{.Written = *framed};
+    return SendFrame{.Written = FrameCleartext(out, step->Written)};
 }
 
 ConnectionResult ClientConnection::SendResume(Timestamp now,
@@ -420,13 +424,12 @@ ConnectionResult ClientConnection::SendResume(Timestamp now,
 
     DirectionFrames frames =
         MakeDirectionFrames(resumed->Result.Keys, ERole::Client);
+    // The array is exactly as wide as Resume, so the write cannot fail.
     std::array<std::byte, RESUME_PLAINTEXT_SIZE> plain{};
     ByteWriter writer{MutableByteSpan{plain}};
     const wire::ResumeMessage resume{.ClientReceiveOffset =
                                          Session_.ReceiveOffset()};
-    if (auto written = wire::WriteResume(writer, resume); !written) {
-        return Refuse(SessionError{written.error()});
-    }
+    std::ignore = wire::WriteResume(writer, resume);
     // Sealed with the sealer the Channel then takes over, so its first frame
     // goes out under the next nonce rather than this one again.
     const auto sealed = frames.Sealer.Seal(out, writer.Written());

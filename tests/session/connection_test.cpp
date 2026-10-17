@@ -2,6 +2,7 @@
 
 #include <doctest/doctest.h>
 
+#include <algorithm>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -462,4 +463,373 @@ TEST_CASE_FIXTURE(SodiumFixture,
     CHECK(link.AgentError->Disposition() == EDisposition::CloseConnection);
     CHECK_FALSE(link.Agent.IsLive());
     CHECK(ends.Agent.State() == ESessionState::Detached);
+}
+
+// ── Refusals and corners ───────────────────────────────────────────────
+
+namespace {
+
+/// A frame as it would come off the socket: header, then `body` as is.
+std::vector<std::byte> RawFrame(std::uint8_t epoch, ByteSpan body,
+                                std::uint32_t declared = UINT32_MAX) {
+    std::vector<std::byte> frame(wire::HEADER_SIZE + body.size());
+    ByteWriter header{MutableByteSpan{frame}.first(wire::HEADER_SIZE)};
+    REQUIRE(wire::WriteFrameHeader(
+        header, wire::FrameHeader{
+                    .Length = declared == UINT32_MAX
+                                  ? static_cast<std::uint32_t>(body.size())
+                                  : declared,
+                    .Epoch = epoch}));
+    std::ranges::copy(body, frame.begin() + wire::HEADER_SIZE);
+    return frame;
+}
+
+/// Buffers for driving one end by hand.
+struct Hands {
+    std::vector<std::byte> Frames =
+        std::vector<std::byte>(CONNECTION_FRAME_STORAGE);
+    std::vector<std::byte> Out = std::vector<std::byte>(CONNECTION_OUT_SIZE);
+    std::vector<std::byte> Scratch =
+        std::vector<std::byte>(CONNECTION_SCRATCH_SIZE);
+
+    template <typename TConnection>
+    ConnectionResult Pump(TConnection& connection, Timestamp now) {
+        return connection.Pump(now, MutableByteSpan{Out},
+                               MutableByteSpan{Scratch});
+    }
+};
+
+/// Drives `client` against an agent routed to `session` until either end
+/// refuses or both go quiet. Returns the agent's refusal, if any.
+std::optional<SessionError> DriveAgainst(ClientSession& client,
+                                         AgentSession& session,
+                                         HandshakeNonce nonce, Timestamp now) {
+    Hands agentHands;
+    Hands clientHands;
+    AgentConnection agent{MutableByteSpan{agentHands.Frames}, now};
+    ClientConnection connection{client, nonce,
+                                MutableByteSpan{clientHands.Frames}, now};
+    for (int step = 0; step < MAX_STEPS; ++step) {
+        bool busy = false;
+        auto toAgent = clientHands.Pump(connection, now);
+        if (!toAgent) {
+            return std::nullopt;
+        }
+        if (const auto* send = std::get_if<SendFrame>(&*toAgent)) {
+            busy = true;
+            REQUIRE(
+                agent.OnBytes(ByteSpan{clientHands.Out}.first(send->Written)));
+        }
+        auto toClient = agentHands.Pump(agent, now);
+        if (!toClient) {
+            return toClient.error();
+        }
+        if (std::holds_alternative<NeedsSession>(*toClient)) {
+            busy = true;
+            agent.Route(session.Ref(), NextNonce());
+        } else if (const auto* send = std::get_if<SendFrame>(&*toClient)) {
+            busy = true;
+            REQUIRE(connection.OnBytes(
+                ByteSpan{agentHands.Out}.first(send->Written)));
+        }
+        if (!busy) {
+            agent.Close(now);
+            connection.Close(now);
+            return std::nullopt;
+        }
+    }
+    FAIL("never went quiet");
+    return std::nullopt;
+}
+
+/// Pumps both ends of `link` until the client is live and the agent has
+/// nothing left to say, for tests that start from a live connection.
+void BringUp(Link& link, Timestamp now) {
+    link.Shuttle(now);
+    REQUIRE(link.Client.IsLive());
+    REQUIRE(link.Agent.IsLive());
+}
+
+}  // namespace
+
+TEST_CASE_FIXTURE(SodiumFixture,
+                  "buffers smaller than Pump asks for are refused, not used") {
+    Ends ends;
+    Hands hands;
+    AgentConnection agent{MutableByteSpan{hands.Frames}, START};
+    std::vector<std::byte> small(wire::HEADER_SIZE);
+    const auto refused = agent.Pump(START, MutableByteSpan{small},
+                                    MutableByteSpan{hands.Scratch});
+    REQUIRE_FALSE(refused.has_value());
+    CHECK(refused.error().Proto() == EProtoError::BufferTooSmall);
+    // A defect in the caller, not the peer: the connection carries on.
+    CHECK(hands.Pump(agent, START).has_value());
+
+    ClientConnection client{ends.Client, NextNonce(),
+                            MutableByteSpan{hands.Frames}, START};
+    const auto cramped =
+        client.Pump(START, MutableByteSpan{hands.Out}, MutableByteSpan{small});
+    REQUIRE_FALSE(cramped.has_value());
+    CHECK(cramped.error().Proto() == EProtoError::BufferTooSmall);
+}
+
+TEST_CASE_FIXTURE(SodiumFixture,
+                  "garbage before a Hello closes the connection, capped") {
+    struct Case {
+        const char* Name;
+        std::vector<std::byte> Bytes;
+    };
+    const std::vector<std::byte> junk(8, std::byte{0x7F});
+    const std::vector<Case> cases{
+        {"a frame longer than a stranger may send",
+         RawFrame(0, ByteSpan{junk}, wire::MAX_HANDSHAKE_FRAME + 1)},
+        {"a sealed epoch on a cleartext frame", RawFrame(1, ByteSpan{junk})},
+        {"a body that is no Hello", RawFrame(0, ByteSpan{junk})},
+    };
+    for (const auto& c : cases) {
+        CAPTURE(c.Name);
+        Hands hands;
+        AgentConnection agent{MutableByteSpan{hands.Frames}, START};
+        REQUIRE(agent.OnBytes(ByteSpan{c.Bytes}));
+        const auto refused = hands.Pump(agent, START);
+        REQUIRE_FALSE(refused.has_value());
+        CHECK(refused.error().Disposition() == EDisposition::CloseConnection);
+        // Failed stays failed, for bytes as for pumps.
+        CHECK_FALSE(agent.OnBytes(ByteSpan{junk}).has_value());
+        CHECK_FALSE(hands.Pump(agent, START).has_value());
+        CHECK_FALSE(agent.NextDeadline().IsSet());
+    }
+}
+
+TEST_CASE_FIXTURE(SodiumFixture,
+                  "more bytes than one handshake frame can hold are refused") {
+    Hands hands;
+    AgentConnection agent{MutableByteSpan{hands.Frames}, START};
+    const std::vector<std::byte> flood(
+        wire::HEADER_SIZE + wire::MAX_HANDSHAKE_FRAME + 1, std::byte{0});
+    const auto refused = agent.OnBytes(ByteSpan{flood});
+    REQUIRE_FALSE(refused.has_value());
+    CHECK(refused.error().Disposition() == EDisposition::CloseConnection);
+}
+
+TEST_CASE_FIXTURE(SodiumFixture,
+                  "the agent keeps asking for a session until it is told") {
+    Ends ends;
+    Link link{ends, START};
+    REQUIRE(link.PumpClient(START));
+    const auto first = link.Agent.Pump(START, MutableByteSpan{link.Out},
+                                       MutableByteSpan{link.Scratch});
+    REQUIRE(first.has_value());
+    REQUIRE(std::holds_alternative<NeedsSession>(*first));
+    const auto again = link.Agent.Pump(START, MutableByteSpan{link.Out},
+                                       MutableByteSpan{link.Scratch});
+    REQUIRE(again.has_value());
+    CHECK(std::get_if<NeedsSession>(&*again)->Id == ends.Agent.Ref().Id());
+
+    // Routing twice is a no-op: the attempt is built once.
+    link.Agent.Route(ends.Agent.Ref(), NextNonce());
+    link.Agent.RouteUnknown(ends.LocalSecret, NextNonce());
+    link.Shuttle(START);
+    CHECK(link.Client.IsLive());
+}
+
+TEST_CASE_FIXTURE(SodiumFixture,
+                  "a sealed epoch inside the handshake closes both ends") {
+    Ends ends;
+    Link link{ends, START};
+    REQUIRE(link.PumpClient(START));  // Hello
+    REQUIRE(link.PumpAgent(START));   // NeedsSession
+    REQUIRE(link.PumpAgent(START));   // Challenge, into the client
+    // The agent now waits for Auth and has nothing to say.
+    const auto waiting = link.Agent.Pump(START, MutableByteSpan{link.Out},
+                                         MutableByteSpan{link.Scratch});
+    REQUIRE(waiting.has_value());
+    CHECK(std::holds_alternative<Idle>(*waiting));
+
+    const std::vector<std::byte> junk(4, std::byte{0x01});
+    REQUIRE(link.Agent.OnBytes(ByteSpan{RawFrame(1, ByteSpan{junk})}));
+    const auto agentRefused = link.Agent.Pump(START, MutableByteSpan{link.Out},
+                                              MutableByteSpan{link.Scratch});
+    REQUIRE_FALSE(agentRefused.has_value());
+    CHECK(agentRefused.error().Disposition() == EDisposition::CloseConnection);
+
+    // The client, waiting on Challenge, takes the same refusal.
+    Ends other;
+    Hands hands;
+    ClientConnection client{other.Client, NextNonce(),
+                            MutableByteSpan{hands.Frames}, START};
+    REQUIRE(hands.Pump(client, START).has_value());  // Hello
+    const auto idle = hands.Pump(client, START);
+    REQUIRE(idle.has_value());
+    CHECK(std::holds_alternative<Idle>(*idle));
+    REQUIRE(client.OnBytes(ByteSpan{RawFrame(1, ByteSpan{junk})}));
+    const auto clientRefused = hands.Pump(client, START);
+    REQUIRE_FALSE(clientRefused.has_value());
+    CHECK(clientRefused.error().Disposition() == EDisposition::CloseConnection);
+    CHECK(other.Client.State() == ESessionState::Detached);
+}
+
+TEST_CASE_FIXTURE(
+    SodiumFixture,
+    "a client refuses a Challenge that is not one, and times out") {
+    Ends ends;
+    Hands hands;
+    ClientConnection client{ends.Client, NextNonce(),
+                            MutableByteSpan{hands.Frames}, START};
+    REQUIRE(hands.Pump(client, START).has_value());  // Hello
+    const std::vector<std::byte> junk(6, std::byte{0x02});
+    REQUIRE(client.OnBytes(ByteSpan{RawFrame(0, ByteSpan{junk})}));
+    const auto refused = hands.Pump(client, START);
+    REQUIRE_FALSE(refused.has_value());
+    CHECK(refused.error().Disposition() == EDisposition::CloseConnection);
+
+    Hands later;
+    ClientConnection slow{ends.Client, NextNonce(),
+                          MutableByteSpan{later.Frames}, START};
+    const auto expired = later.Pump(slow, START + HANDSHAKE_TIMEOUT);
+    REQUIRE_FALSE(expired.has_value());
+    CHECK(expired.error().Session() == ESessionError::HandshakeTimeout);
+}
+
+TEST_CASE_FIXTURE(SodiumFixture,
+                  "a client will not send Hello on a nonce it has used") {
+    // §5 rule three on the client's own generator: a nonce from a finished
+    // handshake is caught before a byte goes out.
+    Ends ends;
+    const HandshakeNonce nonce = NextNonce();
+    REQUIRE_FALSE(DriveAgainst(ends.Client, ends.Agent, nonce, START));
+    REQUIRE(ends.Client.RememberedNonces() == 2);
+
+    Hands hands;
+    ClientConnection repeat{ends.Client, nonce, MutableByteSpan{hands.Frames},
+                            START + 1s};
+    const auto refused = hands.Pump(repeat, START + 1s);
+    REQUIRE_FALSE(refused.has_value());
+    CHECK(refused.error().Proto() == EProtoError::NonceReused);
+    CHECK(refused.error().Disposition() == EDisposition::CloseConnection);
+}
+
+TEST_CASE_FIXTURE(
+    SodiumFixture,
+    "a live connection reports its channel's deadline and resizes") {
+    Ends ends;
+    Link link{ends, START};
+    BringUp(link, START);
+    // Live: no handshake deadline any more, only the channel's own.
+    CHECK_FALSE(
+        link.Agent.NextDeadline().HasExpired(START + HANDSHAKE_TIMEOUT));
+    CHECK(link.Agent.NextDeadline().HasExpired(START + REKEY_INTERVAL));
+
+    link.Client.QueueResize(
+        wire::ResizeMessage{.Rows = 24, .Cols = 80, .XPixel = 0, .YPixel = 0});
+    link.Shuttle(START + 1ms);
+    REQUIRE(ends.LastResize.has_value());
+    CHECK(ends.LastResize->Cols == 80);
+}
+
+TEST_CASE_FIXTURE(
+    SodiumFixture,
+    "a bent frame on a live connection closes it, not the session") {
+    Ends ends;
+    Link link{ends, START};
+    BringUp(link, START);
+    const std::vector<std::byte> junk(32, std::byte{0x03});
+    REQUIRE(link.Agent.OnBytes(ByteSpan{RawFrame(0, ByteSpan{junk})}));
+    const auto refused = link.Agent.Pump(START, MutableByteSpan{link.Out},
+                                         MutableByteSpan{link.Scratch});
+    REQUIRE_FALSE(refused.has_value());
+    CHECK(refused.error().Disposition() == EDisposition::CloseConnection);
+    link.Close(START);
+    CHECK(ends.Agent.State() == ESessionState::Detached);
+
+    // And on the client's side: a frame declaring more than MAX_FRAME.
+    Link second{ends, START + 1s};
+    BringUp(second, START + 1s);
+    REQUIRE(second.Client.OnBytes(
+        ByteSpan{RawFrame(0, ByteSpan{junk}, wire::MAX_FRAME + 1)}));
+    const auto tooLong =
+        second.Client.Pump(START + 1s, MutableByteSpan{second.Out},
+                           MutableByteSpan{second.Scratch});
+    REQUIRE_FALSE(tooLong.has_value());
+    CHECK(tooLong.error().Disposition() == EDisposition::CloseConnection);
+}
+
+TEST_CASE_FIXTURE(SodiumFixture,
+                  "a superseded client connection stands down too") {
+    Ends ends;
+    Link first{ends, START};
+    BringUp(first, START);
+    Link second{ends, START + 1s};
+    BringUp(second, START + 1s);
+    const auto stale = first.Client.Pump(START + 2s, MutableByteSpan{first.Out},
+                                         MutableByteSpan{first.Scratch});
+    REQUIRE_FALSE(stale.has_value());
+    CHECK(stale.error().Session() == ESessionError::Superseded);
+}
+
+TEST_CASE_FIXTURE(SodiumFixture,
+                  "a client claiming bytes the agent never sent is refused") {
+    // The client of this session once held 100 bytes; the agent it now meets
+    // has the same secrets, the same seed, and a stream that never got that
+    // far — as if it had been restored from an older snapshot.
+    Ends ends;
+    const auto output = Pattern(100, 7);
+    REQUIRE(ends.Agent.Write(ByteSpan{output}) == output.size());
+    {
+        Link first{ends, START};
+        first.Shuttle(START);
+        REQUIRE(ends.Client.ReceiveOffset() == output.size());
+        first.Close(START + 1s);
+    }
+    // One connection with nothing in it brings the other agent's seed to
+    // where the client's is now.
+    Ends behind;
+    {
+        Link warm{behind, START};
+        warm.Shuttle(START);
+        REQUIRE(warm.Client.IsLive());
+        warm.Close(START + 1s);
+    }
+
+    const auto refusal =
+        DriveAgainst(ends.Client, behind.Agent, NextNonce(), START + 2s);
+    REQUIRE(refusal.has_value());
+    CHECK(refusal->Session() == ESessionError::AckBeyondSent);
+    CHECK(refusal->Disposition() == EDisposition::CloseConnection);
+    CHECK(behind.Agent.State() == ESessionState::Detached);
+}
+
+TEST_CASE_FIXTURE(SodiumFixture,
+                  "a client that lost what it acknowledged ends the session") {
+    // §9: the agent trimmed what the client confirmed holding; a client that
+    // now asks for it again cannot be served whole, and losing bytes silently
+    // is not allowed — the session ends, with the reason.
+    Ends ends;
+    const auto output = Pattern(100, 8);
+    REQUIRE(ends.Agent.Write(ByteSpan{output}) == output.size());
+    {
+        Link first{ends, START};
+        first.Shuttle(START);
+        // Let the idle Ack go out, so the agent trims what the client holds.
+        first.Shuttle(START + ACK_IDLE_DELAY);
+        first.Shuttle(START + 2 * ACK_IDLE_DELAY);
+        first.Close(START + 1s);
+    }
+    // A client with the same secrets, a step behind on the seed like this
+    // one, and nothing received: one empty connection to another agent.
+    Ends forgetful;
+    {
+        Link warm{forgetful, START};
+        warm.Shuttle(START);
+        warm.Close(START + 1s);
+    }
+    REQUIRE(forgetful.Client.ReceiveOffset() == 0);
+
+    const auto refusal =
+        DriveAgainst(forgetful.Client, ends.Agent, NextNonce(), START + 2s);
+    REQUIRE(refusal.has_value());
+    CHECK(refusal->Session() == ESessionError::PeerBehindBuffer);
+    CHECK(refusal->Disposition() == EDisposition::KillSession);
+    CHECK(ends.Agent.State() == ESessionState::Reaped);
+    CHECK(ends.Agent.ReapReason() == ESessionError::PeerBehindBuffer);
 }
