@@ -825,6 +825,26 @@ TEST_CASE_FIXTURE(SodiumFixture, "a Data seen twice is delivered once") {
     CHECK(pair.ClientRecv.RecvOffset() == 10);
 }
 
+TEST_CASE_FIXTURE(
+    SodiumFixture,
+    "a resend straddling recv_offset reports where its tail starts") {
+    ChannelPair pair;
+    FrameSealer sealer{crypto::Key{pair.Keys.ServerToClient.Expose()},
+                       pair.Keys.SaltServerToClient};
+    const auto head = DataPlain(0, 0, 4);
+    REQUIRE(InjectToClient(pair, sealer, ByteSpan{head}).has_value());
+
+    // Bytes 0..10 again after a reconnect: 0..4 are a duplicate.
+    const auto resend = DataPlain(0, 0, 10);
+    const auto ev = InjectToClient(pair, sealer, ByteSpan{resend});
+    REQUIRE(ev.has_value());
+    REQUIRE(std::holds_alternative<DeliveredData>(*ev));
+    const auto& data = std::get<DeliveredData>(*ev);
+    CHECK(data.Bytes.size() == 6);
+    CHECK(data.Offset == 4);
+    CHECK(pair.ClientRecv.RecvOffset() == 10);
+}
+
 // ── Refusals on the outgoing side ──────────────────────────────────────
 
 TEST_CASE_FIXTURE(SodiumFixture,
