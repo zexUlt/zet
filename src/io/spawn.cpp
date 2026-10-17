@@ -46,6 +46,12 @@ constexpr int SPAWN_FAILED_EXIT = 127;
         if (::dup2(slave, target) < 0) {
             fail();
         }
+        // dup2 onto itself changes nothing, close-on-exec included: a slave
+        // that came out as 0, 1 or 2 would be closed by execve.
+        // NOLINTNEXTLINE(cppcoreguidelines-pro-type-vararg)
+        if (::fcntl(target, F_SETFD, 0) != 0) {
+            fail();
+        }
     }
     if (slave > STDERR_FILENO) {
         static_cast<void>(::close(slave));

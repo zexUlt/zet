@@ -35,6 +35,10 @@ struct Child {
 
 /// Runs `spec` on a new pty as the leader of a new session.
 ///
+/// The caller keeps descriptors 0, 1 and 2 open, on /dev/null if on nothing
+/// else. Were one of them free, the pipe that reports a failed execve could
+/// be given its number and be overwritten by the child's own stdio.
+///
 /// The child resets its signal mask and every disposition before execve: the
 /// parent blocks the signals it reads through signalfd, and a shell started
 /// with SIGINT blocked would never see Ctrl-C. A failed execve comes back as
