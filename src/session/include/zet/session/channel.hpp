@@ -124,8 +124,8 @@ public:
     /// Priority: Pong > Data (with piggybacked Ack) > Resize > bare Ack.
     /// §9: "кумулятивные ACK ... пиггибэком в заголовке plaintext каждого
     /// кадра данных плюс отдельным Ack при простое дольше 200 мс".
-    [[nodiscard]] std::size_t Poll(Timestamp now, MutableByteSpan out,
-                                   MutableByteSpan scratch) noexcept;
+    [[nodiscard]] ChannelResult<std::size_t> Poll(
+        Timestamp now, MutableByteSpan out, MutableByteSpan scratch) noexcept;
 
     /// The next time-driven event, for the event loop's timer queue.
     ///
@@ -154,13 +154,13 @@ private:
     /// Rekey if the sealer reports NeedsRekey() or REKEY_INTERVAL has elapsed
     /// since the epoch began. Returns false only on EpochsExhausted — the
     /// connection cannot send another frame and must be closed. §8.
-    [[nodiscard]] bool RekeyIfNeeded(Timestamp now) noexcept;
+    [[nodiscard]] ChannelResult<void> RekeyIfNeeded(Timestamp now) noexcept;
 
     /// Seal `plaintext` into `out`. Returns the byte count of the sealed frame
     /// (header + ciphertext + tag), or 0 on any error (buffer too small,
     /// epochs exhausted).
-    [[nodiscard]] std::size_t SealInto(MutableByteSpan out,
-                                       ByteSpan plaintext) noexcept;
+    [[nodiscard]] ChannelResult<std::size_t> SealInto(
+        MutableByteSpan out, ByteSpan plaintext) noexcept;
 
     wire::FrameSealer Sealer_;
     wire::FrameOpener Opener_;

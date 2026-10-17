@@ -1,6 +1,9 @@
 #include "zet/session/channel.hpp"
 
 #include <algorithm>
+#include <tuple>
+
+#include "zet/crypto/crypto.hpp"
 
 #include "zet/core/byte_reader.hpp"
 #include "zet/core/byte_writer.hpp"
@@ -8,22 +11,32 @@
 #include "zet/wire/message.hpp"
 
 namespace zet::session {
+namespace {
+
+/// A second copy of a direction key for the sealer or opener, which own what
+/// they are given. Written straight into the new Secret: its value constructor
+/// takes the array by value, and that parameter is a stack copy of the key
+/// nobody wipes.
+[[nodiscard]] crypto::Key Clone(const crypto::Key& key) noexcept {
+    crypto::Key copy;
+    copy.Expose() = key.Expose();
+    return copy;
+}
+
+}  // namespace
 
 Channel::Channel(const wire::ConnectionKeys& keys, ERole role,
                  SendBuffer& sendBuf, ReceiveCursor& recvCursor, Timestamp now,
                  std::uint64_t frameLimit, std::uint64_t byteLimit) noexcept
-    // Secret<> is move-only. Extract the key bytes through Expose() and
-    // construct independent Secret values for each direction. Expose() is the
-    // project's intentional way of reading key material, and constructing a
-    // fresh Secret from those bytes for each channel end is the only way to
-    // give two objects the same key without copying the wrapper.
-    : Sealer_{crypto::Key{role == ERole::Client ? keys.ClientToServer.Expose()
-                                                : keys.ServerToClient.Expose()},
+    // Secret<> is move-only, and the keys stay with the caller: each direction
+    // gets its own copy.
+    : Sealer_{Clone(role == ERole::Client ? keys.ClientToServer
+                                          : keys.ServerToClient),
               role == ERole::Client ? keys.SaltClientToServer
                                     : keys.SaltServerToClient,
               frameLimit, byteLimit},
-      Opener_{crypto::Key{role == ERole::Client ? keys.ServerToClient.Expose()
-                                                : keys.ClientToServer.Expose()},
+      Opener_{Clone(role == ERole::Client ? keys.ServerToClient
+                                          : keys.ClientToServer),
               role == ERole::Client ? keys.SaltServerToClient
                                     : keys.SaltClientToServer,
               frameLimit},
@@ -125,44 +138,38 @@ ChannelResult<IncomingEvent> Channel::Receive(
             return DeliveredNothing{};
         }
 
-        // Handshake messages inside a sealed frame are a protocol violation:
-        // §7 says the receiver "уже перешедший в запечатанный режим, открытый
-        // кадр не принимает". These types here mean a peer sending wrong
-        // message types in the sealed stream — close the connection.
+        // Resume is the one sealed message that is not the channel's: the
+        // connection opens it before a Channel exists. The rest are handshake
+        // messages, which belong to cleartext frames.
         case wire::EMessageType::Hello:
         case wire::EMessageType::Challenge:
         case wire::EMessageType::Auth:
         case wire::EMessageType::AuthOk:
         case wire::EMessageType::Resume:
-            return std::unexpected(
-                SessionError{EProtoError::UnexpectedMessage});
+            break;
     }
 
-    // ParseMessageType parses the u8 as a known EMessageType or returns
-    // UnknownMessageType. The switch above covers every enumerator. This line
-    // is unreachable on a conforming compiler, but avoids a missing-return
-    // warning on compilers that do not see through the exhaustive switch.
-    ++UnknownTypeCount_;
-    return DeliveredNothing{};
+    // Known, but not allowed here. Unlike an unknown type this is not a newer
+    // peer talking past us; it is a peer out of step with the protocol.
+    return std::unexpected(SessionError{EProtoError::UnexpectedMessage});
 }
 
-std::size_t Channel::Poll(Timestamp now, MutableByteSpan out,
-                          MutableByteSpan scratch) noexcept {
+ChannelResult<std::size_t> Channel::Poll(Timestamp now, MutableByteSpan out,
+                                         MutableByteSpan scratch) noexcept {
     // Rekey before sending if the sealer has hit its limits. §8: "by 2^24
     // frames, 1 GiB or 1 hour". A failed rekey (EpochsExhausted) means this
-    // connection cannot produce another frame and must be torn down by the
-    // caller.
-    if (!RekeyIfNeeded(now)) {
-        return 0;
+    // connection cannot produce another frame, and the caller has to hear
+    // that rather than a zero it would read as "nothing to send".
+    if (auto rekeyed = RekeyIfNeeded(now); !rekeyed) {
+        return std::unexpected(rekeyed.error());
     }
 
-    // The minimum frame is HEADER_SIZE + type(1) + TAG_SIZE. Callers that pass
-    // a tiny buffer get nothing back rather than an error: the buffer size is
-    // their contract with the I/O layer, not ours.
-    const std::size_t minFrame =
-        wire::HEADER_SIZE + 1 + 16 /*crypto::TAG_SIZE*/;
-    if (out.size() < minFrame) {
-        return 0;
+    // The smallest frame there is: header, type byte, tag. A buffer below it
+    // is a defect in the caller, and saying so beats silently sending nothing.
+    static constexpr std::size_t MIN_FRAME =
+        wire::HEADER_SIZE + 1 + crypto::TAG_SIZE;
+    if (out.size() < MIN_FRAME) {
+        return std::unexpected(SessionError{EProtoError::BufferTooSmall});
     }
 
     // Priority 1: a Pong we owe the peer. §9: "управляющие сообщения ...
@@ -174,12 +181,12 @@ std::size_t Channel::Poll(Timestamp now, MutableByteSpan out,
         std::array<std::byte, 1 + sizeof(std::uint64_t)> plain{};
         ByteWriter writer{MutableByteSpan{plain}};
         if (wire::WritePong(writer, *PendingPong_)) {
-            const std::size_t n =
-                SealInto(out, ByteSpan{plain}.first(writer.Size()));
-            if (n > 0) {
-                PendingPong_.reset();
-                return n;
+            const auto n = SealInto(out, ByteSpan{plain}.first(writer.Size()));
+            if (!n) {
+                return std::unexpected(n.error());
             }
+            PendingPong_.reset();
+            return *n;
         }
     }
 
@@ -196,42 +203,38 @@ std::size_t Channel::Poll(Timestamp now, MutableByteSpan out,
         static constexpr std::size_t DATA_HEADER =
             1 + 2 * sizeof(std::uint64_t);
         if (scratch.size() < DATA_HEADER + 1) {
-            return 0;
+            return std::unexpected(SessionError{EProtoError::BufferTooSmall});
         }
         const std::size_t payloadCap =
             std::min(wire::MAX_DATA_PAYLOAD, scratch.size() - DATA_HEADER);
         const std::size_t payloadSize = std::min(payloadCap, SendBuf_.Unsent());
         if (payloadSize > 0) {
+            // The writer spans exactly DATA_HEADER bytes, which is what these
+            // three writes take, so none of them can fail.
             ByteWriter hdrWriter{scratch.first(DATA_HEADER)};
-            if (!hdrWriter.WriteU8(
-                    static_cast<std::uint8_t>(wire::EMessageType::Data))) {
-                return 0;
-            }
-            if (!hdrWriter.WriteU64BE(RecvCursor_.RecvOffset())) {
-                return 0;
-            }
-            if (!hdrWriter.WriteU64BE(SendBuf_.SendNext())) {
-                return 0;
-            }
+            std::ignore = hdrWriter.WriteU8(
+                static_cast<std::uint8_t>(wire::EMessageType::Data));
+            std::ignore = hdrWriter.WriteU64BE(RecvCursor_.RecvOffset());
+            std::ignore = hdrWriter.WriteU64BE(SendBuf_.SendNext());
             // Copy payload after the 17-byte header.
             const MutableByteSpan payloadDest =
                 scratch.subspan(DATA_HEADER, payloadSize);
             const auto payloadOut =
                 SendBuf_.CopyOut(SendBuf_.SendNext(), payloadDest);
+            // SendNext lies in [Base, End) whenever Unsent() > 0, so the copy
+            // returns exactly payloadSize bytes.
             const std::size_t actualPayload = payloadOut.size();
-            if (actualPayload == 0) {
-                return 0;
-            }
             const ByteSpan plaintext =
                 ByteSpan{scratch}.first(DATA_HEADER + actualPayload);
-            const std::size_t n = SealInto(out, plaintext);
-            if (n > 0) {
-                SendBuf_.AdvanceSendNext(actualPayload);
-                // The Data frame carried a piggybacked Ack. §9.
-                LastAckedOffset_ = RecvCursor_.RecvOffset();
-                AckPendingSince_.reset();
-                return n;
+            const auto n = SealInto(out, plaintext);
+            if (!n) {
+                return std::unexpected(n.error());
             }
+            SendBuf_.AdvanceSendNext(actualPayload);
+            // The Data frame carried a piggybacked Ack. §9.
+            LastAckedOffset_ = RecvCursor_.RecvOffset();
+            AckPendingSince_.reset();
+            return *n;
         }
     }
 
@@ -243,12 +246,12 @@ std::size_t Channel::Poll(Timestamp now, MutableByteSpan out,
         std::array<std::byte, 1 + 4 * sizeof(std::uint16_t)> plain{};
         ByteWriter writer{MutableByteSpan{plain}};
         if (wire::WriteResize(writer, *PendingResize_)) {
-            const std::size_t n =
-                SealInto(out, ByteSpan{plain}.first(writer.Size()));
-            if (n > 0) {
-                PendingResize_.reset();
-                return n;
+            const auto n = SealInto(out, ByteSpan{plain}.first(writer.Size()));
+            if (!n) {
+                return std::unexpected(n.error());
             }
+            PendingResize_.reset();
+            return *n;
         }
     }
 
@@ -270,13 +273,14 @@ std::size_t Channel::Poll(Timestamp now, MutableByteSpan out,
             ByteWriter writer{MutableByteSpan{plain}};
             const wire::AckMessage msg{.Ack = recvOff};
             if (wire::WriteAck(writer, msg)) {
-                const std::size_t n =
+                const auto n =
                     SealInto(out, ByteSpan{plain}.first(writer.Size()));
-                if (n > 0) {
-                    LastAckedOffset_ = recvOff;
-                    AckPendingSince_.reset();
-                    return n;
+                if (!n) {
+                    return std::unexpected(n.error());
                 }
+                LastAckedOffset_ = recvOff;
+                AckPendingSince_.reset();
+                return *n;
             }
         }
     }
@@ -301,27 +305,26 @@ void Channel::QueueResize(wire::ResizeMessage resize) noexcept {
     PendingResize_ = resize;
 }
 
-bool Channel::RekeyIfNeeded(Timestamp now) noexcept {
+ChannelResult<void> Channel::RekeyIfNeeded(Timestamp now) noexcept {
     const bool timeExpired = now >= EpochStart_ + REKEY_INTERVAL;
     if (!Sealer_.NeedsRekey() && !timeExpired) {
-        return true;
+        return {};
     }
-    const auto result = Sealer_.Rekey();
-    if (!result) {
-        // EpochsExhausted: the connection has used all 256 key epochs. §8:
-        // "only a fresh handshake, which derives new keys, gets the session
-        // moving again". Signal failure; the caller tears down the connection.
-        return false;
+    // EpochsExhausted: the connection has used every key epoch. §8: "only a
+    // fresh handshake, which derives new keys, gets the session moving
+    // again", which is what CloseConnection leads to.
+    if (const auto result = Sealer_.Rekey(); !result) {
+        return std::unexpected(SessionError{result.error()});
     }
     EpochStart_ = now;
-    return true;
+    return {};
 }
 
-std::size_t Channel::SealInto(MutableByteSpan out,
-                              ByteSpan plaintext) noexcept {
+ChannelResult<std::size_t> Channel::SealInto(MutableByteSpan out,
+                                             ByteSpan plaintext) noexcept {
     const auto result = Sealer_.Seal(out, plaintext);
     if (!result) {
-        return 0;
+        return std::unexpected(SessionError{result.error()});
     }
     return *result;
 }
