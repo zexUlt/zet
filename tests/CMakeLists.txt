@@ -48,8 +48,11 @@ if(ZET_HAVE_IO)
     target_sources(zet_tests PRIVATE
         io/clock_test.cpp
         io/fd_test.cpp
+        io/poller_test.cpp
     )
-    target_link_libraries(zet_tests PRIVATE zet::io)
+    # The Waker test wakes the poller from a second thread.
+    find_package(Threads REQUIRED)
+    target_link_libraries(zet_tests PRIVATE zet::io Threads::Threads)
 endif()
 
 include(${doctest_SOURCE_DIR}/scripts/cmake/doctest.cmake)
