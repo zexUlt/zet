@@ -28,9 +28,9 @@ namespace {
 
 using namespace zet::io::test;
 
-volatile std::sig_atomic_t resized = 0;
+volatile std::sig_atomic_t RESIZED = 0;
 
-void OnWindowChange(int /*signal*/) { resized = 1; }
+void OnWindowChange(int /*signal*/) { RESIZED = 1; }
 
 /// Writes all of `bytes` to stdout, or reports why it could not.
 bool WriteAll(const char* bytes, std::size_t length) {
@@ -83,8 +83,8 @@ int Echo() {
     }
     std::array<char, CHILD_BUFFER_SIZE> buffer{};
     for (;;) {
-        if (resized != 0) {
-            resized = 0;
+        if (RESIZED != 0) {
+            RESIZED = 0;
             if (!ReportSize()) {
                 return EXIT_FAILURE;
             }

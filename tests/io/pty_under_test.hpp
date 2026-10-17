@@ -57,8 +57,8 @@ inline constexpr WindowSize CONTRACT_SIZE{.Rows = 24, .Cols = 80};
 class RealPty final : public PtyUnderTest {
 public:
     /// Starts zet_pty_echo with `argv` (its own name first, nullptr last).
-    template <std::size_t N>
-    explicit RealPty(const std::array<const char*, N>& argv) {
+    template <std::size_t length>
+    explicit RealPty(const std::array<const char*, length>& argv) {
         constexpr std::array<const char*, 1> environment{nullptr};
         auto child = Spawn(SpawnSpec{.Path = ECHO_CHILD_PATH,
                                      .Argv = argv,
