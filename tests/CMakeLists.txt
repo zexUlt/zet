@@ -51,6 +51,18 @@ if(ZET_HAVE_IO)
         io/poller_test.cpp
         io/pty_test.cpp
         io/spawn_test.cpp
+        io/fake_pty.cpp
+        io/pty_contract_test.cpp
+        io/pty_burst_test.cpp
+    )
+
+    # The child the pty contract and the burst run against (design.md §16):
+    # its behaviour on a terminal is known exactly, which a shell's is not.
+    add_executable(zet_pty_echo io/pty_echo_child.cpp)
+    target_link_libraries(zet_pty_echo PRIVATE zet::compile_options)
+    add_dependencies(zet_tests zet_pty_echo)
+    target_compile_definitions(zet_tests PRIVATE
+        ZET_PTY_ECHO_PATH="$<TARGET_FILE:zet_pty_echo>"
     )
     # The Waker test wakes the poller from a second thread.
     find_package(Threads REQUIRED)
