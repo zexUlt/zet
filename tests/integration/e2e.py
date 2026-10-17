@@ -33,6 +33,7 @@ The client gets them from its own environment; the agent gets them through
 
 from __future__ import annotations
 
+import errno
 import os
 import select
 import shutil
@@ -146,7 +147,11 @@ class Terminal:
             raise Timeout(f"nothing on the terminal for {timeout}s: {self.tail()!r}")
         try:
             chunk = os.read(self.process.master, READ_CHUNK)
-        except OSError:
+        except OSError as error:
+            # EIO is how a pty master says its slave is gone; anything else is
+            # a fault of the test, not the end of a session.
+            if error.errno != errno.EIO:
+                raise
             chunk = b""
         if not chunk:
             self.ended = True

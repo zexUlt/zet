@@ -225,5 +225,8 @@ def test_an_orphaned_session_is_reaped(zet: Zet, clean_bashrc):
     finally:
         # The client dies without a word and never comes back.
         terminal.kill()
-    wait_gone(shell)
-    wait_gone(agent)
+    # Both, so that a shell that lingers still says whether the agent did too.
+    try:
+        wait_gone(shell)
+    finally:
+        wait_gone(agent)
