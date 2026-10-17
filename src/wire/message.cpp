@@ -66,6 +66,11 @@ ProtoResult<EMessageType> ParseMessageType(ByteReader& reader) noexcept {
         case EMessageType::Auth:
         case EMessageType::AuthOk:
         case EMessageType::Resume:
+        case EMessageType::Data:
+        case EMessageType::Ack:
+        case EMessageType::Resize:
+        case EMessageType::Ping:
+        case EMessageType::Pong:
             return static_cast<EMessageType>(*type);
     }
     // Reserved and unassigned types alike. The disposition attached to this
@@ -287,6 +292,150 @@ ProtoResult<void> WriteResume(ByteWriter& writer,
         return type;
     }
     return writer.WriteU64BE(message.ClientReceiveOffset);
+}
+
+ProtoResult<DataMessage> ParseData(ByteReader& reader) noexcept {
+    auto ack = reader.ReadU64BE();
+    if (!ack) {
+        return std::unexpected(ack.error());
+    }
+    auto offset = reader.ReadU64BE();
+    if (!offset) {
+        return std::unexpected(offset.error());
+    }
+    // Everything remaining is the stream payload. Empty means the sender
+    // should have used Ack instead (§7). Oversize means the frame that
+    // carried this plaintext was already too large, but we check here
+    // as well so that the codec is self-contained.
+    const ByteSpan payload = reader.Rest();
+    if (payload.empty()) {
+        return std::unexpected(EProtoError::MalformedField);
+    }
+    if (payload.size() > MAX_DATA_PAYLOAD) {
+        return std::unexpected(EProtoError::LengthLimitExceeded);
+    }
+    if (auto skip = reader.Skip(payload.size()); !skip) {
+        return std::unexpected(skip.error());
+    }
+    return DataMessage{.Ack = *ack, .Offset = *offset, .Payload = payload};
+}
+
+ProtoResult<void> WriteData(ByteWriter& writer,
+                            const DataMessage& message) noexcept {
+    if (message.Payload.empty()) {
+        return std::unexpected(EProtoError::MalformedField);
+    }
+    if (message.Payload.size() > MAX_DATA_PAYLOAD) {
+        return std::unexpected(EProtoError::LengthLimitExceeded);
+    }
+    if (auto type = WriteMessageType(writer, EMessageType::Data); !type) {
+        return type;
+    }
+    if (auto ack = writer.WriteU64BE(message.Ack); !ack) {
+        return ack;
+    }
+    if (auto offset = writer.WriteU64BE(message.Offset); !offset) {
+        return offset;
+    }
+    return writer.WriteBytes(message.Payload);
+}
+
+ProtoResult<AckMessage> ParseAck(ByteReader& reader) noexcept {
+    auto ack = reader.ReadU64BE();
+    if (!ack) {
+        return std::unexpected(ack.error());
+    }
+    if (auto rest = RequireExhausted(reader); !rest) {
+        return std::unexpected(rest.error());
+    }
+    return AckMessage{.Ack = *ack};
+}
+
+ProtoResult<void> WriteAck(ByteWriter& writer,
+                           const AckMessage& message) noexcept {
+    if (auto type = WriteMessageType(writer, EMessageType::Ack); !type) {
+        return type;
+    }
+    return writer.WriteU64BE(message.Ack);
+}
+
+ProtoResult<ResizeMessage> ParseResize(ByteReader& reader) noexcept {
+    auto rows = reader.ReadU16BE();
+    if (!rows) {
+        return std::unexpected(rows.error());
+    }
+    auto cols = reader.ReadU16BE();
+    if (!cols) {
+        return std::unexpected(cols.error());
+    }
+    auto xpixel = reader.ReadU16BE();
+    if (!xpixel) {
+        return std::unexpected(xpixel.error());
+    }
+    auto ypixel = reader.ReadU16BE();
+    if (!ypixel) {
+        return std::unexpected(ypixel.error());
+    }
+    if (auto rest = RequireExhausted(reader); !rest) {
+        return std::unexpected(rest.error());
+    }
+    return ResizeMessage{
+        .Rows = *rows, .Cols = *cols, .XPixel = *xpixel, .YPixel = *ypixel};
+}
+
+ProtoResult<void> WriteResize(ByteWriter& writer,
+                              const ResizeMessage& message) noexcept {
+    if (auto type = WriteMessageType(writer, EMessageType::Resize); !type) {
+        return type;
+    }
+    if (auto rows = writer.WriteU16BE(message.Rows); !rows) {
+        return rows;
+    }
+    if (auto cols = writer.WriteU16BE(message.Cols); !cols) {
+        return cols;
+    }
+    if (auto xpixel = writer.WriteU16BE(message.XPixel); !xpixel) {
+        return xpixel;
+    }
+    return writer.WriteU16BE(message.YPixel);
+}
+
+ProtoResult<PingMessage> ParsePing(ByteReader& reader) noexcept {
+    auto token = reader.ReadU64BE();
+    if (!token) {
+        return std::unexpected(token.error());
+    }
+    if (auto rest = RequireExhausted(reader); !rest) {
+        return std::unexpected(rest.error());
+    }
+    return PingMessage{.Token = *token};
+}
+
+ProtoResult<void> WritePing(ByteWriter& writer,
+                            const PingMessage& message) noexcept {
+    if (auto type = WriteMessageType(writer, EMessageType::Ping); !type) {
+        return type;
+    }
+    return writer.WriteU64BE(message.Token);
+}
+
+ProtoResult<PongMessage> ParsePong(ByteReader& reader) noexcept {
+    auto token = reader.ReadU64BE();
+    if (!token) {
+        return std::unexpected(token.error());
+    }
+    if (auto rest = RequireExhausted(reader); !rest) {
+        return std::unexpected(rest.error());
+    }
+    return PongMessage{.Token = *token};
+}
+
+ProtoResult<void> WritePong(ByteWriter& writer,
+                            const PongMessage& message) noexcept {
+    if (auto type = WriteMessageType(writer, EMessageType::Pong); !type) {
+        return type;
+    }
+    return writer.WriteU64BE(message.Token);
 }
 
 }  // namespace zet::wire

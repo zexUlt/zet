@@ -84,6 +84,33 @@ void CheckDisposition(EProtoError error) noexcept {
     return left.ClientReceiveOffset == right.ClientReceiveOffset;
 }
 
+[[nodiscard]] bool Same(const DataMessage& left,
+                        const DataMessage& right) noexcept {
+    return left.Ack == right.Ack && left.Offset == right.Offset &&
+           std::ranges::equal(left.Payload, right.Payload);
+}
+
+[[nodiscard]] bool Same(const AckMessage& left,
+                        const AckMessage& right) noexcept {
+    return left.Ack == right.Ack;
+}
+
+[[nodiscard]] bool Same(const ResizeMessage& left,
+                        const ResizeMessage& right) noexcept {
+    return left.Rows == right.Rows && left.Cols == right.Cols &&
+           left.XPixel == right.XPixel && left.YPixel == right.YPixel;
+}
+
+[[nodiscard]] bool Same(const PingMessage& left,
+                        const PingMessage& right) noexcept {
+    return left.Token == right.Token;
+}
+
+[[nodiscard]] bool Same(const PongMessage& left,
+                        const PongMessage& right) noexcept {
+    return left.Token == right.Token;
+}
+
 template <typename TMessage>
 using MessageParser = ProtoResult<TMessage> (*)(ByteReader&) noexcept;
 
@@ -164,6 +191,21 @@ void ParseBody(ByteSpan input) noexcept {
             return;
         case EMessageType::Resume:
             ParseThenRoundTrip(reader, *type, ParseResume, WriteResume);
+            return;
+        case EMessageType::Data:
+            ParseThenRoundTrip(reader, *type, ParseData, WriteData);
+            return;
+        case EMessageType::Ack:
+            ParseThenRoundTrip(reader, *type, ParseAck, WriteAck);
+            return;
+        case EMessageType::Resize:
+            ParseThenRoundTrip(reader, *type, ParseResize, WriteResize);
+            return;
+        case EMessageType::Ping:
+            ParseThenRoundTrip(reader, *type, ParsePing, WritePing);
+            return;
+        case EMessageType::Pong:
+            ParseThenRoundTrip(reader, *type, ParsePong, WritePong);
             return;
     }
 }
