@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <cstddef>
 #include <cstdint>
 #include <vector>
@@ -752,8 +753,10 @@ TEST_CASE("a session end of a kind nobody defined is refused both ways") {
 
     std::vector<std::byte> out(MAX_FRAME);
     ByteWriter writer{MutableByteSpan{out}};
-    const SessionEndMessage odd{.Kind = static_cast<ESessionEndKind>(7),
-                                .Value = 0};
+    // bit_cast rather than static_cast: the point is a value outside the
+    // enumeration, which is what the analyzer rightly flags a cast for.
+    const SessionEndMessage odd{
+        .Kind = std::bit_cast<ESessionEndKind>(std::uint8_t{7}), .Value = 0};
     CHECK(WriteSessionEnd(writer, odd).error() == EProtoError::MalformedField);
     CHECK(writer.Size() == 0);
 }
