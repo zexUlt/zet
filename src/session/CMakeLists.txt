@@ -1,4 +1,5 @@
 add_library(zet_session STATIC
+    agent_session.cpp
     error.cpp
 )
 add_library(zet::session ALIAS zet_session)

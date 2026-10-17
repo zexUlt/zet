@@ -10,6 +10,10 @@ std::string_view Describe(ESessionError error) noexcept {
             return "data arrived past the end of the stream";
         case ESessionError::DisconnectBufferOverflow:
             return "too much output while disconnected";
+        case ESessionError::NotAuthenticated:
+            return "resume did not authenticate";
+        case ESessionError::UnknownSeed:
+            return "resume opened under a seed the session does not hold";
     }
     return "unknown session error";
 }
