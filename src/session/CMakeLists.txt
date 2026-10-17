@@ -1,4 +1,5 @@
 add_library(zet_session STATIC
+    agent_session.cpp
     error.cpp
     send_buffer.cpp
     receive_cursor.cpp

@@ -15,6 +15,14 @@ TEST_CASE(
           EDisposition::CloseConnection);
     CHECK(DispositionOf(ESessionError::StreamGap) ==
           EDisposition::CloseConnection);
+    CHECK(DispositionOf(ESessionError::UnknownSeed) ==
+          EDisposition::CloseConnection);
+}
+
+TEST_CASE("a resume that did not authenticate cannot end the session") {
+    // Its peer proved nothing, so §5 forbids it any say over the session.
+    CHECK(DispositionOf(ESessionError::NotAuthenticated) ==
+          EDisposition::CloseConnection);
 }
 
 TEST_CASE("output that cannot be replayed whole ends the session") {
@@ -28,6 +36,7 @@ TEST_CASE("every session error has a reason worth showing the user") {
     for (const ESessionError error :
          {ESessionError::AckBeyondSent, ESessionError::StreamGap,
           ESessionError::DisconnectBufferOverflow,
+          ESessionError::NotAuthenticated, ESessionError::UnknownSeed,
           ESessionError::PeerBehindBuffer}) {
         CAPTURE(static_cast<int>(error));
         CHECK_FALSE(Describe(error).empty());
