@@ -76,3 +76,30 @@ jobs:
           path: build/musl-fuzz/work/
           if-no-files-found: ignore
           retention-days: 14
+
+  # The short scenario of §16 at its full size: a cut at every byte offset of
+  # 64 KiB, both ways. Every offset is a run of its own, so it costs the
+  # square of the size — five minutes here, too much for every pull request,
+  # which runs 16 KiB of it.
+  reconnect-every-offset:
+    name: reconnect at every offset (64 KiB)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Restore the compiler cache
+        uses: ./.github/actions/ccache
+        with:
+          key: musl-dev
+
+      - name: Restore the Alpine packages
+        uses: ./.github/actions/apk
+
+      - name: Cut at every byte of 64 KiB
+        run: |
+          tools/in_alpine.sh '
+            cmake --preset musl-dev >/dev/null &&
+            cmake --build --preset musl-dev &&
+            ZET_CUT_SCENARIO_BYTES=65536 ctest --preset musl-dev -R "a cut at every byte"
+          '
