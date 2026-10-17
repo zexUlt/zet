@@ -109,6 +109,37 @@ def wait_pid(pid: int, timeout: float = STEP_TIMEOUT_SECONDS) -> int:
     return status
 
 
+def wait_gone(pid: int, timeout: float = STEP_TIMEOUT_SECONDS) -> None:
+    """Waits for a process that is not our child to end, on a pidfd: no
+    polling, and no reaping, which is its parent's to do."""
+    try:
+        pidfd = os.pidfd_open(pid)
+    except ProcessLookupError:
+        return
+    try:
+        ready, _, _ = select.select([pidfd], [], [], timeout)
+    finally:
+        os.close(pidfd)
+    if not ready:
+        raise Timeout(f"pid {pid} still running after {timeout}s")
+
+
+# How often wait_until looks again. Used only where the kernel offers no
+# event to wait on, such as another process closing one of its sockets.
+POLL_INTERVAL_SECONDS = 0.05
+
+
+def wait_until(condition, what: str, timeout: float = STEP_TIMEOUT_SECONDS) -> None:
+    """Waits for `condition()` to hold, looking every POLL_INTERVAL_SECONDS up
+    to the deadline. The one place the suite polls: keep it for state with no
+    descriptor to wait on, and say in the caller why there is none."""
+    deadline = _deadline(timeout)
+    while not condition():
+        if time.monotonic() >= deadline:
+            raise Timeout(f"waited {timeout}s for {what}")
+        select.select([], [], [], min(POLL_INTERVAL_SECONDS, _remaining(deadline)))
+
+
 class PtyProcess:
     """A command on a fresh pty of its own, the way a user's terminal runs it."""
 

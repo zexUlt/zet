@@ -17,6 +17,7 @@ from pathlib import Path
 
 import pytest
 
+from e2e import PROFILE, Zet, install_agent
 from harness import NOISE_BANNER, STEP_TIMEOUT_SECONDS, Timeout, read_until
 
 SSHD = "/usr/sbin/sshd"
@@ -151,6 +152,9 @@ LogLevel INFO
 # Alpine's does not. BASH_ENV makes it, so the noisy rc file reaches the
 # channel the way it would on the hosts zet meets in the wild.
 SetEnv BASH_ENV={home / ".bashrc"}
+# What the client hands the agent through `ssh -o SetEnv` (the e2e suite's
+# timeouts, and the sanitizer options of an ASan build).
+AcceptEnv ZET_* ASAN_OPTIONS UBSAN_OPTIONS
 """)
 
         known_hosts = work / "known_hosts"
@@ -250,6 +254,20 @@ def binaries() -> Binaries:
     if missing:
         pytest.skip(f"{' and '.join(missing)} not built under {build} yet")
     return Binaries(client=found["zet"], agent=found["zet-agent"])
+
+
+@pytest.fixture(scope="session")
+def installed_agent(binaries: Binaries) -> Path:
+    """zet-agent copied where the test user can run it (e2e.AGENT_DIR)."""
+    return install_agent(binaries.agent)
+
+
+@pytest.fixture
+def zet(binaries: Binaries, installed_agent: Path, ssh_host: SshHost) -> Zet:
+    """zet against the test host, with a login profile whose prompt the tests
+    can wait for."""
+    ssh_host.write_home_file(".bash_profile", PROFILE)
+    return Zet(client=binaries.client, agent=installed_agent, host=ssh_host)
 
 
 @pytest.fixture(scope="session")
