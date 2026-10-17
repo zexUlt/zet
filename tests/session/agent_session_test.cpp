@@ -2,6 +2,7 @@
 
 #include <doctest/doctest.h>
 
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <optional>
@@ -336,4 +337,42 @@ TEST_CASE_FIXTURE(SodiumFixture,
 
     two.Detach(Timestamp::FromNanos(2));
     CHECK(session.State() == ESessionState::Detached);
+}
+
+TEST_CASE_FIXTURE(SodiumFixture,
+                  "the pty's door and the handle reach the same streams") {
+    std::vector<std::byte> storage(64);
+    const SessionLimits limits{.ResendMax = 8,
+                               .DisconnectMax = 16,
+                               .OrphanTimeout = std::chrono::seconds{30}};
+    AgentSession session{DeriveSessionSecrets(MakeKey(1)),
+                         SessionStreams{.Storage = MutableByteSpan{storage},
+                                        .Now = Timestamp{},
+                                        .Limits = limits}};
+    Client client{1};
+
+    CHECK(session.State() == ESessionState::Detached);
+    CHECK(session.AcceptsWrites());
+    REQUIRE(session.NextDeadline().IsSet());
+    CHECK_FALSE(session.ReapReason().has_value());
+
+    auto outcome = Resume(session, client, 10);
+    REQUIRE(outcome.FromAgent->has_value());
+    auto& handle = (*outcome.FromAgent)->Handle;
+    REQUIRE(handle.Attach(0));
+    CHECK(handle.IsCurrent());
+    CHECK_FALSE(session.NextDeadline().IsSet());
+
+    const std::vector<std::byte> output(4, std::byte{0x41});
+    REQUIRE(session.Write(ByteSpan{output}) == output.size());
+    CHECK(handle.Output().End() == output.size());
+    CHECK(handle.Input().RecvOffset() == 0);
+    CHECK(session.Ref().ReceiveOffset() == 0);
+
+    handle.Kill(ESessionError::PeerBehindBuffer);
+    CHECK(session.State() == ESessionState::Reaped);
+    CHECK(session.ReapReason() == ESessionError::PeerBehindBuffer);
+    CHECK_FALSE(session.AcceptsWrites());
+    session.OnTimer(Timestamp{} + std::chrono::hours{1});
+    CHECK(session.ReapReason() == ESessionError::PeerBehindBuffer);
 }

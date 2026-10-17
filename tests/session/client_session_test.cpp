@@ -319,3 +319,43 @@ TEST_CASE_FIXTURE(SodiumFixture,
         CHECK(client.RememberedNonces() == 0);
     }
 }
+
+TEST_CASE_FIXTURE(SodiumFixture,
+                  "the keyboard's door and the handle reach the same streams") {
+    std::vector<std::byte> storage(64);
+    const SessionLimits limits{
+        .ResendMax = 8, .DisconnectMax = 16, .OrphanTimeout = Duration::zero()};
+    ClientSession client{DeriveSessionSecrets(MakeKey(1)),
+                         SessionStreams{.Storage = MutableByteSpan{storage},
+                                        .Now = Timestamp{},
+                                        .Limits = limits}};
+    AgentSession agent{DeriveSessionSecrets(MakeKey(1)), SessionStreams{}};
+
+    CHECK(client.State() == ESessionState::Detached);
+    CHECK(client.AcceptsWrites());
+    CHECK(client.ReceiveOffset() == 0);
+
+    // Typed while offline: held back at the detached ceiling, never dropped.
+    const std::vector<std::byte> typed(20, std::byte{0x61});
+    REQUIRE(client.Write(ByteSpan{typed}) == 16);
+    CHECK_FALSE(client.AcceptsWrites());
+
+    auto result = Connect(client, agent, 1, 2);
+    REQUIRE(result.FromClient.has_value());
+    auto& handle = result.FromClient->Handle;
+    REQUIRE(handle.Attach(0));
+    CHECK(handle.IsCurrent());
+    CHECK(client.State() == ESessionState::Live);
+    CHECK(handle.Output().End() == 16);
+    CHECK(handle.Input().RecvOffset() == 0);
+
+    handle.Detach(Timestamp::FromNanos(1));
+    CHECK(client.State() == ESessionState::Detached);
+    CHECK_FALSE(handle.IsCurrent());
+
+    handle.Kill(ESessionError::SessionReaped);
+    CHECK(client.State() == ESessionState::Reaped);
+    const auto late = client.Write(ByteSpan{typed});
+    REQUIRE_FALSE(late.has_value());
+    CHECK(late.error() == ESessionError::SessionReaped);
+}
