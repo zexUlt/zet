@@ -18,6 +18,7 @@ add_executable(zet_tests
     core/version_test.cpp
     crypto/crypto_test.cpp
     session/agent_session_test.cpp
+    session/client_session_test.cpp
     session/error_test.cpp
     session/send_buffer_test.cpp
     session/receive_cursor_test.cpp

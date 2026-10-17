@@ -38,3 +38,10 @@ zet_add_compile_fail(ref_cannot_confirm "no member named 'ConfirmResume'")
 zet_add_compile_fail(session_cannot_be_changed_directly "is a private member")
 zet_add_compile_fail(handle_cannot_be_copied "call to deleted constructor")
 zet_add_compile_fail(attempt_finishes_once "rvalue ref-qualifier|is an lvalue")
+
+zet_add_compile_fail(client_handle_from_nowhere "calling a private constructor")
+zet_add_compile_fail(client_session_cannot_be_changed_directly
+                     "is a private member")
+zet_add_compile_fail(client_handle_cannot_be_copied "call to deleted constructor")
+zet_add_compile_fail(client_attempt_finishes_once
+                     "rvalue ref-qualifier|is an lvalue")
