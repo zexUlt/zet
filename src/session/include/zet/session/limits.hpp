@@ -37,6 +37,12 @@ inline constexpr Duration DEFAULT_ORPHAN_TIMEOUT = std::chrono::minutes{30};
 /// where the clock is handed in.
 inline constexpr Duration REKEY_INTERVAL = std::chrono::hours{1};
 
+/// How long one resume exchange may take, Hello to the opened Resume, per §5.
+/// A stranger can hold a half-finished handshake open for this long and no
+/// longer; a real client on any network a terminal is usable over finishes
+/// in a few round trips.
+inline constexpr Duration HANDSHAKE_TIMEOUT = std::chrono::seconds{5};
+
 /// The policy one session runs under, defaulting to the figures above.
 ///
 /// A value rather than the constants themselves, the way FrameSealer takes its
