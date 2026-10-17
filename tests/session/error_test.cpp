@@ -30,6 +30,10 @@ TEST_CASE("output that cannot be replayed whole ends the session") {
           EDisposition::KillSession);
     CHECK(DispositionOf(ESessionError::PeerBehindBuffer) ==
           EDisposition::KillSession);
+    CHECK(DispositionOf(ESessionError::OrphanTimeout) ==
+          EDisposition::KillSession);
+    CHECK(DispositionOf(ESessionError::SessionReaped) ==
+          EDisposition::KillSession);
 }
 
 TEST_CASE("every session error has a reason worth showing the user") {
@@ -37,7 +41,8 @@ TEST_CASE("every session error has a reason worth showing the user") {
          {ESessionError::AckBeyondSent, ESessionError::StreamGap,
           ESessionError::DisconnectBufferOverflow,
           ESessionError::NotAuthenticated, ESessionError::UnknownSeed,
-          ESessionError::PeerBehindBuffer}) {
+          ESessionError::PeerBehindBuffer, ESessionError::OrphanTimeout,
+          ESessionError::SessionReaped}) {
         CAPTURE(static_cast<int>(error));
         CHECK_FALSE(Describe(error).empty());
         CHECK(Describe(error) != "unknown session error");

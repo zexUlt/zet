@@ -6,6 +6,7 @@
 #include "zet/core/bytes.hpp"
 #include "zet/crypto/crypto.hpp"
 #include "zet/session/error.hpp"
+#include "zet/session/stream_state.hpp"
 #include "zet/wire/handshake.hpp"
 #include "zet/wire/key_schedule.hpp"
 
@@ -48,7 +49,7 @@ enum class EResumeKeys : std::uint8_t {
 /// points into it, and the table that owns sessions keeps them in place.
 class AgentSession {
 public:
-    explicit AgentSession(wire::SessionSecrets secrets) noexcept;
+    AgentSession(wire::SessionSecrets secrets, SessionStreams streams) noexcept;
 
     AgentSession(const AgentSession&) = delete;
     AgentSession& operator=(const AgentSession&) = delete;
@@ -58,6 +59,28 @@ public:
 
     /// The view an unauthenticated connection is allowed.
     [[nodiscard]] SessionRef Ref() noexcept;
+
+    // ── The pty's door. Writing the shell's output into the stream is not a
+    // change any peer causes, and the code holding a connection never has the
+    // session itself, only a SessionRef — so this is no way around §5.
+
+    /// See StreamState::Write. The agent reaps on overflow while detached.
+    [[nodiscard]] SessionResult<std::size_t> Write(ByteSpan output) noexcept {
+        return Streams_.Write(output);
+    }
+    [[nodiscard]] bool AcceptsWrites() const noexcept {
+        return Streams_.AcceptsWrites();
+    }
+    [[nodiscard]] ESessionState State() const noexcept {
+        return Streams_.State();
+    }
+    [[nodiscard]] std::optional<ESessionError> ReapReason() const noexcept {
+        return Streams_.ReapReason();
+    }
+    [[nodiscard]] Deadline NextDeadline() const noexcept {
+        return Streams_.NextDeadline();
+    }
+    void OnTimer(Timestamp now) noexcept { Streams_.OnTimer(now); }
 
 private:
     friend class SessionRef;
@@ -71,6 +94,7 @@ private:
     /// until the first connection is confirmed.
     std::optional<crypto::Key> PreviousSeed_;
     wire::NonceMemory Seen_;
+    StreamState Streams_;
 };
 
 /// A session as seen before its peer has proved anything.
@@ -84,6 +108,10 @@ public:
     /// How many handshake nonces the session remembers. For tests and for
     /// zet-dump; reading it changes nothing.
     [[nodiscard]] std::size_t RememberedNonces() const noexcept;
+
+    /// How much of the client's stream the session holds: what AuthOk will
+    /// tell the client to resend from.
+    [[nodiscard]] std::uint64_t ReceiveOffset() const noexcept;
 
 private:
     friend class AgentSession;
@@ -117,12 +145,34 @@ public:
     /// confirmed: by then the seed of n has been replaced twice.
     [[nodiscard]] SessionResult<void> ConfirmResume(EResumeKeys used) noexcept;
 
+    /// Makes this connection the live one once Resume has opened, resending
+    /// from what the client says it holds. A connection that was live until
+    /// now is superseded rather than detached; it learns so from IsCurrent().
+    [[nodiscard]] SessionResult<void> Attach(
+        std::uint64_t clientReceiveOffset) noexcept;
+
+    /// Lets go of the session when this connection closes. Does nothing if a
+    /// newer connection has taken over — it is that one's to detach.
+    void Detach(Timestamp now) noexcept;
+
+    /// Whether this connection is still the one attached. A superseded
+    /// connection must stop touching the streams.
+    [[nodiscard]] bool IsCurrent() const noexcept;
+
+    /// Ends the session, for an error whose disposition says so.
+    void Kill(ESessionError reason) noexcept;
+
+    [[nodiscard]] SendBuffer& Output() noexcept;
+    [[nodiscard]] ReceiveCursor& Input() noexcept;
+
 private:
     friend class ResumeAttempt;
 
     explicit SessionHandle(AgentSession& session) noexcept;
 
     AgentSession* Session_;
+    /// Which attachment this handle made; zero until Attach.
+    std::uint64_t Generation_{0};
 };
 
 /// What a finished attempt yields: the right to change the session, and the
@@ -139,10 +189,11 @@ struct Resumed {
 /// memory is an empty one of its own.
 class ResumeAttempt {
 public:
-    /// `receiveOffset` is how much of the client's stream the agent holds; it
-    /// goes into AuthOk under the transcript MAC.
-    ResumeAttempt(SessionRef session, wire::HandshakeNonce serverNonce,
-                  std::uint64_t receiveOffset) noexcept;
+    /// How much of the client's stream the agent holds goes into AuthOk under
+    /// the transcript MAC; it is read from the session, so that it cannot
+    /// disagree with the cursor the resend will meet.
+    ResumeAttempt(SessionRef session,
+                  wire::HandshakeNonce serverNonce) noexcept;
 
     /// For a sid no session answers to. The secrets come from
     /// DeriveDecoySecrets, so two probes for the same sid meet the same

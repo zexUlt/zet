@@ -24,8 +24,6 @@ struct SodiumFixture {
 /// Room for any handshake message several times over.
 constexpr std::size_t SCRATCH = 256;
 
-constexpr std::uint64_t RECEIVE_OFFSET = 4096;
-
 crypto::Key MakeKey(std::uint8_t seed) {
     crypto::KeyBytes bytes{};
     std::uint8_t value = seed;
@@ -114,8 +112,7 @@ Outcome Connect(Client& client, ResumeAttempt& attempt, SessionRef ref,
 /// One whole resume of `session` by `client`, with a fresh nonce pair.
 Outcome Resume(AgentSession& session, Client& client, std::uint8_t nonceSeed) {
     ResumeAttempt attempt{session.Ref(),
-                          MakeNonce(static_cast<std::uint8_t>(nonceSeed + 1)),
-                          RECEIVE_OFFSET};
+                          MakeNonce(static_cast<std::uint8_t>(nonceSeed + 1))};
     return Connect(client, attempt, session.Ref(), nonceSeed);
 }
 
@@ -131,7 +128,7 @@ bool SameKeys(const wire::ConnectionKeys& left,
 
 TEST_CASE_FIXTURE(SodiumFixture,
                   "a client holding K_auth gets a handle to its session") {
-    AgentSession session{DeriveSessionSecrets(MakeKey(1))};
+    AgentSession session{DeriveSessionSecrets(MakeKey(1)), SessionStreams{}};
     Client client{1};
 
     auto outcome = Resume(session, client, 10);
@@ -142,12 +139,12 @@ TEST_CASE_FIXTURE(SodiumFixture,
     auto& resumed = **outcome.FromAgent;
     CHECK(resumed.Handle.Id() == client.Id);
     CHECK(SameKeys(resumed.Result.Keys, outcome.FromClient->Keys));
-    CHECK(outcome.FromClient->PeerReceiveOffset == RECEIVE_OFFSET);
+    CHECK(outcome.FromClient->PeerReceiveOffset == 0);
 }
 
 TEST_CASE_FIXTURE(SodiumFixture,
                   "the session changes at Finish and not one step earlier") {
-    AgentSession session{DeriveSessionSecrets(MakeKey(1))};
+    AgentSession session{DeriveSessionSecrets(MakeKey(1)), SessionStreams{}};
     Client client{1};
 
     const auto outcome = Resume(session, client, 10);
@@ -162,7 +159,7 @@ TEST_CASE_FIXTURE(SodiumFixture,
 
 TEST_CASE_FIXTURE(SodiumFixture,
                   "a peer without K_auth gets no handle and changes nothing") {
-    AgentSession session{DeriveSessionSecrets(MakeKey(1))};
+    AgentSession session{DeriveSessionSecrets(MakeKey(1)), SessionStreams{}};
     Client stranger{2};
     // The stranger read the sid off the wire; that is all it has.
     stranger.Id = session.Ref().Id();
@@ -176,8 +173,8 @@ TEST_CASE_FIXTURE(SodiumFixture,
 
 TEST_CASE_FIXTURE(SodiumFixture,
                   "an attempt that never finished yields nothing") {
-    AgentSession session{DeriveSessionSecrets(MakeKey(1))};
-    ResumeAttempt attempt{session.Ref(), MakeNonce(1), RECEIVE_OFFSET};
+    AgentSession session{DeriveSessionSecrets(MakeKey(1)), SessionStreams{}};
+    ResumeAttempt attempt{session.Ref(), MakeNonce(1)};
 
     const auto result = std::move(attempt).Finish();
     REQUIRE_FALSE(result.has_value());
@@ -194,7 +191,7 @@ TEST_CASE_FIXTURE(SodiumFixture,
     auto attempt =
         ResumeAttempt::ForUnknown(localSecret, client.Id, MakeNonce(1));
 
-    AgentSession unrelated{DeriveSessionSecrets(MakeKey(3))};
+    AgentSession unrelated{DeriveSessionSecrets(MakeKey(3)), SessionStreams{}};
     const auto outcome = Connect(client, attempt, unrelated.Ref(), 10);
     REQUIRE(outcome.FromAgent.has_value());
     REQUIRE_FALSE(outcome.FromAgent->has_value());
@@ -204,7 +201,7 @@ TEST_CASE_FIXTURE(SodiumFixture,
 
 TEST_CASE_FIXTURE(SodiumFixture,
                   "the first connection of a session has no fallback keys") {
-    AgentSession session{DeriveSessionSecrets(MakeKey(1))};
+    AgentSession session{DeriveSessionSecrets(MakeKey(1)), SessionStreams{}};
     Client client{1};
 
     const auto outcome = Resume(session, client, 10);
@@ -214,7 +211,7 @@ TEST_CASE_FIXTURE(SodiumFixture,
 
 TEST_CASE_FIXTURE(SodiumFixture,
                   "after a confirmed resume both ends meet on the next seed") {
-    AgentSession session{DeriveSessionSecrets(MakeKey(1))};
+    AgentSession session{DeriveSessionSecrets(MakeKey(1)), SessionStreams{}};
     Client client{1};
 
     auto first = Resume(session, client, 10);
@@ -230,7 +227,7 @@ TEST_CASE_FIXTURE(SodiumFixture,
 
 TEST_CASE_FIXTURE(SodiumFixture,
                   "a client whose answer was cut is met on the seed it kept") {
-    AgentSession session{DeriveSessionSecrets(MakeKey(1))};
+    AgentSession session{DeriveSessionSecrets(MakeKey(1)), SessionStreams{}};
     Client client{1};
 
     auto first = Resume(session, client, 10);
@@ -258,7 +255,7 @@ TEST_CASE_FIXTURE(SodiumFixture,
 
 TEST_CASE_FIXTURE(SodiumFixture,
                   "the previous seed cannot be confirmed when there is none") {
-    AgentSession session{DeriveSessionSecrets(MakeKey(1))};
+    AgentSession session{DeriveSessionSecrets(MakeKey(1)), SessionStreams{}};
     Client client{1};
 
     auto outcome = Resume(session, client, 10);
@@ -273,7 +270,7 @@ TEST_CASE_FIXTURE(SodiumFixture,
                   "keys of connection n are gone once n+1 is confirmed") {
     // The M2 criterion from §17, read from the outside: after two confirmed
     // resumes, nothing the session can derive any more opens connection n.
-    AgentSession session{DeriveSessionSecrets(MakeKey(1))};
+    AgentSession session{DeriveSessionSecrets(MakeKey(1)), SessionStreams{}};
     Client client{1};
     const crypto::Key seedOfFirst = Clone(client.Seed);
 
@@ -297,4 +294,46 @@ TEST_CASE_FIXTURE(SodiumFixture,
     CHECK_FALSE(SameKeys(resumed.Result.Keys, probe.FromClient->Keys));
     REQUIRE(resumed.Result.FallbackKeys.has_value());
     CHECK_FALSE(SameKeys(*resumed.Result.FallbackKeys, probe.FromClient->Keys));
+}
+
+TEST_CASE_FIXTURE(SodiumFixture,
+                  "the second resume takes the session over from the first") {
+    std::vector<std::byte> storage(64);
+    AgentSession session{DeriveSessionSecrets(MakeKey(1)),
+                         SessionStreams{.Storage = MutableByteSpan{storage},
+                                        .Now = Timestamp{},
+                                        .Limits = SessionLimits{}}};
+    Client client{1};
+
+    // The shell wrote while nobody was there; the first connection asks for
+    // all of it.
+    const std::vector<std::byte> output(12, std::byte{0x41});
+    REQUIRE(session.Write(ByteSpan{output}) == output.size());
+
+    auto first = Resume(session, client, 10);
+    REQUIRE(first.FromAgent->has_value());
+    auto& one = (*first.FromAgent)->Handle;
+    REQUIRE(one.ConfirmResume(EResumeKeys::Current));
+    REQUIRE(one.Attach(0));
+    CHECK(session.State() == ESessionState::Live);
+    CHECK(one.Output().SendNext() == 0);
+    client.MoveOn();
+
+    // The client changed networks; the old socket is still half-open.
+    auto second = Resume(session, client, 20);
+    REQUIRE(second.FromAgent->has_value());
+    auto& two = (*second.FromAgent)->Handle;
+    REQUIRE(two.ConfirmResume(EResumeKeys::Current));
+    REQUIRE(two.Attach(7));
+    CHECK(two.Output().SendNext() == 7);
+
+    CHECK_FALSE(one.IsCurrent());
+    CHECK(two.IsCurrent());
+    // The half-open socket finally times out. It must not detach the session
+    // from the connection that replaced it.
+    one.Detach(Timestamp::FromNanos(1));
+    CHECK(session.State() == ESessionState::Live);
+
+    two.Detach(Timestamp::FromNanos(2));
+    CHECK(session.State() == ESessionState::Detached);
 }

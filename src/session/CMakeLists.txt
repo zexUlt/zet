@@ -3,6 +3,7 @@ add_library(zet_session STATIC
     client_session.cpp
     error.cpp
     send_buffer.cpp
+    stream_state.cpp
     receive_cursor.cpp
     channel.cpp
 )

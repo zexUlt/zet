@@ -26,10 +26,12 @@ namespace {
 
 }  // namespace
 
-AgentSession::AgentSession(wire::SessionSecrets secrets) noexcept
+AgentSession::AgentSession(wire::SessionSecrets secrets,
+                           SessionStreams streams) noexcept
     : Id_(secrets.Id),
       Auth_(std::move(secrets.Auth)),
-      Seed_(std::move(secrets.ConnectionSeed)) {}
+      Seed_(std::move(secrets.ConnectionSeed)),
+      Streams_(streams, EDetachedOverflow::Reap) {}
 
 SessionRef AgentSession::Ref() noexcept { return SessionRef{*this}; }
 
@@ -39,6 +41,10 @@ const wire::SessionId& SessionRef::Id() const noexcept { return Session_->Id_; }
 
 std::size_t SessionRef::RememberedNonces() const noexcept {
     return Session_->Seen_.Size();
+}
+
+std::uint64_t SessionRef::ReceiveOffset() const noexcept {
+    return Session_->Streams_.ReceiveOffset();
 }
 
 SessionHandle::SessionHandle(AgentSession& session) noexcept
@@ -68,12 +74,11 @@ SessionResult<void> SessionHandle::ConfirmResume(EResumeKeys used) noexcept {
 }
 
 ResumeAttempt::ResumeAttempt(SessionRef session,
-                             wire::HandshakeNonce serverNonce,
-                             std::uint64_t receiveOffset) noexcept
+                             wire::HandshakeNonce serverNonce) noexcept
     : ResumeAttempt(session.Session_, Clone(session.Session_->Auth_),
                     Clone(session.Session_->Seed_),
                     Clone(session.Session_->PreviousSeed_), serverNonce,
-                    receiveOffset) {}
+                    session.ReceiveOffset()) {}
 
 ResumeAttempt ResumeAttempt::ForUnknown(
     const crypto::Key& localSecret, const wire::SessionId& id,
@@ -84,6 +89,36 @@ ResumeAttempt ResumeAttempt::ForUnknown(
     return ResumeAttempt{
         nullptr,      std::move(decoy.Auth), std::move(decoy.ConnectionSeed),
         std::nullopt, serverNonce,           0};
+}
+
+SessionResult<void> SessionHandle::Attach(
+    std::uint64_t clientReceiveOffset) noexcept {
+    auto generation = Session_->Streams_.Attach(clientReceiveOffset);
+    if (!generation) {
+        return std::unexpected(generation.error());
+    }
+    Generation_ = *generation;
+    return {};
+}
+
+void SessionHandle::Detach(Timestamp now) noexcept {
+    Session_->Streams_.Detach(Generation_, now);
+}
+
+bool SessionHandle::IsCurrent() const noexcept {
+    return Session_->Streams_.IsCurrent(Generation_);
+}
+
+void SessionHandle::Kill(ESessionError reason) noexcept {
+    Session_->Streams_.Kill(reason);
+}
+
+SendBuffer& SessionHandle::Output() noexcept {
+    return Session_->Streams_.Output();
+}
+
+ReceiveCursor& SessionHandle::Input() noexcept {
+    return Session_->Streams_.Input();
 }
 
 ResumeAttempt::ResumeAttempt(AgentSession* session, crypto::Key auth,

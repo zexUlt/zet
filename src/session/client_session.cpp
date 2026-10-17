@@ -18,10 +18,12 @@ namespace {
 
 }  // namespace
 
-ClientSession::ClientSession(wire::SessionSecrets secrets) noexcept
+ClientSession::ClientSession(wire::SessionSecrets secrets,
+                             SessionStreams streams) noexcept
     : Id_(secrets.Id),
       Auth_(std::move(secrets.Auth)),
-      Seed_(std::move(secrets.ConnectionSeed)) {}
+      Seed_(std::move(secrets.ConnectionSeed)),
+      Streams_(streams, EDetachedOverflow::Backpressure) {}
 
 const wire::SessionId& ClientSession::Id() const noexcept { return Id_; }
 
@@ -47,6 +49,36 @@ void ClientSessionHandle::ConfirmAgentFrame() noexcept {
     // derived from memory after this call — that is the forward-secrecy
     // guarantee for the client side.
     Session_->Seed_ = wire::AdvanceConnectionSeed(Session_->Seed_);
+}
+
+SessionResult<void> ClientSessionHandle::Attach(
+    std::uint64_t agentReceiveOffset) noexcept {
+    auto generation = Session_->Streams_.Attach(agentReceiveOffset);
+    if (!generation) {
+        return std::unexpected(generation.error());
+    }
+    Generation_ = *generation;
+    return {};
+}
+
+void ClientSessionHandle::Detach(Timestamp now) noexcept {
+    Session_->Streams_.Detach(Generation_, now);
+}
+
+bool ClientSessionHandle::IsCurrent() const noexcept {
+    return Session_->Streams_.IsCurrent(Generation_);
+}
+
+void ClientSessionHandle::Kill(ESessionError reason) noexcept {
+    Session_->Streams_.Kill(reason);
+}
+
+SendBuffer& ClientSessionHandle::Output() noexcept {
+    return Session_->Streams_.Output();
+}
+
+ReceiveCursor& ClientSessionHandle::Input() noexcept {
+    return Session_->Streams_.Input();
 }
 
 ClientResumeAttempt::ClientResumeAttempt(
