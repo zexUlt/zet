@@ -1,4 +1,5 @@
 add_library(zet_wire STATIC
+    armor.cpp
     frame.cpp
     frame_stream.cpp
     handshake.cpp

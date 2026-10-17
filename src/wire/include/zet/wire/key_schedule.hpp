@@ -23,6 +23,13 @@ namespace zet::wire {
 inline constexpr std::size_t HANDSHAKE_NONCE_SIZE = 16;
 using HandshakeNonce = std::array<std::byte, HANDSHAKE_NONCE_SIZE>;
 
+/// Bootstrap nonce, per §4: thirty-two bytes from each side. Wider than the
+/// handshake's, because these two are all that separates one bootstrap from
+/// any other the same machine ever ran — there is no session secret yet to
+/// lean on.
+inline constexpr std::size_t BOOTSTRAP_NONCE_SIZE = 32;
+using BootstrapNonce = std::array<std::byte, BOOTSTRAP_NONCE_SIZE>;
+
 /// Session identifier: a routing label, not a credential. It travels in the
 /// clear, and §5 turns on it being useless to whoever reads it.
 inline constexpr std::size_t SESSION_ID_SIZE = 16;
@@ -46,6 +53,17 @@ struct ConnectionKeys {
     DirectionSalt SaltClientToServer{};
     DirectionSalt SaltServerToClient{};
 };
+
+/// The session master out of a bootstrap, per §4 and §8.
+///
+/// `exchanged` is what X25519 gave both ends — libsodium's kx folds the two
+/// public keys into it — and the version and both nonces go in on top, so an
+/// Accept from some earlier run, even one that a stale terminal replays word
+/// for word, cannot produce the master of this one.
+[[nodiscard]] crypto::Key DeriveBootstrapMaster(
+    const crypto::Key& exchanged, std::uint16_t version,
+    const BootstrapNonce& clientNonce,
+    const BootstrapNonce& agentNonce) noexcept;
 
 /// Neither derivation can fail: every length involved is fixed by a type, and
 /// the labels are literals the signature checks at compile time. Returning

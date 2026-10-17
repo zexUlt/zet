@@ -2,6 +2,7 @@
 
 #include <doctest/doctest.h>
 
+#include <algorithm>
 #include <array>
 #include <cstddef>
 #include <cstdint>
@@ -353,6 +354,29 @@ TEST_CASE_FIXTURE(SodiumFixture,
     REQUIRE(real.has_value());
     REQUIRE(other.has_value());
     CHECK(real->Transmit.Expose() != other->Transmit.Expose());
+}
+
+TEST_CASE_FIXTURE(SodiumFixture,
+                  "a seeded key pair matches the recorded vector") {
+    // crypto_kx_seed_keypair on the seed 00 01 … 1F.
+    constexpr std::array<std::uint8_t, PUBLIC_KEY_SIZE> expected = {
+        0x0E, 0x02, 0x16, 0x22, 0x3F, 0x14, 0x71, 0x43, 0xD3, 0x26, 0x15,
+        0xA9, 0x11, 0x89, 0xC2, 0x88, 0xC1, 0x72, 0x8C, 0xBA, 0x3C, 0xC5,
+        0xF9, 0xF6, 0x21, 0xB1, 0x02, 0x6E, 0x03, 0xD8, 0x31, 0x29};
+    KeyBytes seed{};
+    for (std::size_t i = 0; i < seed.size(); ++i) {
+        seed[i] = static_cast<std::byte>(KAT_KEY[i]);
+    }
+    const auto pair = KeyPairFromSeed(Key{seed});
+    CHECK(std::equal(pair.Public.begin(), pair.Public.end(), expected.begin(),
+                     [](std::byte a, std::uint8_t b) {
+                         return a == static_cast<std::byte>(b);
+                     }));
+    // The same seed, the same pair: the two ends of a test can agree on it.
+    const auto again = KeyPairFromSeed(Key{seed});
+    CHECK(again.Public == pair.Public);
+    const auto shared = DeriveClientKeys(pair, GenerateKeyPair().Public);
+    CHECK(shared.has_value());
 }
 
 TEST_CASE_FIXTURE(SodiumFixture, "generated key pairs differ") {

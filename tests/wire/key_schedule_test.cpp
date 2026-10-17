@@ -232,3 +232,37 @@ TEST_CASE_FIXTURE(SodiumFixture,
     REQUIRE(opened.has_value());
     CHECK(std::equal(plaintext.begin(), plaintext.end(), opened->begin()));
 }
+
+namespace {
+
+BootstrapNonce MakeBootstrapNonce(std::uint8_t seed) {
+    BootstrapNonce nonce{};
+    for (std::size_t i = 0; i < nonce.size(); ++i) {
+        nonce[i] = static_cast<std::byte>(seed * 5 + i);
+    }
+    return nonce;
+}
+
+}  // namespace
+
+TEST_CASE_FIXTURE(SodiumFixture,
+                  "the bootstrap master depends on every input, in order") {
+    const auto exchanged = MakeMaster(1);
+    const auto client = MakeBootstrapNonce(2);
+    const auto agent = MakeBootstrapNonce(3);
+    const auto base = Bytes(DeriveBootstrapMaster(exchanged, 1, client, agent));
+
+    CHECK(Bytes(DeriveBootstrapMaster(exchanged, 1, client, agent)) == base);
+    CHECK(Bytes(DeriveBootstrapMaster(MakeMaster(9), 1, client, agent)) !=
+          base);
+    CHECK(Bytes(DeriveBootstrapMaster(exchanged, 2, client, agent)) != base);
+    CHECK(Bytes(DeriveBootstrapMaster(exchanged, 1, MakeBootstrapNonce(4),
+                                      agent)) != base);
+    CHECK(Bytes(DeriveBootstrapMaster(exchanged, 1, client,
+                                      MakeBootstrapNonce(4))) != base);
+    // Swapped, the two nonces give another master: an agent that hands the
+    // client's nonce back as its own does not land on the client's.
+    CHECK(Bytes(DeriveBootstrapMaster(exchanged, 1, agent, client)) != base);
+    // Nor is it the exchanged key itself.
+    CHECK(base != Bytes(exchanged));
+}

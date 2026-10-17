@@ -1,5 +1,6 @@
 add_library(zet_session STATIC
     agent_session.cpp
+    bootstrap.cpp
     client_session.cpp
     connection.cpp
     error.cpp

@@ -48,6 +48,16 @@ KeyPair GenerateKeyPair() noexcept {
     return pair;
 }
 
+KeyPair KeyPairFromSeed(const Key& seed) noexcept {
+    static_assert(KEY_SIZE == crypto_kx_SEEDBYTES);
+    KeyPair pair;
+    // Fails only on a seed of the wrong length, which the type rules out.
+    std::ignore = crypto_kx_seed_keypair(
+        reinterpret_cast<unsigned char*>(pair.Public.data()),
+        Raw(pair.Private.Expose()), Raw(seed.Expose()));
+    return pair;
+}
+
 ProtoResult<SessionKeys> DeriveClientKeys(const KeyPair& own,
                                           const PublicKey& peer) noexcept {
     SessionKeys keys;
