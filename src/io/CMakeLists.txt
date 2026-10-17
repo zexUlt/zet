@@ -3,6 +3,8 @@ add_library(zet_io STATIC
     errno.cpp
     fd.cpp
     poller.cpp
+    pty.cpp
+    spawn.cpp
 )
 add_library(zet::io ALIAS zet_io)
 
