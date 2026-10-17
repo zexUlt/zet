@@ -2,8 +2,9 @@ name: fuzz soak (release gate)
 
 # The M1 criterion from docs/design.md §17: every fuzzer, ten minutes, clean.
 # Separate from CI on purpose — an hour of fuzzing on every pull request buys
-# nothing the one-minute smoke run there does not already catch, and the thing
-# a release needs to know is not answered in sixty seconds either way.
+# nothing the one-minute smoke run in fuzz.yml does not already catch, and
+# the thing a release needs to know is not answered in sixty seconds either
+# way.
 #
 # Dispatch it with the default of 600 seconds to run the M1 gate; the nightly
 # run takes the 30 minutes per target that §17 asks for.

@@ -1,0 +1,89 @@
+name: fuzz
+
+# The one-minute smoke run, split out of ci.yml so that it can be filtered by
+# path: the filter belongs to a workflow, not to a job.
+#
+# The list names what fuzzing cannot see rather than what it can. A file
+# wrongly left off it costs a needless run; a directory wrongly left off a list
+# of what fuzzing does see would have been skipped without anyone noticing —
+# src/session arrives at M2, and nothing would have told the filter about it.
+#
+# The job is not a required check, so a pull request it skips still merges.
+
+on:
+  pull_request:
+    paths-ignore:
+      - "docs/**"
+      - "tests/**"
+      - "**/*.md"
+      - ".claude/**"
+      - ".clang-format"
+      - ".clang-tidy"
+      - ".gitignore"
+      - "LICENSE"
+      - "NOTICE"
+      - "THIRD_PARTY_LICENSES"
+      - "tools/check_*.sh"
+      - "tools/git-hooks/**"
+      - ".github/workflows/ci.yml"
+      - ".github/workflows/fuzz-soak.yml"
+  push:
+    branches: [trunk]
+    # The same list: GitHub has no way to share it between the two triggers.
+    paths-ignore:
+      - "docs/**"
+      - "tests/**"
+      - "**/*.md"
+      - ".claude/**"
+      - ".clang-format"
+      - ".clang-tidy"
+      - ".gitignore"
+      - "LICENSE"
+      - "NOTICE"
+      - "THIRD_PARTY_LICENSES"
+      - "tools/check_*.sh"
+      - "tools/git-hooks/**"
+      - ".github/workflows/ci.yml"
+      - ".github/workflows/fuzz-soak.yml"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  ZET_APK_CACHE: ${{ github.workspace }}/../apk-cache
+
+jobs:
+  fuzz:
+    name: fuzz
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      # Instrumented objects match nothing the other jobs built, so the fuzz
+      # build gets a cache entry of its own rather than evicting theirs.
+      - name: Restore the compiler cache
+        uses: ./.github/actions/ccache
+        with:
+          key: musl-fuzz
+
+      - name: Restore the Alpine packages
+        uses: ./.github/actions/apk
+
+      # A minute per target, which is what catches "does not build" and "dies
+      # on the first input" — the two things ET's fuzzers would have caught had
+      # anyone ever run them. The ten minutes per target from the M1 criterion
+      # are in fuzz-soak.yml, where they do not sit on every pull request.
+      - name: Build and run every fuzzer briefly
+        run: tools/fuzz_run.sh 60
+
+      # Without the artifact a finding is a red tick and a stack trace: the
+      # input that produced it lives only on a runner that is about to be
+      # deleted.
+      - name: Keep what the fuzzers found
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-findings
+          path: build/musl-fuzz/findings/
+          if-no-files-found: ignore
