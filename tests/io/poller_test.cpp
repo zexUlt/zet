@@ -2,6 +2,7 @@
 
 #include <doctest/doctest.h>
 #include <signal.h>
+#include <sys/resource.h>
 
 #include <array>
 #include <cerrno>
@@ -299,6 +300,11 @@ TEST_CASE("refusals name the call and the reason") {
     CHECK(noSignal.error().Code == EINVAL);
     CHECK_FALSE(poller.WatchSignal(0, SIGNAL_TOKEN).has_value());
 
+    REQUIRE(poller.WatchSignal(SIGUSR1, SIGNAL_TOKEN));
+    const auto again = poller.WatchSignal(SIGUSR1, SIGNAL_TOKEN + 1);
+    REQUIRE_FALSE(again.has_value());
+    CHECK(again.error().Code == EEXIST);
+
     REQUIRE(poller.MakeWaker(WAKER_TOKEN));
     const auto second = poller.MakeWaker(WAKER_TOKEN);
     REQUIRE_FALSE(second.has_value());
@@ -310,4 +316,29 @@ TEST_CASE("refusals name the call and the reason") {
         poller.Wait(std::span<PollEvent>{events}.first(0), Deadline{now}, now);
     REQUIRE_FALSE(empty.has_value());
     CHECK(empty.error().Call == "epoll_wait");
+}
+
+TEST_CASE("a WatchSignal that fails leaves the signal mask as it was") {
+    Poller poller = MakePoller();
+    sigset_t before{};
+    REQUIRE(::pthread_sigmask(SIG_SETMASK, nullptr, &before) == 0);
+    REQUIRE(sigismember(&before, SIGUSR2) == 0);
+
+    // No descriptor left to open: the signalfd the first watch needs fails.
+    rlimit limits{};
+    REQUIRE(::getrlimit(RLIMIT_NOFILE, &limits) == 0);
+    rlimit none = limits;
+    none.rlim_cur = 0;
+    REQUIRE(::setrlimit(RLIMIT_NOFILE, &none) == 0);
+    const auto watched = poller.WatchSignal(SIGUSR2, SIGNAL_TOKEN);
+    REQUIRE(::setrlimit(RLIMIT_NOFILE, &limits) == 0);
+
+    REQUIRE_FALSE(watched.has_value());
+    CHECK(watched.error().Code == EMFILE);
+    sigset_t after{};
+    REQUIRE(::pthread_sigmask(SIG_SETMASK, nullptr, &after) == 0);
+    CHECK(sigismember(&after, SIGUSR2) == 0);
+
+    // And the signal can still be watched once descriptors are back.
+    CHECK(poller.WatchSignal(SIGUSR2, SIGNAL_TOKEN).has_value());
 }

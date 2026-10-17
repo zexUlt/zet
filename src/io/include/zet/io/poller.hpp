@@ -103,6 +103,8 @@ public:
     /// Reports `signo` with `token` instead of letting it interrupt the
     /// process. The signal is blocked from here on, and every thread created
     /// afterwards inherits that; a child must unblock it before execve.
+    /// A signal already watched here is refused with EEXIST. On any failure
+    /// the signal mask is left as it was before the call.
     [[nodiscard]] IoResult<void> WatchSignal(int signo,
                                              std::uint64_t token) noexcept;
 
