@@ -154,8 +154,9 @@ template <typename THandshake>
         __builtin_trap();
     }
     // Rule three of §5 is only worth having while unauthenticated traffic
-    // cannot flush the buffer: an unfinished handshake remembers nothing, or a
-    // stranger sending Hellos would blind the repeat check.
+    // cannot flush the buffer. The automata hold the memory through a const
+    // reference now, so this is the compiler's promise as much as theirs; the
+    // check stays to catch a const_cast or a second reference creeping in.
     if (seen.Size() != 0) {
         __builtin_trap();
     }

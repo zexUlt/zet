@@ -134,7 +134,7 @@ PreAuthResult<SessionId> PeekHelloSessionId(ByteSpan body) noexcept {
 ClientHandshake::ClientHandshake(SessionId id, crypto::Key auth,
                                  crypto::Key connectionSeed,
                                  HandshakeNonce clientNonce,
-                                 NonceMemory& seen) noexcept
+                                 const NonceMemory& seen) noexcept
     : Id_(id),
       Auth_(std::move(auth)),
       ConnectionSeed_(std::move(connectionSeed)),
@@ -254,8 +254,6 @@ PreAuthResult<HandshakeStep> ClientHandshake::OnAuthOk(
 
     Keys_ = DeriveConnectionKeys(ConnectionSeed_, ClientNonce_, ServerNonce_);
     PeerReceiveOffset_ = ok->ServerReceiveOffset;
-    Seen_.Remember(ClientNonce_);
-    Seen_.Remember(ServerNonce_);
     Stage_ = EStage::Done;
     return HandshakeStep{.Written = 0, .Complete = true};
 }
@@ -266,18 +264,22 @@ std::optional<HandshakeResult> ClientHandshake::TakeResult() noexcept {
     }
     Stage_ = EStage::Spent;
     return HandshakeResult{.Keys = std::move(Keys_),
-                           .PeerReceiveOffset = PeerReceiveOffset_};
+                           .PeerReceiveOffset = PeerReceiveOffset_,
+                           .ClientNonce = ClientNonce_,
+                           .ServerNonce = ServerNonce_,
+                           .FallbackKeys = std::nullopt};
 }
 
-ServerHandshake::ServerHandshake(crypto::Key auth, crypto::Key connectionSeed,
-                                 HandshakeNonce serverNonce,
-                                 std::uint64_t receiveOffset,
-                                 NonceMemory& seen) noexcept
+ServerHandshake::ServerHandshake(
+    crypto::Key auth, crypto::Key connectionSeed, HandshakeNonce serverNonce,
+    std::uint64_t receiveOffset, const NonceMemory& seen,
+    std::optional<crypto::Key> previousSeed) noexcept
     : Auth_(std::move(auth)),
       ConnectionSeed_(std::move(connectionSeed)),
       ServerNonce_(serverNonce),
       ReceiveOffset_(receiveOffset),
-      Seen_(seen) {}
+      Seen_(seen),
+      PreviousSeed_(std::move(previousSeed)) {}
 
 PreAuthResult<HandshakeStep> ServerHandshake::Handle(
     ByteSpan body, MutableByteSpan out) noexcept {
@@ -355,6 +357,10 @@ PreAuthResult<HandshakeStep> ServerHandshake::OnAuth(
     AbsorbReceiveOffset(Script_, ReceiveOffset_);
 
     Keys_ = DeriveConnectionKeys(ConnectionSeed_, ClientNonce_, ServerNonce_);
+    if (PreviousSeed_) {
+        FallbackKeys_ =
+            DeriveConnectionKeys(*PreviousSeed_, ClientNonce_, ServerNonce_);
+    }
 
     const AuthOkMessage ok{
         .ServerTag = Script_.Tag(Auth_, ByteSpan{SERVER_TAG_LABEL}),
@@ -364,8 +370,6 @@ PreAuthResult<HandshakeStep> ServerHandshake::OnAuth(
         return std::unexpected(Fail(written.error()));
     }
 
-    Seen_.Remember(ClientNonce_);
-    Seen_.Remember(ServerNonce_);
     Stage_ = EStage::Done;
     return HandshakeStep{.Written = writer.Size(), .Complete = true};
 }
@@ -377,7 +381,11 @@ std::optional<HandshakeResult> ServerHandshake::TakeResult() noexcept {
     Stage_ = EStage::Spent;
     // The client's offset rides in Resume, which is sealed and therefore the
     // session's to open, not this automaton's.
-    return HandshakeResult{.Keys = std::move(Keys_), .PeerReceiveOffset = 0};
+    return HandshakeResult{.Keys = std::move(Keys_),
+                           .PeerReceiveOffset = 0,
+                           .ClientNonce = ClientNonce_,
+                           .ServerNonce = ServerNonce_,
+                           .FallbackKeys = std::move(FallbackKeys_)};
 }
 
 }  // namespace zet::wire

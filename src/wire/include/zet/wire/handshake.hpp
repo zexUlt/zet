@@ -64,8 +64,11 @@ using PreAuthResult = std::expected<TValue, PreAuthError>;
 /// The handshake nonces a session has already used, per §5 rule three.
 ///
 /// Owned by the session, not by a handshake: what it has to outlive is the
-/// connection. Entries are recorded only once a handshake authenticates, so
-/// that unauthenticated traffic cannot flush the buffer and blind it.
+/// connection. The automata only read it. They hand the nonces they used back
+/// in HandshakeResult, and the session records them once the peer has proved
+/// itself — so unauthenticated traffic cannot flush the buffer and blind it,
+/// and that is now said by a const reference rather than by the order of two
+/// lines inside the automaton.
 class NonceMemory {
 public:
     [[nodiscard]] bool Seen(const HandshakeNonce& nonce) const noexcept;
@@ -126,6 +129,14 @@ struct HandshakeResult {
     /// How much of our stream the peer says it already holds, so that the
     /// replay starts there and not from the beginning.
     std::uint64_t PeerReceiveOffset{0};
+    /// The two nonces this handshake used, for the session to remember now
+    /// that it is allowed to change anything (§5 rule three).
+    HandshakeNonce ClientNonce{};
+    HandshakeNonce ServerNonce{};
+    /// Keys from the previous connection seed, on the agent only and only
+    /// when it was given one. A client whose answer to Resume was cut is
+    /// still on that seed, and §8 has the agent try these second.
+    std::optional<ConnectionKeys> FallbackKeys;
 };
 
 /// Reads a Hello far enough to route it and no further.
@@ -138,7 +149,8 @@ struct HandshakeResult {
 class ClientHandshake {
 public:
     ClientHandshake(SessionId id, crypto::Key auth, crypto::Key connectionSeed,
-                    HandshakeNonce clientNonce, NonceMemory& seen) noexcept;
+                    HandshakeNonce clientNonce,
+                    const NonceMemory& seen) noexcept;
 
     ClientHandshake(const ClientHandshake&) = delete;
     ClientHandshake& operator=(const ClientHandshake&) = delete;
@@ -185,7 +197,7 @@ private:
     crypto::Key ConnectionSeed_;
     HandshakeNonce ClientNonce_;
     HandshakeNonce ServerNonce_{};
-    NonceMemory& Seen_;
+    const NonceMemory& Seen_;
     Transcript Script_;
     ConnectionKeys Keys_;
     std::uint64_t PeerReceiveOffset_{0};
@@ -199,9 +211,16 @@ public:
     /// DeriveDecoySecrets, and this class is never told which it got. That is
     /// what makes §5 rule two structural — the branch that could diverge in
     /// timing or in wording does not exist here to diverge.
-    ServerHandshake(crypto::Key auth, crypto::Key connectionSeed,
-                    HandshakeNonce serverNonce, std::uint64_t receiveOffset,
-                    NonceMemory& seen) noexcept;
+    ///
+    /// `previousSeed` is the seed the agent still keeps under §8 because the
+    /// client may not have moved past it. Its keys are derived only after
+    /// tag_c verifies: before that a real session and a decoy must cost the
+    /// same, and a decoy never has a previous seed.
+    ServerHandshake(
+        crypto::Key auth, crypto::Key connectionSeed,
+        HandshakeNonce serverNonce, std::uint64_t receiveOffset,
+        const NonceMemory& seen,
+        std::optional<crypto::Key> previousSeed = std::nullopt) noexcept;
 
     ServerHandshake(const ServerHandshake&) = delete;
     ServerHandshake& operator=(const ServerHandshake&) = delete;
@@ -228,9 +247,11 @@ private:
     HandshakeNonce ServerNonce_;
     HandshakeNonce ClientNonce_{};
     std::uint64_t ReceiveOffset_;
-    NonceMemory& Seen_;
+    const NonceMemory& Seen_;
+    std::optional<crypto::Key> PreviousSeed_;
     Transcript Script_;
     ConnectionKeys Keys_;
+    std::optional<ConnectionKeys> FallbackKeys_;
     std::uint16_t Version_{0};
     EStage Stage_{EStage::Fresh};
 };
