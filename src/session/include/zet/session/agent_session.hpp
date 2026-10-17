@@ -187,6 +187,9 @@ struct Resumed {
 /// Built for a session that was found or for a decoy, and the handshake inside
 /// cannot tell which (§5 rule two): both get secrets, and the decoy's nonce
 /// memory is an empty one of its own.
+/// Picks the constructor of ResumeAttempt for a sid no session answers to.
+struct UnknownSession {};
+
 class ResumeAttempt {
 public:
     /// How much of the client's stream the agent holds goes into AuthOk under
@@ -201,6 +204,12 @@ public:
     [[nodiscard]] static ResumeAttempt ForUnknown(
         const crypto::Key& localSecret, const wire::SessionId& id,
         wire::HandshakeNonce serverNonce) noexcept;
+
+    /// The same as ForUnknown, as a constructor, for building the attempt in
+    /// place — it can be neither copied nor moved.
+    ResumeAttempt(UnknownSession, const crypto::Key& localSecret,
+                  const wire::SessionId& id,
+                  wire::HandshakeNonce serverNonce) noexcept;
 
     ResumeAttempt(const ResumeAttempt&) = delete;
     ResumeAttempt& operator=(const ResumeAttempt&) = delete;
@@ -220,6 +229,10 @@ public:
     [[nodiscard]] SessionResult<Resumed> Finish() && noexcept;
 
 private:
+    /// For a decoy: the secrets derived once, then taken apart.
+    ResumeAttempt(wire::SessionSecrets decoy,
+                  wire::HandshakeNonce serverNonce) noexcept;
+
     ResumeAttempt(AgentSession* session, crypto::Key auth, crypto::Key seed,
                   std::optional<crypto::Key> previousSeed,
                   wire::HandshakeNonce serverNonce,

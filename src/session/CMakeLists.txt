@@ -1,6 +1,7 @@
 add_library(zet_session STATIC
     agent_session.cpp
     client_session.cpp
+    connection.cpp
     error.cpp
     send_buffer.cpp
     stream_state.cpp

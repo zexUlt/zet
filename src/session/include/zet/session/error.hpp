@@ -43,6 +43,11 @@ enum class ESessionError : std::uint8_t {
     OrphanTimeout,
     /// The session was reaped already. Whatever arrives for it is too late.
     SessionReaped,
+    /// The resume exchange did not finish within HANDSHAKE_TIMEOUT (§5).
+    HandshakeTimeout,
+    /// A newer connection of the same session authenticated and took over.
+    /// This one is left with nothing to carry.
+    Superseded,
 };
 
 template <typename TValue>
@@ -57,6 +62,8 @@ using SessionResult = std::expected<TValue, ESessionError>;
         case ESessionError::StreamGap:
         case ESessionError::NotAuthenticated:
         case ESessionError::UnknownSeed:
+        case ESessionError::HandshakeTimeout:
+        case ESessionError::Superseded:
             return EDisposition::CloseConnection;
 
         case ESessionError::DisconnectBufferOverflow:
