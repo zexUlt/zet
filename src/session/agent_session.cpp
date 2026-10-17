@@ -83,13 +83,21 @@ ResumeAttempt::ResumeAttempt(SessionRef session,
 ResumeAttempt ResumeAttempt::ForUnknown(
     const crypto::Key& localSecret, const wire::SessionId& id,
     wire::HandshakeNonce serverNonce) noexcept {
-    auto decoy = wire::DeriveDecoySecrets(localSecret, id);
+    return ResumeAttempt{UnknownSession{}, localSecret, id, serverNonce};
+}
+
+ResumeAttempt::ResumeAttempt(UnknownSession, const crypto::Key& localSecret,
+                             const wire::SessionId& id,
+                             wire::HandshakeNonce serverNonce) noexcept
+    : ResumeAttempt(wire::DeriveDecoySecrets(localSecret, id), serverNonce) {}
+
+ResumeAttempt::ResumeAttempt(wire::SessionSecrets decoy,
+                             wire::HandshakeNonce serverNonce) noexcept
     // Offset zero, as for a session that has received nothing yet. It would
     // only reach the wire in AuthOk, and a decoy never gets that far.
-    return ResumeAttempt{
-        nullptr,      std::move(decoy.Auth), std::move(decoy.ConnectionSeed),
-        std::nullopt, serverNonce,           0};
-}
+    : ResumeAttempt(nullptr, std::move(decoy.Auth),
+                    std::move(decoy.ConnectionSeed), std::nullopt, serverNonce,
+                    0) {}
 
 SessionResult<void> SessionHandle::Attach(
     std::uint64_t clientReceiveOffset) noexcept {
