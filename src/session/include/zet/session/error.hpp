@@ -27,6 +27,10 @@ enum class ESessionError : std::uint8_t {
     /// session cannot be resumed without losing bytes, and losing them silently
     /// is the one thing §9 forbids.
     DisconnectBufferOverflow,
+    /// The peer resumes from below what it has already acknowledged. Those
+    /// bytes were trimmed when the acknowledgement came, so the stream cannot
+    /// continue whole; the peer has lost state it once confirmed holding.
+    PeerBehindBuffer,
 };
 
 template <typename TValue>
@@ -42,6 +46,7 @@ using SessionResult = std::expected<TValue, ESessionError>;
             return EDisposition::CloseConnection;
 
         case ESessionError::DisconnectBufferOverflow:
+        case ESessionError::PeerBehindBuffer:
             return EDisposition::KillSession;
     }
     return EDisposition::CloseConnection;

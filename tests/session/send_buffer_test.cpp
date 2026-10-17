@@ -368,17 +368,42 @@ TEST_CASE("ResetSendNext after reconnect resumes from peer offset") {
     buf.AdvanceSendNext(20);
     CHECK(buf.SendNext() == 20);
 
-    // Ack 10, reconnect: peer has received up to offset 5.
+    // Ack 10, reconnect: the peer holds 15, which also acknowledges up to it.
     REQUIRE(buf.Acknowledge(10).has_value());
-    buf.ResetSendNext(5);
-    // Peer_recv_offset 5 < Base 10 → clamped to Base.
-    CHECK(buf.SendNext() == 10);
-
-    buf.ResetSendNext(15);
+    REQUIRE(buf.ResetSendNext(15).has_value());
     CHECK(buf.SendNext() == 15);
+    CHECK(buf.Base() == 15);
+}
 
-    buf.ResetSendNext(100);  // above End → clamped to End
-    CHECK(buf.SendNext() == 20);
+TEST_CASE("a peer resuming below its own acknowledgement cannot be served") {
+    std::array<std::byte, 32> storage{};
+    SendBuffer buf{MutableByteSpan{storage}};
+    std::vector<std::byte> data;
+    Fill(data, 20);
+    REQUIRE(buf.Append(ByteSpan{data}) > 0);
+    REQUIRE(buf.Acknowledge(10).has_value());
+
+    // Bytes 5..10 were trimmed when the ack came. Resending from 10 would
+    // leave a hole the receiver refuses, reconnect after reconnect.
+    const auto behind = buf.ResetSendNext(5);
+    REQUIRE_FALSE(behind.has_value());
+    CHECK(behind.error() == ESessionError::PeerBehindBuffer);
+    CHECK(buf.Base() == 10);
+    // The cursor stays where the acknowledgement left it.
+    CHECK(buf.SendNext() == 10);
+}
+
+TEST_CASE("a peer resuming past what was sent is refused, not clamped") {
+    std::array<std::byte, 32> storage{};
+    SendBuffer buf{MutableByteSpan{storage}};
+    std::vector<std::byte> data;
+    Fill(data, 20);
+    REQUIRE(buf.Append(ByteSpan{data}) > 0);
+
+    const auto ahead = buf.ResetSendNext(21);
+    REQUIRE_FALSE(ahead.has_value());
+    CHECK(ahead.error() == ESessionError::AckBeyondSent);
+    CHECK(buf.Base() == 0);
 }
 
 TEST_CASE("Acknowledge clamps SendNext to new Base") {

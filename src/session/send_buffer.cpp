@@ -1,6 +1,7 @@
 #include "zet/session/send_buffer.hpp"
 
 #include <algorithm>
+#include <tuple>
 
 namespace zet::session {
 
@@ -98,10 +99,18 @@ MutableByteSpan SendBuffer::CopyOut(std::uint64_t fromOffset,
     return dest.first(take);
 }
 
-void SendBuffer::ResetSendNext(std::uint64_t peerRecvOffset) noexcept {
-    // Clamp to [Base_, End_]: any value outside that range violates the
-    // invariant.  §9: after a reconnect, retransmit from peer_recv_offset.
-    SendNext_ = std::clamp(peerRecvOffset, Base_, End_);
+SessionResult<void> SendBuffer::ResetSendNext(
+    std::uint64_t peerRecvOffset) noexcept {
+    if (peerRecvOffset > End_) {
+        return std::unexpected(ESessionError::AckBeyondSent);
+    }
+    if (peerRecvOffset < Base_) {
+        return std::unexpected(ESessionError::PeerBehindBuffer);
+    }
+    // Within [Base, End], so the acknowledgement cannot fail.
+    std::ignore = Acknowledge(peerRecvOffset);
+    SendNext_ = peerRecvOffset;
+    return {};
 }
 
 void SendBuffer::AdvanceSendNext(std::size_t count) noexcept {

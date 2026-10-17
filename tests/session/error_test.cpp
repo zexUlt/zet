@@ -20,12 +20,15 @@ TEST_CASE(
 TEST_CASE("output that cannot be replayed whole ends the session") {
     CHECK(DispositionOf(ESessionError::DisconnectBufferOverflow) ==
           EDisposition::KillSession);
+    CHECK(DispositionOf(ESessionError::PeerBehindBuffer) ==
+          EDisposition::KillSession);
 }
 
 TEST_CASE("every session error has a reason worth showing the user") {
     for (const ESessionError error :
          {ESessionError::AckBeyondSent, ESessionError::StreamGap,
-          ESessionError::DisconnectBufferOverflow}) {
+          ESessionError::DisconnectBufferOverflow,
+          ESessionError::PeerBehindBuffer}) {
         CAPTURE(static_cast<int>(error));
         CHECK_FALSE(Describe(error).empty());
         CHECK(Describe(error) != "unknown session error");

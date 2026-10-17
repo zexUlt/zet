@@ -72,9 +72,16 @@ public:
                                           MutableByteSpan dest) const noexcept;
 
     /// Set the send cursor to `peerRecvOffset` for retransmission after a
-    /// reconnect (peer_recv_offset from the Resume message).  Values below
-    /// Base are clamped to Base; values above End are clamped to End.  §9.
-    void ResetSendNext(std::uint64_t peerRecvOffset) noexcept;
+    /// reconnect (peer_recv_offset from the handshake), §9. The offset is
+    /// cumulative, so it also acknowledges everything below it.
+    ///
+    /// Nothing is clamped. Above End the peer claims bytes we never sent —
+    /// AckBeyondSent. Below Base it asks for bytes it acknowledged before and
+    /// we have since dropped — PeerBehindBuffer. Resending from Base instead
+    /// would leave a hole the receiver refuses as StreamGap, and the session
+    /// would reconnect into the same refusal for ever.
+    [[nodiscard]] SessionResult<void> ResetSendNext(
+        std::uint64_t peerRecvOffset) noexcept;
 
     /// Advance the send cursor by `count` bytes once a Data frame has been
     /// sealed from a CopyOut result.  Clamped to End.
