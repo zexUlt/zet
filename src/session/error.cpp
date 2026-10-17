@@ -14,6 +14,8 @@ std::string_view Describe(ESessionError error) noexcept {
             return "resume did not authenticate";
         case ESessionError::UnknownSeed:
             return "resume opened under a seed the session does not hold";
+        case ESessionError::PeerBehindBuffer:
+            return "peer resumed from bytes it had already acknowledged";
     }
     return "unknown session error";
 }

@@ -19,6 +19,8 @@ add_executable(zet_tests
     crypto/crypto_test.cpp
     session/agent_session_test.cpp
     session/error_test.cpp
+    session/send_buffer_test.cpp
+    session/receive_cursor_test.cpp
     wire/frame_test.cpp
     wire/handshake_test.cpp
     wire/frame_stream_test.cpp
