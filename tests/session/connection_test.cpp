@@ -244,6 +244,26 @@ TEST_CASE_FIXTURE(SodiumFixture,
                                  ends.AtTerminal.end()) == more);
 }
 
+TEST_CASE_FIXTURE(
+    SodiumFixture,
+    "read room shrinks with buffered bytes and widens once live") {
+    std::vector<std::byte> frames(CONNECTION_FRAME_STORAGE);
+    AgentConnection alone{MutableByteSpan{frames}, START};
+    // Before authentication only a handshake frame fits.
+    CHECK(alone.ReadCapacity() ==
+          wire::HEADER_SIZE + wire::MAX_HANDSHAKE_FRAME);
+    CHECK(alone.ReadRoom() == alone.ReadCapacity());
+    const std::array<std::byte, 3> partial{};
+    REQUIRE(alone.OnBytes(ByteSpan{partial}));
+    CHECK(alone.ReadRoom() == alone.ReadCapacity() - partial.size());
+
+    Ends ends;
+    Link link{ends, START};
+    link.Shuttle(START);
+    REQUIRE(link.Agent.IsLive());
+    CHECK(link.Agent.ReadCapacity() == wire::HEADER_SIZE + wire::MAX_FRAME);
+}
+
 TEST_CASE_FIXTURE(SodiumFixture,
                   "a resize queued before Resume reaches the agent") {
     Ends ends;

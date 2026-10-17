@@ -9,6 +9,11 @@ add_subdirectory(session)
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     set(ZET_HAVE_IO ON PARENT_SCOPE)
     add_subdirectory(io)
+    # The binaries need zet_io, and with it Linux (§12: the client comes to
+    # macOS with the kqueue backend).
+    add_subdirectory(app)
+    add_subdirectory(agent)
+    add_subdirectory(client)
 else()
     set(ZET_HAVE_IO OFF PARENT_SCOPE)
 endif()
