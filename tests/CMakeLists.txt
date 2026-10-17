@@ -24,6 +24,7 @@ add_executable(zet_tests
     session/send_buffer_test.cpp
     session/stream_state_test.cpp
     session/receive_cursor_test.cpp
+    session/reconnect_property_test.cpp
     session/channel_test.cpp
     wire/frame_test.cpp
     wire/handshake_test.cpp
