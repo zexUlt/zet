@@ -251,3 +251,72 @@ TEST_CASE_FIXTURE(
     CHECK(
         SameKeys(conn3.FromClient->Result.Keys, conn3.FromAgent->Result.Keys));
 }
+
+TEST_CASE_FIXTURE(SodiumFixture,
+                  "an AuthOk the agent did not sign yields no client handle") {
+    // §5 rule four, at the session level. The agent above that lacks K_auth
+    // fails at tag_c and never answers, so it never tests the client's own
+    // check. Here the real agent answers and the answer is bent on the way:
+    // every byte after the type — the tag and the offset rule five binds
+    // into it — must cost the client its handle and change nothing.
+    AgentSession agent{DeriveSessionSecrets(MakeKey(1))};
+
+    // The length of AuthOk, learned from one untouched exchange.
+    std::size_t authOkSize = 0;
+    {
+        ClientSession client{DeriveSessionSecrets(MakeKey(1))};
+        ClientResumeAttempt clientAttempt{client, MakeNonce(1)};
+        ResumeAttempt agentAttempt{agent.Ref(), MakeNonce(2), RECEIVE_OFFSET};
+        std::vector<std::byte> a(SCRATCH);
+        std::vector<std::byte> b(SCRATCH);
+        const auto hello = clientAttempt.Start(MutableByteSpan{a});
+        REQUIRE(hello.has_value());
+        const auto challenge =
+            agentAttempt.Handle(ByteSpan{a}.first(*hello), MutableByteSpan{b});
+        REQUIRE(challenge.has_value());
+        const auto auth = clientAttempt.Handle(
+            ByteSpan{b}.first(challenge->Written), MutableByteSpan{a});
+        REQUIRE(auth.has_value());
+        const auto ok = agentAttempt.Handle(ByteSpan{a}.first(auth->Written),
+                                            MutableByteSpan{b});
+        REQUIRE(ok.has_value());
+        authOkSize = ok->Written;
+    }
+    REQUIRE(authOkSize > 1);
+
+    for (std::size_t offset = 1; offset < authOkSize; ++offset) {
+        CAPTURE(offset);
+        // A fresh agent session each time: the nonces must not repeat into a
+        // NonceReused refusal that would pass this test for the wrong reason.
+        AgentSession fresh{DeriveSessionSecrets(MakeKey(1))};
+        ClientSession client{DeriveSessionSecrets(MakeKey(1))};
+        ClientResumeAttempt clientAttempt{client, MakeNonce(3)};
+        ResumeAttempt agentAttempt{fresh.Ref(), MakeNonce(4), RECEIVE_OFFSET};
+        std::vector<std::byte> a(SCRATCH);
+        std::vector<std::byte> b(SCRATCH);
+
+        const auto hello = clientAttempt.Start(MutableByteSpan{a});
+        REQUIRE(hello.has_value());
+        const auto challenge =
+            agentAttempt.Handle(ByteSpan{a}.first(*hello), MutableByteSpan{b});
+        REQUIRE(challenge.has_value());
+        const auto auth = clientAttempt.Handle(
+            ByteSpan{b}.first(challenge->Written), MutableByteSpan{a});
+        REQUIRE(auth.has_value());
+        const auto ok = agentAttempt.Handle(ByteSpan{a}.first(auth->Written),
+                                            MutableByteSpan{b});
+        REQUIRE(ok.has_value());
+
+        std::vector<std::byte> bent{
+            b.begin(), b.begin() + static_cast<std::ptrdiff_t>(ok->Written)};
+        bent.at(offset) ^= std::byte{0x01};
+        const auto done =
+            clientAttempt.Handle(ByteSpan{bent}, MutableByteSpan{a});
+        CHECK_FALSE(done.has_value());
+
+        const auto finished = std::move(clientAttempt).Finish();
+        REQUIRE_FALSE(finished.has_value());
+        CHECK(finished.error() == ESessionError::NotAuthenticated);
+        CHECK(client.RememberedNonces() == 0);
+    }
+}
