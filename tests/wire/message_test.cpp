@@ -32,6 +32,14 @@ ProtoResult<void> WriteMessage(ByteWriter& writer,
                                const ResumeMessage& message) {
     return WriteResume(writer, message);
 }
+ProtoResult<void> WriteMessage(ByteWriter& writer,
+                               const BootstrapOfferMessage& message) {
+    return WriteBootstrapOffer(writer, message);
+}
+ProtoResult<void> WriteMessage(ByteWriter& writer,
+                               const BootstrapAcceptMessage& message) {
+    return WriteBootstrapAccept(writer, message);
+}
 ProtoResult<void> WriteMessage(ByteWriter& writer, const DataMessage& message) {
     return WriteData(writer, message);
 }
@@ -87,6 +95,10 @@ ProtoResult<void> ParseAny(ByteSpan bytes) {
             return Discard(ParseAuthOk(reader));
         case EMessageType::Resume:
             return Discard(ParseResume(reader));
+        case EMessageType::BootstrapOffer:
+            return Discard(ParseBootstrapOffer(reader));
+        case EMessageType::BootstrapAccept:
+            return Discard(ParseBootstrapAccept(reader));
         case EMessageType::Data:
             return Discard(ParseData(reader));
         case EMessageType::Ack:
@@ -141,6 +153,23 @@ AuthOkMessage MakeAuthOk() {
 
 ResumeMessage MakeResume() {
     return ResumeMessage{.ClientReceiveOffset = 0xFFFF'FFFF'FFFF'FFFF};
+}
+
+BootstrapOfferMessage MakeOffer() {
+    return BootstrapOfferMessage{
+        .VersionMin = 1,
+        .VersionMax = 0x0102,
+        .ClientKey = Pattern<crypto::PUBLIC_KEY_SIZE>(0x51),
+        .ClientNonce = Pattern<BOOTSTRAP_NONCE_SIZE>(0x61)};
+}
+
+BootstrapAcceptMessage MakeAccept() {
+    return BootstrapAcceptMessage{
+        .Version = 0x0102,
+        .AgentKey = Pattern<crypto::PUBLIC_KEY_SIZE>(0x71),
+        .ClientNonce = Pattern<BOOTSTRAP_NONCE_SIZE>(0x61),
+        .AgentNonce = Pattern<BOOTSTRAP_NONCE_SIZE>(0x81),
+        .Port = 0xC350};
 }
 
 // For Data, the payload is a ByteSpan: keep the bytes alongside the message.
@@ -291,7 +320,8 @@ TEST_CASE("cutting a message at any offset is truncation, never a parse") {
     const std::vector<std::vector<std::byte>> messages{
         Encode(MakeHello()),  Encode(MakeChallenge()), Encode(MakeAuth()),
         Encode(MakeAuthOk()), Encode(MakeResume()),    Encode(MakeAck()),
-        Encode(MakeResize()), Encode(MakePing()),      Encode(MakePong())};
+        Encode(MakeResize()), Encode(MakePing()),      Encode(MakePong()),
+        Encode(MakeOffer()),  Encode(MakeAccept())};
 
     for (const auto& bytes : messages) {
         const std::size_t size = bytes.size();
@@ -342,6 +372,8 @@ TEST_CASE("a writer with too little room refuses instead of overflowing") {
     refusesUpTo(MakeResize());
     refusesUpTo(MakePing());
     refusesUpTo(MakePong());
+    refusesUpTo(MakeOffer());
+    refusesUpTo(MakeAccept());
 }
 
 TEST_CASE("an unknown option that is not critical is carried past") {
@@ -453,7 +485,7 @@ TEST_CASE("bytes past the last field of a fixed message are malformed") {
     for (auto bytes :
          {Encode(MakeAuth()), Encode(MakeAuthOk()), Encode(MakeResume()),
           Encode(MakeAck()), Encode(MakeResize()), Encode(MakePing()),
-          Encode(MakePong())}) {
+          Encode(MakePong()), Encode(MakeOffer()), Encode(MakeAccept())}) {
         bytes.push_back(std::byte{0x00});
         const auto parsed = ParseAny(ByteSpan{bytes});
         REQUIRE_FALSE(parsed.has_value());
@@ -462,10 +494,11 @@ TEST_CASE("bytes past the last field of a fixed message are malformed") {
 }
 
 TEST_CASE("a type byte outside the registry is unknown") {
-    // 0x00 is not assigned, 0x06 opens the bootstrap-reserved range (§7),
-    // 0x15 is the first unassigned session type, 0xFF is past everything.
+    // 0x00 is not assigned, 0x08 is the first free one of the bootstrap
+    // range (§7), 0x15 the first unassigned session type, 0xFF is past
+    // everything.
     for (const std::uint8_t type :
-         std::array<std::uint8_t, 4>{0x00, 0x06, 0x15, 0xFF}) {
+         std::array<std::uint8_t, 4>{0x00, 0x08, 0x15, 0xFF}) {
         CAPTURE(type);
         const std::vector<std::byte> bytes{std::byte{type}};
         ByteReader reader{ByteSpan{bytes}};
@@ -517,7 +550,7 @@ TEST_CASE("nothing a handshake message can say reaps the session") {
     }
 
     for (const std::uint8_t type :
-         std::array<std::uint8_t, 4>{0x00, 0x06, 0x15, 0xFF}) {
+         std::array<std::uint8_t, 4>{0x00, 0x08, 0x15, 0xFF}) {
         corpus.push_back({std::byte{type}});
     }
 
@@ -554,6 +587,69 @@ TEST_CASE("nothing a handshake message can say reaps the session") {
     // Guards the sweep itself: a corpus the parser happens to accept whole
     // would pass the check above without testing anything.
     CHECK(refused > 0);
+}
+
+// ─── Bootstrap messages ──────────────────────────────────────────────────────
+
+TEST_CASE("a bootstrap offer survives a round trip") {
+    const auto offer = MakeOffer();
+    const auto bytes = Encode(offer);
+    CHECK(bytes.front() == std::byte{0x06});
+    ByteReader reader{ByteSpan{bytes}};
+    REQUIRE(ParseMessageType(reader) == EMessageType::BootstrapOffer);
+    const auto parsed = ParseBootstrapOffer(reader);
+    REQUIRE(parsed.has_value());
+    CHECK(parsed->VersionMin == offer.VersionMin);
+    CHECK(parsed->VersionMax == offer.VersionMax);
+    CHECK(parsed->ClientKey == offer.ClientKey);
+    CHECK(parsed->ClientNonce == offer.ClientNonce);
+}
+
+TEST_CASE("a bootstrap accept survives a round trip") {
+    const auto accept = MakeAccept();
+    const auto bytes = Encode(accept);
+    CHECK(bytes.front() == std::byte{0x07});
+    // The port is the last two bytes, big-endian.
+    CHECK(bytes.at(bytes.size() - 2) == std::byte{0xC3});
+    CHECK(bytes.back() == std::byte{0x50});
+    ByteReader reader{ByteSpan{bytes}};
+    REQUIRE(ParseMessageType(reader) == EMessageType::BootstrapAccept);
+    const auto parsed = ParseBootstrapAccept(reader);
+    REQUIRE(parsed.has_value());
+    CHECK(parsed->Version == accept.Version);
+    CHECK(parsed->AgentKey == accept.AgentKey);
+    CHECK(parsed->ClientNonce == accept.ClientNonce);
+    CHECK(parsed->AgentNonce == accept.AgentNonce);
+    CHECK(parsed->Port == accept.Port);
+}
+
+TEST_CASE("an offer with a backwards version range is refused both ways") {
+    auto offer = MakeOffer();
+    offer.VersionMin = 3;
+    offer.VersionMax = 2;
+    std::vector<std::byte> out(MAX_FRAME);
+    ByteWriter writer{MutableByteSpan{out}};
+    CHECK(WriteBootstrapOffer(writer, offer).error() ==
+          EProtoError::MalformedField);
+
+    auto bytes = Encode(MakeOffer());
+    // ver_min:u16 sits right after the type byte.
+    bytes.at(1) = std::byte{0xFF};
+    CHECK(ParseAny(ByteSpan{bytes}).error() == EProtoError::MalformedField);
+}
+
+TEST_CASE("an accept naming port zero is refused both ways") {
+    auto accept = MakeAccept();
+    accept.Port = 0;
+    std::vector<std::byte> out(MAX_FRAME);
+    ByteWriter writer{MutableByteSpan{out}};
+    CHECK(WriteBootstrapAccept(writer, accept).error() ==
+          EProtoError::MalformedField);
+
+    auto bytes = Encode(MakeAccept());
+    bytes.at(bytes.size() - 2) = std::byte{0};
+    bytes.back() = std::byte{0};
+    CHECK(ParseAny(ByteSpan{bytes}).error() == EProtoError::MalformedField);
 }
 
 // ─── Session messages ────────────────────────────────────────────────────────

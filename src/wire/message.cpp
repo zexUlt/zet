@@ -66,6 +66,8 @@ ProtoResult<EMessageType> ParseMessageType(ByteReader& reader) noexcept {
         case EMessageType::Auth:
         case EMessageType::AuthOk:
         case EMessageType::Resume:
+        case EMessageType::BootstrapOffer:
+        case EMessageType::BootstrapAccept:
         case EMessageType::Data:
         case EMessageType::Ack:
         case EMessageType::Resize:
@@ -292,6 +294,114 @@ ProtoResult<void> WriteResume(ByteWriter& writer,
         return type;
     }
     return writer.WriteU64BE(message.ClientReceiveOffset);
+}
+
+ProtoResult<BootstrapOfferMessage> ParseBootstrapOffer(
+    ByteReader& reader) noexcept {
+    BootstrapOfferMessage message{};
+    auto versionMin = reader.ReadU16BE();
+    if (!versionMin) {
+        return std::unexpected(versionMin.error());
+    }
+    auto versionMax = reader.ReadU16BE();
+    if (!versionMax) {
+        return std::unexpected(versionMax.error());
+    }
+    // Checked here rather than left to whoever picks the version: an empty
+    // range is not a range a newer client could have meant.
+    if (*versionMin > *versionMax) {
+        return std::unexpected(EProtoError::MalformedField);
+    }
+    message.VersionMin = *versionMin;
+    message.VersionMax = *versionMax;
+    if (auto key = ReadArray(reader, message.ClientKey); !key) {
+        return std::unexpected(key.error());
+    }
+    if (auto nonce = ReadArray(reader, message.ClientNonce); !nonce) {
+        return std::unexpected(nonce.error());
+    }
+    if (auto rest = RequireExhausted(reader); !rest) {
+        return std::unexpected(rest.error());
+    }
+    return message;
+}
+
+ProtoResult<void> WriteBootstrapOffer(
+    ByteWriter& writer, const BootstrapOfferMessage& message) noexcept {
+    if (message.VersionMin > message.VersionMax) {
+        return std::unexpected(EProtoError::MalformedField);
+    }
+    if (auto type = WriteMessageType(writer, EMessageType::BootstrapOffer);
+        !type) {
+        return type;
+    }
+    if (auto low = writer.WriteU16BE(message.VersionMin); !low) {
+        return low;
+    }
+    if (auto high = writer.WriteU16BE(message.VersionMax); !high) {
+        return high;
+    }
+    if (auto key = writer.WriteBytes(ByteSpan{message.ClientKey}); !key) {
+        return key;
+    }
+    return writer.WriteBytes(ByteSpan{message.ClientNonce});
+}
+
+ProtoResult<BootstrapAcceptMessage> ParseBootstrapAccept(
+    ByteReader& reader) noexcept {
+    BootstrapAcceptMessage message{};
+    auto version = reader.ReadU16BE();
+    if (!version) {
+        return std::unexpected(version.error());
+    }
+    message.Version = *version;
+    if (auto key = ReadArray(reader, message.AgentKey); !key) {
+        return std::unexpected(key.error());
+    }
+    if (auto echoed = ReadArray(reader, message.ClientNonce); !echoed) {
+        return std::unexpected(echoed.error());
+    }
+    if (auto nonce = ReadArray(reader, message.AgentNonce); !nonce) {
+        return std::unexpected(nonce.error());
+    }
+    auto port = reader.ReadU16BE();
+    if (!port) {
+        return std::unexpected(port.error());
+    }
+    // Port zero is "pick one for me" to bind(2), and nobody can connect to it.
+    if (*port == 0) {
+        return std::unexpected(EProtoError::MalformedField);
+    }
+    message.Port = *port;
+    if (auto rest = RequireExhausted(reader); !rest) {
+        return std::unexpected(rest.error());
+    }
+    return message;
+}
+
+ProtoResult<void> WriteBootstrapAccept(
+    ByteWriter& writer, const BootstrapAcceptMessage& message) noexcept {
+    if (message.Port == 0) {
+        return std::unexpected(EProtoError::MalformedField);
+    }
+    if (auto type = WriteMessageType(writer, EMessageType::BootstrapAccept);
+        !type) {
+        return type;
+    }
+    if (auto version = writer.WriteU16BE(message.Version); !version) {
+        return version;
+    }
+    if (auto key = writer.WriteBytes(ByteSpan{message.AgentKey}); !key) {
+        return key;
+    }
+    if (auto echoed = writer.WriteBytes(ByteSpan{message.ClientNonce});
+        !echoed) {
+        return echoed;
+    }
+    if (auto nonce = writer.WriteBytes(ByteSpan{message.AgentNonce}); !nonce) {
+        return nonce;
+    }
+    return writer.WriteU16BE(message.Port);
 }
 
 ProtoResult<DataMessage> ParseData(ByteReader& reader) noexcept {

@@ -84,6 +84,21 @@ void CheckDisposition(EProtoError error) noexcept {
     return left.ClientReceiveOffset == right.ClientReceiveOffset;
 }
 
+[[nodiscard]] bool Same(const BootstrapOfferMessage& left,
+                        const BootstrapOfferMessage& right) noexcept {
+    return left.VersionMin == right.VersionMin &&
+           left.VersionMax == right.VersionMax &&
+           left.ClientKey == right.ClientKey &&
+           left.ClientNonce == right.ClientNonce;
+}
+
+[[nodiscard]] bool Same(const BootstrapAcceptMessage& left,
+                        const BootstrapAcceptMessage& right) noexcept {
+    return left.Version == right.Version && left.AgentKey == right.AgentKey &&
+           left.ClientNonce == right.ClientNonce &&
+           left.AgentNonce == right.AgentNonce && left.Port == right.Port;
+}
+
 [[nodiscard]] bool Same(const DataMessage& left,
                         const DataMessage& right) noexcept {
     return left.Ack == right.Ack && left.Offset == right.Offset &&
@@ -191,6 +206,14 @@ void ParseBody(ByteSpan input) noexcept {
             return;
         case EMessageType::Resume:
             ParseThenRoundTrip(reader, *type, ParseResume, WriteResume);
+            return;
+        case EMessageType::BootstrapOffer:
+            ParseThenRoundTrip(reader, *type, ParseBootstrapOffer,
+                               WriteBootstrapOffer);
+            return;
+        case EMessageType::BootstrapAccept:
+            ParseThenRoundTrip(reader, *type, ParseBootstrapAccept,
+                               WriteBootstrapAccept);
             return;
         case EMessageType::Data:
             ParseThenRoundTrip(reader, *type, ParseData, WriteData);

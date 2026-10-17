@@ -12,6 +12,7 @@ add_library(zet_core STATIC
     byte_writer.cpp
     log.cpp
     secure_zero.cpp
+    shell_quote.cpp
 )
 add_library(zet::core ALIAS zet_core)
 

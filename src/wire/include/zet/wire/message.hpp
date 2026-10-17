@@ -31,6 +31,11 @@ enum class EMessageType : std::uint8_t {
     AuthOk = 0x04,
     Resume = 0x05,
 
+    // Bootstrap (§4): cleartext, armored, and over the ssh channel only —
+    // never on the TCP connection, where the handshake refuses them.
+    BootstrapOffer = 0x06,
+    BootstrapAccept = 0x07,
+
     // Session messages (sealed mode, §7). These arrive only after the
     // transcript MAC has been verified. The handshake state machine rejects
     // them pre-auth: ParseMessageType returning a known type is not the same
@@ -129,6 +134,29 @@ struct ResumeMessage {
     std::uint64_t ClientReceiveOffset{0};
 };
 
+/// The client's half of the key exchange (§4), written to the agent's stdin.
+struct BootstrapOfferMessage {
+    std::uint16_t VersionMin{PROTOCOL_VERSION_MIN};
+    std::uint16_t VersionMax{PROTOCOL_VERSION_MAX};
+    crypto::PublicKey ClientKey{};
+    BootstrapNonce ClientNonce{};
+};
+
+/// The agent's half, printed on its stdout among whatever else the remote
+/// shell prints there.
+struct BootstrapAcceptMessage {
+    /// Picked out of the Offer's range the way Challenge picks one out of
+    /// Hello's: the highest both speak.
+    std::uint16_t Version{PROTOCOL_VERSION_MAX};
+    crypto::PublicKey AgentKey{};
+    /// The Offer's nonce, back. Output of an earlier run, or anything else a
+    /// .bashrc prints in the shape of an Accept, does not carry it (§4).
+    BootstrapNonce ClientNonce{};
+    BootstrapNonce AgentNonce{};
+    /// Where the agent listens for the session's connections.
+    std::uint16_t Port{0};
+};
+
 /// §7. `Payload` is a non-owning view into the buffer the message was parsed
 /// from; it does not outlive it and must not be empty (use Ack for "nothing
 /// new, but I acknowledge").
@@ -201,6 +229,16 @@ struct PongMessage {
     ByteReader& reader) noexcept;
 [[nodiscard]] ProtoResult<void> WriteResume(
     ByteWriter& writer, const ResumeMessage& message) noexcept;
+
+[[nodiscard]] ProtoResult<BootstrapOfferMessage> ParseBootstrapOffer(
+    ByteReader& reader) noexcept;
+[[nodiscard]] ProtoResult<void> WriteBootstrapOffer(
+    ByteWriter& writer, const BootstrapOfferMessage& message) noexcept;
+
+[[nodiscard]] ProtoResult<BootstrapAcceptMessage> ParseBootstrapAccept(
+    ByteReader& reader) noexcept;
+[[nodiscard]] ProtoResult<void> WriteBootstrapAccept(
+    ByteWriter& writer, const BootstrapAcceptMessage& message) noexcept;
 
 [[nodiscard]] ProtoResult<DataMessage> ParseData(ByteReader& reader) noexcept;
 [[nodiscard]] ProtoResult<void> WriteData(ByteWriter& writer,

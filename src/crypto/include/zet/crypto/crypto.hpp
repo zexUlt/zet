@@ -59,6 +59,11 @@ void RandomBytes(MutableByteSpan out) noexcept;
 
 [[nodiscard]] KeyPair GenerateKeyPair() noexcept;
 
+/// The key pair a seed determines. The bootstrap draws its ephemeral pair this
+/// way so that the caller supplies all randomness, as everywhere in the core,
+/// and a test or a fuzzer can fix it.
+[[nodiscard]] KeyPair KeyPairFromSeed(const Key& seed) noexcept;
+
 [[nodiscard]] ProtoResult<SessionKeys> DeriveClientKeys(
     const KeyPair& own, const PublicKey& peer) noexcept;
 

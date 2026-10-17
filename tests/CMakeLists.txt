@@ -14,10 +14,12 @@ add_executable(zet_tests
     core/byte_writer_test.cpp
     core/log_test.cpp
     core/secret_test.cpp
+    core/shell_quote_test.cpp
     core/time_test.cpp
     core/version_test.cpp
     crypto/crypto_test.cpp
     session/agent_session_test.cpp
+    session/bootstrap_test.cpp
     session/client_session_test.cpp
     session/connection_test.cpp
     session/error_test.cpp
@@ -26,6 +28,7 @@ add_executable(zet_tests
     session/receive_cursor_test.cpp
     session/reconnect_property_test.cpp
     session/channel_test.cpp
+    wire/armor_test.cpp
     wire/frame_test.cpp
     wire/handshake_test.cpp
     wire/frame_stream_test.cpp

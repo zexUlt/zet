@@ -161,6 +161,8 @@ ChannelResult<IncomingEvent> Channel::Receive(
         case wire::EMessageType::Auth:
         case wire::EMessageType::AuthOk:
         case wire::EMessageType::Resume:
+        case wire::EMessageType::BootstrapOffer:
+        case wire::EMessageType::BootstrapAccept:
             break;
     }
 
