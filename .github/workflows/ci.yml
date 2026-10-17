@@ -185,3 +185,27 @@ jobs:
             exit 1
           fi
           git checkout src/core/CMakeLists.txt
+
+      # The compile-fail tests pass only on the diagnostic each one expects, so
+      # breaking one means making its forbidden line legal. Opening every
+      # private member of the file does that while anchored to no name in it.
+      # Build and test run separately: a build that failed for some other
+      # reason must not count as the test having noticed.
+      - name: compile-fail tests catch an opened door
+        run: |
+          target=tests/compile_fail/handle_from_nowhere.cpp
+          test -f "$target" || { echo "the injection target moved"; exit 1; }
+          { printf '#pragma clang diagnostic ignored "-Wkeyword-macro"\n#define private public\n'
+            cat "$target"; } > "$target.new"
+          mv "$target.new" "$target"
+          if ! grep -q '^#define private public$' "$target"; then
+            echo "the injection did not apply — this self-test checks nothing"
+            git checkout "$target"
+            exit 1
+          fi
+          tools/in_alpine.sh 'cmake --build --preset musl-dev'
+          if tools/in_alpine.sh 'ctest --preset musl-dev -R "^compile_fail\.handle_from_nowhere$"'; then
+            echo "the compile-fail test passed a SessionHandle anyone can build"
+            exit 1
+          fi
+          git checkout "$target"

@@ -17,6 +17,7 @@ add_executable(zet_tests
     core/time_test.cpp
     core/version_test.cpp
     crypto/crypto_test.cpp
+    session/agent_session_test.cpp
     session/error_test.cpp
     session/send_buffer_test.cpp
     session/receive_cursor_test.cpp
@@ -39,3 +40,5 @@ target_link_libraries(zet_tests PRIVATE
 
 include(${doctest_SOURCE_DIR}/scripts/cmake/doctest.cmake)
 doctest_discover_tests(zet_tests)
+
+add_subdirectory(compile_fail)

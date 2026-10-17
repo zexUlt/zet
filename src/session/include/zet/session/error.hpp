@@ -27,6 +27,13 @@ enum class ESessionError : std::uint8_t {
     /// session cannot be resumed without losing bytes, and losing them silently
     /// is the one thing §9 forbids.
     DisconnectBufferOverflow,
+    /// A handle was asked of a resume attempt that did not authenticate: it is
+    /// unfinished, it failed, it was a decoy, or it was already spent.
+    NotAuthenticated,
+    /// Resume opened under the previous seed of a session that keeps none.
+    /// Only a defect on our side gets here — the fallback keys exist exactly
+    /// when the previous seed does — and the connection is not to be trusted.
+    UnknownSeed,
     /// The peer resumes from below what it has already acknowledged. Those
     /// bytes were trimmed when the acknowledgement came, so the stream cannot
     /// continue whole; the peer has lost state it once confirmed holding.
@@ -43,6 +50,8 @@ using SessionResult = std::expected<TValue, ESessionError>;
         // starts again from offsets both ends have authenticated.
         case ESessionError::AckBeyondSent:
         case ESessionError::StreamGap:
+        case ESessionError::NotAuthenticated:
+        case ESessionError::UnknownSeed:
             return EDisposition::CloseConnection;
 
         case ESessionError::DisconnectBufferOverflow:
