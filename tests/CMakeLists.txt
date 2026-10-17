@@ -48,6 +48,8 @@ if(ZET_HAVE_IO)
     target_sources(zet_tests PRIVATE
         io/clock_test.cpp
         io/fd_test.cpp
+        io/pty_test.cpp
+        io/spawn_test.cpp
     )
     target_link_libraries(zet_tests PRIVATE zet::io)
 endif()

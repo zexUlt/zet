@@ -2,6 +2,8 @@ add_library(zet_io STATIC
     clock.cpp
     errno.cpp
     fd.cpp
+    pty.cpp
+    spawn.cpp
 )
 add_library(zet::io ALIAS zet_io)
 
