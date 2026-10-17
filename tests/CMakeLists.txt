@@ -48,9 +48,9 @@ if(ZET_HAVE_IO)
     target_sources(zet_tests PRIVATE
         io/clock_test.cpp
         io/fd_test.cpp
+        io/poller_test.cpp
         io/pty_test.cpp
         io/spawn_test.cpp
-        io/poller_test.cpp
         io/fake_pty.cpp
         io/pty_contract_test.cpp
         io/pty_burst_test.cpp

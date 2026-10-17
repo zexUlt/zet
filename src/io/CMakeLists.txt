@@ -2,8 +2,6 @@ add_library(zet_io STATIC
     clock.cpp
     errno.cpp
     fd.cpp
-    pty.cpp
-    spawn.cpp
     poller.cpp
     pty.cpp
     spawn.cpp
