@@ -46,11 +46,11 @@
 //  P2  SendBuffer.Base() never decreases
 //  P3  SendBuffer.Base() <= SendBuffer.SendNext() <= SendBuffer.End()
 //  P4  Every byte delivered at absolute offset O equals what was first
-//      delivered there (append-only, no rewrite).
+//      delivered there (append-only, no rewrite), and DeliveredData::Offset
+//      is the recv_offset the delivery started at.
 //  P5  SendBuffer.Size() <= SendBuffer.Capacity()
-//  P6  No KillSession disposition unless it is one of the two documented
-//      KillSession ESessionError values (DisconnectBufferOverflow,
-//      PeerBehindBuffer).  All others mean the fuzzer hit an unexpected path.
+//  P6  Receive() never returns KillSession: a Channel only ever closes its
+//      connection, and killing the session is the layer above's call.
 //  P7  Poll() return value in [0, HEADER_SIZE + MAX_FRAME].
 //  P8  Operation budget: at most MAX_OPS steps for any input length.
 
@@ -267,31 +267,22 @@ void CheckProperties(const Snapshot& before, const SendBuffer& clientSend,
 }
 
 // Process a ChannelResult from Receive() and apply property checks.
-// Returns false on KillSession (caller should stop processing on that channel).
-bool HandleReceiveResult(const ChannelResult<IncomingEvent>& result,
+void HandleReceiveResult(const ChannelResult<IncomingEvent>& result,
                          StreamRecord& rec, std::uint64_t oldRecvOffset,
                          const ReceiveCursor& cursor) noexcept {
     if (!result) {
-        const SessionError& err = result.error();
-        // P6: when KillSession comes from a session-level error, it must be
-        // one of the two documented values (DisconnectBufferOverflow,
-        // PeerBehindBuffer). A proto-level KillSession (VersionMismatch) is
-        // also valid and is allowed through; trapping on it would produce a
-        // false finding if the message parser ever surfaces it post-auth.
-        if (err.Disposition() == zet::EDisposition::KillSession) {
-            if (err.Session().has_value()) {
-                const ESessionError se = *err.Session();
-                if (se != ESessionError::DisconnectBufferOverflow &&
-                    se != ESessionError::PeerBehindBuffer) {
-                    __builtin_trap();
-                }
-            }
+        // P6.
+        if (result.error().Disposition() == zet::EDisposition::KillSession) {
+            __builtin_trap();
         }
-        return false;
+        return;
     }
 
     if (std::holds_alternative<DeliveredData>(*result)) {
         const DeliveredData& dd = std::get<DeliveredData>(*result);
+        if (dd.Offset != oldRecvOffset) {
+            __builtin_trap();
+        }
         // P4: bytes delivered at oldRecvOffset must extend the record.
         if (!RecordDelivery(rec, oldRecvOffset, dd.Bytes)) {
             __builtin_trap();
@@ -301,7 +292,6 @@ bool HandleReceiveResult(const ChannelResult<IncomingEvent>& result,
             __builtin_trap();
         }
     }
-    return true;
 }
 
 // Perform one inject: seal `plain` and call Receive() on `chan`.
@@ -379,8 +369,11 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data,
     StreamRecord agentRecvRec;   // c2s direction: what Agent.Receive() yields
 
     // Working buffers for Poll() and Receive().
-    std::array<std::byte, wire::HEADER_SIZE + wire::MAX_FRAME> pollOut{};
-    std::array<std::byte, Channel::POLL_SCRATCH_SIZE> pollScratch{};
+    // Static: together over half a megabyte, too much for the stack of a
+    // fuzzer thread. Poll overwrites what it uses, so reuse across runs is
+    // harmless.
+    static std::array<std::byte, wire::HEADER_SIZE + wire::MAX_FRAME> pollOut{};
+    static std::array<std::byte, Channel::POLL_SCRATCH_SIZE> pollScratch{};
     std::vector<std::byte> recvScratch(wire::MAX_FRAME);
 
     // Reference stream cursor: absolute position in the deterministic client
