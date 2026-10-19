@@ -162,12 +162,25 @@ ResumeMessage MakeResume() {
     return ResumeMessage{.ClientReceiveOffset = 0xFFFF'FFFF'FFFF'FFFF};
 }
 
+/// What IsForwardedVariable admits, as design.md §4 lists it.
+constexpr std::array<std::string_view, MAX_BOOTSTRAP_ENV> FORWARDED_FOR_TEST{
+    "TERM",           "COLORTERM",   "LANG",
+    "LANGUAGE",       "LC_ALL",      "LC_ADDRESS",
+    "LC_COLLATE",     "LC_CTYPE",    "LC_IDENTIFICATION",
+    "LC_MEASUREMENT", "LC_MESSAGES", "LC_MONETARY",
+    "LC_NAME",        "LC_NUMERIC",  "LC_PAPER",
+    "LC_TELEPHONE",   "LC_TIME"};
+
 BootstrapOfferMessage MakeOffer() {
-    return BootstrapOfferMessage{
+    BootstrapOfferMessage offer{
         .VersionMin = 1,
         .VersionMax = 0x0102,
         .ClientKey = Pattern<crypto::PUBLIC_KEY_SIZE>(0x51),
-        .ClientNonce = Pattern<BOOTSTRAP_NONCE_SIZE>(0x61)};
+        .ClientNonce = Pattern<BOOTSTRAP_NONCE_SIZE>(0x61),
+        .Environment = {}};
+    REQUIRE(offer.Environment.Add("TERM", "xterm-256color"));
+    REQUIRE(offer.Environment.Add("LANG", "en_US.UTF-8"));
+    return offer;
 }
 
 BootstrapAcceptMessage MakeAccept() {
@@ -176,7 +189,8 @@ BootstrapAcceptMessage MakeAccept() {
         .AgentKey = Pattern<crypto::PUBLIC_KEY_SIZE>(0x71),
         .ClientNonce = Pattern<BOOTSTRAP_NONCE_SIZE>(0x61),
         .AgentNonce = Pattern<BOOTSTRAP_NONCE_SIZE>(0x81),
-        .Port = 0xC350};
+        .Port = 0xC350,
+        .OrphanTimeoutSeconds = 0x0000'0708};
 }
 
 // For Data, the payload is a ByteSpan: keep the bytes alongside the message.
@@ -616,15 +630,21 @@ TEST_CASE("a bootstrap offer survives a round trip") {
     CHECK(parsed->VersionMax == offer.VersionMax);
     CHECK(parsed->ClientKey == offer.ClientKey);
     CHECK(parsed->ClientNonce == offer.ClientNonce);
+    CHECK(parsed->Environment == offer.Environment);
+    REQUIRE(parsed->Environment.Variables().size() == 2);
+    CHECK(parsed->Environment.Variables()[0].Name() == "TERM");
+    CHECK(parsed->Environment.Variables()[0].Value() == "xterm-256color");
 }
 
 TEST_CASE("a bootstrap accept survives a round trip") {
     const auto accept = MakeAccept();
     const auto bytes = Encode(accept);
     CHECK(bytes.front() == std::byte{0x07});
-    // The port is the last two bytes, big-endian.
-    CHECK(bytes.at(bytes.size() - 2) == std::byte{0xC3});
-    CHECK(bytes.back() == std::byte{0x50});
+    // The port, then the orphan timeout, both big-endian, at the end.
+    CHECK(bytes.at(bytes.size() - 6) == std::byte{0xC3});
+    CHECK(bytes.at(bytes.size() - 5) == std::byte{0x50});
+    CHECK(bytes.at(bytes.size() - 2) == std::byte{0x07});
+    CHECK(bytes.back() == std::byte{0x08});
     ByteReader reader{ByteSpan{bytes}};
     REQUIRE(ParseMessageType(reader) == EMessageType::BootstrapAccept);
     const auto parsed = ParseBootstrapAccept(reader);
@@ -634,6 +654,134 @@ TEST_CASE("a bootstrap accept survives a round trip") {
     CHECK(parsed->ClientNonce == accept.ClientNonce);
     CHECK(parsed->AgentNonce == accept.AgentNonce);
     CHECK(parsed->Port == accept.Port);
+    CHECK(parsed->OrphanTimeoutSeconds == accept.OrphanTimeoutSeconds);
+}
+
+TEST_CASE("only the terminal type and the locale are forwarded") {
+    for (const std::string_view name :
+         {"TERM", "COLORTERM", "LANG", "LANGUAGE", "LC_ALL", "LC_CTYPE",
+          "LC_IDENTIFICATION"}) {
+        CAPTURE(name);
+        CHECK(IsForwardedVariable(name));
+    }
+    for (const std::string_view name :
+         {"", "PATH", "LD_PRELOAD", "HOME", "LC_", "LC__", "LC_all", "LC_X1",
+          "LC_MODIFIERS", "term", "TERMINFO", "LANGX"}) {
+        CAPTURE(name);
+        CHECK_FALSE(IsForwardedVariable(name));
+    }
+}
+
+TEST_CASE("an environment refuses what it could not forward") {
+    BootstrapEnvironment environment;
+    CHECK_FALSE(environment.Add("PATH", "/bin"));
+    CHECK_FALSE(environment.Add("TERM", "xterm\n"));
+    CHECK_FALSE(environment.Add("TERM", std::string_view{"x\0y", 3}));
+    CHECK_FALSE(environment.Add("TERM", std::string(MAX_ENV_VALUE + 1, 'x')));
+    CHECK_FALSE(environment.Add("LC_" + std::string(MAX_ENV_NAME, 'A'), "C"));
+    REQUIRE(environment.Add("TERM", ""));
+    CHECK_FALSE(environment.Add("TERM", "xterm"));
+    CHECK(environment.Variables().size() == 1);
+
+    // Every forwarded name fits at once, and that is the whole list.
+    BootstrapEnvironment full;
+    for (const std::string_view name : FORWARDED_FOR_TEST) {
+        REQUIRE(full.Add(name, "C"));
+    }
+    CHECK(full.Variables().size() == MAX_BOOTSTRAP_ENV);
+    CHECK_FALSE(full.Add("TERM", "xterm"));
+    CHECK_FALSE(full.Add("LANG", "C"));
+}
+
+TEST_CASE("an offer at the most it may carry survives a round trip") {
+    BootstrapOfferMessage offer = MakeOffer();
+    offer.Environment = {};
+    for (const std::string_view name : FORWARDED_FOR_TEST) {
+        REQUIRE(offer.Environment.Add(name, std::string(MAX_ENV_VALUE, '~')));
+    }
+    const auto bytes = Encode(offer);
+    ByteReader reader{ByteSpan{bytes}};
+    REQUIRE(ParseMessageType(reader) == EMessageType::BootstrapOffer);
+    const auto parsed = ParseBootstrapOffer(reader);
+    REQUIRE(parsed.has_value());
+    CHECK(parsed->Environment == offer.Environment);
+}
+
+TEST_CASE("an offer whose environment the agent would not set is refused") {
+    // Header fields as MakeOffer writes them, then the environment by hand.
+    auto bytes = Encode(MakeOffer());
+    const std::size_t fixed = 1 + 2 * sizeof(std::uint16_t) +
+                              crypto::PUBLIC_KEY_SIZE + BOOTSTRAP_NONCE_SIZE;
+    bytes.resize(fixed);
+    const auto refused = [&](std::vector<std::byte> environment,
+                             EProtoError expected) {
+        auto message = bytes;
+        message.insert(message.end(), environment.begin(), environment.end());
+        ByteReader reader{ByteSpan{message}};
+        REQUIRE(ParseMessageType(reader) == EMessageType::BootstrapOffer);
+        const auto parsed = ParseBootstrapOffer(reader);
+        REQUIRE_FALSE(parsed.has_value());
+        CHECK(parsed.error() == expected);
+    };
+    const auto text = [](std::string_view chars) {
+        std::vector<std::byte> out;
+        out.push_back(static_cast<std::byte>(chars.size()));
+        for (const char c : chars) {
+            out.push_back(static_cast<std::byte>(c));
+        }
+        return out;
+    };
+    const auto entry = [&](std::string_view name, std::string_view value) {
+        auto out = text(name);
+        const auto rest = text(value);
+        out.insert(out.end(), rest.begin(), rest.end());
+        return out;
+    };
+    const auto withCount = [](std::uint8_t count, std::vector<std::byte> rest) {
+        rest.insert(rest.begin(), static_cast<std::byte>(count));
+        return rest;
+    };
+
+    SUBCASE("no count at all") { refused({}, EProtoError::Truncated); }
+    SUBCASE("bytes after an empty environment") {
+        refused(withCount(0, {std::byte{0}}), EProtoError::MalformedField);
+    }
+    SUBCASE("more variables than an Offer carries") {
+        refused(withCount(MAX_BOOTSTRAP_ENV + 1, {}),
+                EProtoError::LengthLimitExceeded);
+    }
+    SUBCASE("a name that is not forwarded") {
+        refused(withCount(1, entry("LD_PRELOAD", "/tmp/x.so")),
+                EProtoError::MalformedField);
+    }
+    SUBCASE("a value with a control character") {
+        refused(withCount(1, entry("TERM", "xterm\x1b")),
+                EProtoError::MalformedField);
+    }
+    SUBCASE("the same name twice") {
+        auto two = entry("TERM", "a");
+        const auto again = entry("TERM", "b");
+        two.insert(two.end(), again.begin(), again.end());
+        refused(withCount(2, two), EProtoError::MalformedField);
+    }
+    SUBCASE("fewer variables than counted") {
+        refused(withCount(2, entry("TERM", "a")), EProtoError::Truncated);
+    }
+    SUBCASE("a value cut short") {
+        auto cut = entry("TERM", "xterm");
+        cut.pop_back();
+        refused(withCount(1, cut), EProtoError::Truncated);
+    }
+}
+
+TEST_CASE("an accept without its orphan timeout is truncated") {
+    auto bytes = Encode(MakeAccept());
+    bytes.resize(bytes.size() - sizeof(std::uint32_t));
+    ByteReader reader{ByteSpan{bytes}};
+    REQUIRE(ParseMessageType(reader) == EMessageType::BootstrapAccept);
+    const auto parsed = ParseBootstrapAccept(reader);
+    REQUIRE_FALSE(parsed.has_value());
+    CHECK(parsed.error() == EProtoError::Truncated);
 }
 
 TEST_CASE("an offer with a backwards version range is refused both ways") {
@@ -660,8 +808,9 @@ TEST_CASE("an accept naming port zero is refused both ways") {
           EProtoError::MalformedField);
 
     auto bytes = Encode(MakeAccept());
-    bytes.at(bytes.size() - 2) = std::byte{0};
-    bytes.back() = std::byte{0};
+    // The port sits before the four bytes of the orphan timeout.
+    bytes.at(bytes.size() - 6) = std::byte{0};
+    bytes.at(bytes.size() - 5) = std::byte{0};
     CHECK(ParseAny(ByteSpan{bytes}).error() == EProtoError::MalformedField);
 }
 

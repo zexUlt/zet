@@ -57,10 +57,12 @@ inline constexpr Duration KEEPALIVE_INTERVAL = std::chrono::seconds{5};
 ///
 /// The half-open case: a cut that drops packets instead of resetting leaves
 /// TCP retransmitting for a quarter of an hour, and neither end learns of it
-/// from the socket. Twenty seconds is four keepalive intervals — long enough
-/// to ride out a Wi-Fi handover or a lost Ping, short enough that a user who
-/// closed the lid notices a reconnect, not a hang.
-inline constexpr Duration PEER_SILENCE_TIMEOUT = std::chrono::seconds{20};
+/// from the socket. Fifteen seconds is three keepalive intervals: one lost
+/// Ping does not cut the connection, and a user who closed the lid notices a
+/// reconnect, not a hang. ET gives up after ten (two of its five-second
+/// keepalives), which a mobile link with ten-second stalls trips over; and a
+/// false cut costs a reconnect, never a byte.
+inline constexpr Duration PEER_SILENCE_TIMEOUT = std::chrono::seconds{15};
 
 /// The two liveness timers of one connection. Zero switches either off,
 /// which only tests and fuzzers want.

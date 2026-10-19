@@ -4,6 +4,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <span>
+#include <string_view>
 
 #include "zet/core/byte_reader.hpp"
 #include "zet/core/byte_writer.hpp"
@@ -136,11 +137,67 @@ struct ResumeMessage {
 };
 
 /// The client's half of the key exchange (§4), written to the agent's stdin.
+/// How many variables an Offer carries at most: one of each name
+/// IsForwardedVariable admits.
+inline constexpr std::size_t MAX_BOOTSTRAP_ENV = 17;
+
+/// The longest name forwarded: LC_IDENTIFICATION is 17.
+inline constexpr std::size_t MAX_ENV_NAME = 20;
+
+/// The longest value: a terminal type or a locale, never a path.
+inline constexpr std::size_t MAX_ENV_VALUE = 64;
+
+/// Whether the client may hand `name` to the agent's shell (§4). ssh -T
+/// carries no TERM and sshd's AcceptEnv usually only the locale, so the
+/// Offer brings the terminal type and the locale and nothing else: the shell
+/// is the user's own, but a list that can grow to LD_PRELOAD is a list
+/// nobody reviews.
+[[nodiscard]] bool IsForwardedVariable(std::string_view name) noexcept;
+
+/// One variable for the agent's shell. Fixed storage, like every message.
+struct EnvironmentVariable {
+    std::array<char, MAX_ENV_NAME> NameBytes{};
+    std::uint8_t NameLength{0};
+    std::array<char, MAX_ENV_VALUE> ValueBytes{};
+    std::uint8_t ValueLength{0};
+
+    [[nodiscard]] std::string_view Name() const noexcept {
+        return {NameBytes.data(), NameLength};
+    }
+    [[nodiscard]] std::string_view Value() const noexcept {
+        return {ValueBytes.data(), ValueLength};
+    }
+};
+
+/// The terminal environment the client hands the agent in the Offer.
+class BootstrapEnvironment {
+public:
+    /// Adds a variable. False, and nothing added, for a name that is not
+    /// forwarded, a duplicate, a name or value too long, a value with a byte
+    /// outside printable ASCII, or a full list.
+    [[nodiscard]] bool Add(std::string_view name,
+                           std::string_view value) noexcept;
+
+    [[nodiscard]] std::span<const EnvironmentVariable> Variables()
+        const noexcept {
+        return std::span{Entries_}.first(Count_);
+    }
+
+    /// The same variables with the same values, in the same order.
+    [[nodiscard]] bool operator==(
+        const BootstrapEnvironment& other) const noexcept;
+
+private:
+    std::array<EnvironmentVariable, MAX_BOOTSTRAP_ENV> Entries_{};
+    std::size_t Count_{0};
+};
+
 struct BootstrapOfferMessage {
     std::uint16_t VersionMin{PROTOCOL_VERSION_MIN};
     std::uint16_t VersionMax{PROTOCOL_VERSION_MAX};
     crypto::PublicKey ClientKey{};
     BootstrapNonce ClientNonce{};
+    BootstrapEnvironment Environment{};
 };
 
 /// The agent's half, printed on its stdout among whatever else the remote
@@ -156,6 +213,10 @@ struct BootstrapAcceptMessage {
     BootstrapNonce AgentNonce{};
     /// Where the agent listens for the session's connections.
     std::uint16_t Port{0};
+    /// How long the agent keeps the session without a client, in seconds; 0
+    /// is for ever. The client gives up reconnecting after as long: by then
+    /// there is nothing left to reconnect to (§9).
+    std::uint32_t OrphanTimeoutSeconds{0};
 };
 
 /// §7. `Payload` is a non-owning view into the buffer the message was parsed

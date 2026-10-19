@@ -89,14 +89,16 @@ void CheckDisposition(EProtoError error) noexcept {
     return left.VersionMin == right.VersionMin &&
            left.VersionMax == right.VersionMax &&
            left.ClientKey == right.ClientKey &&
-           left.ClientNonce == right.ClientNonce;
+           left.ClientNonce == right.ClientNonce &&
+           left.Environment == right.Environment;
 }
 
 [[nodiscard]] bool Same(const BootstrapAcceptMessage& left,
                         const BootstrapAcceptMessage& right) noexcept {
     return left.Version == right.Version && left.AgentKey == right.AgentKey &&
            left.ClientNonce == right.ClientNonce &&
-           left.AgentNonce == right.AgentNonce && left.Port == right.Port;
+           left.AgentNonce == right.AgentNonce && left.Port == right.Port &&
+           left.OrphanTimeoutSeconds == right.OrphanTimeoutSeconds;
 }
 
 [[nodiscard]] bool Same(const DataMessage& left,
