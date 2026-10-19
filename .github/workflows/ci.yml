@@ -305,9 +305,11 @@ jobs:
       - name: Install the toolchain
         run: brew install libsodium ninja llvm
 
+      # Homebrew's LLVM rather than the runner's Xcode: macos-14 ships Apple
+      # clang 15, and zet needs clang 20 or newer (CMakeLists.txt).
       - name: Build and test
         run: |
-          cmake --preset dev
+          cmake --preset dev -DCMAKE_CXX_COMPILER="$(brew --prefix llvm)/bin/clang++"
           cmake --build --preset dev
           ctest --preset dev
 
