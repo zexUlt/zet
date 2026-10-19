@@ -7,13 +7,22 @@ name: macos e2e
 # it any Linux container, does not run. The Intel image can, and GitHub
 # supports it until about August 2027 — this job has that expiry.
 #
-# Nightly and on demand for now: a cold colima start and agent build cost
+# Nightly, on demand and on changes to itself for now: a cold colima start and agent build cost
 # minutes, measured in design.md §16 before this goes on pull requests.
 
 on:
   workflow_dispatch:
   schedule:
     - cron: "0 4 * * *"
+  # And on a pull request that changes the job itself or the host it stands
+  # on, so that a change to the setup is proven before it lands.
+  pull_request:
+    paths:
+      - ".github/workflows/macos-e2e.yml"
+      - "tools/macos_e2e_host.sh"
+      - "tests/macos_e2e/**"
+      - "tests/integration/sshhost.py"
+      - "tests/integration/host.py"
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
