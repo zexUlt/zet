@@ -244,6 +244,26 @@ TEST_CASE_FIXTURE(SodiumFixture,
                                  ends.AtTerminal.end()) == more);
 }
 
+TEST_CASE_FIXTURE(
+    SodiumFixture,
+    "read room shrinks with buffered bytes and widens once live") {
+    std::vector<std::byte> frames(CONNECTION_FRAME_STORAGE);
+    AgentConnection alone{MutableByteSpan{frames}, START};
+    // Before authentication only a handshake frame fits.
+    CHECK(alone.ReadCapacity() ==
+          wire::HEADER_SIZE + wire::MAX_HANDSHAKE_FRAME);
+    CHECK(alone.ReadRoom() == alone.ReadCapacity());
+    const std::array<std::byte, 3> partial{};
+    REQUIRE(alone.OnBytes(ByteSpan{partial}));
+    CHECK(alone.ReadRoom() == alone.ReadCapacity() - partial.size());
+
+    Ends ends;
+    Link link{ends, START};
+    link.Shuttle(START);
+    REQUIRE(link.Agent.IsLive());
+    CHECK(link.Agent.ReadCapacity() == wire::HEADER_SIZE + wire::MAX_FRAME);
+}
+
 TEST_CASE_FIXTURE(SodiumFixture,
                   "a resize queued before Resume reaches the agent") {
     Ends ends;
@@ -906,6 +926,37 @@ TEST_CASE_FIXTURE(SodiumFixture,
     // The first End decides.
     CHECK(ends.EndsHeard[0].first == SHELL_EXIT);
     CHECK(ends.AtTerminal == last);
+}
+
+TEST_CASE_FIXTURE(SodiumFixture,
+                  "only the current connection counts as having delivered the "
+                  "end") {
+    Ends ends;
+    ends.Agent.End(SHELL_EXIT);
+    Link first{ends, START};
+    first.Shuttle(START);
+    first.Shuttle(START + ACK_IDLE_DELAY);
+    REQUIRE(ends.EndsHeard.size() == 1);
+    CHECK(first.Agent.DeliveredEnd());
+
+    // A second connection takes the session over; the first one, superseded,
+    // no longer stands for the client having everything.
+    Link second{ends, START + 1s};
+    second.Shuttle(START + 1s);
+    CHECK_FALSE(first.Agent.DeliveredEnd());
+    second.Shuttle(START + 1s + ACK_IDLE_DELAY);
+    CHECK(second.Agent.DeliveredEnd());
+}
+
+TEST_CASE_FIXTURE(SodiumFixture,
+                  "no end is delivered before the shell has ended") {
+    Ends ends;
+    Link link{ends, START};
+    BringUp(link, START);
+    CHECK_FALSE(link.Agent.DeliveredEnd());
+    std::vector<std::byte> frames(CONNECTION_FRAME_STORAGE);
+    const AgentConnection fresh{MutableByteSpan{frames}, START};
+    CHECK_FALSE(fresh.DeliveredEnd());
 }
 
 TEST_CASE_FIXTURE(SodiumFixture,

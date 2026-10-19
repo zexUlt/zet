@@ -56,6 +56,7 @@ if(ZET_HAVE_IO)
         io/pty_test.cpp
         io/spawn_test.cpp
         io/fake_pty.cpp
+        client/escape_test.cpp
         io/pty_contract_test.cpp
         io/pty_burst_test.cpp
         io/tcp_test.cpp
@@ -72,7 +73,7 @@ if(ZET_HAVE_IO)
     )
     # The Waker test wakes the poller from a second thread.
     find_package(Threads REQUIRED)
-    target_link_libraries(zet_tests PRIVATE zet::io Threads::Threads)
+    target_link_libraries(zet_tests PRIVATE zet::io zet_client_loop Threads::Threads)
 endif()
 
 include(${doctest_SOURCE_DIR}/scripts/cmake/doctest.cmake)

@@ -102,6 +102,19 @@ public:
     /// Whether Resume has gone through and the session's streams flow.
     [[nodiscard]] bool IsLive() const noexcept { return Channel_.has_value(); }
 
+    /// What the next OnBytes will still take. Reading at most this much off
+    /// the socket keeps a caller out of the error path; zero means Pump has
+    /// whole frames to work through first.
+    [[nodiscard]] std::size_t ReadRoom() const noexcept {
+        return Frames_.Room();
+    }
+
+    /// The most OnBytes ever holds: one frame of the current stage. Whatever
+    /// Pump delivers out of one read is never more than this.
+    [[nodiscard]] std::size_t ReadCapacity() const noexcept {
+        return Frames_.Capacity();
+    }
+
     /// When Pump next has something to do on its own: the handshake deadline
     /// until the connection is live, the channel's afterwards.
     [[nodiscard]] Deadline NextDeadline() const noexcept;
@@ -177,6 +190,12 @@ public:
     /// The socket is gone. Detaches the session if this connection still
     /// carries it.
     void Close(Timestamp now) noexcept;
+
+    /// Whether this connection carries the session — live and not superseded
+    /// — and has sent it SessionEnd. A client closes its end once it has
+    /// that, so a close seen when this is true is the client saying it holds
+    /// the whole stream; a close of any other connection says nothing.
+    [[nodiscard]] bool DeliveredEnd() const noexcept;
 
 private:
     enum class EStage : std::uint8_t {
