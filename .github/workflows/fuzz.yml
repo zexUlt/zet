@@ -27,6 +27,8 @@ on:
       - "tools/git-hooks/**"
       - ".github/workflows/ci.yml"
       - ".github/workflows/fuzz-soak.yml"
+      - ".github/workflows/macos-e2e.yml"
+      - "tools/macos_e2e_host.sh"
   push:
     branches: [trunk]
     # The same list: GitHub has no way to share it between the two triggers.
@@ -45,6 +47,8 @@ on:
       - "tools/git-hooks/**"
       - ".github/workflows/ci.yml"
       - ".github/workflows/fuzz-soak.yml"
+      - ".github/workflows/macos-e2e.yml"
+      - "tools/macos_e2e_host.sh"
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
