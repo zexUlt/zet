@@ -37,6 +37,7 @@ import errno
 import os
 import select
 import shutil
+import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -65,6 +66,17 @@ DEFAULT_ORPHAN_TIMEOUT_S = 20
 # LeakSanitizer cannot read the main thread's stack under musl and reports
 # false leaks (design.md §16, the same reason the fuzzers run without it).
 SANITIZER_OPTIONS = {"ASAN_OPTIONS": "detect_leaks=0"}
+
+# What zet writes to stderr, which the tests' pty shares with stdout, when
+# its link goes and comes back (src/client/client.cpp). Removed before a
+# stream is compared: they are zet's own words, not the session's.
+LOST_NOTICE = "zet: connection lost, reconnecting\u2026 (Enter ~ . to quit)\r\n".encode()
+REGAINED_NOTICE = b"zet: reconnected\r\n"
+ESCAPE_NOTICE = b"zet: closed by ~."
+
+# zet's status after ~., and after giving up: ssh's 255 for both.
+ESCAPE_STATUS = 255
+GAVE_UP_STATUS = 255
 
 TCP_ESTABLISHED = 0x01
 TCP_LISTEN = 0x0A
@@ -194,20 +206,28 @@ class TcpSocket:
     state: int
 
 
-def socket_inodes(pid: int) -> set[int]:
-    inodes = set()
-    try:
-        names = os.listdir(f"/proc/{pid}/fd")
-    except FileNotFoundError:
-        return inodes
-    for name in names:
+def socket_inodes(pid: int, user: str | None = None) -> set[int]:
+    """The sockets `pid` holds. Another user's descriptors are read as that
+    user: the container has no CAP_SYS_PTRACE, so root gets EACCES on them."""
+    if user is not None:
+        listing = subprocess.run(
+            ["su", "-s", "/bin/sh", user, "-c", f"ls -l /proc/{pid}/fd"],
+            capture_output=True, text=True, timeout=STEP_TIMEOUT_SECONDS)
+        links = [line.rsplit(" -> ", 1)[1] for line in listing.stdout.splitlines()
+                 if " -> " in line]
+    else:
+        links = []
         try:
-            link = os.readlink(f"/proc/{pid}/fd/{name}")
-        except OSError:
-            continue
-        if link.startswith("socket:["):
-            inodes.add(int(link[len("socket:["):-1]))
-    return inodes
+            names = os.listdir(f"/proc/{pid}/fd")
+        except FileNotFoundError:
+            names = []
+        for name in names:
+            try:
+                links.append(os.readlink(f"/proc/{pid}/fd/{name}"))
+            except OSError:
+                continue
+    return {int(link[len("socket:["):-1]) for link in links
+            if link.startswith("socket:[")}
 
 
 def tcp_sockets() -> list[TcpSocket]:
@@ -227,8 +247,8 @@ def tcp_sockets() -> list[TcpSocket]:
     return found
 
 
-def sockets_of(pid: int) -> list[TcpSocket]:
-    inodes = socket_inodes(pid)
+def sockets_of(pid: int, user: str | None = None) -> list[TcpSocket]:
+    inodes = socket_inodes(pid, user)
     return [s for s in tcp_sockets() if s.inode in inodes]
 
 

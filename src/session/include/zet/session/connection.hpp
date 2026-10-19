@@ -191,6 +191,12 @@ public:
     /// carries it.
     void Close(Timestamp now) noexcept;
 
+    /// Whether this connection carries the session — live and not superseded
+    /// — and has sent it SessionEnd. A client closes its end once it has
+    /// that, so a close seen when this is true is the client saying it holds
+    /// the whole stream; a close of any other connection says nothing.
+    [[nodiscard]] bool DeliveredEnd() const noexcept;
+
 private:
     enum class EStage : std::uint8_t {
         AwaitHello,

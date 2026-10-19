@@ -929,6 +929,37 @@ TEST_CASE_FIXTURE(SodiumFixture,
 }
 
 TEST_CASE_FIXTURE(SodiumFixture,
+                  "only the current connection counts as having delivered the "
+                  "end") {
+    Ends ends;
+    ends.Agent.End(SHELL_EXIT);
+    Link first{ends, START};
+    first.Shuttle(START);
+    first.Shuttle(START + ACK_IDLE_DELAY);
+    REQUIRE(ends.EndsHeard.size() == 1);
+    CHECK(first.Agent.DeliveredEnd());
+
+    // A second connection takes the session over; the first one, superseded,
+    // no longer stands for the client having everything.
+    Link second{ends, START + 1s};
+    second.Shuttle(START + 1s);
+    CHECK_FALSE(first.Agent.DeliveredEnd());
+    second.Shuttle(START + 1s + ACK_IDLE_DELAY);
+    CHECK(second.Agent.DeliveredEnd());
+}
+
+TEST_CASE_FIXTURE(SodiumFixture,
+                  "no end is delivered before the shell has ended") {
+    Ends ends;
+    Link link{ends, START};
+    BringUp(link, START);
+    CHECK_FALSE(link.Agent.DeliveredEnd());
+    std::vector<std::byte> frames(CONNECTION_FRAME_STORAGE);
+    const AgentConnection fresh{MutableByteSpan{frames}, START};
+    CHECK_FALSE(fresh.DeliveredEnd());
+}
+
+TEST_CASE_FIXTURE(SodiumFixture,
                   "keepalives hold an idle connection up, silence ends it") {
     using namespace std::chrono_literals;
     SessionLimits limits;

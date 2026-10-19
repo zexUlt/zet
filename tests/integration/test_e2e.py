@@ -10,14 +10,16 @@ from __future__ import annotations
 
 import os
 import random
+import signal
 import subprocess
 import uuid
 from pathlib import Path
 
 import pytest
 
-from e2e import (PROMPT, TCP_LISTEN, Terminal, Zet, command_of, connection_to_agent,
-                 parent_of, real_uid_of, socket_inodes, sockets_of)
+from e2e import (ESCAPE_NOTICE, ESCAPE_STATUS, GAVE_UP_STATUS, LOST_NOTICE, PROMPT,
+                 REGAINED_NOTICE, TCP_LISTEN, Terminal, Zet, command_of,
+                 connection_to_agent, parent_of, real_uid_of, socket_inodes, sockets_of)
 from harness import STEP_TIMEOUT_SECONDS, PtyProcess, wait_gone, wait_until
 
 # The stream the cut tests check: `seq 1 STREAM_LINES`, 6.9 MB. More than
@@ -136,7 +138,7 @@ def test_the_agent_is_not_root_and_only_accepts(zet: Zet, clean_bashrc):
         agent = parent_of(shell)
         assert command_of(agent) == "zet-agent"
         assert real_uid_of(agent) != 0
-        sockets = sockets_of(agent)
+        sockets = sockets_of(agent, zet.host.user)
         listening = {s.local_port for s in sockets if s.state == TCP_LISTEN}
         assert len(listening) == 1, sockets
         assert all(s.local_port in listening for s in sockets), sockets
@@ -180,6 +182,11 @@ def _cut_mid_stream(zet: Zet, iptables: str, rules_for, seed: int) -> None:
 
         terminal.expect(b"END\r\n")
         received = bytes(terminal.buffer[start:terminal.consumed - len(b"END\r\n")])
+        # zet says so on stderr when the link goes and comes back, once each:
+        # those lines are its own, not the session's.
+        assert received.count(LOST_NOTICE) == 1, context
+        assert received.count(REGAINED_NOTICE) == 1, context
+        received = received.replace(LOST_NOTICE, b"", 1).replace(REGAINED_NOTICE, b"", 1)
         # The remote pty turns \n into \r\n once; a client that left OPOST on
         # would show a second \r.
         stream = received.replace(b"\r\n", b"\n")
@@ -230,3 +237,43 @@ def test_an_orphaned_session_is_reaped(zet: Zet, clean_bashrc):
         wait_gone(shell)
     finally:
         wait_gone(agent)
+
+
+def _drop_both_ways(port: int) -> list[list[str]]:
+    return [["INPUT", "-i", "lo", "-p", "tcp", "--dport", str(port), "-j", "DROP"],
+            ["INPUT", "-i", "lo", "-p", "tcp", "--sport", str(port), "-j", "DROP"]]
+
+
+def test_tilde_dot_quits_over_a_dead_link(zet: Zet, clean_bashrc, iptables):
+    """Enter ~ . ends zet at once, with ssh's 255, even when the connection is
+    gone and nothing would ever answer."""
+    terminal = zet.start()
+    rules: list[list[str]] = []
+    try:
+        terminal.expect(PROMPT)
+        cut = connection_to_agent(terminal.pid, zet.host.port)
+        rules = _drop_both_ways(cut.remote_port)
+        for rule in rules:
+            subprocess.run([iptables, "-I", *rule], check=True, timeout=STEP_TIMEOUT_SECONDS)
+        terminal.send(b"\r~.")
+        assert terminal.finish() == ESCAPE_STATUS
+        assert ESCAPE_NOTICE in terminal.buffer
+    finally:
+        for rule in rules:
+            subprocess.run([iptables, "-D", *rule], check=True, timeout=STEP_TIMEOUT_SECONDS)
+        terminal.kill()
+
+
+def test_the_client_gives_up_once_the_agent_is_gone(zet: Zet, clean_bashrc):
+    """The agent dies; once reconnecting has failed for longer than the agent
+    would have kept the session, zet stops trying and says why."""
+    terminal = zet.start(ZET_ORPHAN_TIMEOUT=str(ORPHAN_TIMEOUT_S))
+    try:
+        terminal.expect(PROMPT)
+        shell = _shell_pid(terminal)
+        agent = parent_of(shell)
+        os.kill(agent, signal.SIGKILL)
+        assert terminal.finish() == GAVE_UP_STATUS
+        assert b"gone" in terminal.tail()
+    finally:
+        terminal.kill()

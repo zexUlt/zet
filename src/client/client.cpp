@@ -21,6 +21,7 @@
 #include <variant>
 #include <vector>
 
+#include "escape.hpp"
 #include "zet/app/byte_queue.hpp"
 #include "zet/app/env.hpp"
 #include "zet/app/registration.hpp"
@@ -36,6 +37,8 @@
 #include "zet/session/client_session.hpp"
 #include "zet/session/connection.hpp"
 #include "zet/session/limits.hpp"
+
+extern char** environ;
 
 namespace zet::client {
 
@@ -66,6 +69,10 @@ constexpr Duration FLUSH_TIMEOUT = 10s;
 /// room for all that one read could deliver.
 constexpr std::size_t STDOUT_QUEUE_MAX = 1024 * 1024;
 
+// The socket is read only while this has room for a whole live frame; less,
+// and the gate would never open.
+static_assert(STDOUT_QUEUE_MAX >= session::CONNECTION_FRAME_STORAGE);
+
 /// Sealed frames the socket has not taken yet, past the resend window.
 constexpr std::size_t SOCKET_OUTPUT_SLACK = 1024 * 1024;
 
@@ -86,6 +93,14 @@ constexpr int FAILURE_STATUS = 255;
 constexpr int EXEC_FAILED_STATUS = 127;
 
 constexpr std::string_view DEFAULT_AGENT = "zet-agent";
+
+/// The two lines zet writes to stderr when its link to the agent goes and
+/// comes back. On stderr and never into the session: the agent's stream on
+/// stdout stays exactly what the agent sent (tests/integration compare it).
+constexpr std::string_view LOST_NOTICE =
+    "zet: connection lost, reconnecting\u2026 (Enter ~ . to quit)\r\n";
+constexpr std::string_view REGAINED_NOTICE = "zet: reconnected\r\n";
+constexpr std::string_view ESCAPE_NOTICE = "zet: closed by ~.\r\n";
 
 constexpr std::string_view USAGE =
     "usage: zet [--agent PATH] [--ssh-arg ARG]... HOST\n"
@@ -108,10 +123,28 @@ struct Options {
     std::string Agent{DEFAULT_AGENT};
     std::vector<std::string> SshArgs;
     std::string Host;
-    std::string Term;
     session::SessionLimits Limits;
     Duration BackoffMax{BACKOFF_MAX};
 };
+
+/// Whether a variable of ours goes to the shell on the far side: what the
+/// terminal is and which language the user reads (§4). Nothing else of the
+/// local environment leaves the machine.
+bool Forwarded(std::string_view entry) noexcept {
+    return entry.starts_with("TERM=") || entry.starts_with("LANG=") ||
+           entry.starts_with("LC_");
+}
+
+/// The NAME=value entries the bootstrap carries to the agent's shell.
+[[maybe_unused]] std::vector<std::string> ForwardedEnvironment() {
+    std::vector<std::string> entries;
+    for (char** entry = environ; *entry != nullptr; ++entry) {
+        if (Forwarded(*entry)) {
+            entries.emplace_back(*entry);
+        }
+    }
+    return entries;
+}
 
 std::optional<Options> ReadOptions(std::span<char*> args) {
     Options options;
@@ -129,10 +162,6 @@ std::optional<Options> ReadOptions(std::span<char*> args) {
     }
     if (options.Host.empty()) {
         return std::nullopt;
-    }
-    // NOLINTNEXTLINE(concurrency-mt-unsafe): one thread.
-    if (const char* term = std::getenv("TERM")) {
-        options.Term = term;
     }
     using app::EUnit;
     if (auto keepalive = app::DurationFromEnv("ZET_KEEPALIVE_INTERVAL",
@@ -157,15 +186,10 @@ std::string Quoted(std::string_view text) {
     return out;
 }
 
-/// The one remote command: the agent's path, quoted, and constant words (§4).
-/// TERM rides along quoted the same way: the shell on the pty needs it, and
-/// ssh -T has no terminal to carry it.
+/// The one remote command: the agent's path, quoted, and a constant word
+/// (§4). Nothing variable goes into it but the path.
 std::string RemoteCommand(const Options& options) {
-    std::string command = Quoted(options.Agent) + " --bootstrap";
-    if (!options.Term.empty()) {
-        command += " --term " + Quoted(options.Term);
-    }
-    return command;
+    return Quoted(options.Agent) + " --bootstrap";
 }
 
 /// A child with pipes on its stdin and stdout; stderr stays ours, so that
@@ -438,9 +462,15 @@ std::optional<wire::ResizeMessage> TerminalSize() noexcept {
 
 class Client {
 public:
+    /// `giveUpAfter` is how long the agent keeps a session nobody is
+    /// connected to (BootstrapAccept): reconnecting for longer than that
+    /// cannot succeed. Zero, or none, means never give up for that reason.
     Client(const Options& options, session::BootstrapResult bootstrapped,
-           io::AddressList addresses, io::Poller poller)
+           io::AddressList addresses, io::Poller poller,
+           std::optional<Duration> giveUpAfter)
         : Options_(options),
+          GiveUpAfter_(giveUpAfter && giveUpAfter->count() > 0 ? giveUpAfter
+                                                               : std::nullopt),
           Addresses_(addresses),
           Poller_(std::move(poller)),
           Storage_(
@@ -490,6 +520,7 @@ private:
     [[nodiscard]] int Finish(int status) noexcept;
 
     const Options& Options_;
+    std::optional<Duration> GiveUpAfter_;
     io::AddressList Addresses_;
     io::Poller Poller_;
     std::vector<std::byte> Storage_;
@@ -505,7 +536,10 @@ private:
     std::optional<session::ClientConnection> Connection_;
     app::ByteQueue SocketOut_;
 
-    std::array<std::byte, STDIN_CHUNK> In_{};
+    EscapeScanner Escape_;
+    /// Room for what the scanner may make of one read: a held ~ and every
+    /// byte of it.
+    std::array<std::byte, 2 * STDIN_CHUNK + 1> In_{};
     std::size_t InFrom_{0};
     std::size_t InTo_{0};
     bool InEnded_{false};
@@ -516,6 +550,11 @@ private:
 
     std::optional<wire::SessionEndMessage> Ended_;
     std::optional<int> Signaled_;
+    bool Escaped_{false};
+    /// The link went down after it had been live, and the user was told.
+    bool Announced_{false};
+    /// When the last live connection was lost; the give-up clock runs from it.
+    std::optional<Timestamp> LostSince_;
     std::optional<std::string> Fatal_;
 
     std::array<std::byte, session::CONNECTION_OUT_SIZE> Out_{};
@@ -542,7 +581,17 @@ int Client::Run() noexcept {
                                    : SIGNAL_STATUS_BASE + Ended_->Value;
             return Finish(status);
         }
+        if (Escaped_) {
+            Say(ESCAPE_NOTICE);
+            return ESCAPE_QUIT_STATUS;
+        }
         if (Fatal_) {
+            return Finish(FAILURE_STATUS);
+        }
+        if (GiveUpAfter_ && LostSince_ && now - *LostSince_ > *GiveUpAfter_) {
+            Fatal_ =
+                "the agent has not answered for longer than it keeps a "
+                "session; it is gone";
             return Finish(FAILURE_STATUS);
         }
         if (Signaled_) {
@@ -591,9 +640,15 @@ void Client::Pump(Timestamp now) noexcept {
         auto result = Connection_->Pump(now, MutableByteSpan{Out_},
                                         MutableByteSpan{Scratch_});
         if (!result) {
-            if (result.error().Disposition() == EDisposition::KillSession) {
+            const session::SessionError& error = result.error();
+            if (error.Disposition() == EDisposition::KillSession) {
                 Fatal_ = std::string{"the session is over: "} +
-                         std::string{result.error().Description()};
+                         std::string{error.Description()};
+            } else if (!Connection_->IsLive() &&
+                       error.Proto() == EProtoError::AuthenticationFailed) {
+                // The answer to our Auth did not verify: an agent that does
+                // not know this session gives exactly that (§5 rule two).
+                Fatal_ = "the agent does not know this session any more";
             }
             Drop(now);
             return;
@@ -619,6 +674,11 @@ void Client::Pump(Timestamp now) noexcept {
     }
     if (Connection_ && Connection_->IsLive()) {
         Attempts_ = 0;
+        LostSince_.reset();
+        if (Announced_) {
+            Say(REGAINED_NOTICE);
+            Announced_ = false;
+        }
     }
 }
 
@@ -672,6 +732,15 @@ void Client::FinishConnecting(Timestamp now) noexcept {
 }
 
 void Client::Drop(Timestamp now) noexcept {
+    if (Connection_ && Connection_->IsLive() && !Fatal_) {
+        if (!Announced_) {
+            Say(LOST_NOTICE);
+            Announced_ = true;
+        }
+    }
+    if (!LostSince_) {
+        LostSince_ = now;
+    }
     if (Connection_) {
         Connection_->Close(now);
         Connection_.reset();
@@ -710,10 +779,14 @@ bool Client::UpdateInterest() noexcept {
 }
 
 Deadline Client::NextDeadline() const noexcept {
-    if (Link_ == ELink::Up && Connection_) {
-        return Connection_->NextDeadline();
+    Deadline next = Link_ == ELink::Up && Connection_
+                        ? Connection_->NextDeadline()
+                        : LinkDeadline_;
+    if (GiveUpAfter_ && LostSince_) {
+        next =
+            Earliest(next, Deadline{*LostSince_ + *GiveUpAfter_ + Duration{1}});
     }
-    return LinkDeadline_;
+    return next;
 }
 
 void Client::Handle(const io::PollEvent& event, Timestamp now) noexcept {
@@ -756,7 +829,8 @@ void Client::ReadStdin() noexcept {
     if (InTo_ != 0 || InEnded_) {
         return;
     }
-    const auto n = io::ReadSome(STDIN_FILENO, MutableByteSpan{In_});
+    std::array<std::byte, STDIN_CHUNK> typed{};
+    const auto n = io::ReadSome(STDIN_FILENO, MutableByteSpan{typed});
     if (!n) {
         if (!n.error().WouldBlock()) {
             InEnded_ = true;
@@ -767,7 +841,10 @@ void Client::ReadStdin() noexcept {
         InEnded_ = true;
         return;
     }
-    InTo_ = *n;
+    const auto scanned =
+        Escape_.Feed(ByteSpan{typed}.first(*n), MutableByteSpan{In_});
+    InTo_ = scanned.Written;
+    Escaped_ = scanned.Quit;
 }
 
 void Client::WriteStdout() noexcept {
@@ -900,8 +977,12 @@ int Main(std::span<char*> args) noexcept {
         return FAILURE_STATUS;
     }
 
-    auto client = std::make_unique<Client>(*options, std::move(*bootstrapped),
-                                           *addresses, std::move(*poller));
+    // The agent's orphan timeout comes in BootstrapAccept once the bootstrap
+    // carries it; until then the client never gives up for that reason.
+    const std::optional<Duration> giveUpAfter;
+    auto client =
+        std::make_unique<Client>(*options, std::move(*bootstrapped), *addresses,
+                                 std::move(*poller), giveUpAfter);
     const int status = client->Run();
     const std::optional<std::string> fatal = client->Fatal();
     client.reset();

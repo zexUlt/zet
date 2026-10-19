@@ -57,8 +57,14 @@ constexpr std::size_t PTY_READ_CHUNK = 64 * 1024;
 constexpr std::size_t SOCKET_READ_CHUNK = 64 * 1024;
 
 /// Keystrokes the pty has not taken yet. A socket is read only while this has
-/// room for everything that one read could deliver, so it never overflows.
-constexpr std::size_t PTY_INPUT_MAX = 256 * 1024;
+/// room for everything that one read could deliver — a whole frame of the
+/// live stage — so it never overflows. Two frames, so that one can wait for
+/// the pty while the next is read.
+constexpr std::size_t PTY_INPUT_MAX = 2 * session::CONNECTION_FRAME_STORAGE;
+
+// Smaller than one frame, and the gate on reading the socket never opens once
+// the connection is live: the stall the first version of this file had.
+static_assert(PTY_INPUT_MAX >= session::CONNECTION_FRAME_STORAGE);
 
 /// Sealed frames a socket has not taken yet, on top of the resend window.
 /// The channel never has more than the window in flight, so a working
@@ -88,7 +94,7 @@ constexpr int USAGE_STATUS = 2;
 constexpr int FAILURE_STATUS = 1;
 
 constexpr std::string_view USAGE =
-    "usage: zet-agent --bootstrap [--term TERM]\n"
+    "usage: zet-agent --bootstrap\n"
     "Started by zet over ssh; not meant to be run by hand.\n";
 
 void Say(std::string_view text) noexcept {
@@ -110,10 +116,9 @@ void Log(log::ELevel level, std::string_view message,
 
 struct Config {
     session::SessionLimits Limits;
-    std::string Term{DEFAULT_TERM};
 };
 
-/// `--bootstrap [--term TERM]`, and the environment of e2e.py.
+/// `--bootstrap`, and the environment of e2e.py.
 std::optional<Config> ReadConfig(std::span<char*> args) {
     Config config;
     bool bootstrap = false;
@@ -121,8 +126,6 @@ std::optional<Config> ReadConfig(std::span<char*> args) {
         const std::string_view arg{args[i]};
         if (arg == "--bootstrap") {
             bootstrap = true;
-        } else if (arg == "--term" && i + 1 < args.size()) {
-            config.Term = args[++i];
         } else {
             return std::nullopt;
         }
@@ -234,10 +237,12 @@ std::optional<Bootstrapped> Bootstrap() noexcept {
                         .Listener = std::move(*listener)};
 }
 
-/// The user's login shell and the environment it starts with.
+/// The user's login shell and the environment it starts with: the agent's
+/// own, which sshd built for the user, with what the client sent on top
+/// (`NAME=value` entries: the terminal and the language, §4).
 class ShellCommand {
 public:
-    explicit ShellCommand(std::string_view term) {
+    explicit ShellCommand(std::span<const std::string> fromClient) {
         const passwd* user = ::getpwuid(::getuid());
         Path_ = user != nullptr && user->pw_shell != nullptr &&
                         user->pw_shell[0] != '\0'
@@ -251,14 +256,30 @@ public:
         Name_ = "-" + Path_.substr(slash == std::string::npos ? 0 : slash + 1);
         Argv_ = {Name_.c_str(), nullptr};
 
+        const auto sentByClient = [&](std::string_view text) {
+            const auto name = text.substr(0, text.find('=') + 1);
+            return std::ranges::any_of(fromClient, [&](const std::string& e) {
+                return e.starts_with(name);
+            });
+        };
+        bool hasTerm = false;
         for (char** entry = environ; *entry != nullptr; ++entry) {
             const std::string_view text{*entry};
             // zet's own settings are the agent's, not the shell's.
-            if (!text.starts_with("TERM=") && !text.starts_with("ZET_")) {
+            if (!text.starts_with("ZET_") && !sentByClient(text)) {
                 Environment_.emplace_back(text);
+                hasTerm = hasTerm || text.starts_with("TERM=");
             }
         }
-        Environment_.push_back("TERM=" + std::string{term});
+        for (const std::string& entry : fromClient) {
+            Environment_.push_back(entry);
+            hasTerm = hasTerm || entry.starts_with("TERM=");
+        }
+        // ssh -T gives the remote side no TERM, and a shell without one runs
+        // nothing that draws.
+        if (!hasTerm) {
+            Environment_.push_back("TERM=" + std::string{DEFAULT_TERM});
+        }
         for (const std::string& entry : Environment_) {
             Envp_.push_back(entry.c_str());
         }
@@ -303,7 +324,9 @@ struct Connection {
     /// The client closed its end, which after SessionEnd is how it says it
     /// has the whole stream.
     bool PeerClosed{false};
-    bool WasLive{false};
+    /// What AgentConnection::DeliveredEnd said at the last Pump: the read
+    /// that sees the close comes after it.
+    bool DeliveredEnd{false};
 };
 
 wire::SessionEndMessage EndOf(const io::ExitStatus& status) noexcept {
@@ -350,6 +373,8 @@ private:
     [[nodiscard]] Connection* Find(std::uint64_t token) noexcept;
 
     Config Config_;
+    /// What the client asked the shell's environment to have (§4).
+    std::vector<std::string> ShellEnvironment_;
     io::Listener Listener_;
     io::Poller Poller_;
     std::vector<std::byte> Storage_;
@@ -382,7 +407,7 @@ bool Agent::Start() noexcept {
             return false;
         }
     }
-    const ShellCommand shell{Config_.Term};
+    const ShellCommand shell{ShellEnvironment_};
     auto child = io::Spawn(shell.Spec());
     if (!child) {
         const std::array fields{
@@ -472,9 +497,7 @@ void Agent::Pump(Connection& connection, Timestamp now) noexcept {
             connection.Closing = true;
             return;
         }
-        if (connection.Link.IsLive()) {
-            connection.WasLive = true;
-        }
+        connection.DeliveredEnd = connection.Link.DeliveredEnd();
         const auto& event = *result;
         if (const auto* needs = std::get_if<session::NeedsSession>(&event)) {
             const auto nonce = RandomNonce<wire::HandshakeNonce>();
@@ -518,7 +541,10 @@ void Agent::DropClosed(Timestamp now) noexcept {
         if (!c->Closing) {
             return false;
         }
-        if (c->PeerClosed && c->WasLive && Session_.HasEnded()) {
+        // Only the connection that carries the session, closed by the
+        // client after SessionEnd went out on it, says the client has
+        // everything; a superseded one closing says nothing.
+        if (c->PeerClosed && c->DeliveredEnd) {
             EndDelivered_ = true;
         }
         c->Link.Close(now);

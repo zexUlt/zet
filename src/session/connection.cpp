@@ -195,6 +195,11 @@ ConnectionResult AgentConnection::Pump(Timestamp now, MutableByteSpan out,
     return Idle{};
 }
 
+bool AgentConnection::DeliveredEnd() const noexcept {
+    return Stage_ == EStage::Live && Handle_ && Handle_->IsCurrent() &&
+           Channel_ && Channel_->SessionEndSent();
+}
+
 void AgentConnection::QueueEnd() noexcept {
     // Every Pump rather than once: the shell may end while this connection
     // is live. The channel sends it once the stream is acknowledged.
