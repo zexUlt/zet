@@ -371,7 +371,12 @@ std::optional<session::BootstrapResult> Bootstrap(const Options& options) {
     const auto written = io::WriteSome(
         process->In.Get(), std::as_bytes(std::span{offer}.first(*length)));
     if (!written || *written != *length) {
+        // Waiting would only spend BOOTSTRAP_TIMEOUT on an Accept that cannot
+        // come: the agent never saw a whole Offer.
         SayError("bootstrap", "ssh did not take the offer");
+        process->In.Reset();
+        static_cast<void>(Reap(process->Pid, false));
+        return std::nullopt;
     }
 
     const Timestamp until = io::MonotonicNow() + BOOTSTRAP_TIMEOUT;
@@ -436,12 +441,14 @@ public:
     DescriptorFlags(DescriptorFlags&&) = delete;
     DescriptorFlags& operator=(DescriptorFlags&&) = delete;
 
+    /// Once: the destructor after an explicit call does nothing.
     void Restore() noexcept {
         for (std::size_t i = 0; i < Saved_.size(); ++i) {
             if (Saved_[i] >= 0) {
                 // NOLINTNEXTLINE(cppcoreguidelines-pro-type-vararg)
                 static_cast<void>(
                     ::fcntl(static_cast<int>(i), F_SETFL, Saved_[i]));
+                Saved_[i] = -1;
             }
         }
     }
@@ -602,6 +609,9 @@ int Client::Run() noexcept {
             return Finish(status);
         }
         if (Escaped_) {
+            // Not through Finish: ~. is for when the link is dead or the
+            // session wedged, and it quits at once, as ssh's does, rather than
+            // spend Finish's drain on output that may never be written.
             return ESCAPE_QUIT_STATUS;
         }
         if (Fatal_) {
