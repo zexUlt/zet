@@ -1,0 +1,95 @@
+name: macos e2e
+
+# The macOS client against the Linux agent, end to end (design.md §16).
+#
+# On macos-15-intel because the arm64 macOS runners cannot start a VM:
+# Apple's Virtualization.framework does not nest there, so colima, and with
+# it any Linux container, does not run. The Intel image can, and GitHub
+# supports it until about August 2027 — this job has that expiry.
+#
+# Nightly, on demand and on changes to itself for now: a cold colima start and agent build cost
+# minutes, measured in design.md §16 before this goes on pull requests.
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 4 * * *"
+  # And on a pull request that changes the job itself or the host it stands
+  # on, so that a change to the setup is proven before it lands.
+  pull_request:
+    paths:
+      - ".github/workflows/macos-e2e.yml"
+      - "tools/macos_e2e_host.sh"
+      - "tests/macos_e2e/**"
+      - "tests/integration/sshhost.py"
+      - "tests/integration/host.py"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  ZET_APK_CACHE: ${{ github.workspace }}/../apk-cache
+
+jobs:
+  macos-e2e:
+    name: macos e2e
+    runs-on: macos-15-intel
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      # ccache and apk files live under the home directory, which colima
+      # mounts into its VM, so the container sees the same paths.
+      - name: Restore the compiler cache
+        uses: ./.github/actions/ccache
+        with:
+          key: macos-e2e-agent
+
+      - name: Restore the Alpine packages
+        uses: ./.github/actions/apk
+
+      - name: Start colima
+        run: |
+          brew install colima docker ninja libsodium
+          colima start --cpu 3 --memory 8 --vm-type vz --mount-type virtiofs
+          docker version --format 'docker {{.Server.Version}}'
+
+      # Until the macOS port lands, the zet target is not built on Darwin
+      # and the client scenarios skip; the host is checked either way.
+      # The project needs Clang 20 or newer (CMakeLists.txt); the image's
+      # default Xcode has Apple clang 17. The newest Xcode on it is used.
+      - name: Pick the newest Xcode
+        run: |
+          find /Applications -maxdepth 1 -name 'Xcode*.app' | sort -V
+          newest=$(find /Applications -maxdepth 1 -name 'Xcode_*.app' | sort -V | tail -1)
+          sudo xcode-select -s "$newest"
+          clang++ --version | head -1
+
+      - name: Build the native client
+        run: |
+          cmake --preset dev >/dev/null
+          if ninja -C build/dev -t targets all | grep -q '^zet:'; then
+            cmake --build --preset dev --target zet
+          else
+            echo "no zet target on macOS yet: the client scenarios will skip"
+          fi
+
+      - name: Start the host
+        run: tools/macos_e2e_host.sh up
+
+      - name: Run the macOS suite
+        run: |
+          python3 -m venv "$RUNNER_TEMP/venv"
+          "$RUNNER_TEMP/venv/bin/pip" install --quiet pytest
+          "$RUNNER_TEMP/venv/bin/python" -m pytest -p no:cacheprovider -v tests/macos_e2e
+
+      - name: The host's log
+        if: failure()
+        run: |
+          docker logs zet-e2e-host 2>&1 | tail -80 || true
+          docker exec zet-e2e-host cat /src/build/macos-e2e/sshd.log 2>/dev/null | tail -40 || true
+
+      - name: Stop the host
+        if: always()
+        run: tools/macos_e2e_host.sh down
