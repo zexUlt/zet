@@ -341,11 +341,39 @@ TEST_CASE_FIXTURE(SodiumFixture, "a finished end reads nothing more") {
 
 TEST_CASE_FIXTURE(SodiumFixture, "writing into too small a buffer is refused") {
     BootstrapClient client{MakeSeed(1), MakeNonce(1)};
-    std::string small(BOOTSTRAP_OFFER_TEXT_SIZE - 1, '\0');
+    // An Offer is as long as its environment makes it;
+    // BOOTSTRAP_OFFER_TEXT_SIZE is the most. One character short of this one's
+    // own length is too small.
+    std::string fits(BOOTSTRAP_OFFER_TEXT_SIZE, '\0');
+    const auto length = client.WriteOffer(std::span{fits});
+    REQUIRE(length.has_value());
+    std::string small(*length - 1, '\0');
     CHECK(client.WriteOffer(std::span{small}).error() ==
           EProtoError::BufferTooSmall);
     auto answered = Answer(client, 2);
     std::string tiny(BOOTSTRAP_ACCEPT_TEXT_SIZE - 1, '\0');
     CHECK(answered.Agent.WriteAccept(std::span{tiny}).error() ==
           EProtoError::BufferTooSmall);
+}
+
+TEST_CASE_FIXTURE(SodiumFixture,
+                  "the client's terminal reaches the agent and the agent's "
+                  "orphan timeout reaches the client") {
+    constexpr std::uint32_t orphanTimeout = 1800;
+    BootstrapEnvironment environment;
+    REQUIRE(environment.Add("TERM", "xterm-256color"));
+    REQUIRE(environment.Add("LC_ALL", "C.UTF-8"));
+    BootstrapClient client{MakeSeed(1), MakeNonce(1), environment};
+
+    BootstrapAgent agent{MakeSeed(2), MakeNonce(2), PORT, orphanTimeout};
+    auto [offered, read] = Run(agent, OfferText(client));
+    REQUIRE(offered.has_value());
+    CHECK(offered->Environment == environment);
+    CHECK(offered->OrphanTimeoutSeconds == orphanTimeout);
+
+    auto [accepted, taken] = Run(client, AcceptText(agent));
+    REQUIRE(accepted.has_value());
+    CHECK(accepted->OrphanTimeoutSeconds == orphanTimeout);
+    CHECK(accepted->Environment == environment);
+    CHECK(SameSecrets(accepted->Secrets, offered->Secrets));
 }

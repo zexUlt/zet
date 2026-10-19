@@ -17,21 +17,25 @@ constexpr std::uint8_t CLEARTEXT_EPOCH = 0;
 
 /// A frame of one bootstrap message, armored into `out`. `body` writes the
 /// message; the frame around it is the same as for any other cleartext one.
-template <std::size_t tBodySize, typename TWrite>
+template <std::size_t tMaxBodySize, typename TWrite>
 [[nodiscard]] ProtoResult<std::size_t> WriteArmoredMessage(
     std::span<char> out, TWrite&& write) noexcept {
-    std::array<std::byte, wire::HEADER_SIZE + tBodySize> frame{};
-    ByteWriter writer{MutableByteSpan{frame}};
-    const wire::FrameHeader header{
-        .Length = static_cast<std::uint32_t>(tBodySize),
-        .Epoch = CLEARTEXT_EPOCH};
-    if (auto written = wire::WriteFrameHeader(writer, header); !written) {
+    std::array<std::byte, wire::HEADER_SIZE + tMaxBodySize> frame{};
+    // The body first, since the header carries its length and an Offer's
+    // depends on how many variables it brings.
+    ByteWriter body{MutableByteSpan{frame}.subspan(wire::HEADER_SIZE)};
+    if (auto written = std::forward<TWrite>(write)(body); !written) {
         return std::unexpected(written.error());
     }
-    if (auto written = std::forward<TWrite>(write)(writer); !written) {
+    const std::size_t length = body.Written().size();
+    ByteWriter head{MutableByteSpan{frame}.first(wire::HEADER_SIZE)};
+    const wire::FrameHeader header{.Length = static_cast<std::uint32_t>(length),
+                                   .Epoch = CLEARTEXT_EPOCH};
+    if (auto written = wire::WriteFrameHeader(head, header); !written) {
         return std::unexpected(written.error());
     }
-    return wire::WriteArmor(ByteSpan{frame}, out);
+    return wire::WriteArmor(ByteSpan{frame}.first(wire::HEADER_SIZE + length),
+                            out);
 }
 
 /// The message type and the reader positioned after it, if `block` is
@@ -84,9 +88,12 @@ template <typename TConsider>
 
 }  // namespace
 
-BootstrapClient::BootstrapClient(const crypto::Key& seed,
-                                 const wire::BootstrapNonce& nonce) noexcept
-    : Keys_(crypto::KeyPairFromSeed(seed)), Nonce_(nonce) {}
+BootstrapClient::BootstrapClient(
+    const crypto::Key& seed, const wire::BootstrapNonce& nonce,
+    const wire::BootstrapEnvironment& environment) noexcept
+    : Keys_(crypto::KeyPairFromSeed(seed)),
+      Nonce_(nonce),
+      Environment_(environment) {}
 
 ProtoResult<std::size_t> BootstrapClient::WriteOffer(
     std::span<char> out) const noexcept {
@@ -94,7 +101,8 @@ ProtoResult<std::size_t> BootstrapClient::WriteOffer(
         .VersionMin = wire::PROTOCOL_VERSION_MIN,
         .VersionMax = wire::PROTOCOL_VERSION_MAX,
         .ClientKey = Keys_.Public,
-        .ClientNonce = Nonce_};
+        .ClientNonce = Nonce_,
+        .Environment = Environment_};
     return WriteArmoredMessage<BOOTSTRAP_OFFER_SIZE>(
         out, [&](ByteWriter& writer) {
             return wire::WriteBootstrapOffer(writer, offer);
@@ -150,13 +158,19 @@ ChannelResult<std::optional<BootstrapResult>> BootstrapClient::Consider(
         exchanged->Transmit, accept->Version, Nonce_, accept->AgentNonce);
     return BootstrapResult{.Secrets = wire::DeriveSessionSecrets(master),
                            .Version = accept->Version,
-                           .Port = accept->Port};
+                           .Port = accept->Port,
+                           .OrphanTimeoutSeconds = accept->OrphanTimeoutSeconds,
+                           .Environment = Environment_};
 }
 
 BootstrapAgent::BootstrapAgent(const crypto::Key& seed,
                                const wire::BootstrapNonce& nonce,
-                               std::uint16_t port) noexcept
-    : Keys_(crypto::KeyPairFromSeed(seed)), Nonce_(nonce), Port_(port) {}
+                               std::uint16_t port,
+                               std::uint32_t orphanTimeoutSeconds) noexcept
+    : Keys_(crypto::KeyPairFromSeed(seed)),
+      Nonce_(nonce),
+      Port_(port),
+      OrphanTimeoutSeconds_(orphanTimeoutSeconds) {}
 
 ChannelResult<BootstrapStep> BootstrapAgent::Feed(ByteSpan chunk) noexcept {
     if (Accept_) {
@@ -193,14 +207,18 @@ ChannelResult<std::optional<BootstrapResult>> BootstrapAgent::Consider(
     }
     const crypto::Key master = wire::DeriveBootstrapMaster(
         exchanged->Receive, *version, offer->ClientNonce, Nonce_);
-    Accept_ = wire::BootstrapAcceptMessage{.Version = *version,
-                                           .AgentKey = Keys_.Public,
-                                           .ClientNonce = offer->ClientNonce,
-                                           .AgentNonce = Nonce_,
-                                           .Port = Port_};
+    Accept_ = wire::BootstrapAcceptMessage{
+        .Version = *version,
+        .AgentKey = Keys_.Public,
+        .ClientNonce = offer->ClientNonce,
+        .AgentNonce = Nonce_,
+        .Port = Port_,
+        .OrphanTimeoutSeconds = OrphanTimeoutSeconds_};
     return BootstrapResult{.Secrets = wire::DeriveSessionSecrets(master),
                            .Version = *version,
-                           .Port = Port_};
+                           .Port = Port_,
+                           .OrphanTimeoutSeconds = OrphanTimeoutSeconds_,
+                           .Environment = offer->Environment};
 }
 
 ProtoResult<std::size_t> BootstrapAgent::WriteAccept(
