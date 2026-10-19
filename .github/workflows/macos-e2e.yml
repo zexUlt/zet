@@ -51,20 +51,21 @@ jobs:
 
       - name: Start colima
         run: |
-          brew install colima docker ninja libsodium
+          brew install colima docker ninja libsodium llvm
           colima start --cpu 3 --memory 8 --vm-type vz --mount-type virtiofs
           docker version --format 'docker {{.Server.Version}}'
 
       # Until the macOS port lands, the zet target is not built on Darwin
       # and the client scenarios skip; the host is checked either way.
-      # The project needs Clang 20 or newer (CMakeLists.txt); the image's
-      # default Xcode has Apple clang 17. The newest Xcode on it is used.
-      - name: Pick the newest Xcode
+      # The project needs Clang 20 or newer (CMakeLists.txt). Every Xcode on
+      # the image, 26.3 included, has Apple clang 17, so Homebrew's LLVM is
+      # put first on PATH, linking against its own libc++.
+      - name: Use Homebrew's Clang
         run: |
-          find /Applications -maxdepth 1 -name 'Xcode*.app' | sort -V
-          newest=$(find /Applications -maxdepth 1 -name 'Xcode_*.app' | sort -V | tail -1)
-          sudo xcode-select -s "$newest"
-          clang++ --version | head -1
+          llvm=$(brew --prefix llvm)
+          echo "$llvm/bin" >> "$GITHUB_PATH"
+          echo "LDFLAGS=-L$llvm/lib/c++ -Wl,-rpath,$llvm/lib/c++" >> "$GITHUB_ENV"
+          "$llvm/bin/clang++" --version | head -1
 
       - name: Build the native client
         run: |
