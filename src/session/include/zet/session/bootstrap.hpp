@@ -26,13 +26,17 @@
 /// random generator, which is what lets the fuzzer and the tests fix them.
 namespace zet::session {
 
-/// Body sizes: the type byte and the fields of §7.
+/// Body sizes: the type byte and the fields of §7. An Offer's is the most
+/// it can be, with every variable at its longest.
 inline constexpr std::size_t BOOTSTRAP_OFFER_SIZE =
     sizeof(std::uint8_t) + 2 * sizeof(std::uint16_t) + crypto::PUBLIC_KEY_SIZE +
-    wire::BOOTSTRAP_NONCE_SIZE;
+    wire::BOOTSTRAP_NONCE_SIZE + sizeof(std::uint8_t) +
+    wire::MAX_BOOTSTRAP_ENV *
+        (2 * sizeof(std::uint8_t) + wire::MAX_ENV_NAME + wire::MAX_ENV_VALUE);
 inline constexpr std::size_t BOOTSTRAP_ACCEPT_SIZE =
     sizeof(std::uint8_t) + sizeof(std::uint16_t) + crypto::PUBLIC_KEY_SIZE +
-    2 * wire::BOOTSTRAP_NONCE_SIZE + sizeof(std::uint16_t);
+    2 * wire::BOOTSTRAP_NONCE_SIZE + sizeof(std::uint16_t) +
+    sizeof(std::uint32_t);
 
 /// Room WriteOffer and WriteAccept need: the whole frame, armored.
 inline constexpr std::size_t BOOTSTRAP_OFFER_TEXT_SIZE =
@@ -42,6 +46,8 @@ inline constexpr std::size_t BOOTSTRAP_ACCEPT_TEXT_SIZE =
 
 static_assert(wire::HEADER_SIZE + BOOTSTRAP_ACCEPT_SIZE <=
               wire::MAX_ARMORED_FRAME);
+static_assert(wire::HEADER_SIZE + BOOTSTRAP_OFFER_SIZE <=
+              wire::MAX_ARMORED_FRAME);
 
 /// What a finished bootstrap leaves either end with.
 struct BootstrapResult {
@@ -50,6 +56,12 @@ struct BootstrapResult {
     /// Where the agent listens. The agent knew it all along; the client
     /// learns it from the Accept.
     std::uint16_t Port{0};
+    /// How long the agent keeps the session without a client; 0 is for ever.
+    /// Again the agent's to set and the client's to learn.
+    std::uint32_t OrphanTimeoutSeconds{0};
+    /// What the agent's shell is to get: the client's TERM and locale. The
+    /// client's own, on the client.
+    wire::BootstrapEnvironment Environment{};
 };
 
 /// What one Feed did: how much of the chunk it read, and the result if this
@@ -64,8 +76,10 @@ class BootstrapClient {
 public:
     /// `seed` determines the ephemeral key pair; draw it fresh for every
     /// bootstrap, like `nonce`.
-    BootstrapClient(const crypto::Key& seed,
-                    const wire::BootstrapNonce& nonce) noexcept;
+    /// `environment` is what the agent's shell will be given (§4).
+    BootstrapClient(
+        const crypto::Key& seed, const wire::BootstrapNonce& nonce,
+        const wire::BootstrapEnvironment& environment = {}) noexcept;
 
     /// The armored Offer, BOOTSTRAP_OFFER_TEXT_SIZE characters.
     [[nodiscard]] ProtoResult<std::size_t> WriteOffer(
@@ -93,6 +107,7 @@ private:
 
     crypto::KeyPair Keys_;
     wire::BootstrapNonce Nonce_;
+    wire::BootstrapEnvironment Environment_;
     wire::ArmorScanner Scanner_;
     std::uint64_t Ignored_{0};
     bool Done_{false};
@@ -101,9 +116,11 @@ private:
 /// The agent's end: reads its stdin for the Offer, then writes the Accept.
 class BootstrapAgent {
 public:
-    /// `port` is the one the agent has already bound for the session.
+    /// `port` is the one the agent has already bound for the session, and
+    /// `orphanTimeoutSeconds` how long it will keep the session unattended.
     BootstrapAgent(const crypto::Key& seed, const wire::BootstrapNonce& nonce,
-                   std::uint16_t port) noexcept;
+                   std::uint16_t port,
+                   std::uint32_t orphanTimeoutSeconds = 0) noexcept;
 
     /// Reads stdin until an Offer. Other blocks are skipped as on the client;
     /// an Offer that cannot be used is an error, because on stdin nothing but
@@ -127,6 +144,7 @@ private:
     crypto::KeyPair Keys_;
     wire::BootstrapNonce Nonce_;
     std::uint16_t Port_;
+    std::uint32_t OrphanTimeoutSeconds_;
     wire::ArmorScanner Scanner_;
     std::optional<wire::BootstrapAcceptMessage> Accept_;
     std::uint64_t Ignored_{0};

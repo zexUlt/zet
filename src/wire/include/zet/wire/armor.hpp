@@ -26,10 +26,11 @@ namespace zet::wire {
 inline constexpr std::string_view ARMOR_BEGIN = "-----BEGIN ZET BOOTSTRAP-----";
 inline constexpr std::string_view ARMOR_END = "-----END ZET BOOTSTRAP-----";
 
-/// The widest frame a block may carry once decoded. The bootstrap messages
-/// are about a hundred bytes; the rest is room for a later version, and the
-/// ceiling is what keeps a block that never ends from holding more.
-inline constexpr std::size_t MAX_ARMORED_FRAME = 512;
+/// The widest frame a block may carry once decoded. An Accept is about a
+/// hundred bytes and an Offer with the most terminal environment it may
+/// carry about one and a half kilobytes; the ceiling is what keeps a block
+/// that never ends from holding more.
+inline constexpr std::size_t MAX_ARMORED_FRAME = 2048;
 
 /// The base64 text of MAX_ARMORED_FRAME bytes, padding included.
 inline constexpr std::size_t MAX_ARMOR_TEXT = (MAX_ARMORED_FRAME + 2) / 3 * 4;

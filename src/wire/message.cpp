@@ -1,6 +1,8 @@
 #include "zet/wire/message.hpp"
 
 #include <algorithm>
+#include <array>
+#include <string_view>
 
 namespace zet::wire {
 
@@ -297,6 +299,96 @@ ProtoResult<void> WriteResume(ByteWriter& writer,
     return writer.WriteU64BE(message.ClientReceiveOffset);
 }
 
+namespace {
+
+constexpr std::string_view LOCALE_PREFIX = "LC_";
+constexpr std::array<std::string_view, 4> FORWARDED_NAMES{"TERM", "COLORTERM",
+                                                          "LANG", "LANGUAGE"};
+constexpr char FIRST_PRINTABLE = 0x20;
+constexpr char LAST_PRINTABLE = 0x7E;
+
+[[nodiscard]] bool IsUpperOrUnderscore(char c) noexcept {
+    return (c >= 'A' && c <= 'Z') || c == '_';
+}
+
+[[nodiscard]] bool IsPrintable(std::string_view text) noexcept {
+    return std::ranges::all_of(text, [](char c) {
+        return c >= FIRST_PRINTABLE && c <= LAST_PRINTABLE;
+    });
+}
+
+[[nodiscard]] std::string_view AsText(ByteSpan bytes) noexcept {
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
+    return {reinterpret_cast<const char*>(bytes.data()), bytes.size()};
+}
+
+[[nodiscard]] ProtoResult<std::string_view> ReadShortText(
+    ByteReader& reader) noexcept {
+    auto length = reader.ReadU8();
+    if (!length) {
+        return std::unexpected(length.error());
+    }
+    auto bytes = reader.ReadBytes(*length);
+    if (!bytes) {
+        return std::unexpected(bytes.error());
+    }
+    return AsText(*bytes);
+}
+
+[[nodiscard]] ProtoResult<void> WriteShortText(ByteWriter& writer,
+                                               std::string_view text) noexcept {
+    if (auto length = writer.WriteU8(static_cast<std::uint8_t>(text.size()));
+        !length) {
+        return length;
+    }
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
+    return writer.WriteBytes(
+        ByteSpan{reinterpret_cast<const std::byte*>(text.data()), text.size()});
+}
+
+}  // namespace
+
+bool IsForwardedVariable(std::string_view name) noexcept {
+    if (std::ranges::find(FORWARDED_NAMES, name) != FORWARDED_NAMES.end()) {
+        return true;
+    }
+    return name.size() > LOCALE_PREFIX.size() &&
+           name.starts_with(LOCALE_PREFIX) &&
+           std::ranges::all_of(name.substr(LOCALE_PREFIX.size()),
+                               IsUpperOrUnderscore);
+}
+
+bool BootstrapEnvironment::Add(std::string_view name,
+                               std::string_view value) noexcept {
+    if (Count_ == Entries_.size() || name.size() > MAX_ENV_NAME ||
+        value.size() > MAX_ENV_VALUE || !IsForwardedVariable(name) ||
+        !IsPrintable(value)) {
+        return false;
+    }
+    const auto taken = Variables();
+    if (std::ranges::any_of(taken, [&](const EnvironmentVariable& variable) {
+            return variable.Name() == name;
+        })) {
+        return false;
+    }
+    EnvironmentVariable& slot = Entries_.at(Count_);
+    std::ranges::copy(name, slot.NameBytes.begin());
+    slot.NameLength = static_cast<std::uint8_t>(name.size());
+    std::ranges::copy(value, slot.ValueBytes.begin());
+    slot.ValueLength = static_cast<std::uint8_t>(value.size());
+    ++Count_;
+    return true;
+}
+
+bool BootstrapEnvironment::operator==(
+    const BootstrapEnvironment& other) const noexcept {
+    return std::ranges::equal(
+        Variables(), other.Variables(),
+        [](const EnvironmentVariable& x, const EnvironmentVariable& y) {
+            return x.Name() == y.Name() && x.Value() == y.Value();
+        });
+}
+
 ProtoResult<BootstrapOfferMessage> ParseBootstrapOffer(
     ByteReader& reader) noexcept {
     BootstrapOfferMessage message{};
@@ -320,6 +412,29 @@ ProtoResult<BootstrapOfferMessage> ParseBootstrapOffer(
     }
     if (auto nonce = ReadArray(reader, message.ClientNonce); !nonce) {
         return std::unexpected(nonce.error());
+    }
+    auto count = reader.ReadU8();
+    if (!count) {
+        return std::unexpected(count.error());
+    }
+    if (*count > MAX_BOOTSTRAP_ENV) {
+        return std::unexpected(EProtoError::LengthLimitExceeded);
+    }
+    for (std::uint8_t i = 0; i < *count; ++i) {
+        auto name = ReadShortText(reader);
+        if (!name) {
+            return std::unexpected(name.error());
+        }
+        auto value = ReadShortText(reader);
+        if (!value) {
+            return std::unexpected(value.error());
+        }
+        // Whatever Add would refuse from the client's own environment is
+        // refused on the wire too: the agent sets nothing the client could
+        // not have.
+        if (!message.Environment.Add(*name, *value)) {
+            return std::unexpected(EProtoError::MalformedField);
+        }
     }
     if (auto rest = RequireExhausted(reader); !rest) {
         return std::unexpected(rest.error());
@@ -345,7 +460,24 @@ ProtoResult<void> WriteBootstrapOffer(
     if (auto key = writer.WriteBytes(ByteSpan{message.ClientKey}); !key) {
         return key;
     }
-    return writer.WriteBytes(ByteSpan{message.ClientNonce});
+    if (auto nonce = writer.WriteBytes(ByteSpan{message.ClientNonce}); !nonce) {
+        return nonce;
+    }
+    const auto variables = message.Environment.Variables();
+    if (auto count =
+            writer.WriteU8(static_cast<std::uint8_t>(variables.size()));
+        !count) {
+        return count;
+    }
+    for (const EnvironmentVariable& variable : variables) {
+        if (auto name = WriteShortText(writer, variable.Name()); !name) {
+            return name;
+        }
+        if (auto value = WriteShortText(writer, variable.Value()); !value) {
+            return value;
+        }
+    }
+    return {};
 }
 
 ProtoResult<BootstrapAcceptMessage> ParseBootstrapAccept(
@@ -374,6 +506,11 @@ ProtoResult<BootstrapAcceptMessage> ParseBootstrapAccept(
         return std::unexpected(EProtoError::MalformedField);
     }
     message.Port = *port;
+    auto orphanTimeout = reader.ReadU32BE();
+    if (!orphanTimeout) {
+        return std::unexpected(orphanTimeout.error());
+    }
+    message.OrphanTimeoutSeconds = *orphanTimeout;
     if (auto rest = RequireExhausted(reader); !rest) {
         return std::unexpected(rest.error());
     }
@@ -402,7 +539,10 @@ ProtoResult<void> WriteBootstrapAccept(
     if (auto nonce = writer.WriteBytes(ByteSpan{message.AgentNonce}); !nonce) {
         return nonce;
     }
-    return writer.WriteU16BE(message.Port);
+    if (auto port = writer.WriteU16BE(message.Port); !port) {
+        return port;
+    }
+    return writer.WriteU32BE(message.OrphanTimeoutSeconds);
 }
 
 ProtoResult<DataMessage> ParseData(ByteReader& reader) noexcept {
