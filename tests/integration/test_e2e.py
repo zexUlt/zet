@@ -277,3 +277,18 @@ def test_the_client_gives_up_once_the_agent_is_gone(zet: Zet, clean_bashrc):
         assert b"gone" in terminal.tail()
     finally:
         terminal.kill()
+
+
+def test_the_terminal_type_reaches_the_shell(zet: Zet, clean_bashrc):
+    """ssh -T gives the far side no TERM; the bootstrap carries the client's
+    (§4), and the shell has it rather than the agent's default."""
+    terminal = zet.start()
+    try:
+        terminal.expect(PROMPT)
+        terminal.send(_typed('echo "te""rm=$TERM"'))
+        terminal.expect(b"term=")
+        assert terminal.expect(b"\r\n").strip() == zet.env()["TERM"].encode()
+        terminal.send(_typed("exit 0"))
+        assert terminal.finish() == 0
+    finally:
+        terminal.kill()

@@ -182,14 +182,21 @@ struct Bootstrapped {
 
 /// The §4 exchange on stdin and stdout, with the port bound first so that
 /// the Accept can name it.
-std::optional<Bootstrapped> Bootstrap() noexcept {
+std::optional<Bootstrapped> Bootstrap(const Config& config) noexcept {
     auto listener = io::ListenTcp();
     if (!listener) {
         SayError("listen", listener.error().Description());
         return std::nullopt;
     }
-    session::BootstrapAgent bootstrap{
-        RandomKey(), RandomNonce<wire::BootstrapNonce>(), listener->Port};
+    // The client learns how long we keep a session without it, which is how
+    // long its reconnecting can make sense.
+    const auto orphanSeconds = static_cast<std::uint32_t>(
+        std::chrono::duration_cast<std::chrono::seconds>(
+            config.Limits.OrphanTimeout)
+            .count());
+    session::BootstrapAgent bootstrap{RandomKey(),
+                                      RandomNonce<wire::BootstrapNonce>(),
+                                      listener->Port, orphanSeconds};
 
     const Timestamp until = io::MonotonicNow() + BOOTSTRAP_TIMEOUT;
     std::array<std::byte, 4096> chunk{};
@@ -242,7 +249,7 @@ std::optional<Bootstrapped> Bootstrap() noexcept {
 /// (`NAME=value` entries: the terminal and the language, §4).
 class ShellCommand {
 public:
-    explicit ShellCommand(std::span<const std::string> fromClient) {
+    explicit ShellCommand(const wire::BootstrapEnvironment& fromClient) {
         const passwd* user = ::getpwuid(::getuid());
         Path_ = user != nullptr && user->pw_shell != nullptr &&
                         user->pw_shell[0] != '\0'
@@ -257,10 +264,11 @@ public:
         Argv_ = {Name_.c_str(), nullptr};
 
         const auto sentByClient = [&](std::string_view text) {
-            const auto name = text.substr(0, text.find('=') + 1);
-            return std::ranges::any_of(fromClient, [&](const std::string& e) {
-                return e.starts_with(name);
-            });
+            const auto name = text.substr(0, text.find('='));
+            return std::ranges::any_of(fromClient.Variables(),
+                                       [&](const wire::EnvironmentVariable& v) {
+                                           return v.Name() == name;
+                                       });
         };
         bool hasTerm = false;
         for (char** entry = environ; *entry != nullptr; ++entry) {
@@ -271,9 +279,11 @@ public:
                 hasTerm = hasTerm || text.starts_with("TERM=");
             }
         }
-        for (const std::string& entry : fromClient) {
-            Environment_.push_back(entry);
-            hasTerm = hasTerm || entry.starts_with("TERM=");
+        for (const wire::EnvironmentVariable& variable :
+             fromClient.Variables()) {
+            Environment_.push_back(std::string{variable.Name()} + "=" +
+                                   std::string{variable.Value()});
+            hasTerm = hasTerm || variable.Name() == "TERM";
         }
         // ssh -T gives the remote side no TERM, and a shell without one runs
         // nothing that draws.
@@ -341,6 +351,7 @@ class Agent {
 public:
     Agent(Config config, Bootstrapped bootstrapped, io::Poller poller)
         : Config_(std::move(config)),
+          ShellEnvironment_(bootstrapped.Result.Environment),
           Listener_(std::move(bootstrapped.Listener)),
           Poller_(std::move(poller)),
           Storage_(
@@ -374,7 +385,7 @@ private:
 
     Config Config_;
     /// What the client asked the shell's environment to have (§4).
-    std::vector<std::string> ShellEnvironment_;
+    wire::BootstrapEnvironment ShellEnvironment_;
     io::Listener Listener_;
     io::Poller Poller_;
     std::vector<std::byte> Storage_;
@@ -801,7 +812,7 @@ int Main(std::span<char*> args) noexcept {
         }
     }
 
-    auto bootstrapped = Bootstrap();
+    auto bootstrapped = Bootstrap(*config);
     if (!bootstrapped) {
         return FAILURE_STATUS;
     }

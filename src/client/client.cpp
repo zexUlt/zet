@@ -3,6 +3,7 @@
 #include <fcntl.h>
 #include <poll.h>
 #include <signal.h>
+#include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -127,23 +128,23 @@ struct Options {
     Duration BackoffMax{BACKOFF_MAX};
 };
 
-/// Whether a variable of ours goes to the shell on the far side: what the
-/// terminal is and which language the user reads (§4). Nothing else of the
-/// local environment leaves the machine.
-bool Forwarded(std::string_view entry) noexcept {
-    return entry.starts_with("TERM=") || entry.starts_with("LANG=") ||
-           entry.starts_with("LC_");
-}
-
-/// The NAME=value entries the bootstrap carries to the agent's shell.
-[[maybe_unused]] std::vector<std::string> ForwardedEnvironment() {
-    std::vector<std::string> entries;
+/// What of the local environment goes to the shell on the far side: the
+/// terminal and the language (§4, wire::IsForwardedVariable). A variable the
+/// bootstrap cannot carry — too long, not printable — stays home.
+wire::BootstrapEnvironment ForwardedEnvironment() noexcept {
+    wire::BootstrapEnvironment environment;
     for (char** entry = environ; *entry != nullptr; ++entry) {
-        if (Forwarded(*entry)) {
-            entries.emplace_back(*entry);
+        const std::string_view text{*entry};
+        const auto equals = text.find('=');
+        if (equals == std::string_view::npos) {
+            continue;
+        }
+        const auto name = text.substr(0, equals);
+        if (wire::IsForwardedVariable(name)) {
+            static_cast<void>(environment.Add(name, text.substr(equals + 1)));
         }
     }
-    return entries;
+    return environment;
 }
 
 std::optional<Options> ReadOptions(std::span<char*> args) {
@@ -351,7 +352,8 @@ TNonce RandomNonce() noexcept {
 /// §4 over `ssh -T HOST agent --bootstrap`.
 std::optional<session::BootstrapResult> Bootstrap(const Options& options) {
     session::BootstrapClient bootstrap{RandomKey(),
-                                       RandomNonce<wire::BootstrapNonce>()};
+                                       RandomNonce<wire::BootstrapNonce>(),
+                                       ForwardedEnvironment()};
     std::array<char, session::BOOTSTRAP_OFFER_TEXT_SIZE> offer{};
     const auto length = bootstrap.WriteOffer(offer);
     if (!length) {
@@ -460,6 +462,15 @@ std::optional<wire::ResizeMessage> TerminalSize() noexcept {
                                .YPixel = size->YPixels};
 }
 
+/// Whether two descriptors are the same file. A terminal's stdout and
+/// stderr are, and then they share the O_NONBLOCK zet puts on stdout.
+bool SameFile(int a, int b) noexcept {
+    struct stat first{};
+    struct stat second{};
+    return ::fstat(a, &first) == 0 && ::fstat(b, &second) == 0 &&
+           first.st_dev == second.st_dev && first.st_ino == second.st_ino;
+}
+
 class Client {
 public:
     /// `giveUpAfter` is how long the agent keeps a session nobody is
@@ -484,7 +495,8 @@ public:
           Stdout_(STDOUT_QUEUE_MAX),
           StdinWatch_(STDIN_FILENO, STDIN_TOKEN),
           StdoutWatch_(STDOUT_FILENO, STDOUT_TOKEN),
-          Size_(TerminalSize()) {}
+          Size_(TerminalSize()),
+          NoticesInline_(SameFile(STDOUT_FILENO, STDERR_FILENO)) {}
 
     /// Runs the session; the result is zet's exit status.
     [[nodiscard]] int Run() noexcept;
@@ -493,6 +505,9 @@ public:
     [[nodiscard]] const std::optional<std::string>& Fatal() const noexcept {
         return Fatal_;
     }
+
+    /// Whether the user ended it with ~.
+    [[nodiscard]] bool Escaped() const noexcept { return Escaped_; }
 
 private:
     enum class ELink : std::uint8_t {
@@ -516,6 +531,7 @@ private:
     void ReadSocket(Timestamp now) noexcept;
     void WriteSocket(Timestamp now) noexcept;
     void Resize() noexcept;
+    void Notice(std::string_view text) noexcept;
     [[nodiscard]] Duration Backoff() noexcept;
     [[nodiscard]] int Finish(int status) noexcept;
 
@@ -547,6 +563,10 @@ private:
     app::Registration StdinWatch_;
     app::Registration StdoutWatch_;
     std::optional<wire::ResizeMessage> Size_;
+    /// stderr is the terminal stdout writes to: a notice then goes in line
+    /// with the output, whole, instead of a write that a full, non-blocking
+    /// terminal would cut short.
+    bool NoticesInline_;
 
     std::optional<wire::SessionEndMessage> Ended_;
     std::optional<int> Signaled_;
@@ -582,7 +602,6 @@ int Client::Run() noexcept {
             return Finish(status);
         }
         if (Escaped_) {
-            Say(ESCAPE_NOTICE);
             return ESCAPE_QUIT_STATUS;
         }
         if (Fatal_) {
@@ -676,7 +695,7 @@ void Client::Pump(Timestamp now) noexcept {
         Attempts_ = 0;
         LostSince_.reset();
         if (Announced_) {
-            Say(REGAINED_NOTICE);
+            Notice(REGAINED_NOTICE);
             Announced_ = false;
         }
     }
@@ -734,7 +753,7 @@ void Client::FinishConnecting(Timestamp now) noexcept {
 void Client::Drop(Timestamp now) noexcept {
     if (Connection_ && Connection_->IsLive() && !Fatal_) {
         if (!Announced_) {
-            Say(LOST_NOTICE);
+            Notice(LOST_NOTICE);
             Announced_ = true;
         }
     }
@@ -892,6 +911,16 @@ void Client::WriteSocket(Timestamp now) noexcept {
     }
 }
 
+void Client::Notice(std::string_view text) noexcept {
+    const ByteSpan bytes{reinterpret_cast<const std::byte*>(text.data()),
+                         text.size()};
+    if (!NoticesInline_) {
+        Say(text);
+    } else if (!Stdout_.Append(bytes)) {
+        // The terminal is far behind; the notice is not worth stalling for.
+    }
+}
+
 void Client::Resize() noexcept {
     Size_ = TerminalSize();
     if (Size_ && Connection_) {
@@ -977,20 +1006,27 @@ int Main(std::span<char*> args) noexcept {
         return FAILURE_STATUS;
     }
 
-    // The agent's orphan timeout comes in BootstrapAccept once the bootstrap
-    // carries it; until then the client never gives up for that reason.
-    const std::optional<Duration> giveUpAfter;
+    // Reconnecting for longer than the agent keeps a session cannot succeed.
+    const std::optional<Duration> giveUpAfter =
+        bootstrapped->OrphanTimeoutSeconds == 0
+            ? std::nullopt
+            : std::optional<Duration>{
+                  std::chrono::seconds{bootstrapped->OrphanTimeoutSeconds}};
     auto client =
         std::make_unique<Client>(*options, std::move(*bootstrapped), *addresses,
                                  std::move(*poller), giveUpAfter);
     const int status = client->Run();
     const std::optional<std::string> fatal = client->Fatal();
+    const bool escaped = client->Escaped();
     client.reset();
     flags.Restore();
     if (raw) {
         static_cast<void>(raw->Restore());
     }
-    if (fatal) {
+    // Once stdio is blocking again: these must not be lost to EAGAIN.
+    if (escaped) {
+        Say(ESCAPE_NOTICE);
+    } else if (fatal) {
         SayError("session", *fatal);
     }
     return status;
