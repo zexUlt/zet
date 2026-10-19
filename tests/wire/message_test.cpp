@@ -162,6 +162,15 @@ ResumeMessage MakeResume() {
     return ResumeMessage{.ClientReceiveOffset = 0xFFFF'FFFF'FFFF'FFFF};
 }
 
+/// What IsForwardedVariable admits, as design.md §4 lists it.
+constexpr std::array<std::string_view, MAX_BOOTSTRAP_ENV> FORWARDED_FOR_TEST{
+    "TERM",           "COLORTERM",   "LANG",
+    "LANGUAGE",       "LC_ALL",      "LC_ADDRESS",
+    "LC_COLLATE",     "LC_CTYPE",    "LC_IDENTIFICATION",
+    "LC_MEASUREMENT", "LC_MESSAGES", "LC_MONETARY",
+    "LC_NAME",        "LC_NUMERIC",  "LC_PAPER",
+    "LC_TELEPHONE",   "LC_TIME"};
+
 BootstrapOfferMessage MakeOffer() {
     BootstrapOfferMessage offer{
         .VersionMin = 1,
@@ -656,8 +665,8 @@ TEST_CASE("only the terminal type and the locale are forwarded") {
         CHECK(IsForwardedVariable(name));
     }
     for (const std::string_view name :
-         {"", "PATH", "LD_PRELOAD", "HOME", "LC_", "LC_all", "LC_X1", "term",
-          "TERMINFO", "LANGX"}) {
+         {"", "PATH", "LD_PRELOAD", "HOME", "LC_", "LC__", "LC_all", "LC_X1",
+          "LC_MODIFIERS", "term", "TERMINFO", "LANGX"}) {
         CAPTURE(name);
         CHECK_FALSE(IsForwardedVariable(name));
     }
@@ -674,22 +683,20 @@ TEST_CASE("an environment refuses what it could not forward") {
     CHECK_FALSE(environment.Add("TERM", "xterm"));
     CHECK(environment.Variables().size() == 1);
 
-    // The list is full at MAX_BOOTSTRAP_ENV, whatever the names.
+    // Every forwarded name fits at once, and that is the whole list.
     BootstrapEnvironment full;
-    for (std::size_t i = 0; i < MAX_BOOTSTRAP_ENV; ++i) {
-        std::string name = "LC_";
-        name += static_cast<char>('A' + i);
+    for (const std::string_view name : FORWARDED_FOR_TEST) {
         REQUIRE(full.Add(name, "C"));
     }
+    CHECK(full.Variables().size() == MAX_BOOTSTRAP_ENV);
     CHECK_FALSE(full.Add("TERM", "xterm"));
+    CHECK_FALSE(full.Add("LANG", "C"));
 }
 
 TEST_CASE("an offer at the most it may carry survives a round trip") {
     BootstrapOfferMessage offer = MakeOffer();
     offer.Environment = {};
-    for (std::size_t i = 0; i < MAX_BOOTSTRAP_ENV; ++i) {
-        std::string name = "LC_" + std::string(MAX_ENV_NAME - 4, 'A');
-        name += static_cast<char>('A' + i);
+    for (const std::string_view name : FORWARDED_FOR_TEST) {
         REQUIRE(offer.Environment.Add(name, std::string(MAX_ENV_VALUE, '~')));
     }
     const auto bytes = Encode(offer);
@@ -736,6 +743,9 @@ TEST_CASE("an offer whose environment the agent would not set is refused") {
     };
 
     SUBCASE("no count at all") { refused({}, EProtoError::Truncated); }
+    SUBCASE("bytes after an empty environment") {
+        refused(withCount(0, {std::byte{0}}), EProtoError::MalformedField);
+    }
     SUBCASE("more variables than an Offer carries") {
         refused(withCount(MAX_BOOTSTRAP_ENV + 1, {}),
                 EProtoError::LengthLimitExceeded);

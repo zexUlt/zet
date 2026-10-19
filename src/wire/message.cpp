@@ -301,15 +301,18 @@ ProtoResult<void> WriteResume(ByteWriter& writer,
 
 namespace {
 
-constexpr std::string_view LOCALE_PREFIX = "LC_";
-constexpr std::array<std::string_view, 4> FORWARDED_NAMES{"TERM", "COLORTERM",
-                                                          "LANG", "LANGUAGE"};
+// The terminal type and the locale: LANG, LANGUAGE and the thirteen LC_*
+// categories glibc knows. Spelled out rather than matched as LC_*, so that
+// the list is what a reviewer reads and nothing else.
+constexpr std::array<std::string_view, MAX_BOOTSTRAP_ENV> FORWARDED_NAMES{
+    "TERM",           "COLORTERM",   "LANG",
+    "LANGUAGE",       "LC_ALL",      "LC_ADDRESS",
+    "LC_COLLATE",     "LC_CTYPE",    "LC_IDENTIFICATION",
+    "LC_MEASUREMENT", "LC_MESSAGES", "LC_MONETARY",
+    "LC_NAME",        "LC_NUMERIC",  "LC_PAPER",
+    "LC_TELEPHONE",   "LC_TIME"};
 constexpr char FIRST_PRINTABLE = 0x20;
 constexpr char LAST_PRINTABLE = 0x7E;
-
-[[nodiscard]] bool IsUpperOrUnderscore(char c) noexcept {
-    return (c >= 'A' && c <= 'Z') || c == '_';
-}
 
 [[nodiscard]] bool IsPrintable(std::string_view text) noexcept {
     return std::ranges::all_of(text, [](char c) {
@@ -349,13 +352,10 @@ constexpr char LAST_PRINTABLE = 0x7E;
 }  // namespace
 
 bool IsForwardedVariable(std::string_view name) noexcept {
-    if (std::ranges::find(FORWARDED_NAMES, name) != FORWARDED_NAMES.end()) {
-        return true;
-    }
-    return name.size() > LOCALE_PREFIX.size() &&
-           name.starts_with(LOCALE_PREFIX) &&
-           std::ranges::all_of(name.substr(LOCALE_PREFIX.size()),
-                               IsUpperOrUnderscore);
+    // == only: libc++ builds starts_with and the positional compare on
+    // substr, which can throw, and under -fno-exceptions a throw is an abort
+    // the core may not contain (invariant 1).
+    return std::ranges::find(FORWARDED_NAMES, name) != FORWARDED_NAMES.end();
 }
 
 bool BootstrapEnvironment::Add(std::string_view name,
@@ -371,7 +371,10 @@ bool BootstrapEnvironment::Add(std::string_view name,
         })) {
         return false;
     }
-    EnvironmentVariable& slot = Entries_.at(Count_);
+    // In range: Count_ < Entries_.size() was checked above. Not .at(), which
+    // under -fno-exceptions ends the process instead of throwing.
+    EnvironmentVariable& slot =
+        *std::next(Entries_.begin(), static_cast<std::ptrdiff_t>(Count_));
     std::ranges::copy(name, slot.NameBytes.begin());
     slot.NameLength = static_cast<std::uint8_t>(name.size());
     std::ranges::copy(value, slot.ValueBytes.begin());
