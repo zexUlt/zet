@@ -69,7 +69,7 @@ TEST_CASE("a listener gets a port of its own and accepts nothing yet") {
     const auto none = Accept(listener->Socket.Get());
     REQUIRE_FALSE(none.has_value());
     CHECK(none.error().WouldBlock());
-    CHECK(none.error().Call == "accept4");
+    CHECK(none.error().Call == "accept");
 }
 
 TEST_CASE("connect, accept and a round trip go through the poller") {

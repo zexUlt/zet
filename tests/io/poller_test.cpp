@@ -3,6 +3,7 @@
 #include <doctest/doctest.h>
 #include <signal.h>
 #include <sys/resource.h>
+#include <unistd.h>
 
 #include <array>
 #include <cerrno>
@@ -51,6 +52,11 @@ bool IsBlocked(int signo) {
     REQUIRE(::pthread_sigmask(SIG_BLOCK, nullptr, &current) == 0);
     return sigismember(&current, signo) == 1;
 }
+
+/// Sends `signo` to the process, the way a terminal's SIGWINCH or a kill(1)
+/// arrives. Not raise(): that targets this thread alone, and kqueue reports
+/// only signals sent to the process (poller.hpp).
+void Raise(int signo) { REQUIRE(::kill(::getpid(), signo) == 0); }
 
 void Send(int fd) {
     const std::array<std::byte, 1> byte{std::byte{1}};
@@ -184,7 +190,7 @@ TEST_CASE("a watched signal arrives as an event and is unblocked after") {
         REQUIRE(poller.WatchSignal(SIGUSR1, SIGNAL_TOKEN));
         CHECK(IsBlocked(SIGUSR1));
 
-        REQUIRE(::raise(SIGUSR1) == 0);
+        Raise(SIGUSR1);
         std::array<PollEvent, 4> events{};
         REQUIRE(WaitReady(poller, events) == 1);
         CHECK(events[0].Token == SIGNAL_TOKEN);
@@ -199,8 +205,8 @@ TEST_CASE("several watched signals share one source and keep their tokens") {
     REQUIRE(poller.WatchSignal(SIGUSR1, SIGNAL_TOKEN));
     REQUIRE(poller.WatchSignal(SIGUSR2, SIGNAL_TOKEN + 1));
 
-    REQUIRE(::raise(SIGUSR2) == 0);
-    REQUIRE(::raise(SIGUSR1) == 0);
+    Raise(SIGUSR2);
+    Raise(SIGUSR1);
     std::array<PollEvent, 4> events{};
     REQUIRE(WaitReady(poller, events) == 2);
     bool sawFirst = false;
@@ -232,7 +238,7 @@ TEST_CASE("a moved-from poller leaves the signals to the one it moved to") {
         Poller source = MakePoller();
         REQUIRE(source.WatchSignal(SIGUSR1, SIGNAL_TOKEN));
         Poller moved{std::move(source)};
-        REQUIRE(::raise(SIGUSR1) == 0);
+        Raise(SIGUSR1);
         std::array<PollEvent, 4> events{};
         REQUIRE(WaitReady(moved, events) == 1);
         CHECK(events[0].Signal == SIGUSR1);
@@ -275,9 +281,10 @@ TEST_CASE("wakes before the wait collapse into one event") {
 TEST_CASE("refusals name the call and the reason") {
     Poller poller = MakePoller();
 
+    // Each refusal names the backend's own call: epoll_ctl, kevent.
     const auto bad = poller.Watch(-1, EInterest::Read, FIRST_TOKEN);
     REQUIRE_FALSE(bad.has_value());
-    CHECK(bad.error().Call == "epoll_ctl");
+    CHECK_FALSE(bad.error().Call.empty());
     CHECK(bad.error().Code == EBADF);
 
     auto pair = MakeSocketPair();
@@ -315,9 +322,12 @@ TEST_CASE("refusals name the call and the reason") {
     const auto empty =
         poller.Wait(std::span<PollEvent>{events}.first(0), Deadline{now}, now);
     REQUIRE_FALSE(empty.has_value());
-    CHECK(empty.error().Call == "epoll_wait");
+    CHECK(empty.error().Code == EINVAL);
 }
 
+// Linux only: the failure is injected by leaving no descriptor for the
+// signalfd the first watch opens, and the kqueue backend opens none.
+#if defined(__linux__)
 TEST_CASE("a WatchSignal that fails leaves the signal mask as it was") {
     Poller poller = MakePoller();
     sigset_t before{};
@@ -342,3 +352,4 @@ TEST_CASE("a WatchSignal that fails leaves the signal mask as it was") {
     // And the signal can still be watched once descriptors are back.
     CHECK(poller.WatchSignal(SIGUSR2, SIGNAL_TOKEN).has_value());
 }
+#endif

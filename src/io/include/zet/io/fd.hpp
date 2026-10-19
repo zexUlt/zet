@@ -48,6 +48,10 @@ struct Pipe {
 
 [[nodiscard]] IoResult<Pipe> MakePipe() noexcept;
 
+/// A pipe that closes on exec but blocks: for the ends a child gets as its
+/// stdio, which it expects to block on like any other.
+[[nodiscard]] IoResult<Pipe> MakeBlockingPipe() noexcept;
+
 /// A connected pair of stream sockets, both close-on-exec and non-blocking.
 struct SocketPair {
     UniqueFd First;
@@ -59,6 +63,13 @@ struct SocketPair {
 /// Switches `fd` to non-blocking. Everything the event loop touches is: one
 /// blocking call stops every session the loop carries.
 [[nodiscard]] IoResult<void> SetNonBlocking(int fd) noexcept;
+
+/// Marks `fd` close-on-exec, so that no child the process runs inherits it.
+[[nodiscard]] IoResult<void> SetCloseOnExec(int fd) noexcept;
+
+/// Close-on-exec and non-blocking: what every descriptor the event loop
+/// opens gets, set after the call that opened it on every platform.
+[[nodiscard]] IoResult<void> PrepareDescriptor(int fd) noexcept;
 
 /// One read(2), retried on EINTR. 0 is end of file; a descriptor with nothing
 /// to read yet fails with an Errno whose WouldBlock() is true.

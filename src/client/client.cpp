@@ -202,19 +202,19 @@ struct Process {
 };
 
 std::optional<Process> Run(const std::vector<std::string>& argv) {
-    std::array<int, 2> in{-1, -1};
-    std::array<int, 2> out{-1, -1};
-    if (::pipe2(in.data(), O_CLOEXEC) != 0) {
+    auto in = io::MakeBlockingPipe();
+    if (!in) {
         return std::nullopt;
     }
     Process process;
-    process.In = io::UniqueFd{in[1]};
-    io::UniqueFd childIn{in[0]};
-    if (::pipe2(out.data(), O_CLOEXEC) != 0) {
+    process.In = std::move(in->Write);
+    io::UniqueFd childIn = std::move(in->Read);
+    auto out = io::MakeBlockingPipe();
+    if (!out) {
         return std::nullopt;
     }
-    process.Out = io::UniqueFd{out[0]};
-    io::UniqueFd childOut{out[1]};
+    process.Out = std::move(out->Read);
+    io::UniqueFd childOut = std::move(out->Write);
 
     std::vector<char*> pointers;
     pointers.reserve(argv.size() + 1);
@@ -416,7 +416,8 @@ std::optional<session::BootstrapResult> Bootstrap(const Options& options) {
         ended ||
         ReadAll(*process, io::MonotonicNow() + SSH_EXIT_TIMEOUT, SSH_OUTPUT_MAX)
             .Ended;
-    const int status = Reap(process->Pid, sshEnded);
+    // Not const: macOS's WIFEXITED casts its argument to a non-const int*.
+    int status = Reap(process->Pid, sshEnded);
     if (!result && ended) {
         SayError("bootstrap", WIFEXITED(status) && WEXITSTATUS(status) != 0
                                   ? "ssh failed before the agent answered"

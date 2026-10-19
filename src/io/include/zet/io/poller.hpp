@@ -11,6 +11,7 @@
 #include "zet/core/time.hpp"
 #include "zet/io/errno.hpp"
 #include "zet/io/fd.hpp"
+#include "zet/io/poller_backend.hpp"
 
 /// The one wait in zet, per docs/design.md §10: a single thread blocks here
 /// until a descriptor is ready, a signal arrives, another thread wakes it, or
@@ -18,10 +19,38 @@
 ///
 /// What is watched is a source — a descriptor, a signal by number, a waker —
 /// rather than a bare descriptor. On Linux all three are descriptors (the
-/// latter two through signalfd and eventfd); on kqueue they would be
-/// EVFILT_READ, EVFILT_SIGNAL and EVFILT_USER. Keeping that difference behind
-/// the interface is what lets a second backend be written without the event
-/// loop noticing.
+/// latter two through signalfd and eventfd); on macOS they are the
+/// EVFILT_READ/EVFILT_WRITE, EVFILT_SIGNAL and EVFILT_USER filters of one
+/// kqueue. This header is the contract both backends keep, and the tests in
+/// tests/io/poller_test.cpp run unchanged on each:
+///
+/// - Level-triggered. A source stays reported for as long as it is ready, so
+///   a reader that took only part of what was there is told again on the
+///   next Wait.
+/// - One event per source per Wait. A descriptor watched for ReadWrite that
+///   is both readable and writable arrives as one event with both flags.
+/// - Readable: a read will not block. It may return 0 or an error: a peer's
+///   end of file and a socket's pending error are readable too.
+/// - Writable: a write will not block, or will fail at once.
+/// - Hangup: the peer is gone, or this end was shut down. It comes together
+///   with Readable when Read is watched, and bytes still buffered can be
+///   read before the end of file. Which conditions count as Hangup rather
+///   than Error differs by backend; callers treat Readable, Hangup and Error
+///   alike as "the next read says what happened".
+/// - Error: the descriptor has a pending error the next read or write
+///   returns.
+/// - A signal sent to the process — a terminal's SIGWINCH, kill(2) —
+///   arrives as one event with its number, however many times it was sent
+///   since the last Wait, and is consumed: it is not delivered to the
+///   process as well. One sent to a single thread, by raise(3) or
+///   pthread_kill(3), is not promised: kqueue does not report it.
+/// - Wakes before a Wait collapse into one event.
+/// - At most MAX_EVENTS_PER_WAIT events, and no more than `out` holds; the
+///   rest stays ready for the next Wait.
+/// - The timeout is the deadline rounded up to a millisecond, so a Wait
+///   that returns for the deadline returns after it.
+/// - A refusal is an Errno naming the backend's own call, epoll_ctl or
+///   kevent and the like, with the errno it gave.
 namespace zet::io {
 
 enum class EInterest : std::uint8_t {
@@ -55,11 +84,12 @@ inline constexpr std::uint64_t FIRST_RESERVED_TOKEN = UINT64_MAX - 1;
 inline constexpr std::size_t MAX_EVENTS_PER_WAIT = 64;
 
 /// The highest signal number WatchSignal accepts: Linux has 64, counting the
-/// real-time ones.
+/// real-time ones; macOS has 31.
 inline constexpr int MAX_SIGNAL = 64;
 
-/// Wakes a Poller from another thread. Does not own the descriptor: the Poller
-/// does, and a Waker must not outlive the Poller that made it.
+/// Wakes a Poller from another thread. Does not own the descriptor — an
+/// eventfd on Linux, the kqueue itself on macOS: the Poller does, and a Waker
+/// must not outlive the Poller that made it.
 class Waker {
 public:
     /// Makes the next Wait return with the waker's token, or the current one
@@ -115,6 +145,7 @@ public:
     /// Blocks until something happens or `deadline` passes, and writes what
     /// happened into `out`. Returns how many events it wrote; 0 means the
     /// deadline passed, or a signal not watched here interrupted the wait.
+    /// An empty `out` is refused with EINVAL.
     /// `now` is when the caller last read the clock: the timeout is the
     /// distance to the deadline from there, rounded up to a millisecond so
     /// that the deadline has passed when Wait returns for it.
@@ -123,17 +154,13 @@ public:
                                              Timestamp now) noexcept;
 
 private:
-    explicit Poller(UniqueFd epoll) noexcept;
+    explicit Poller(PollerBackend backend) noexcept;
 
-    [[nodiscard]] IoResult<void> Control(int op, int fd, std::uint32_t events,
-                                         std::uint64_t token) noexcept;
-    [[nodiscard]] IoResult<std::size_t> TakeSignals(
-        std::span<PollEvent> out) noexcept;
-    void DrainWaker() noexcept;
+    /// The token `signo` reports with, if it is watched here.
+    [[nodiscard]] std::optional<std::uint64_t> SignalToken(
+        int signo) const noexcept;
 
-    UniqueFd Epoll_;
-    UniqueFd Signals_;
-    UniqueFd Waker_;
+    PollerBackend Backend_;
     std::uint64_t WakerToken_{0};
     /// The signals this poller blocked, which are the ones it unblocks.
     sigset_t Blocked_{};
@@ -141,7 +168,7 @@ private:
     std::array<std::optional<std::uint64_t>, MAX_SIGNAL + 1> SignalTokens_{};
 };
 
-/// The epoll_wait timeout for `deadline` seen from `now`: -1 for no deadline,
+/// The wait timeout for `deadline` seen from `now`: -1 for no deadline,
 /// otherwise the distance in milliseconds rounded up and clamped to what an
 /// int holds. Exposed for its test.
 [[nodiscard]] int TimeoutMillis(Deadline deadline, Timestamp now) noexcept;
