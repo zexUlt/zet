@@ -137,8 +137,8 @@ struct ResumeMessage {
 };
 
 /// The client's half of the key exchange (§4), written to the agent's stdin.
-/// How many variables an Offer carries at most: TERM, COLORTERM, LANG,
-/// LANGUAGE and the thirteen LC_* categories glibc knows.
+/// How many variables an Offer carries at most: one of each name
+/// IsForwardedVariable admits.
 inline constexpr std::size_t MAX_BOOTSTRAP_ENV = 17;
 
 /// The longest name forwarded: LC_IDENTIFICATION is 17.
