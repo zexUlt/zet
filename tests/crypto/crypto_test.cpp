@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <cstddef>
 #include <cstdint>
 #include <string_view>
@@ -396,4 +397,27 @@ TEST_CASE_FIXTURE(SodiumFixture, "random bytes fill the whole span") {
         zeroes += (byte == std::byte{0}) ? 1 : 0;
     }
     CHECK(zeroes < buffer.size() / 2);
+}
+
+TEST_CASE("unkeyed BLAKE2b matches the reference digests") {
+    // python3 -c "import hashlib; print(hashlib.blake2b(bytes(range(32)),
+    //     digest_size=16).hexdigest())", and the same of b"".
+    constexpr std::array<std::uint8_t, 16> counting = {
+        0xf3, 0x9a, 0x2c, 0xad, 0x58, 0x41, 0x1c, 0xd4,
+        0x9f, 0x57, 0x7e, 0x50, 0x86, 0xb8, 0x03, 0x1f};
+    constexpr std::array<std::uint8_t, 16> empty = {
+        0xca, 0xe6, 0x69, 0x41, 0xd9, 0xef, 0xbd, 0x40,
+        0x4e, 0x4d, 0x88, 0x75, 0x8e, 0xa6, 0x76, 0x70};
+    REQUIRE(Init());
+
+    std::array<std::byte, 32> input{};
+    for (std::size_t i = 0; i < input.size(); ++i) {
+        input[i] = static_cast<std::byte>(i);
+    }
+    std::array<std::byte, 16> digest{};
+    Hash(digest, ByteSpan{input});
+    CHECK(digest == std::bit_cast<std::array<std::byte, 16>>(counting));
+
+    Hash(digest, ByteSpan{});
+    CHECK(digest == std::bit_cast<std::array<std::byte, 16>>(empty));
 }

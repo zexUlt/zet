@@ -266,3 +266,23 @@ TEST_CASE_FIXTURE(SodiumFixture,
     // Nor is it the exchanged key itself.
     CHECK(base != Bytes(exchanged));
 }
+
+TEST_CASE_FIXTURE(SodiumFixture,
+                  "the sid is the hash of the registration secret") {
+    const SessionSecrets secrets = DeriveSessionSecrets(MakeMaster(7));
+    CHECK(secrets.Id == SessionIdOf(secrets.Registration));
+    // R is a secret of its own, not another name for one of the others.
+    CHECK(secrets.Registration.Expose() != secrets.Auth.Expose());
+    CHECK(secrets.Registration.Expose() != secrets.ConnectionSeed.Expose());
+    // And a sid says nothing a registration could be rebuilt from: knowing
+    // Id, the only way to R is a preimage of BLAKE2b.
+    const SessionSecrets other = DeriveSessionSecrets(MakeMaster(8));
+    CHECK(other.Id != secrets.Id);
+}
+
+TEST_CASE_FIXTURE(SodiumFixture, "a decoy's registration claims nothing") {
+    const SessionSecrets real = DeriveSessionSecrets(MakeMaster(7));
+    const SessionSecrets decoy = DeriveDecoySecrets(MakeMaster(9), real.Id);
+    CHECK(decoy.Id == real.Id);
+    CHECK(SessionIdOf(decoy.Registration) != real.Id);
+}
