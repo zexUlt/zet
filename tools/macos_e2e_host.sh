@@ -14,6 +14,10 @@
 #     tools/macos_e2e_host.sh up      build zet-agent, start the host, wait
 #     tools/macos_e2e_host.sh down    stop and remove it
 #
+# With ZET_E2E_AGENT set to a zet-agent built elsewhere — CI builds it once on
+# Linux and hands it over as an artifact — `up` skips the build and the
+# toolchain: the agent is static, and the host needs only what the tests run.
+#
 # `up` leaves build/macos-e2e/ssh_config and build/macos-e2e/host.json for the
 # client side: tests/macos_e2e reads the latter.
 set -euo pipefail
@@ -46,8 +50,9 @@ up() {
     mkdir -p "$OUT"
     local apk_cache=${ZET_APK_CACHE:-$root/build/.apk-cache}
     mkdir -p "$apk_cache"
-    local packages
-    packages="$(grep -v '^#' tools/alpine-packages.txt | tr '\n' ' ') $(grep -v '^#' tools/integration-packages.txt | tr '\n' ' ')"
+    local toolchain host_packages
+    toolchain="$(grep -v '^#' tools/alpine-packages.txt | tr '\n' ' ')"
+    host_packages="$(grep -v '^#' tools/integration-packages.txt | tr '\n' ' ')"
 
     local common=(
         -v "$root:/src" -v "$apk_cache:/apk-cache" -w /src
@@ -57,19 +62,29 @@ up() {
         mkdir -p "$CCACHE_DIR"
         common+=(-v "$CCACHE_DIR:/ccache" -e CCACHE_DIR=/ccache -e ZET_COMPILER_LAUNCHER=ccache)
     fi
-    local install="apk add --no-progress --cache-dir /apk-cache --update-cache $packages >/dev/null"
+    local apk="apk add --no-progress --cache-dir /apk-cache --update-cache"
+    local install="$apk $host_packages >/dev/null"
+    local agent_glob="build/$PRESET"
 
-    # The build runs in a container of its own, with the full ephemeral range:
-    # a cold build fetches every package, and fifty ports in TIME_WAIT for a
-    # minute each is a budget it could run through.
-    docker run --rm "${common[@]}" "$ALPINE_IMAGE" sh -c "
+    if [ -n "${ZET_E2E_AGENT:-}" ]; then
+        # Under the checkout, which is what the container mounts.
+        mkdir -p "$OUT/agent"
+        cp "$ZET_E2E_AGENT" "$OUT/agent/zet-agent"
+        chmod 755 "$OUT/agent/zet-agent"
+        agent_glob="$OUT/agent"
+    else
+        # The build runs in a container of its own, with the full ephemeral
+        # range: a cold build fetches every package, and fifty ports in
+        # TIME_WAIT for a minute each is a budget it could run through.
+        docker run --rm "${common[@]}" "$ALPINE_IMAGE" sh -c "
 set -e
-$install
+$apk $toolchain $host_packages >/dev/null
 chmod -R a+rw /apk-cache 2>/dev/null || true
 cmake --preset $PRESET >/dev/null
 cmake --build --preset $PRESET --target zet-agent
 chown -R \$ZET_UID:\$ZET_GID build 2>/dev/null || true
 "
+    fi
 
     local args=(
         -d --init --name "$CONTAINER"
@@ -83,8 +98,8 @@ chown -R \$ZET_UID:\$ZET_GID build 2>/dev/null || true
     docker run "${args[@]}" "$ALPINE_IMAGE" sh -c "
 set -e
 $install
-agent=\$(find build/$PRESET -type f -name zet-agent -perm -u+x | head -1)
-[ -n \"\$agent\" ] || { echo \"no zet-agent under build/$PRESET\" >&2; exit 1; }
+agent=\$(find $agent_glob -type f -name zet-agent -perm -u+x | head -1)
+[ -n \"\$agent\" ] || { echo \"no zet-agent under $agent_glob\" >&2; exit 1; }
 cd tests/integration
 exec python3 host.py --agent \"/src/\$agent\" --out /src/$OUT \
     --client-dir '$root/$OUT' --client-port $SSH_PORT \

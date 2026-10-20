@@ -93,14 +93,38 @@ def wait_process(process: subprocess.Popen, timeout: float = STEP_TIMEOUT_SECOND
         raise Timeout(f"{process.args!r} still running after {timeout}s") from None
 
 
-def wait_pid(pid: int, timeout: float = STEP_TIMEOUT_SECONDS) -> int:
-    """Reaps `pid`, waiting on a pidfd with a deadline; kills it if it is
-    still running at the deadline."""
-    pidfd = os.pidfd_open(pid)
+def _exits_within(pid: int, timeout: float) -> bool:
+    """Whether `pid` ends within `timeout`, waiting on the kernel's own event
+    for it: a pidfd on Linux, EVFILT_PROC on macOS, where the macOS client
+    suite runs this too. No polling either way. A pid already gone counts as
+    ended."""
+    if hasattr(os, "pidfd_open"):
+        try:
+            pidfd = os.pidfd_open(pid)
+        except ProcessLookupError:
+            return True
+        try:
+            ready, _, _ = select.select([pidfd], [], [], timeout)
+        finally:
+            os.close(pidfd)
+        return bool(ready)
+    queue = select.kqueue()
     try:
-        ready, _, _ = select.select([pidfd], [], [], timeout)
+        watch = select.kevent(pid, filter=select.KQ_FILTER_PROC,
+                              flags=select.KQ_EV_ADD | select.KQ_EV_ONESHOT,
+                              fflags=select.KQ_NOTE_EXIT)
+        try:
+            return bool(queue.control([watch], 1, timeout))
+        except ProcessLookupError:
+            return True
     finally:
-        os.close(pidfd)
+        queue.close()
+
+
+def wait_pid(pid: int, timeout: float = STEP_TIMEOUT_SECONDS) -> int:
+    """Reaps `pid`, waiting for its exit with a deadline; kills it if it is
+    still running at the deadline."""
+    ready = _exits_within(pid, timeout)
     if not ready:
         os.kill(pid, signal.SIGKILL)
         os.waitpid(pid, 0)
@@ -110,17 +134,9 @@ def wait_pid(pid: int, timeout: float = STEP_TIMEOUT_SECONDS) -> int:
 
 
 def wait_gone(pid: int, timeout: float = STEP_TIMEOUT_SECONDS) -> None:
-    """Waits for a process that is not our child to end, on a pidfd: no
-    polling, and no reaping, which is its parent's to do."""
-    try:
-        pidfd = os.pidfd_open(pid)
-    except ProcessLookupError:
-        return
-    try:
-        ready, _, _ = select.select([pidfd], [], [], timeout)
-    finally:
-        os.close(pidfd)
-    if not ready:
+    """Waits for a process that is not our child to end: no polling, and no
+    reaping, which is its parent's to do."""
+    if not _exits_within(pid, timeout):
         raise Timeout(f"pid {pid} still running after {timeout}s")
 
 

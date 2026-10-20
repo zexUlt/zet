@@ -7,8 +7,11 @@ name: macos e2e
 # it any Linux container, does not run. The Intel image can, and GitHub
 # supports it until about August 2027 — this job has that expiry.
 #
-# Nightly, on demand and on changes to itself: the first run took 13.5
-# minutes, six of them starting colima and six building the agent cold.
+# The agent is built once, on Linux, where it is built anyway and ccache is
+# warm, and handed to the macOS job as an artifact: building it inside colima
+# on the Intel runner took six of the first run's 13.5 minutes. The macOS job
+# starts colima in the background while it builds the client, the two
+# longest things it does, and the host installs only what the tests run.
 
 on:
   workflow_dispatch:
@@ -18,6 +21,9 @@ on:
   # on, so that a change to the setup is proven before it lands.
   pull_request:
     paths:
+      - "src/client/**"
+      - "src/app/**"
+      - "src/io/**"
       - ".github/workflows/macos-e2e.yml"
       - "tools/macos_e2e_host.sh"
       - "tests/macos_e2e/**"
@@ -32,8 +38,44 @@ env:
   ZET_APK_CACHE: ${{ github.workspace }}/../apk-cache
 
 jobs:
+  agent:
+    name: build zet-agent
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      # The same cache entry as the musl-dev jobs of ci.yml: the agent's
+      # objects are theirs.
+      - name: Restore the compiler cache
+        uses: ./.github/actions/ccache
+        with:
+          key: musl-dev
+
+      - name: Restore the Alpine packages
+        uses: ./.github/actions/apk
+
+      - name: Build
+        run: |
+          tools/in_alpine.sh '
+            cmake --preset musl-dev >/dev/null &&
+            cmake --build --preset musl-dev --target zet-agent
+          '
+          agent=$(find build/musl-dev -type f -name zet-agent -perm -u+x | head -1)
+          test -n "$agent" || { echo "no zet-agent was built"; exit 1; }
+          mkdir -p "$RUNNER_TEMP/agent"
+          cp "$agent" "$RUNNER_TEMP/agent/zet-agent"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: zet-agent
+          path: ${{ runner.temp }}/agent/zet-agent
+          if-no-files-found: error
+          retention-days: 1
+
   macos-e2e:
     name: macos e2e
+    needs: agent
     runs-on: macos-15-intel
     timeout-minutes: 60
     steps:
@@ -44,40 +86,53 @@ jobs:
       - name: Restore the compiler cache
         uses: ./.github/actions/ccache
         with:
-          key: macos-e2e-agent
+          key: macos-e2e-client
 
       - name: Restore the Alpine packages
         uses: ./.github/actions/apk
 
-      - name: Start colima
+      # The VM images colima and Lima download on first start: the same every
+      # run, and a few hundred megabytes of the boot.
+      - name: Restore the VM images
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/Library/Caches/lima
+            ~/Library/Caches/colima
+          key: colima-images-${{ runner.os }}-${{ runner.arch }}-v1
+
+      # One step, so that colima is this shell's child: it is installed and
+      # started first, the VM boots while LLVM is poured and the client
+      # compiles, and `wait` collects its exit status — the readiness check —
+      # without polling. Homebrew's LLVM, as the macos job in ci.yml: the
+      # project needs Clang 20 or newer, which the runner's Xcode lacks.
+      - name: Start colima and build the native client
         run: |
-          brew install colima docker ninja libsodium llvm
-          colima start --cpu 3 --memory 8 --vm-type vz --mount-type virtiofs
+          # pipefail: the background pipeline's status must be colima's.
+          set -o pipefail
+          stamp() { while IFS= read -r line; do printf '%s %s\n' "$(date +%T)" "$line"; done; }
+          brew install colima docker
+          colima start --cpu 3 --memory 8 --vm-type vz --mount-type virtiofs \
+            2>&1 | stamp > "$RUNNER_TEMP/colima.log" &
+          colima=$!
+          brew install ninja libsodium llvm ccache
+          cmake --preset dev -DCMAKE_CXX_COMPILER="$(brew --prefix llvm)/bin/clang++" >/dev/null
+          cmake --build --preset dev --target zet
+          echo "client built at $(date +%T)"
+          status=0
+          wait "$colima" || status=$?
+          # Always: how long the boot took is the number this job is about.
+          cat "$RUNNER_TEMP/colima.log"
+          [ "$status" -eq 0 ] || exit 1
           docker version --format 'docker {{.Server.Version}}'
 
-      # Until the macOS port lands, the zet target is not built on Darwin
-      # and the client scenarios skip; the host is checked either way.
-      # The project needs Clang 20 or newer (CMakeLists.txt). Every Xcode on
-      # the image, 26.3 included, has Apple clang 17, so Homebrew's LLVM is
-      # put first on PATH, linking against its own libc++.
-      - name: Use Homebrew's Clang
-        run: |
-          llvm=$(brew --prefix llvm)
-          echo "$llvm/bin" >> "$GITHUB_PATH"
-          echo "LDFLAGS=-L$llvm/lib/c++ -Wl,-rpath,$llvm/lib/c++" >> "$GITHUB_ENV"
-          "$llvm/bin/clang++" --version | head -1
-
-      - name: Build the native client
-        run: |
-          cmake --preset dev >/dev/null
-          if ninja -C build/dev -t targets all | grep -q '^zet:'; then
-            cmake --build --preset dev --target zet
-          else
-            echo "no zet target on macOS yet: the client scenarios will skip"
-          fi
+      - uses: actions/download-artifact@v4
+        with:
+          name: zet-agent
+          path: ${{ runner.temp }}/agent
 
       - name: Start the host
-        run: tools/macos_e2e_host.sh up
+        run: ZET_E2E_AGENT="$RUNNER_TEMP/agent/zet-agent" tools/macos_e2e_host.sh up
 
       - name: Run the macOS suite
         run: |
