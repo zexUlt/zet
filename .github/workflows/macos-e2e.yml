@@ -55,25 +55,13 @@ jobs:
           colima start --cpu 3 --memory 8 --vm-type vz --mount-type virtiofs
           docker version --format 'docker {{.Server.Version}}'
 
-      # Until the macOS port lands, the zet target is not built on Darwin
-      # and the client scenarios skip; the host is checked either way.
-      # The project needs Clang 20 or newer (CMakeLists.txt); the image's
-      # default Xcode has Apple clang 17. The newest Xcode on it is used.
-      - name: Pick the newest Xcode
-        run: |
-          find /Applications -maxdepth 1 -name 'Xcode*.app' | sort -V
-          newest=$(find /Applications -maxdepth 1 -name 'Xcode_*.app' | sort -V | tail -1)
-          sudo xcode-select -s "$newest"
-          clang++ --version | head -1
-
+      # Homebrew's LLVM, as the macos job in ci.yml: the project needs Clang
+      # 20 or newer (CMakeLists.txt), which the runner's Xcode does not have.
       - name: Build the native client
         run: |
-          cmake --preset dev >/dev/null
-          if ninja -C build/dev -t targets all | grep -q '^zet:'; then
-            cmake --build --preset dev --target zet
-          else
-            echo "no zet target on macOS yet: the client scenarios will skip"
-          fi
+          brew install llvm
+          cmake --preset dev -DCMAKE_CXX_COMPILER="$(brew --prefix llvm)/bin/clang++" >/dev/null
+          cmake --build --preset dev --target zet
 
       - name: Start the host
         run: tools/macos_e2e_host.sh up
