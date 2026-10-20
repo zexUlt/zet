@@ -9,8 +9,11 @@
 /// The one place in zet that builds text for a shell to read (design.md §4).
 ///
 /// ssh hands the remote command to the user's login shell as a single string,
-/// so anything variable in it is a way in. The command is a constant
-/// everywhere except the path to zet-agent, and that path goes through here.
+/// so anything variable in it is a way in. Without delivery (--agent PATH):
+/// the command is a constant except for the agent path. With delivery
+/// (M5.5): the command is `exec /bin/sh -c '<installer>'` where the installer
+/// is the constant from deliver.hpp; both the installer and any agent path go
+/// through this function.
 namespace zet {
 
 /// How long `text` becomes once quoted: two quotes around it, and every quote
