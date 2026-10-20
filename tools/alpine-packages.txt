@@ -26,3 +26,7 @@ git
 # LTO (invariant 6a), and the distribution runs make check against it.
 libsodium-static=1.0.20-r1
 libsodium-dev=1.0.20-r1
+
+# The kernel's UAPI headers, for the seccomp filter's BPF and audit-arch
+# constants (src/io/seccomp.cpp). Headers only: nothing is linked from them.
+linux-headers
