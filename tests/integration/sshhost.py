@@ -95,7 +95,11 @@ def ensure_user(name: str = TEST_USER, shell: str = "/bin/bash") -> pwd.struct_p
     else:
         # The systemd suite runs on the Ubuntu runner itself, whose adduser
         # is a different program; useradd is the same on every glibc distro.
-        _run(["useradd", "--create-home", "--shell", shell, name])
+        # An empty skeleton: the runner keeps gigabytes of toolchains in
+        # /etc/skel, which useradd would copy into the new home.
+        skeleton = Path("/var/empty-skel")
+        skeleton.mkdir(exist_ok=True)
+        _run(["useradd", "--create-home", "--skel", str(skeleton), "--shell", shell, name])
     # Both lock a new account with '!', and sshd refuses a locked account
     # even for a public key. '*' has no password and is not locked.
     _run(["chpasswd", "-e"], input=f"{name}:*\n".encode())

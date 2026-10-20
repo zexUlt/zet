@@ -99,15 +99,12 @@ jobs:
           # sshd's privilege separation directory; the runner's own sshd is
           # not running, ours starts on a free port.
           sudo mkdir -p /run/sshd
-          # The suite's two test users, made here rather than by the suite:
-          # under pytest useradd hung past its 30-second step on the runner.
+          # The suite's two test users. An empty skeleton: the runner image
+          # keeps its toolchains in /etc/skel, gigabytes that useradd would
+          # copy into every new home, past any step's timeout.
+          sudo mkdir -p /var/empty-skel
           for user in zettest zettest2; do
-            if ! sudo timeout 60 strace -f -tt -o "$RUNNER_TEMP/useradd.$user" \
-                useradd --create-home --shell /bin/bash "$user" < /dev/null; then
-              echo "useradd $user did not finish; its last calls:"
-              tail -40 "$RUNNER_TEMP/useradd.$user"
-              exit 1
-            fi
+            sudo useradd --create-home --skel /var/empty-skel --shell /bin/bash "$user"
             # useradd locks the account with '!', and sshd refuses a locked
             # account even for a public key; '*' has no password, no lock.
             sudo usermod --password '*' "$user"
