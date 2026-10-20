@@ -49,28 +49,42 @@ up() {
     local packages
     packages="$(grep -v '^#' tools/alpine-packages.txt | tr '\n' ' ') $(grep -v '^#' tools/integration-packages.txt | tr '\n' ' ')"
 
+    local common=(
+        -v "$root:/src" -v "$apk_cache:/apk-cache" -w /src
+        -e "ZET_UID=$(id -u)" -e "ZET_GID=$(id -g)"
+    )
+    if [ -n "${CCACHE_DIR:-}" ]; then
+        mkdir -p "$CCACHE_DIR"
+        common+=(-v "$CCACHE_DIR:/ccache" -e CCACHE_DIR=/ccache -e ZET_COMPILER_LAUNCHER=ccache)
+    fi
+    local install="apk add --no-progress --cache-dir /apk-cache --update-cache $packages >/dev/null"
+
+    # The build runs in a container of its own, with the full ephemeral range:
+    # a cold build fetches every package, and fifty ports in TIME_WAIT for a
+    # minute each is a budget it could run through.
+    docker run --rm "${common[@]}" "$ALPINE_IMAGE" sh -c "
+set -e
+$install
+chmod -R a+rw /apk-cache 2>/dev/null || true
+cmake --preset $PRESET >/dev/null
+cmake --build --preset $PRESET --target zet-agent
+chown -R \$ZET_UID:\$ZET_GID build 2>/dev/null || true
+"
+
     local args=(
         -d --init --name "$CONTAINER"
         --cap-add=NET_ADMIN
         --sysctl "net.ipv4.ip_local_port_range=$AGENT_PORT_FIRST $AGENT_PORT_LAST"
         -p "127.0.0.1:$SSH_PORT:2222"
         -p "127.0.0.1:$AGENT_PORT_FIRST-$AGENT_PORT_LAST:$AGENT_PORT_FIRST-$AGENT_PORT_LAST"
-        -v "$root:/src" -v "$apk_cache:/apk-cache" -w /src
-        -e "ZET_UID=$(id -u)" -e "ZET_GID=$(id -g)"
+        "${common[@]}"
     )
-    if [ -n "${CCACHE_DIR:-}" ]; then
-        mkdir -p "$CCACHE_DIR"
-        args+=(-v "$CCACHE_DIR:/ccache" -e CCACHE_DIR=/ccache -e ZET_COMPILER_LAUNCHER=ccache)
-    fi
-
+    # The host itself only installs from the cache the build just filled.
     docker run "${args[@]}" "$ALPINE_IMAGE" sh -c "
 set -e
-apk add --no-progress --cache-dir /apk-cache --update-cache $packages >/dev/null
-chmod -R a+rw /apk-cache 2>/dev/null || true
-cmake --preset $PRESET >/dev/null
-cmake --build --preset $PRESET --target zet-agent
-chown -R \$ZET_UID:\$ZET_GID build 2>/dev/null || true
+$install
 agent=\$(find build/$PRESET -type f -name zet-agent -perm -u+x | head -1)
+[ -n \"\$agent\" ] || { echo \"no zet-agent under build/$PRESET\" >&2; exit 1; }
 cd tests/integration
 exec python3 host.py --agent \"/src/\$agent\" --out /src/$OUT \
     --client-dir '$root/$OUT' --client-port $SSH_PORT \

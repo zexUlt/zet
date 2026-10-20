@@ -78,7 +78,12 @@ class _Listener:
         if not ready:
             self.process.kill()
             raise Timeout("the listener did not report its port")
-        self.port = int(self.process.stdout.readline())
+        line = self.process.stdout.readline()
+        if not line:
+            # Readable at end of file too: the listener died before its port.
+            self.process.kill()
+            raise Timeout("the listener exited without reporting its port")
+        self.port = int(line)
 
     def close(self):
         self.process.kill()
