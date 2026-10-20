@@ -31,7 +31,11 @@
 ///   is both readable and writable arrives as one event with both flags.
 /// - Readable: a read will not block. It may return 0 or an error: a peer's
 ///   end of file and a socket's pending error are readable too.
-/// - Writable: a write will not block, or will fail at once.
+/// - Writable: a write will not block, or will fail at once. A descriptor
+///   whose reader is gone is reported Writable together with Hangup or
+///   Error on both backends — epoll says EPOLLOUT with EPOLLERR for a pipe
+///   and with EPOLLHUP for a socket, kqueue EV_EOF on the write filter — and
+///   the write that follows fails with EPIPE rather than blocking.
 /// - Hangup: the peer is gone, or this end was shut down. It comes together
 ///   with Readable when Read is watched, and bytes still buffered can be
 ///   read before the end of file. Which conditions count as Hangup rather

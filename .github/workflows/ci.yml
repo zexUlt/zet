@@ -245,7 +245,9 @@ jobs:
 
       - name: check_portable catches a Linux-only call on the client's path
         run: |
-          printf '\nnamespace zet {\nint GateSelfTestLinuxOnly() { return SOCK_NONBLOCK; }\n}  // namespace zet\n' \
+          # After a block comment on the same line: a gate that dropped the
+          # whole line with the comment would miss it.
+          printf '\nnamespace zet {\n/* not here */ int GateSelfTestLinuxOnly() { return SOCK_NONBLOCK; }\n}  // namespace zet\n' \
             >> src/io/tcp.cpp
           if ! grep -q GateSelfTestLinuxOnly src/io/tcp.cpp; then
             echo "the injection did not apply — this self-test checks nothing"

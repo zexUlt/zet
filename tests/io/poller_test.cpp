@@ -353,3 +353,85 @@ TEST_CASE("a WatchSignal that fails leaves the signal mask as it was") {
     CHECK(poller.WatchSignal(SIGUSR2, SIGNAL_TOKEN).has_value());
 }
 #endif
+
+namespace {
+
+/// Ignores SIGPIPE for a test that writes to a descriptor with no reader:
+/// the write is to fail with EPIPE, not to end the test process.
+class IgnoreBrokenPipe {
+public:
+    IgnoreBrokenPipe() {
+        struct sigaction ignore{};
+        ignore.sa_handler = SIG_IGN;
+        REQUIRE(::sigaction(SIGPIPE, &ignore, &Old_) == 0);
+    }
+    ~IgnoreBrokenPipe() { ::sigaction(SIGPIPE, &Old_, nullptr); }
+    IgnoreBrokenPipe(const IgnoreBrokenPipe&) = delete;
+    IgnoreBrokenPipe& operator=(const IgnoreBrokenPipe&) = delete;
+    IgnoreBrokenPipe(IgnoreBrokenPipe&&) = delete;
+    IgnoreBrokenPipe& operator=(IgnoreBrokenPipe&&) = delete;
+
+private:
+    struct sigaction Old_{};
+};
+
+}  // namespace
+
+/// Watches `writer` for Write after its reader has gone, and requires what
+/// the contract says: reported Writable with Hangup or Error, and a write
+/// that fails with EPIPE instead of blocking.
+void RequireBrokenWriter(int writer) {
+    Poller poller = MakePoller();
+    REQUIRE(poller.Watch(writer, EInterest::Write, FIRST_TOKEN));
+    std::array<PollEvent, 4> events{};
+    REQUIRE(WaitReady(poller, events) == 1);
+    CHECK(events[0].Writable);
+    CHECK((events[0].Hangup || events[0].Error));
+    const std::array<std::byte, 1> byte{std::byte{1}};
+    const auto written = WriteSome(writer, ByteSpan{byte});
+    REQUIRE_FALSE(written.has_value());
+    CHECK(written.error().Code == EPIPE);
+}
+
+TEST_CASE("a writer whose reader is gone is told, and the write fails") {
+    const IgnoreBrokenPipe ignore;
+    SUBCASE("a pipe") {
+        auto pipe = MakePipe();
+        REQUIRE(pipe.has_value());
+        pipe->Read.Reset();
+        RequireBrokenWriter(pipe->Write.Get());
+    }
+    SUBCASE("a socket") {
+        auto pair = MakeSocketPair();
+        REQUIRE(pair.has_value());
+        pair->Second.Reset();
+        RequireBrokenWriter(pair->First.Get());
+    }
+}
+
+TEST_CASE("a source stays reported until it is consumed") {
+    // Level-triggered: the second Wait sees what the first left unread, and
+    // an edge-triggered backend (EPOLLET, EV_CLEAR) would not.
+    Poller poller = MakePoller();
+    auto readable = MakeSocketPair();
+    auto writable = MakeSocketPair();
+    REQUIRE(readable.has_value());
+    REQUIRE(writable.has_value());
+    REQUIRE(poller.Watch(readable->First.Get(), EInterest::Read, FIRST_TOKEN));
+    REQUIRE(
+        poller.Watch(writable->First.Get(), EInterest::Write, SECOND_TOKEN));
+    Send(readable->Second.Get());
+    for (int round = 0; round < 2; ++round) {
+        CAPTURE(round);
+        std::array<PollEvent, 4> events{};
+        REQUIRE(WaitReady(poller, events) == 2);
+        bool sawRead = false;
+        bool sawWrite = false;
+        for (const PollEvent& event : std::span{events}.first(2)) {
+            sawRead |= event.Token == FIRST_TOKEN && event.Readable;
+            sawWrite |= event.Token == SECOND_TOKEN && event.Writable;
+        }
+        CHECK(sawRead);
+        CHECK(sawWrite);
+    }
+}
