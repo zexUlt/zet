@@ -334,6 +334,20 @@ jobs:
       - name: Binary size budgets
         run: tools/check_binary_size.sh build/musl-release
 
+      - name: Stage the stripped agent (x86_64)
+        run: |
+          agent=$(find build/musl-release -type f -name zet-agent -perm -u+x | head -1)
+          test -n "$agent" || { echo "no zet-agent was built"; exit 1; }
+          mkdir -p "$RUNNER_TEMP/agent-x86_64"
+          cp "$agent" "$RUNNER_TEMP/agent-x86_64/zet-agent"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: zet-agent-x86_64
+          path: ${{ runner.temp }}/agent-x86_64/zet-agent
+          if-no-files-found: error
+          retention-days: 7
+
   # The injection is appended at the end of the file and anchored to nothing
   # in it. The previous version keyed on a member name, a rename made the sed
   # a no-op, and the self-test would have gone green on nothing — while the
@@ -507,3 +521,54 @@ jobs:
           "$(brew --prefix llvm)/bin/clang-tidy" -p build/dev --warnings-as-errors="*" \
             --extra-arg="-isysroot$(xcrun --show-sdk-path)" \
             src/io/poller_kqueue.cpp
+
+  # The release agent on aarch64: the same musl-dev test run and size gate as
+  # the x86_64 jobs, natively on GitHub's free ARM runner, no qemu. Alpine
+  # arm64 images and packages install from the same cached .apk files as the
+  # x86_64 jobs; the runner.arch segment in the cache key keeps the two
+  # package sets apart.
+  agent-aarch64:
+    name: agent (aarch64)
+    needs: changes
+    if: needs.changes.outputs.checks == 'true'
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Restore the compiler cache
+        uses: ./.github/actions/ccache
+        with:
+          key: musl-dev
+
+      - name: Restore the Alpine packages
+        uses: ./.github/actions/apk
+
+      # Tests first: the release binary is only worth uploading if the
+      # debug+test build is clean. musl-asan-ubsan is skipped — ASan on
+      # aarch64 musl can crash the sanitizer runtime itself on this runner
+      # image; musl-dev is the meaningful signal.
+      - name: Build and test
+        run: tools/musl_build.sh musl-dev test
+
+      - name: Build what ships
+        run: tools/musl_build.sh musl-release
+
+      # The same budgets as x86_64: aarch64 binaries are in the same ballpark.
+      # A failure here means the budget needs a conscious decision, not a
+      # silent bump (design.md §14).
+      - name: Binary size budgets
+        run: tools/check_binary_size.sh build/musl-release
+
+      - name: Stage the stripped agent (aarch64)
+        run: |
+          agent=$(find build/musl-release -type f -name zet-agent -perm -u+x | head -1)
+          test -n "$agent" || { echo "no zet-agent was built"; exit 1; }
+          mkdir -p "$RUNNER_TEMP/agent-aarch64"
+          cp "$agent" "$RUNNER_TEMP/agent-aarch64/zet-agent"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: zet-agent-aarch64
+          path: ${{ runner.temp }}/agent-aarch64/zet-agent
+          if-no-files-found: error
+          retention-days: 7
