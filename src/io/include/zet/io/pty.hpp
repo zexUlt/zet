@@ -5,22 +5,11 @@
 #include "zet/core/bytes.hpp"
 #include "zet/io/errno.hpp"
 #include "zet/io/fd.hpp"
+#include "zet/io/terminal.hpp"
 
 /// Pseudo-terminals, per docs/design.md §10 and §16: the agent's end of the
 /// shell it runs.
 namespace zet::io {
-
-/// What TIOCSWINSZ carries. Its own type rather than wire::ResizeMessage:
-/// zet_io moves bytes and does not depend on the protocol.
-struct WindowSize {
-    std::uint16_t Rows{0};
-    std::uint16_t Cols{0};
-    std::uint16_t XPixels{0};
-    std::uint16_t YPixels{0};
-
-    [[nodiscard]] friend bool operator==(const WindowSize&,
-                                         const WindowSize&) noexcept = default;
-};
 
 /// Both ends of one pseudo-terminal. The master is non-blocking and both are
 /// close-on-exec; the slave is opened without becoming anyone's controlling
@@ -31,13 +20,6 @@ struct Pty {
 };
 
 [[nodiscard]] IoResult<Pty> OpenPty() noexcept;
-
-/// Sets the terminal's size. The kernel sends SIGWINCH to the foreground
-/// process group of the slave when it changes.
-[[nodiscard]] IoResult<void> Resize(int fd, WindowSize size) noexcept;
-
-/// The terminal's size, read from either end.
-[[nodiscard]] IoResult<WindowSize> GetWindowSize(int fd) noexcept;
 
 /// One read from the master, retried on EINTR.
 ///

@@ -3,6 +3,7 @@
 #include <doctest/doctest.h>
 #include <signal.h>
 #include <sys/resource.h>
+#include <unistd.h>
 
 #include <array>
 #include <cerrno>
@@ -51,6 +52,11 @@ bool IsBlocked(int signo) {
     REQUIRE(::pthread_sigmask(SIG_BLOCK, nullptr, &current) == 0);
     return sigismember(&current, signo) == 1;
 }
+
+/// Sends `signo` to the process, the way a terminal's SIGWINCH or a kill(1)
+/// arrives. Not raise(): that targets this thread alone, and kqueue reports
+/// only signals sent to the process (poller.hpp).
+void Raise(int signo) { REQUIRE(::kill(::getpid(), signo) == 0); }
 
 void Send(int fd) {
     const std::array<std::byte, 1> byte{std::byte{1}};
@@ -184,7 +190,7 @@ TEST_CASE("a watched signal arrives as an event and is unblocked after") {
         REQUIRE(poller.WatchSignal(SIGUSR1, SIGNAL_TOKEN));
         CHECK(IsBlocked(SIGUSR1));
 
-        REQUIRE(::raise(SIGUSR1) == 0);
+        Raise(SIGUSR1);
         std::array<PollEvent, 4> events{};
         REQUIRE(WaitReady(poller, events) == 1);
         CHECK(events[0].Token == SIGNAL_TOKEN);
@@ -199,8 +205,8 @@ TEST_CASE("several watched signals share one source and keep their tokens") {
     REQUIRE(poller.WatchSignal(SIGUSR1, SIGNAL_TOKEN));
     REQUIRE(poller.WatchSignal(SIGUSR2, SIGNAL_TOKEN + 1));
 
-    REQUIRE(::raise(SIGUSR2) == 0);
-    REQUIRE(::raise(SIGUSR1) == 0);
+    Raise(SIGUSR2);
+    Raise(SIGUSR1);
     std::array<PollEvent, 4> events{};
     REQUIRE(WaitReady(poller, events) == 2);
     bool sawFirst = false;
@@ -232,7 +238,7 @@ TEST_CASE("a moved-from poller leaves the signals to the one it moved to") {
         Poller source = MakePoller();
         REQUIRE(source.WatchSignal(SIGUSR1, SIGNAL_TOKEN));
         Poller moved{std::move(source)};
-        REQUIRE(::raise(SIGUSR1) == 0);
+        Raise(SIGUSR1);
         std::array<PollEvent, 4> events{};
         REQUIRE(WaitReady(moved, events) == 1);
         CHECK(events[0].Signal == SIGUSR1);
@@ -275,9 +281,10 @@ TEST_CASE("wakes before the wait collapse into one event") {
 TEST_CASE("refusals name the call and the reason") {
     Poller poller = MakePoller();
 
+    // Each refusal names the backend's own call: epoll_ctl, kevent.
     const auto bad = poller.Watch(-1, EInterest::Read, FIRST_TOKEN);
     REQUIRE_FALSE(bad.has_value());
-    CHECK(bad.error().Call == "epoll_ctl");
+    CHECK_FALSE(bad.error().Call.empty());
     CHECK(bad.error().Code == EBADF);
 
     auto pair = MakeSocketPair();
@@ -315,9 +322,12 @@ TEST_CASE("refusals name the call and the reason") {
     const auto empty =
         poller.Wait(std::span<PollEvent>{events}.first(0), Deadline{now}, now);
     REQUIRE_FALSE(empty.has_value());
-    CHECK(empty.error().Call == "epoll_wait");
+    CHECK(empty.error().Code == EINVAL);
 }
 
+// Linux only: the failure is injected by leaving no descriptor for the
+// signalfd the first watch opens, and the kqueue backend opens none.
+#if defined(__linux__)
 TEST_CASE("a WatchSignal that fails leaves the signal mask as it was") {
     Poller poller = MakePoller();
     sigset_t before{};
@@ -341,4 +351,87 @@ TEST_CASE("a WatchSignal that fails leaves the signal mask as it was") {
 
     // And the signal can still be watched once descriptors are back.
     CHECK(poller.WatchSignal(SIGUSR2, SIGNAL_TOKEN).has_value());
+}
+#endif
+
+namespace {
+
+/// Ignores SIGPIPE for a test that writes to a descriptor with no reader:
+/// the write is to fail with EPIPE, not to end the test process.
+class IgnoreBrokenPipe {
+public:
+    IgnoreBrokenPipe() {
+        struct sigaction ignore{};
+        ignore.sa_handler = SIG_IGN;
+        REQUIRE(::sigaction(SIGPIPE, &ignore, &Old_) == 0);
+    }
+    ~IgnoreBrokenPipe() { ::sigaction(SIGPIPE, &Old_, nullptr); }
+    IgnoreBrokenPipe(const IgnoreBrokenPipe&) = delete;
+    IgnoreBrokenPipe& operator=(const IgnoreBrokenPipe&) = delete;
+    IgnoreBrokenPipe(IgnoreBrokenPipe&&) = delete;
+    IgnoreBrokenPipe& operator=(IgnoreBrokenPipe&&) = delete;
+
+private:
+    struct sigaction Old_{};
+};
+
+}  // namespace
+
+/// Watches `writer` for Write after its reader has gone, and requires what
+/// the contract says: reported Writable with Hangup or Error, and a write
+/// that fails with EPIPE instead of blocking.
+void RequireBrokenWriter(int writer) {
+    Poller poller = MakePoller();
+    REQUIRE(poller.Watch(writer, EInterest::Write, FIRST_TOKEN));
+    std::array<PollEvent, 4> events{};
+    REQUIRE(WaitReady(poller, events) == 1);
+    CHECK(events[0].Writable);
+    CHECK((events[0].Hangup || events[0].Error));
+    const std::array<std::byte, 1> byte{std::byte{1}};
+    const auto written = WriteSome(writer, ByteSpan{byte});
+    REQUIRE_FALSE(written.has_value());
+    CHECK(written.error().Code == EPIPE);
+}
+
+TEST_CASE("a writer whose reader is gone is told, and the write fails") {
+    const IgnoreBrokenPipe ignore;
+    SUBCASE("a pipe") {
+        auto pipe = MakePipe();
+        REQUIRE(pipe.has_value());
+        pipe->Read.Reset();
+        RequireBrokenWriter(pipe->Write.Get());
+    }
+    SUBCASE("a socket") {
+        auto pair = MakeSocketPair();
+        REQUIRE(pair.has_value());
+        pair->Second.Reset();
+        RequireBrokenWriter(pair->First.Get());
+    }
+}
+
+TEST_CASE("a source stays reported until it is consumed") {
+    // Level-triggered: the second Wait sees what the first left unread, and
+    // an edge-triggered backend (EPOLLET, EV_CLEAR) would not.
+    Poller poller = MakePoller();
+    auto readable = MakeSocketPair();
+    auto writable = MakeSocketPair();
+    REQUIRE(readable.has_value());
+    REQUIRE(writable.has_value());
+    REQUIRE(poller.Watch(readable->First.Get(), EInterest::Read, FIRST_TOKEN));
+    REQUIRE(
+        poller.Watch(writable->First.Get(), EInterest::Write, SECOND_TOKEN));
+    Send(readable->Second.Get());
+    for (int round = 0; round < 2; ++round) {
+        CAPTURE(round);
+        std::array<PollEvent, 4> events{};
+        REQUIRE(WaitReady(poller, events) == 2);
+        bool sawRead = false;
+        bool sawWrite = false;
+        for (const PollEvent& event : std::span{events}.first(2)) {
+            sawRead |= event.Token == FIRST_TOKEN && event.Readable;
+            sawWrite |= event.Token == SECOND_TOKEN && event.Writable;
+        }
+        CHECK(sawRead);
+        CHECK(sawWrite);
+    }
 }

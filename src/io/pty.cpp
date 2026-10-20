@@ -49,30 +49,6 @@ IoResult<Pty> OpenPty() noexcept {
     return Pty{.Master = std::move(master), .Slave = std::move(slave)};
 }
 
-IoResult<void> Resize(int fd, WindowSize size) noexcept {
-    const winsize ws{.ws_row = size.Rows,
-                     .ws_col = size.Cols,
-                     .ws_xpixel = size.XPixels,
-                     .ws_ypixel = size.YPixels};
-    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-vararg)
-    if (::ioctl(fd, TIOCSWINSZ, &ws) != 0) {
-        return std::unexpected(LastErrno("ioctl(TIOCSWINSZ)"));
-    }
-    return {};
-}
-
-IoResult<WindowSize> GetWindowSize(int fd) noexcept {
-    winsize ws{};
-    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-vararg)
-    if (::ioctl(fd, TIOCGWINSZ, &ws) != 0) {
-        return std::unexpected(LastErrno("ioctl(TIOCGWINSZ)"));
-    }
-    return WindowSize{.Rows = ws.ws_row,
-                      .Cols = ws.ws_col,
-                      .XPixels = ws.ws_xpixel,
-                      .YPixels = ws.ws_ypixel};
-}
-
 IoResult<std::size_t> ReadPty(int master, MutableByteSpan into) noexcept {
     auto n = ReadSome(master, into);
     if (!n && n.error().Code == EIO) {

@@ -2,11 +2,32 @@
 
 #include <termios.h>
 
+#include <cstdint>
+
 #include "zet/io/errno.hpp"
 
 /// The client's own terminal, per docs/design.md §3: the one it was started
 /// from, put in raw mode for as long as the session runs on it.
 namespace zet::io {
+
+/// What TIOCSWINSZ carries. Its own type rather than wire::ResizeMessage:
+/// zet_io moves bytes and does not depend on the protocol.
+struct WindowSize {
+    std::uint16_t Rows{0};
+    std::uint16_t Cols{0};
+    std::uint16_t XPixels{0};
+    std::uint16_t YPixels{0};
+
+    [[nodiscard]] friend bool operator==(const WindowSize&,
+                                         const WindowSize&) noexcept = default;
+};
+
+/// Sets the terminal's size. The kernel sends SIGWINCH to the foreground
+/// process group of the slave when it changes.
+[[nodiscard]] IoResult<void> Resize(int fd, WindowSize size) noexcept;
+
+/// The terminal's size, read from either end.
+[[nodiscard]] IoResult<WindowSize> GetWindowSize(int fd) noexcept;
 
 /// Whether `fd` is a terminal at all. A client whose stdin is a pipe has
 /// nothing to put in raw mode.

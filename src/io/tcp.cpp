@@ -27,10 +27,12 @@ IoResult<void> SetNoDelay(int fd) noexcept {
 }
 
 IoResult<UniqueFd> OpenStream(int family) noexcept {
-    UniqueFd fd{
-        ::socket(family, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0)};
+    UniqueFd fd{::socket(family, SOCK_STREAM, 0)};
     if (!fd) {
         return std::unexpected(LastErrno("socket"));
+    }
+    if (auto prepared = PrepareDescriptor(fd.Get()); !prepared) {
+        return std::unexpected(prepared.error());
     }
     return fd;
 }
@@ -117,9 +119,13 @@ IoResult<Listener> ListenTcp(std::uint16_t port) noexcept {
 
 IoResult<UniqueFd> Accept(int listener) noexcept {
     for (;;) {
-        UniqueFd fd{::accept4(listener, nullptr, nullptr,
-                              SOCK_NONBLOCK | SOCK_CLOEXEC)};
+        // accept, not accept4: macOS has no accept4, and the flags are set
+        // the same way as on every other descriptor the loop opens.
+        UniqueFd fd{::accept(listener, nullptr, nullptr)};
         if (fd) {
+            if (auto prepared = PrepareDescriptor(fd.Get()); !prepared) {
+                return std::unexpected(prepared.error());
+            }
             if (auto noDelay = SetNoDelay(fd.Get()); !noDelay) {
                 return std::unexpected(noDelay.error());
             }
@@ -128,7 +134,7 @@ IoResult<UniqueFd> Accept(int listener) noexcept {
         // A connection that was reset while it waited in the queue is not the
         // listener's failure: the next one may be fine.
         if (errno != EINTR && errno != ECONNABORTED) {
-            return std::unexpected(LastErrno("accept4"));
+            return std::unexpected(LastErrno("accept"));
         }
     }
 }

@@ -1,14 +1,29 @@
+# The portable part, POSIX on every platform the client runs on, and the
+# Poller backend picked by platform (design.md §10): one header, one .cpp per
+# backend, no runtime choice. pty, Spawn and Detach are the agent's, and the
+# agent is Linux-only (§12).
 add_library(zet_io STATIC
     clock.cpp
-    daemon.cpp
     errno.cpp
     fd.cpp
     poller.cpp
-    pty.cpp
-    spawn.cpp
     tcp.cpp
     terminal.cpp
 )
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    target_sources(zet_io PRIVATE
+        daemon.cpp
+        poller_epoll.cpp
+        pty.cpp
+        spawn.cpp
+    )
+elseif(CMAKE_SYSTEM_NAME STREQUAL "Darwin")
+    target_sources(zet_io PRIVATE
+        poller_kqueue.cpp
+    )
+else()
+    message(FATAL_ERROR "zet_io has no Poller backend for ${CMAKE_SYSTEM_NAME}")
+endif()
 add_library(zet::io ALIAS zet_io)
 
 target_include_directories(zet_io PUBLIC include)

@@ -18,21 +18,70 @@ void UniqueFd::Reset(int fd) noexcept {
     Fd_ = fd;
 }
 
-IoResult<Pipe> MakePipe() noexcept {
+// Flags are set after the call rather than through pipe2, SOCK_CLOEXEC and
+// SOCK_NONBLOCK, which macOS does not have (design.md §10). The window in
+// between matters only to a process that forks from another thread while it
+// is open, and the loops here fork from the one thread they run on.
+
+IoResult<Pipe> MakeBlockingPipe() noexcept {
     std::array<int, 2> fds{-1, -1};
-    if (::pipe2(fds.data(), O_CLOEXEC | O_NONBLOCK) != 0) {
-        return std::unexpected(LastErrno("pipe2"));
+    if (::pipe(fds.data()) != 0) {
+        return std::unexpected(LastErrno("pipe"));
     }
-    return Pipe{.Read = UniqueFd{fds[0]}, .Write = UniqueFd{fds[1]}};
+    Pipe pipe{.Read = UniqueFd{fds[0]}, .Write = UniqueFd{fds[1]}};
+    for (const int fd : {pipe.Read.Get(), pipe.Write.Get()}) {
+        if (auto closing = SetCloseOnExec(fd); !closing) {
+            return std::unexpected(closing.error());
+        }
+    }
+    return pipe;
+}
+
+IoResult<Pipe> MakePipe() noexcept {
+    auto pipe = MakeBlockingPipe();
+    if (!pipe) {
+        return pipe;
+    }
+    for (const int fd : {pipe->Read.Get(), pipe->Write.Get()}) {
+        if (auto nonBlocking = SetNonBlocking(fd); !nonBlocking) {
+            return std::unexpected(nonBlocking.error());
+        }
+    }
+    return pipe;
 }
 
 IoResult<SocketPair> MakeSocketPair() noexcept {
     std::array<int, 2> fds{-1, -1};
-    if (::socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC | SOCK_NONBLOCK, 0,
-                     fds.data()) != 0) {
+    if (::socketpair(AF_UNIX, SOCK_STREAM, 0, fds.data()) != 0) {
         return std::unexpected(LastErrno("socketpair"));
     }
-    return SocketPair{.First = UniqueFd{fds[0]}, .Second = UniqueFd{fds[1]}};
+    SocketPair pair{.First = UniqueFd{fds[0]}, .Second = UniqueFd{fds[1]}};
+    for (const int fd : {pair.First.Get(), pair.Second.Get()}) {
+        if (auto prepared = PrepareDescriptor(fd); !prepared) {
+            return std::unexpected(prepared.error());
+        }
+    }
+    return pair;
+}
+
+IoResult<void> SetCloseOnExec(int fd) noexcept {
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-vararg)
+    const int flags = ::fcntl(fd, F_GETFD);
+    if (flags < 0) {
+        return std::unexpected(LastErrno("fcntl"));
+    }
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-vararg)
+    if (::fcntl(fd, F_SETFD, flags | FD_CLOEXEC) != 0) {
+        return std::unexpected(LastErrno("fcntl"));
+    }
+    return {};
+}
+
+IoResult<void> PrepareDescriptor(int fd) noexcept {
+    if (auto closing = SetCloseOnExec(fd); !closing) {
+        return closing;
+    }
+    return SetNonBlocking(fd);
 }
 
 IoResult<void> SetNonBlocking(int fd) noexcept {

@@ -47,19 +47,29 @@ target_link_libraries(zet_tests PRIVATE
 )
 
 # zet_io is Linux-only for now (src/CMakeLists.txt), and so are its tests.
+# zet_io's portable part and the client on Linux and macOS; the pty, Spawn
+# and Detach, which only the agent needs, on Linux (src/CMakeLists.txt).
 if(ZET_HAVE_IO)
     target_sources(zet_tests PRIVATE
+        client/escape_test.cpp
         io/clock_test.cpp
-        io/daemon_test.cpp
         io/fd_test.cpp
         io/poller_test.cpp
+        io/tcp_test.cpp
+    )
+    # The Waker test wakes the poller from a second thread.
+    find_package(Threads REQUIRED)
+    target_link_libraries(zet_tests PRIVATE zet::io zet_client_loop Threads::Threads)
+endif()
+
+if(ZET_HAVE_AGENT)
+    target_sources(zet_tests PRIVATE
+        io/daemon_test.cpp
+        io/fake_pty.cpp
+        io/pty_burst_test.cpp
+        io/pty_contract_test.cpp
         io/pty_test.cpp
         io/spawn_test.cpp
-        io/fake_pty.cpp
-        client/escape_test.cpp
-        io/pty_contract_test.cpp
-        io/pty_burst_test.cpp
-        io/tcp_test.cpp
         io/terminal_test.cpp
     )
 
@@ -71,9 +81,6 @@ if(ZET_HAVE_IO)
     target_compile_definitions(zet_tests PRIVATE
         ZET_PTY_ECHO_PATH="$<TARGET_FILE:zet_pty_echo>"
     )
-    # The Waker test wakes the poller from a second thread.
-    find_package(Threads REQUIRED)
-    target_link_libraries(zet_tests PRIVATE zet::io zet_client_loop Threads::Threads)
 endif()
 
 include(${doctest_SOURCE_DIR}/scripts/cmake/doctest.cmake)

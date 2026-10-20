@@ -150,9 +150,10 @@ jobs:
         if: always()
         run: |
           # find, not git ls-files: the latter only lists tracked files, so a
-          # newly written source would be silently skipped.
+          # newly written source would be silently skipped. The macOS-only
+          # backend is left to the macos job: Linux has no sys/event.h.
           tools/in_alpine.sh '
-            files=$(find src tests -name "*.cpp" | sort)
+            files=$(find src tests -name "*.cpp" ! -name "*_kqueue.cpp" | sort)
             [ -n "$files" ] || { echo "no sources"; exit 0; }
             clang-tidy -p build/musl-dev --warnings-as-errors="*" $files
           '
@@ -168,6 +169,9 @@ jobs:
 
       - name: Nothing sleeps
         run: tools/check_no_sleep.sh
+
+      - name: The client's path builds on Linux and macOS
+        run: tools/check_portable.sh
 
       - name: No undeclared dependencies
         run: tools/check_deps.sh
@@ -239,6 +243,23 @@ jobs:
           fi
           git checkout src/core/byte_writer.cpp
 
+      - name: check_portable catches a Linux-only call on the client's path
+        run: |
+          # After a block comment on the same line: a gate that dropped the
+          # whole line with the comment would miss it.
+          printf '\nnamespace zet {\n/* not here */ int GateSelfTestLinuxOnly() { return SOCK_NONBLOCK; }\n}  // namespace zet\n' \
+            >> src/io/tcp.cpp
+          if ! grep -q GateSelfTestLinuxOnly src/io/tcp.cpp; then
+            echo "the injection did not apply — this self-test checks nothing"
+            git checkout src/io/tcp.cpp
+            exit 1
+          fi
+          if tools/check_portable.sh; then
+            echo "the gate passed SOCK_NONBLOCK on the client's path"
+            exit 1
+          fi
+          git checkout src/io/tcp.cpp
+
       - name: check_deps catches an undeclared dependency
         run: |
           test -f src/core/CMakeLists.txt || { echo "the injection target moved"; exit 1; }
@@ -272,3 +293,33 @@ jobs:
             exit 1
           fi
           git checkout "$target"
+
+  # The client on macOS (design.md §12): the kqueue Poller, the portable part
+  # of zet_io and the client itself, built and tested natively. The agent is
+  # Linux-only and is not built here; end to end the macOS client is tested
+  # against a Linux agent by its own job.
+  macos:
+    name: macos
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install the toolchain
+        run: brew install libsodium ninja llvm
+
+      # Homebrew's LLVM rather than the runner's Xcode: macos-14 ships Apple
+      # clang 15, and zet needs clang 20 or newer (CMakeLists.txt).
+      - name: Build and test
+        run: |
+          cmake --preset dev -DCMAKE_CXX_COMPILER="$(brew --prefix llvm)/bin/clang++"
+          cmake --build --preset dev
+          ctest --preset dev
+
+      # The Linux job skips the kqueue backend, which Linux cannot compile; its
+      # names are checked here instead, with Homebrew's clang-tidy.
+      - name: Check naming in the macOS-only sources
+        run: |
+          # Homebrew's clang does not know Apple's SDK by itself.
+          "$(brew --prefix llvm)/bin/clang-tidy" -p build/dev --warnings-as-errors="*" \
+            --extra-arg="-isysroot$(xcrun --show-sdk-path)" \
+            src/io/poller_kqueue.cpp
