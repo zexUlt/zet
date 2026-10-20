@@ -616,9 +616,9 @@ void Agent::DropClosed(Timestamp now) noexcept {
 bool Agent::UpdateInterest() noexcept {
     bool ok = !ListenerWatch_ ||
               static_cast<bool>(ListenerWatch_->Want(Poller_, true, false));
-    if (Mux_ && !Mux_->UpdateInterest(Poller_)) {
-        // Lost like any other loss of the mux: registered again later.
-        Mux_->Close(Poller_);
+    if (Mux_) {
+        // A refusal loses the link and schedules its retry inside MuxLink.
+        Mux_->UpdateInterest(Poller_, io::MonotonicNow());
     }
     if (PtyWatch_) {
         const bool read =

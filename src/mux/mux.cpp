@@ -356,7 +356,6 @@ private:
     void DropClosed() noexcept;
     [[nodiscard]] bool UpdateInterest() noexcept;
     [[nodiscard]] Deadline NextDeadline() const noexcept;
-    void ClosePending(std::uint64_t id) noexcept;
 
     io::UniqueFd Tcp_;
     io::UniqueFd Agents_;
