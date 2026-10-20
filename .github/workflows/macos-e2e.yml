@@ -91,22 +91,39 @@ jobs:
       - name: Restore the Alpine packages
         uses: ./.github/actions/apk
 
-      # One step, so that colima is this shell's child: the VM boots while the
-      # client compiles, and `wait` collects its exit status — the readiness
-      # check — without polling. Homebrew's LLVM, as the macos job in ci.yml:
-      # the project needs Clang 20 or newer, which the runner's Xcode lacks.
+      # The VM images colima and Lima download on first start: the same every
+      # run, and a few hundred megabytes of the boot.
+      - name: Restore the VM images
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/Library/Caches/lima
+            ~/Library/Caches/colima
+          key: colima-images-${{ runner.os }}-${{ runner.arch }}-v1
+
+      # One step, so that colima is this shell's child: it is installed and
+      # started first, the VM boots while LLVM is poured and the client
+      # compiles, and `wait` collects its exit status — the readiness check —
+      # without polling. Homebrew's LLVM, as the macos job in ci.yml: the
+      # project needs Clang 20 or newer, which the runner's Xcode lacks.
       - name: Start colima and build the native client
         run: |
-          brew install colima docker ninja libsodium llvm ccache
+          # pipefail: the background pipeline's status must be colima's.
+          set -o pipefail
+          stamp() { while IFS= read -r line; do printf '%s %s\n' "$(date +%T)" "$line"; done; }
+          brew install colima docker
           colima start --cpu 3 --memory 8 --vm-type vz --mount-type virtiofs \
-            > "$RUNNER_TEMP/colima.log" 2>&1 &
+            2>&1 | stamp > "$RUNNER_TEMP/colima.log" &
           colima=$!
+          brew install ninja libsodium llvm ccache
           cmake --preset dev -DCMAKE_CXX_COMPILER="$(brew --prefix llvm)/bin/clang++" >/dev/null
           cmake --build --preset dev --target zet
-          if ! wait "$colima"; then
-            cat "$RUNNER_TEMP/colima.log"
-            exit 1
-          fi
+          echo "client built at $(date +%T)"
+          status=0
+          wait "$colima" || status=$?
+          # Always: how long the boot took is the number this job is about.
+          cat "$RUNNER_TEMP/colima.log"
+          [ "$status" -eq 0 ] || exit 1
           docker version --format 'docker {{.Server.Version}}'
 
       - uses: actions/download-artifact@v4
