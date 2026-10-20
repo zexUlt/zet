@@ -78,7 +78,7 @@ ProbeScan ProbeScanner::Feed(ByteSpan chunk) noexcept {
             continue;
         }
         if (LineLength_ < Line_.size()) {
-            Line_[LineLength_] = c;
+            Line_.data()[LineLength_] = c;
             ++LineLength_;
         } else {
             LineTooLong_ = true;

@@ -17,9 +17,7 @@ from __future__ import annotations
 
 import hashlib
 import os
-import re
 import shutil
-import stat
 import subprocess
 import threading
 import time
@@ -27,9 +25,9 @@ from pathlib import Path
 
 import pytest
 
-from e2e import PROFILE, PROMPT, SANITIZER_OPTIONS, Zet
+from e2e import PROFILE, PROMPT, SANITIZER_OPTIONS
 from harness import STEP_TIMEOUT_SECONDS, PtyProcess
-from sshhost import CLEAN_BASHRC, NOISY_BASHRC, HOST_ALIAS, SshHost
+from sshhost import CLEAN_BASHRC, NOISY_BASHRC, SshHost
 
 # Architecture string uname -m returns inside the container (always x86_64
 # on CI); the agent binary the test installs is named for it.
@@ -109,15 +107,12 @@ def test_fresh_host_delivers_agent_and_session_connects(
     argv = _delivery_argv(binaries.client, agent_dir, ssh_host, _agent_env())
     terminal = PtyProcess(argv, env=_env(agent_dir))
     try:
-        output = terminal.read_until(PROMPT, timeout=STEP_TIMEOUT_SECONDS)
-        assert PROMPT in output
+        terminal.expect(PROMPT)
         # The session is live: run a command.
         terminal.send(b"echo delivered-ok\r")
-        out2 = terminal.read_until(b"delivered-ok", timeout=STEP_TIMEOUT_SECONDS)
-        assert b"delivered-ok" in out2
+        terminal.expect(b"delivered-ok")
         terminal.send(b"exit 0\r")
-        status = terminal.wait(timeout=STEP_TIMEOUT_SECONDS)
-        assert status == 0
+        assert terminal.finish().status == 0
     finally:
         terminal.kill()
 
@@ -127,30 +122,28 @@ def test_second_connect_does_not_retransmit(
 ):
     """If the binary is already cached (ZET-HAVE), the inode stays the same."""
     agent_dir = _agent_dir(tmp_path, UNAME_ARCH, binaries.agent)
-    # First connect: delivers the binary.
-    for _ in range(2):
+
+    def connect_and_stat() -> bytes:
         argv = _delivery_argv(binaries.client, agent_dir, ssh_host, _agent_env())
         terminal = PtyProcess(argv, env=_env(agent_dir))
         try:
-            output = terminal.read_until(PROMPT, timeout=STEP_TIMEOUT_SECONDS)
-            assert PROMPT in output
-            if _ == 0:
-                # Capture the inode after first delivery.
-                terminal.send(b'stat -c "%i" ~/.cache/zet/*/zet-agent\r')
-                inode_line = terminal.read_until(b"\r\n", timeout=STEP_TIMEOUT_SECONDS)
-                inode_1 = inode_line.strip()
-            else:
-                terminal.send(b'stat -c "%i" ~/.cache/zet/*/zet-agent\r')
-                inode_line = terminal.read_until(b"\r\n", timeout=STEP_TIMEOUT_SECONDS)
-                inode_2 = inode_line.strip()
-                # Same inode: the file was not replaced.
-                assert inode_1 == inode_2, (
-                    f"inode changed: {inode_1!r} → {inode_2!r}"
-                )
+            terminal.expect(PROMPT)
+            terminal.send(b'stat -c "%i" ~/.cache/zet/*/zet-agent\r')
+            # Consume the echoed command line and read up to the next prompt.
+            out = terminal.expect(PROMPT)
             terminal.send(b"exit 0\r")
-            terminal.wait(timeout=STEP_TIMEOUT_SECONDS)
+            terminal.kill()
         finally:
             terminal.kill()
+        # The inode is the last non-empty token before the final prompt.
+        lines = [ln.strip() for ln in out.split(b"\r\n") if ln.strip()]
+        return lines[0] if lines else b""
+
+    inode_1 = connect_and_stat()
+    inode_2 = connect_and_stat()
+    assert inode_1 == inode_2, (
+        f"inode changed on second connect: {inode_1!r} → {inode_2!r}"
+    )
 
 
 def test_different_binary_replaces_and_old_dir_removed(
@@ -163,12 +156,9 @@ def test_different_binary_replaces_and_old_dir_removed(
     argv = _delivery_argv(binaries.client, agent_dir, ssh_host, _agent_env())
     terminal = PtyProcess(argv, env=_env(agent_dir))
     try:
-        terminal.read_until(PROMPT, timeout=STEP_TIMEOUT_SECONDS)
-        # Capture cache dir listing.
-        terminal.send(b"ls ~/.cache/zet/\r")
-        listing1 = terminal.read_until(PROMPT, timeout=STEP_TIMEOUT_SECONDS)
+        terminal.expect(PROMPT)
         terminal.send(b"exit 0\r")
-        terminal.wait(timeout=STEP_TIMEOUT_SECONDS)
+        terminal.kill()
     finally:
         terminal.kill()
 
@@ -186,14 +176,18 @@ def test_different_binary_replaces_and_old_dir_removed(
     argv2 = _delivery_argv(binaries.client, alt_dir, ssh_host, _agent_env())
     terminal2 = PtyProcess(argv2, env=_env(alt_dir))
     try:
-        terminal2.read_until(PROMPT, timeout=STEP_TIMEOUT_SECONDS)
+        terminal2.expect(PROMPT)
         terminal2.send(b"ls ~/.cache/zet/\r")
-        listing2 = terminal2.read_until(PROMPT, timeout=STEP_TIMEOUT_SECONDS)
-        # Old hash dir should be gone: only one entry remains.
-        dirs2 = [l for l in listing2.split() if l]
+        listing2 = terminal2.expect(PROMPT)
+        # Old hash dir should be gone: only one directory entry remains.
+        # Filter out the echoed command and the prompt itself.
+        dirs2 = [
+            tok for tok in listing2.split()
+            if tok and not tok.startswith(PROMPT.rstrip(b" "))
+        ]
         assert len(dirs2) == 1, f"expected one cache dir, got: {listing2!r}"
         terminal2.send(b"exit 0\r")
-        terminal2.wait(timeout=STEP_TIMEOUT_SECONDS)
+        terminal2.kill()
     finally:
         terminal2.kill()
 
@@ -219,9 +213,6 @@ def test_mid_transfer_kill_leaves_only_part_file(
 
     # Check that after a delivery that was cancelled partway (simulated by
     # starting zet and killing it after a brief pause), no zet-agent appears.
-    import threading
-    import time
-
     argv = _delivery_argv(binaries.client, agent_dir, ssh_host, _agent_env())
     proc = subprocess.Popen(
         argv,
@@ -260,10 +251,9 @@ def test_noisy_bashrc_does_not_interfere(
     argv = _delivery_argv(binaries.client, agent_dir, ssh_host, _agent_env())
     terminal = PtyProcess(argv, env=_env(agent_dir))
     try:
-        output = terminal.read_until(PROMPT, timeout=STEP_TIMEOUT_SECONDS)
-        assert PROMPT in output
+        terminal.expect(PROMPT)
         terminal.send(b"exit 0\r")
-        terminal.wait(timeout=STEP_TIMEOUT_SECONDS)
+        terminal.kill()
     finally:
         terminal.kill()
         ssh_host.write_home_file(".bashrc", CLEAN_BASHRC)
@@ -432,11 +422,8 @@ def test_login_shell_delivers(
     argv = _delivery_argv(binaries.client, agent_dir, host, _agent_env())
     terminal = PtyProcess(argv, env=_env(agent_dir))
     try:
-        output = terminal.read_until(marker, timeout=STEP_TIMEOUT_SECONDS)
-        assert marker in output, (
-            f"shell {shell!r}: session did not produce marker; got {output!r}"
-        )
+        terminal.expect(marker)
         terminal.send(b"exit 0\r")
-        terminal.wait(timeout=STEP_TIMEOUT_SECONDS)
+        terminal.kill()
     finally:
         terminal.kill()
