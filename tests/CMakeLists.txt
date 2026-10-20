@@ -23,6 +23,7 @@ add_executable(zet_tests
     session/client_session_test.cpp
     session/connection_test.cpp
     session/error_test.cpp
+    session/mux_router_test.cpp
     session/send_buffer_test.cpp
     session/stream_state_test.cpp
     session/receive_cursor_test.cpp
@@ -34,6 +35,7 @@ add_executable(zet_tests
     wire/frame_stream_test.cpp
     wire/key_schedule_test.cpp
     wire/message_test.cpp
+    wire/mux_message_test.cpp
     wire/sealed_frame_test.cpp
 )
 

@@ -37,7 +37,13 @@ using SessionId = std::array<std::byte, SESSION_ID_SIZE>;
 
 /// What a session keeps for its whole life, derived once at bootstrap.
 struct SessionSecrets {
+    /// SessionIdOf(Registration): public, and checkable by whoever is shown
+    /// the registration secret.
     SessionId Id{};
+    /// R of §6 and §8: what the agent shows zet-muxd to claim this sid. It
+    /// proves ownership of the sid and nothing more — the other secrets come
+    /// from the master under other subkeys, not from it.
+    crypto::Key Registration;
     /// Proves knowledge of the session when resuming, per §5. Never used to
     /// encrypt anything.
     crypto::Key Auth;
@@ -71,6 +77,10 @@ struct ConnectionKeys {
 [[nodiscard]] SessionSecrets DeriveSessionSecrets(
     const crypto::Key& master) noexcept;
 
+/// The sid a registration secret stands for: BLAKE2b-128 of it (§8). What
+/// zet-muxd computes to check a registration, with no state of its own.
+[[nodiscard]] SessionId SessionIdOf(const crypto::Key& registration) noexcept;
+
 /// Secrets for a `sid` no session answers to, per §5 rule two.
 ///
 /// Deterministic on purpose: a decoy drawn afresh each time is itself the
@@ -78,7 +88,8 @@ struct ConnectionKeys {
 /// probes alike and a random one does not. `localSecret` is made when the agent
 /// starts and dies with it — there is nothing worth remembering here between
 /// runs. The returned `Id` is the sid asked about, so that what the automaton
-/// receives is the same shape either way.
+/// receives is the same shape either way; its Registration does not hash to
+/// that Id, and nothing registers a decoy.
 [[nodiscard]] SessionSecrets DeriveDecoySecrets(const crypto::Key& localSecret,
                                                 const SessionId& id) noexcept;
 

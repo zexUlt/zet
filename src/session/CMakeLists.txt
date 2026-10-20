@@ -4,6 +4,7 @@ add_library(zet_session STATIC
     client_session.cpp
     connection.cpp
     error.cpp
+    mux_router.cpp
     send_buffer.cpp
     stream_state.cpp
     receive_cursor.cpp

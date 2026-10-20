@@ -116,6 +116,14 @@ ProtoResult<void> ParseAny(ByteSpan bytes) {
             return Discard(ParsePong(reader));
         case EMessageType::SessionEnd:
             return Discard(ParseSessionEnd(reader));
+        case EMessageType::MuxRegister:
+            return Discard(ParseMuxRegister(reader));
+        case EMessageType::MuxRegistered:
+            return Discard(ParseMuxRegistered(reader));
+        case EMessageType::MuxRefused:
+            return Discard(ParseMuxRefused(reader));
+        case EMessageType::MuxHandoff:
+            return Discard(ParseMuxHandoff(reader));
     }
     return {};
 }

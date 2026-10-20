@@ -25,6 +25,10 @@ inline constexpr std::size_t MAC_SIZE = 32;
 /// KDF context: exactly eight bytes, as crypto_kdf_derive_from_key demands.
 inline constexpr std::size_t CONTEXT_SIZE = 8;
 
+/// Bounds crypto_generichash imposes on the digest it will produce.
+inline constexpr std::size_t MIN_HASH_SIZE = 16;
+inline constexpr std::size_t MAX_HASH_SIZE = 64;
+
 /// Bounds crypto_kdf_derive_from_key imposes on what it will produce.
 inline constexpr std::size_t MIN_DERIVED_SIZE = 16;
 inline constexpr std::size_t MAX_DERIVED_SIZE = 64;
@@ -78,7 +82,21 @@ namespace detail {
 void DeriveInto(MutableByteSpan out, const Key& master, std::uint64_t subkeyId,
                 const KdfContext& context) noexcept;
 
+/// The single unkeyed BLAKE2b call, behind Hash below. The width comes from
+/// the caller's type, so there is nothing to refuse.
+void HashInto(MutableByteSpan out, ByteSpan message) noexcept;
+
 }  // namespace detail
+
+/// Unkeyed BLAKE2b with a digest as wide as `out`. For values that must be
+/// checkable by someone who does not hold the input: the sid is this hash of
+/// the registration secret, so zet-muxd can verify an agent's registration
+/// without any state of its own (§6).
+template <std::size_t tSize>
+    requires(tSize >= MIN_HASH_SIZE && tSize <= MAX_HASH_SIZE)
+void Hash(std::array<std::byte, tSize>& out, ByteSpan message) noexcept {
+    detail::HashInto(MutableByteSpan{out}, message);
+}
 
 /// A subkey from a master. The context separates key purposes, so the same
 /// master under two different labels yields subkeys that say nothing about each

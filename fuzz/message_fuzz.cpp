@@ -33,8 +33,11 @@ using namespace zet::wire;
 
 /// A cleartext body cannot outgrow the frame that carries it, and an encoded
 /// message is never longer than the bytes it was parsed from — so one buffer of
-/// this size holds any message this fuzzer can reach.
-constexpr std::size_t ENCODE_CAPACITY = MAX_HANDSHAKE_FRAME;
+/// this size holds any message this fuzzer can reach. The one exception is the
+/// handoff, which carries a whole handshake frame and its own few bytes.
+constexpr std::size_t ENCODE_CAPACITY = std::max<std::size_t>(
+    MAX_HANDSHAKE_FRAME,
+    sizeof(std::uint8_t) + sizeof(std::uint16_t) + MAX_HANDOFF_PREFIX);
 
 /// Handshake messages prove nothing, so none of the ways to malform one may
 /// reap a session: the sid travels in the clear, and a KillSession here would
@@ -131,6 +134,26 @@ void CheckDisposition(EProtoError error) noexcept {
 [[nodiscard]] bool Same(const SessionEndMessage& left,
                         const SessionEndMessage& right) noexcept {
     return left == right;
+}
+
+[[nodiscard]] bool Same(const MuxRegisterMessage& left,
+                        const MuxRegisterMessage& right) noexcept {
+    return left.Registration.Expose() == right.Registration.Expose();
+}
+
+[[nodiscard]] bool Same(const MuxRegisteredMessage& left,
+                        const MuxRegisteredMessage& right) noexcept {
+    return left == right;
+}
+
+[[nodiscard]] bool Same(const MuxRefusedMessage& left,
+                        const MuxRefusedMessage& right) noexcept {
+    return left == right;
+}
+
+[[nodiscard]] bool Same(const MuxHandoffMessage& left,
+                        const MuxHandoffMessage& right) noexcept {
+    return std::ranges::equal(left.Prefix, right.Prefix);
 }
 
 template <typename TMessage>
@@ -239,6 +262,20 @@ void ParseBody(ByteSpan input) noexcept {
             return;
         case EMessageType::SessionEnd:
             ParseThenRoundTrip(reader, *type, ParseSessionEnd, WriteSessionEnd);
+            return;
+        case EMessageType::MuxRegister:
+            ParseThenRoundTrip(reader, *type, ParseMuxRegister,
+                               WriteMuxRegister);
+            return;
+        case EMessageType::MuxRegistered:
+            ParseThenRoundTrip(reader, *type, ParseMuxRegistered,
+                               WriteMuxRegistered);
+            return;
+        case EMessageType::MuxRefused:
+            ParseThenRoundTrip(reader, *type, ParseMuxRefused, WriteMuxRefused);
+            return;
+        case EMessageType::MuxHandoff:
+            ParseThenRoundTrip(reader, *type, ParseMuxHandoff, WriteMuxHandoff);
             return;
     }
 }

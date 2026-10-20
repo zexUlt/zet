@@ -47,6 +47,14 @@ enum class EMessageType : std::uint8_t {
     Ping = 0x13,
     Pong = 0x14,
     SessionEnd = 0x15,
+
+    // The local socket between zet-muxd and the agents (§6): cleartext, and on
+    // /run/zet/mux.sock only. On TCP the handshake and the channel refuse
+    // them like the bootstrap's.
+    MuxRegister = 0x20,
+    MuxRegistered = 0x21,
+    MuxRefused = 0x22,
+    MuxHandoff = 0x23,
 };
 
 /// Upper bound on the stream bytes a Data message may carry (§7).
@@ -344,6 +352,92 @@ struct SessionEndMessage {
 
 /// A kind outside ESessionEndKind is MalformedField, on both sides: a newer
 /// agent ending a session some new way would need a new version to say so.
+/// What an agent claims its session with (§6): R, whose hash is the sid. A
+/// secret like the others, and only ever sent over the local socket.
+struct MuxRegisterMessage {
+    crypto::Key Registration;
+};
+
+/// The registration holds. `Port` is where zet-muxd listens, the port the
+/// agent announces in BootstrapAccept.
+struct MuxRegisteredMessage {
+    std::uint16_t Port{0};
+
+    [[nodiscard]] friend bool operator==(const MuxRegisteredMessage&,
+                                         const MuxRegisteredMessage&) noexcept =
+        default;
+};
+
+enum class EMuxRefusal : std::uint8_t {
+    /// The sid is registered by a live connection of another uid.
+    Taken = 1,
+    /// A limit of §6: registrations per uid, or the table is full.
+    Limit = 2,
+    /// The registration did not parse.
+    Malformed = 3,
+};
+
+struct MuxRefusedMessage {
+    EMuxRefusal Reason{EMuxRefusal::Malformed};
+
+    [[nodiscard]] friend bool operator==(
+        const MuxRefusedMessage&, const MuxRefusedMessage&) noexcept = default;
+};
+
+/// The most a handoff carries ahead of the socket: one handshake frame.
+inline constexpr std::size_t MAX_HANDOFF_PREFIX =
+    HEADER_SIZE + MAX_HANDSHAKE_FRAME;
+
+/// One TCP connection handed to the agent (§6). On the stream:
+///
+///     frame header ‖ 0x23 ‖ prefix_len:u16be ‖ prefix[prefix_len]
+///
+/// in one frame, and the connection's descriptor rides as SCM_RIGHTS on the
+/// sendmsg that carries the frame's first byte. The prefix is what the mux
+/// already read from the connection — the client's Hello frame, header
+/// included — and the agent reads it before the socket. A receiver pairs the
+/// descriptors it collects with MuxHandoff frames in the order both arrive,
+/// and closes any descriptor left without one. `Prefix` is a view into the
+/// buffer the message was parsed from.
+struct MuxHandoffMessage {
+    ByteSpan Prefix{};
+};
+
+[[nodiscard]] ProtoResult<MuxRegisterMessage> ParseMuxRegister(
+    ByteReader& reader) noexcept;
+[[nodiscard]] ProtoResult<void> WriteMuxRegister(
+    ByteWriter& writer, const MuxRegisterMessage& message) noexcept;
+
+[[nodiscard]] ProtoResult<MuxRegisteredMessage> ParseMuxRegistered(
+    ByteReader& reader) noexcept;
+[[nodiscard]] ProtoResult<void> WriteMuxRegistered(
+    ByteWriter& writer, const MuxRegisteredMessage& message) noexcept;
+
+[[nodiscard]] ProtoResult<MuxRefusedMessage> ParseMuxRefused(
+    ByteReader& reader) noexcept;
+[[nodiscard]] ProtoResult<void> WriteMuxRefused(
+    ByteWriter& writer, const MuxRefusedMessage& message) noexcept;
+
+[[nodiscard]] ProtoResult<MuxHandoffMessage> ParseMuxHandoff(
+    ByteReader& reader) noexcept;
+[[nodiscard]] ProtoResult<void> WriteMuxHandoff(
+    ByteWriter& writer, const MuxHandoffMessage& message) noexcept;
+
+/// What zet-muxd learns from a connection's first bytes, and all it learns.
+struct HelloPeek {
+    /// The whole Hello frame, header included: what goes into the handoff
+    /// prefix.
+    std::size_t FrameSize{0};
+    SessionId Id{};
+};
+
+/// Reads the frame header and the Hello prefix — type, "ZET1", both
+/// versions, sid — and nothing past the sid: not the nonce, not the options.
+/// `Truncated` means read more; the frame may be at most MAX_HANDSHAKE_FRAME.
+/// Anything that is not a cleartext Hello is refused, as the agent's own
+/// handshake would.
+[[nodiscard]] ProtoResult<HelloPeek> PeekHello(ByteSpan buffer) noexcept;
+
 [[nodiscard]] ProtoResult<SessionEndMessage> ParseSessionEnd(
     ByteReader& reader) noexcept;
 [[nodiscard]] ProtoResult<void> WriteSessionEnd(

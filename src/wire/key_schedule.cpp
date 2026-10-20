@@ -27,7 +27,8 @@ constexpr std::uint64_t SEED_RATCHET_SUBKEY = 1;
 
 // Subkey numbers within a context. They are as much part of the wire contract
 // as the labels: change one and the two ends stop agreeing.
-constexpr std::uint64_t SESSION_ID_SUBKEY = 1;
+// Was the sid itself until M5; now R, the sid's preimage (§8).
+constexpr std::uint64_t REGISTRATION_SUBKEY = 1;
 constexpr std::uint64_t AUTH_SUBKEY = 2;
 constexpr std::uint64_t CONNECTION_SEED_SUBKEY = 3;
 
@@ -40,11 +41,19 @@ constexpr std::uint64_t SERVER_SALT_SUBKEY = 4;
 
 SessionSecrets DeriveSessionSecrets(const crypto::Key& master) noexcept {
     SessionSecrets secrets;
-    crypto::DeriveBytes(secrets.Id, master, SESSION_ID_SUBKEY, SESSION_CONTEXT);
+    secrets.Registration =
+        crypto::DeriveSubkey(master, REGISTRATION_SUBKEY, SESSION_CONTEXT);
+    secrets.Id = SessionIdOf(secrets.Registration);
     secrets.Auth = crypto::DeriveSubkey(master, AUTH_SUBKEY, SESSION_CONTEXT);
     secrets.ConnectionSeed =
         crypto::DeriveSubkey(master, CONNECTION_SEED_SUBKEY, SESSION_CONTEXT);
     return secrets;
+}
+
+SessionId SessionIdOf(const crypto::Key& registration) noexcept {
+    SessionId id{};
+    crypto::Hash(id, ByteSpan{registration.Expose()});
+    return id;
 }
 
 SessionSecrets DeriveDecoySecrets(const crypto::Key& localSecret,

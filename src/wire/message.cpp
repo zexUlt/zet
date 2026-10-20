@@ -1,5 +1,7 @@
 #include "zet/wire/message.hpp"
 
+#include "zet/wire/frame.hpp"
+
 #include <algorithm>
 #include <array>
 #include <string_view>
@@ -76,6 +78,10 @@ ProtoResult<EMessageType> ParseMessageType(ByteReader& reader) noexcept {
         case EMessageType::Ping:
         case EMessageType::Pong:
         case EMessageType::SessionEnd:
+        case EMessageType::MuxRegister:
+        case EMessageType::MuxRegistered:
+        case EMessageType::MuxRefused:
+        case EMessageType::MuxHandoff:
             return static_cast<EMessageType>(*type);
     }
     // Reserved and unassigned types alike. The disposition attached to this
@@ -737,6 +743,172 @@ ProtoResult<void> WriteSessionEnd(ByteWriter& writer,
         return kind;
     }
     return writer.WriteU8(message.Value);
+}
+
+namespace {
+
+/// What every frame before authentication says in its epoch byte (§7).
+constexpr std::uint8_t CLEARTEXT_EPOCH = 0;
+
+[[nodiscard]] bool IsMuxRefusal(std::uint8_t reason) noexcept {
+    switch (static_cast<EMuxRefusal>(reason)) {
+        case EMuxRefusal::Taken:
+        case EMuxRefusal::Limit:
+        case EMuxRefusal::Malformed:
+            return true;
+    }
+    return false;
+}
+
+}  // namespace
+
+ProtoResult<MuxRegisterMessage> ParseMuxRegister(ByteReader& reader) noexcept {
+    MuxRegisterMessage message{};
+    if (auto key = ReadArray(reader, message.Registration.Expose()); !key) {
+        return std::unexpected(key.error());
+    }
+    if (auto rest = RequireExhausted(reader); !rest) {
+        return std::unexpected(rest.error());
+    }
+    return message;
+}
+
+ProtoResult<void> WriteMuxRegister(ByteWriter& writer,
+                                   const MuxRegisterMessage& message) noexcept {
+    if (auto type = WriteMessageType(writer, EMessageType::MuxRegister);
+        !type) {
+        return type;
+    }
+    return writer.WriteBytes(ByteSpan{message.Registration.Expose()});
+}
+
+ProtoResult<MuxRegisteredMessage> ParseMuxRegistered(
+    ByteReader& reader) noexcept {
+    auto port = reader.ReadU16BE();
+    if (!port) {
+        return std::unexpected(port.error());
+    }
+    // As in BootstrapAccept: nobody can connect to port zero.
+    if (*port == 0) {
+        return std::unexpected(EProtoError::MalformedField);
+    }
+    if (auto rest = RequireExhausted(reader); !rest) {
+        return std::unexpected(rest.error());
+    }
+    return MuxRegisteredMessage{.Port = *port};
+}
+
+ProtoResult<void> WriteMuxRegistered(
+    ByteWriter& writer, const MuxRegisteredMessage& message) noexcept {
+    if (message.Port == 0) {
+        return std::unexpected(EProtoError::MalformedField);
+    }
+    if (auto type = WriteMessageType(writer, EMessageType::MuxRegistered);
+        !type) {
+        return type;
+    }
+    return writer.WriteU16BE(message.Port);
+}
+
+ProtoResult<MuxRefusedMessage> ParseMuxRefused(ByteReader& reader) noexcept {
+    auto reason = reader.ReadU8();
+    if (!reason) {
+        return std::unexpected(reason.error());
+    }
+    if (!IsMuxRefusal(*reason)) {
+        return std::unexpected(EProtoError::MalformedField);
+    }
+    if (auto rest = RequireExhausted(reader); !rest) {
+        return std::unexpected(rest.error());
+    }
+    return MuxRefusedMessage{.Reason = static_cast<EMuxRefusal>(*reason)};
+}
+
+ProtoResult<void> WriteMuxRefused(ByteWriter& writer,
+                                  const MuxRefusedMessage& message) noexcept {
+    if (!IsMuxRefusal(static_cast<std::uint8_t>(message.Reason))) {
+        return std::unexpected(EProtoError::MalformedField);
+    }
+    if (auto type = WriteMessageType(writer, EMessageType::MuxRefused); !type) {
+        return type;
+    }
+    return writer.WriteU8(static_cast<std::uint8_t>(message.Reason));
+}
+
+ProtoResult<MuxHandoffMessage> ParseMuxHandoff(ByteReader& reader) noexcept {
+    auto length = reader.ReadU16BE();
+    if (!length) {
+        return std::unexpected(length.error());
+    }
+    // An empty prefix is not a connection anyone read a Hello from.
+    if (*length == 0 || *length > MAX_HANDOFF_PREFIX) {
+        return std::unexpected(EProtoError::MalformedField);
+    }
+    auto prefix = reader.ReadBytes(*length);
+    if (!prefix) {
+        return std::unexpected(prefix.error());
+    }
+    if (auto rest = RequireExhausted(reader); !rest) {
+        return std::unexpected(rest.error());
+    }
+    return MuxHandoffMessage{.Prefix = *prefix};
+}
+
+ProtoResult<void> WriteMuxHandoff(ByteWriter& writer,
+                                  const MuxHandoffMessage& message) noexcept {
+    if (message.Prefix.empty() || message.Prefix.size() > MAX_HANDOFF_PREFIX) {
+        return std::unexpected(EProtoError::MalformedField);
+    }
+    if (auto type = WriteMessageType(writer, EMessageType::MuxHandoff); !type) {
+        return type;
+    }
+    if (auto length = writer.WriteU16BE(
+            static_cast<std::uint16_t>(message.Prefix.size()));
+        !length) {
+        return length;
+    }
+    return writer.WriteBytes(message.Prefix);
+}
+
+ProtoResult<HelloPeek> PeekHello(ByteSpan buffer) noexcept {
+    const auto frame = ReadFrame(buffer, MAX_HANDSHAKE_FRAME);
+    if (!frame) {
+        return std::unexpected(frame.error());
+    }
+    if (frame->Header.Epoch != CLEARTEXT_EPOCH) {
+        return std::unexpected(EProtoError::UnexpectedMessage);
+    }
+    ByteReader reader{frame->Body};
+    const auto type = ParseMessageType(reader);
+    if (!type) {
+        return std::unexpected(type.error());
+    }
+    if (*type != EMessageType::Hello) {
+        return std::unexpected(EProtoError::UnexpectedMessage);
+    }
+    auto magic = reader.ReadBytes(HELLO_MAGIC.size());
+    if (!magic) {
+        return std::unexpected(magic.error());
+    }
+    if (!std::ranges::equal(*magic, HELLO_MAGIC)) {
+        return std::unexpected(EProtoError::MalformedField);
+    }
+    auto versionMin = reader.ReadU16BE();
+    if (!versionMin) {
+        return std::unexpected(versionMin.error());
+    }
+    auto versionMax = reader.ReadU16BE();
+    if (!versionMax) {
+        return std::unexpected(versionMax.error());
+    }
+    if (*versionMin > *versionMax) {
+        return std::unexpected(EProtoError::MalformedField);
+    }
+    HelloPeek peek{.FrameSize = frame->Consumed, .Id = {}};
+    if (auto id = ReadArray(reader, peek.Id); !id) {
+        return std::unexpected(id.error());
+    }
+    return peek;
 }
 
 }  // namespace zet::wire

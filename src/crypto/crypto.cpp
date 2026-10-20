@@ -98,6 +98,13 @@ void DeriveInto(MutableByteSpan out, const Key& master, std::uint64_t subkeyId,
         Raw(out), out.size(), subkeyId, context.data(), Raw(master.Expose()));
 }
 
+void HashInto(MutableByteSpan out, ByteSpan message) noexcept {
+    // Cannot fail: the width is bounded by Hash's requires-clause and there
+    // is no key.
+    std::ignore = crypto_generichash(Raw(out), out.size(), Raw(message),
+                                     message.size(), nullptr, 0);
+}
+
 }  // namespace detail
 
 Key DeriveSubkey(const Key& master, std::uint64_t subkeyId,
