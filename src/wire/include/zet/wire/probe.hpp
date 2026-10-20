@@ -90,7 +90,7 @@ private:
     // libc++ hardened mode (_LIBCPP_HARDENING_MODE_EXTENSIVE) unconditionally
     // references __libcpp_verbose_abort — banned in wire objects by
     // check_no_abort.sh.
-    enum class ReadyTag : std::uint8_t {
+    enum class EReadyTag : std::uint8_t {
         None,
         Info,
         Have,
@@ -98,7 +98,7 @@ private:
         Stored,
         Failed,
     };
-    ReadyTag ReadyTag_{ReadyTag::None};
+    EReadyTag ReadyTag_{EReadyTag::None};
     std::string_view ReadyArch_{};
     bool ReadyNoExec_{false};
     std::string_view ReadyReason_{};

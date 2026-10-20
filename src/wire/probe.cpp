@@ -16,8 +16,14 @@ constexpr std::string_view PROBE_VERSION_1 = "1";
 /// Whether `line` starts with `prefix`.
 [[nodiscard]] bool StartsWith(std::string_view line,
                               std::string_view prefix) noexcept {
+    // Use string_view{data(), prefix.size()} rather than substr(0, n) to
+    // avoid triggering the pos<=size() assertion in substr
+    // (_LIBCPP_ASSERT_VALID_ELEMENT_ACCESS in
+    // _LIBCPP_HARDENING_MODE_EXTENSIVE). Even though pos=0 is trivially
+    // <=size(), clang at -O0 may not eliminate the dead branch when the
+    // condition involves a runtime size() value.
     return line.size() >= prefix.size() &&
-           line.substr(0, prefix.size()) == prefix;
+           std::string_view{line.data(), prefix.size()} == prefix;
 }
 
 /// The next space-delimited token starting at `pos` in `line`; advances `pos`
@@ -75,7 +81,7 @@ constexpr std::string_view PROBE_VERSION_1 = "1";
 }  // namespace
 
 ProbeScan ProbeScanner::Feed(ByteSpan chunk) noexcept {
-    ReadyTag_ = ReadyTag::None;
+    ReadyTag_ = EReadyTag::None;
     // Use .data()[i] instead of operator[] to avoid the libc++ hardening check
     // that would introduce a __libcpp_verbose_abort reference (banned in wire).
     for (std::size_t i = 0; i < chunk.size(); ++i) {
@@ -89,28 +95,28 @@ ProbeScan ProbeScanner::Feed(ByteSpan chunk) noexcept {
             // operator* and reference __libcpp_verbose_abort in hardened mode.
             const std::size_t consumed = i + 1;
             switch (ReadyTag_) {
-                case ReadyTag::Info:
-                    ReadyTag_ = ReadyTag::None;
+                case EReadyTag::Info:
+                    ReadyTag_ = EReadyTag::None;
                     return ProbeScan{
                         .Consumed = consumed,
                         .Answer = ProbeInfo{ReadyArch_, ReadyNoExec_}};
-                case ReadyTag::Have:
-                    ReadyTag_ = ReadyTag::None;
+                case EReadyTag::Have:
+                    ReadyTag_ = EReadyTag::None;
                     return ProbeScan{.Consumed = consumed,
                                      .Answer = ProbeHave{}};
-                case ReadyTag::Send:
-                    ReadyTag_ = ReadyTag::None;
+                case EReadyTag::Send:
+                    ReadyTag_ = EReadyTag::None;
                     return ProbeScan{.Consumed = consumed,
                                      .Answer = ProbeSend{}};
-                case ReadyTag::Stored:
-                    ReadyTag_ = ReadyTag::None;
+                case EReadyTag::Stored:
+                    ReadyTag_ = EReadyTag::None;
                     return ProbeScan{.Consumed = consumed,
                                      .Answer = ProbeStored{}};
-                case ReadyTag::Failed:
-                    ReadyTag_ = ReadyTag::None;
+                case EReadyTag::Failed:
+                    ReadyTag_ = EReadyTag::None;
                     return ProbeScan{.Consumed = consumed,
                                      .Answer = ProbeFailed{ReadyReason_}};
-                case ReadyTag::None:
+                case EReadyTag::None:
                     break;
             }
             continue;
@@ -128,9 +134,14 @@ ProbeScan ProbeScanner::Feed(ByteSpan chunk) noexcept {
 void ProbeScanner::EndLine() noexcept {
     std::string_view line{Line_.data(), LineLength_};
     // A pty may turn \n into \r\n.
-    // Use .data()[size()-1] instead of .back() for the same reason.
+    // Use .data()[size()-1] instead of .back() to avoid the back() assertion.
+    // Use the pointer+length constructor instead of remove_suffix(1) to avoid
+    // the n<=size() assertion: even though the !empty() guard makes it
+    // trivially safe, clang at -O0 may not eliminate the dead branch without
+    // the always-inline path propagating the guard across the function
+    // boundary.
     if (!line.empty() && line.data()[line.size() - 1] == '\r') {
-        line.remove_suffix(1);
+        line = {line.data(), line.size() - 1};
     }
     const bool tooLong = LineTooLong_;
     LineLength_ = 0;
@@ -150,27 +161,27 @@ void ProbeScanner::EndLine() noexcept {
     ProbeInfo probeInfo{};
     if (ParseProbe(line, probeInfo)) {
         // Arch string_view points into Line_; valid until next Feed.
-        ReadyTag_ = ReadyTag::Info;
+        ReadyTag_ = EReadyTag::Info;
         ReadyArch_ = probeInfo.Arch;
         ReadyNoExec_ = probeInfo.NoExec;
         return;
     }
 
     if (line == HAVE_MARKER) {
-        ReadyTag_ = ReadyTag::Have;
+        ReadyTag_ = EReadyTag::Have;
         return;
     }
     if (line == SEND_MARKER) {
-        ReadyTag_ = ReadyTag::Send;
+        ReadyTag_ = EReadyTag::Send;
         return;
     }
     if (line == STORED_MARKER) {
-        ReadyTag_ = ReadyTag::Stored;
+        ReadyTag_ = EReadyTag::Stored;
         return;
     }
     if (StartsWith(line, FAILED_MARKER)) {
         // Reason string_view points into Line_; valid until next Feed.
-        ReadyTag_ = ReadyTag::Failed;
+        ReadyTag_ = EReadyTag::Failed;
         // Pointer+length, not substr: substr's pos<=size() assertion
         // (_LIBCPP_ASSERT_VALID_ELEMENT_ACCESS in EXTENSIVE mode) is not
         // provably dead at -O0 because the StartsWith guard is a separate
