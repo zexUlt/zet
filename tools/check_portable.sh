@@ -6,8 +6,9 @@
 # growing Linux-isms (or macOS-isms) that would only show when the other
 # platform is next built.
 #
-# Comments are stripped before matching: the Poller contract names epoll
-# and kqueue on purpose.
+# Comments, // and /* */ alike, are stripped before matching: the Poller
+# contract names epoll and kqueue on purpose, and a name inside a block
+# comment neither counts against a file nor hides the code after it.
 #
 # Usage: tools/check_portable.sh
 set -uo pipefail
@@ -52,7 +53,10 @@ for file in $files; do
         [ -n "$hit" ] || continue
         printf '  %s:%s\n' "$file" "$hit"
         violations=$((violations + 1))
-    done < <(sed 's://.*$::' "$file" | grep -nE "$banned")
+    # Block comments become blank lines of their own height, so that the
+    # line numbers grep reports are still the file's.
+    done < <(perl -0pe 's{/\*.*?\*/}{ (my $c = $&) =~ s/[^\n]//g; $c }gse; s{//[^\n]*}{}g' "$file" |
+             grep -nE "$banned")
 done
 
 printf 'portable sources: %d, platform-specific uses: %d\n' "$count" "$violations"
