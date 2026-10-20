@@ -43,8 +43,17 @@ void Log(log::ELevel level, std::string_view message,
     log::Emit(level, message, fields, io::MonotonicNow());
 }
 
+constexpr uid_t ROOT_UID = 0;
+
 /// The trust rule of MuxLink: the peer runs as the owner of the socket file,
-/// in a directory nobody else but root may write.
+/// or as root, in a directory nobody else but root may write.
+///
+/// Root because of what SO_PEERCRED reports: the credentials of whoever
+/// called listen(), not of the process that accepts. Under socket activation
+/// that is systemd, uid 0, while zet-muxd, running as zet, does the
+/// accepting. Root may do anything to this agent anyway, so trusting a
+/// listener it made gives nobody anything; no one else can make one that
+/// reports uid 0.
 std::expected<void, std::string_view> CheckPeer(const std::string& path,
                                                 int fd) noexcept {
     struct stat socketStat{};
@@ -70,8 +79,9 @@ std::expected<void, std::string_view> CheckPeer(const std::string& path,
     if (!peer) {
         return std::unexpected("cannot tell who the mux is");
     }
-    if (peer->Uid != socketStat.st_uid) {
-        return std::unexpected("the mux is not the socket's owner");
+    if (peer->Uid != socketStat.st_uid && peer->Uid != ROOT_UID) {
+        return std::unexpected(
+            "the mux is neither the socket's owner nor root");
     }
     return {};
 }

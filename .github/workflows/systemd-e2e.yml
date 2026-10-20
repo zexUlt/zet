@@ -1,0 +1,131 @@
+name: systemd e2e
+
+# zet-muxd under real systemd (design.md §6, §16). The integration suite's
+# Alpine container has no systemd, so there socket activation is played by a
+# launcher; here the shipped units/zet-muxd.{socket,service} run on the
+# Ubuntu runner itself, whose PID 1 is systemd. On the host, not in a
+# container, and as root through sudo, which the runner gives.
+#
+# On every pull request, so that it can be a required check: tools/
+# ci_changes.sh decides whether the change reaches what it tests, and the
+# jobs skip otherwise. Also nightly and on demand.
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "30 4 * * *"
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  ZET_APK_CACHE: ${{ github.workspace }}/../apk-cache
+
+jobs:
+  changes:
+    name: changes
+    runs-on: ubuntu-24.04
+    outputs:
+      systemd: ${{ steps.changes.outputs.systemd }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - id: changes
+        uses: ./.github/actions/changes
+
+  build:
+    name: build the binaries
+    needs: changes
+    if: needs.changes.outputs.systemd == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      # The musl-dev entry ci.yml warms: these objects are its.
+      - name: Restore the compiler cache
+        uses: ./.github/actions/ccache
+        with:
+          key: musl-dev
+
+      - name: Restore the Alpine packages
+        uses: ./.github/actions/apk
+
+      # Static, so they run on the Ubuntu host as they are.
+      - name: Build
+        run: |
+          tools/in_alpine.sh '
+            cmake --preset musl-dev >/dev/null &&
+            cmake --build --preset musl-dev --target zet zet-agent zet-muxd
+          '
+          mkdir -p "$RUNNER_TEMP/bin"
+          for name in zet zet-agent zet-muxd; do
+            built=$(find build/musl-dev -type f -name "$name" -perm -u+x | head -1)
+            test -n "$built" || { echo "no $name was built"; exit 1; }
+            cp "$built" "$RUNNER_TEMP/bin/$name"
+          done
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: zet-binaries
+          path: ${{ runner.temp }}/bin/
+          if-no-files-found: error
+          retention-days: 1
+
+  systemd:
+    name: systemd e2e
+    needs: [changes, build]
+    if: needs.changes.outputs.systemd == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: zet-binaries
+          path: ${{ runner.temp }}/bin
+
+      # As a machine is set up from the units' own comments: the binaries in
+      # /usr/local/bin, the zet user, the two units as shipped.
+      - name: Install
+        run: |
+          sudo install -m 0755 "$RUNNER_TEMP"/bin/zet "$RUNNER_TEMP"/bin/zet-agent \
+            "$RUNNER_TEMP"/bin/zet-muxd /usr/local/bin/
+          sudo useradd --system --no-create-home --shell /usr/sbin/nologin zet
+          sudo install -m 0644 units/zet-muxd.socket units/zet-muxd.service /etc/systemd/system/
+          sudo systemctl daemon-reload
+          sudo systemctl start zet-muxd.socket
+          systemctl status zet-muxd.socket --no-pager
+          # sshd's privilege separation directory; the runner's own sshd is
+          # not running, ours starts on a free port.
+          sudo mkdir -p /run/sshd
+          # The suite's two test users. An empty skeleton: the runner image
+          # keeps its toolchains in /etc/skel, gigabytes that useradd would
+          # copy into every new home, past any step's timeout.
+          sudo mkdir -p /var/empty-skel
+          for user in zettest zettest2; do
+            sudo useradd --create-home --skel /var/empty-skel --shell /bin/bash "$user"
+            # useradd locks the account with '!', and sshd refuses a locked
+            # account even for a public key; '*' has no password, no lock.
+            sudo usermod --password '*' "$user"
+          done
+
+      - name: Run the systemd suite
+        run: |
+          python3 -m venv "$RUNNER_TEMP/venv"
+          "$RUNNER_TEMP/venv/bin/pip" install --quiet pytest
+          sudo "$RUNNER_TEMP/venv/bin/python" -m pytest -p no:cacheprovider -v tests/systemd
+
+      - name: The units' journal and the mux's log
+        if: failure()
+        run: |
+          sudo journalctl --no-pager -n 120 -u zet-muxd.socket -u zet-muxd.service || true
+          sudo cat /var/log/zet/muxd.log 2>/dev/null | tail -40 || true
+
+      - name: Stop the units
+        if: always()
+        run: sudo systemctl stop zet-muxd.socket zet-muxd.service || true

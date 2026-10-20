@@ -19,7 +19,7 @@
 # Usage: git diff --name-only BASE...HEAD | tools/ci_changes.sh
 set -uo pipefail
 
-readonly JOBS=(test integration coverage checks macos fuzz macos_e2e)
+readonly JOBS=(test integration coverage checks macos fuzz macos_e2e systemd)
 
 declare -A needed=()
 for job in "${JOBS[@]}"; do
@@ -49,20 +49,20 @@ while IFS= read -r path; do
         # The protocol core: everything links it, coverage measures it, the
         # fuzzers drive it, the macOS client is built on it.
         src/core/* | src/crypto/* | src/wire/* | src/session/*)
-            need test integration coverage checks macos fuzz macos_e2e ;;
+            need test integration coverage checks macos fuzz macos_e2e systemd ;;
 
         # zet_io and the layer above it: what the client and the agent are
         # made of. Not the fuzzers', not the coverage gate's.
         src/io/* | src/app/* | src/client/*)
-            need test integration checks macos macos_e2e ;;
+            need test integration checks macos macos_e2e systemd ;;
 
         # The agent is Linux-only, but the macOS client talks to it end to end.
         src/agent/*)
-            need test integration checks macos_e2e ;;
+            need test integration checks macos_e2e systemd ;;
 
         # zet-muxd: Linux-only, no macOS client path through it yet.
         src/mux/* | units/*)
-            need test integration checks ;;
+            need test integration checks systemd ;;
 
         tests/core/* | tests/crypto/* | tests/wire/* | tests/session/*)
             need test coverage checks macos ;;
@@ -71,9 +71,15 @@ while IFS= read -r path; do
             need test checks macos ;;
 
         # The macOS end-to-end suite stands on the Linux harness's host.
-        tests/integration/sshhost.py | tests/integration/host.py | \
-        tests/integration/harness.py | tests/integration/e2e.py)
+        tests/integration/sshhost.py | tests/integration/harness.py | \
+        tests/integration/e2e.py)
+            need integration macos_e2e systemd ;;
+
+        tests/integration/host.py)
             need integration macos_e2e ;;
+
+        tests/systemd/*)
+            need systemd ;;
 
         tests/integration/*)
             need integration ;;
