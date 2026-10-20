@@ -40,6 +40,7 @@ zet_add_fuzzer(sealed_frame_fuzz zet::wire zet::crypto)
 zet_add_fuzzer(handshake_fuzz zet::wire zet::crypto)
 zet_add_fuzzer(session_fuzz zet::session zet::crypto)
 zet_add_fuzzer(bootstrap_fuzz zet::session zet::crypto)
+zet_add_fuzzer(mux_fuzz zet::session zet::crypto)
 
 # One line per target: name, binary, seed corpus. file(GENERATE) is what
 # resolves $<TARGET_FILE>, so the runner never has to guess where the generator
