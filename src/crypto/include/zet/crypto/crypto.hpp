@@ -29,6 +29,10 @@ inline constexpr std::size_t CONTEXT_SIZE = 8;
 inline constexpr std::size_t MIN_HASH_SIZE = 16;
 inline constexpr std::size_t MAX_HASH_SIZE = 64;
 
+/// BLAKE2b-256: the width used for content-addressing the agent binary
+/// (design.md §4, "Доставка агента (M5.5)").
+inline constexpr std::size_t HASH256_SIZE = 32;
+
 /// Bounds crypto_kdf_derive_from_key imposes on what it will produce.
 inline constexpr std::size_t MIN_DERIVED_SIZE = 16;
 inline constexpr std::size_t MAX_DERIVED_SIZE = 64;

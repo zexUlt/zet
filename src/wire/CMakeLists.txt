@@ -5,6 +5,7 @@ add_library(zet_wire STATIC
     handshake.cpp
     key_schedule.cpp
     message.cpp
+    probe.cpp
     sealed_frame.cpp
 )
 add_library(zet::wire ALIAS zet_wire)
