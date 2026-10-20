@@ -13,25 +13,73 @@ env:
   ZET_APK_CACHE: ${{ github.workspace }}/../apk-cache
 
 jobs:
+  # Whether the change touches anything but documentation. The jobs below
+  # skip on a docs-only pull request rather than the workflow filtering by
+  # path: three of them are required checks, and a workflow that never runs
+  # leaves them missing and the pull request unmergeable, while a skipped
+  # job counts as passed. A push to trunk always runs everything.
+  changes:
+    name: changes
+    runs-on: ubuntu-24.04
+    outputs:
+      code: ${{ steps.diff.outputs.code }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Anything but documentation?
+        id: diff
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE: ${{ github.event.pull_request.base.sha }}
+        run: |
+          if [ "$EVENT" != "pull_request" ]; then
+            echo "code=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          changed=$(git diff --name-only "$BASE"...HEAD)
+          printf '%s\n' "$changed"
+          # Documentation: design.md and prior-art.md, every Markdown file,
+          # the agent rules. Anything else — sources, tests, CMake, gates,
+          # workflows — is code.
+          code=$(printf '%s\n' "$changed" | grep -v -E '^(docs/|\.claude/)|\.md$' | grep -c . || true)
+          if [ "$code" -gt 0 ]; then
+            echo "code=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "code=false" >> "$GITHUB_OUTPUT"
+            echo "documentation only: the build and test jobs skip"
+          fi
+
   test:
     name: test (${{ matrix.preset }})
+    needs: changes
+    # Not skipped at the job level: a skipped matrix job is never expanded,
+    # so the required "test (musl-dev)" and "test (musl-asan-ubsan)" would
+    # wait for ever. The job runs and its steps skip instead.
     runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:
         preset: [musl-dev, musl-asan-ubsan]
+    env:
+      CODE: ${{ needs.changes.outputs.code }}
     steps:
       - uses: actions/checkout@v4
+        if: env.CODE == 'true'
 
       - name: Restore the compiler cache
+        if: env.CODE == 'true'
         uses: ./.github/actions/ccache
         with:
           key: ${{ matrix.preset }}
 
       - name: Restore the Alpine packages
+        if: env.CODE == 'true'
         uses: ./.github/actions/apk
 
       - name: Build and test
+        if: env.CODE == 'true'
         run: tools/musl_build.sh ${{ matrix.preset }} test
 
   # design.md §16: a real sshd on localhost, a real pty, iptables for
@@ -39,6 +87,8 @@ jobs:
   # the other jobs stay as they are.
   integration:
     name: integration (${{ matrix.preset }})
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
@@ -60,6 +110,8 @@ jobs:
 
   coverage:
     name: coverage
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-24.04
     permissions:
       contents: read
@@ -122,6 +174,8 @@ jobs:
 
   checks:
     name: checks
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -300,6 +354,8 @@ jobs:
   # against a Linux agent by its own job.
   macos:
     name: macos
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: macos-14
     steps:
       - uses: actions/checkout@v4
