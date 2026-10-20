@@ -182,6 +182,10 @@
     {
       "name": "musl-release",
       "configurePreset": "musl-release"
+    },
+    {
+        "name": "macos-release",
+        "configurePreset": "macos-release"
     }
   ],
   "testPresets": [

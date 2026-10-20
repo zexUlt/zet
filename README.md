@@ -15,9 +15,9 @@ compatibility with EternalTerminal and no shared code with it.
 
 ## Install
 
-Download a release tarball from
-[GitHub Releases](https://github.com/zexUlt/zet/releases), verify its
-integrity, and unpack:
+Download a release tarball and `SHA256SUMS` from
+[GitHub Releases](https://github.com/zexUlt/zet/releases), verify them,
+and unpack:
 
 ```sh
 # Verify the build-provenance attestation (requires gh ≥ 2.49)
