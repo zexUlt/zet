@@ -33,7 +33,13 @@ constexpr std::string_view PROBE_VERSION_1 = "1";
     while (pos < line.size() && line.data()[pos] != ' ') {
         ++pos;
     }
-    return line.substr(start, pos - start);
+    // Use the pointer+length constructor instead of substr: substr's
+    // pos<=size() assertion (_LIBCPP_ASSERT_VALID_ELEMENT_ACCESS, enabled in
+    // _LIBCPP_HARDENING_MODE_EXTENSIVE) references __libcpp_verbose_abort.
+    // The assertion is not eliminable at -O0 because `start <= line.size()`
+    // requires range inference from the loop bound that the optimiser skips
+    // in non-Release builds.
+    return {line.data() + start, pos - start};
 }
 
 /// Parses `ZET-PROBE 1 <arch> exec|noexec` into `out`.  Returns true on
@@ -165,7 +171,13 @@ void ProbeScanner::EndLine() noexcept {
     if (StartsWith(line, FAILED_MARKER)) {
         // Reason string_view points into Line_; valid until next Feed.
         ReadyTag_ = ReadyTag::Failed;
-        ReadyReason_ = line.substr(FAILED_MARKER.size());
+        // Pointer+length, not substr: substr's pos<=size() assertion
+        // (_LIBCPP_ASSERT_VALID_ELEMENT_ACCESS in EXTENSIVE mode) is not
+        // provably dead at -O0 because the StartsWith guard is a separate
+        // non-inlined function, so the compiler cannot see that
+        // FAILED_MARKER.size() <= line.size() here.
+        ReadyReason_ = {line.data() + FAILED_MARKER.size(),
+                        line.size() - FAILED_MARKER.size()};
         return;
     }
 
