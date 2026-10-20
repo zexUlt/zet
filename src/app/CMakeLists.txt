@@ -5,10 +5,11 @@ add_library(zet_app STATIC
     byte_queue.cpp
     env.cpp
     fd_sink.cpp
+    mux_frames.cpp
     registration.cpp
 )
 add_library(zet::app ALIAS zet_app)
 
 target_include_directories(zet_app PUBLIC include)
 target_link_libraries(zet_app PRIVATE zet::core_options)
-target_link_libraries(zet_app PUBLIC zet::io zet::core zet::compile_options)
+target_link_libraries(zet_app PUBLIC zet::io zet::wire zet::core zet::compile_options)

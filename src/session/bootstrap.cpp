@@ -221,6 +221,13 @@ ChannelResult<std::optional<BootstrapResult>> BootstrapAgent::Consider(
                            .Environment = offer->Environment};
 }
 
+void BootstrapAgent::AnnouncePort(std::uint16_t port) noexcept {
+    Port_ = port;
+    if (Accept_) {
+        Accept_->Port = port;
+    }
+}
+
 ProtoResult<std::size_t> BootstrapAgent::WriteAccept(
     std::span<char> out) const noexcept {
     if (!Accept_) {

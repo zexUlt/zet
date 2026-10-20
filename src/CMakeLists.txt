@@ -14,6 +14,8 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" OR CMAKE_SYSTEM_NAME STREQUAL "Darwin")
     if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
         set(ZET_HAVE_AGENT ON PARENT_SCOPE)
         add_subdirectory(agent)
+        # zet-muxd (design.md §6): Linux only, like the agent it hands to.
+        add_subdirectory(mux)
     else()
         set(ZET_HAVE_AGENT OFF PARENT_SCOPE)
     endif()
