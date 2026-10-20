@@ -147,17 +147,17 @@ TEST_SUITE("ProbeScanner") {
         // FeedByteByByte would return a dangling view, so use a local scanner.
         ProbeScanner scanner;
         const std::string_view input = "ZET-PROBE 1 aarch64 exec\n";
-        std::optional<ProbeScan> LastScan;
+        std::optional<ProbeScan> lastScan;
         for (std::size_t i = 0; i < input.size(); ++i) {
             auto scan = scanner.Feed(AsBytes(input.substr(i, 1)));
             if (scan.Answer) {
-                LastScan = scan;
+                lastScan = scan;
                 break;
             }
         }
-        REQUIRE(LastScan.has_value());
-        REQUIRE(LastScan->Answer.has_value());
-        const auto* info = std::get_if<ProbeInfo>(&*LastScan->Answer);
+        REQUIRE(lastScan.has_value());
+        REQUIRE(lastScan->Answer.has_value());
+        const auto* info = std::get_if<ProbeInfo>(&*lastScan->Answer);
         REQUIRE(info != nullptr);
         CHECK(info->Arch == "aarch64");
     }
@@ -165,17 +165,17 @@ TEST_SUITE("ProbeScanner") {
     TEST_CASE("byte-by-byte: ZET-FAILED parsed") {
         ProbeScanner scanner;
         const std::string_view input = "ZET-FAILED size\n";
-        std::optional<ProbeScan> LastScan;
+        std::optional<ProbeScan> lastScan;
         for (std::size_t i = 0; i < input.size(); ++i) {
             auto scan = scanner.Feed(AsBytes(input.substr(i, 1)));
             if (scan.Answer) {
-                LastScan = scan;
+                lastScan = scan;
                 break;
             }
         }
-        REQUIRE(LastScan.has_value());
-        REQUIRE(LastScan->Answer.has_value());
-        const auto* f = std::get_if<ProbeFailed>(&*LastScan->Answer);
+        REQUIRE(lastScan.has_value());
+        REQUIRE(lastScan->Answer.has_value());
+        const auto* f = std::get_if<ProbeFailed>(&*lastScan->Answer);
         REQUIRE(f != nullptr);
         CHECK(f->Reason == "size");
     }

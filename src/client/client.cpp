@@ -361,6 +361,33 @@ std::string DeliveryCommand() {
     return "exec /bin/sh -c " + Quoted(INSTALLER_SCRIPT);
 }
 
+/// Writes all of `bytes` to the non-blocking pipe `fd`, using poll() to wait
+/// when the kernel buffer is full.  Returns false on a real write error or if
+/// `until` is reached before all bytes are sent.
+[[nodiscard]] bool WriteAllPipe(int fd, ByteSpan bytes,
+                                Timestamp until) noexcept {
+    std::size_t sent = 0;
+    while (sent < bytes.size()) {
+        const Timestamp now = io::MonotonicNow();
+        if (now >= until) {
+            return false;
+        }
+        const auto wr = io::WriteSome(
+            fd, ByteSpan{bytes.data() + sent, bytes.size() - sent});
+        if (!wr) {
+            if (!wr.error().WouldBlock()) {
+                return false;
+            }
+            pollfd pfd{.fd = fd, .events = POLLOUT, .revents = 0};
+            static_cast<void>(
+                ::poll(&pfd, 1, io::TimeoutMillis(Deadline{until}, now)));
+            continue;
+        }
+        sent += *wr;
+    }
+    return true;
+}
+
 /// Runs the probe exchange with the installer and delivers the agent binary
 /// if needed (design.md §4, "Доставка агента (M5.5)").  Returns any bytes
 /// that followed the last installer line — they belong to the bootstrap
@@ -454,14 +481,12 @@ std::optional<std::vector<std::byte>> DeliverAgent(Process& process,
 
     const std::string hashSize =
         HashHex(std::span{binary}) + " " + std::to_string(binary.size()) + "\n";
-    {
-        const auto wr = io::WriteSome(
+    if (!WriteAllPipe(
             process.In.Get(),
-            std::as_bytes(std::span{hashSize.data(), hashSize.size()}));
-        if (!wr || *wr != hashSize.size()) {
-            SayError("deliver", "could not send hash to installer");
-            return std::nullopt;
-        }
+            std::as_bytes(std::span{hashSize.data(), hashSize.size()}),
+            until)) {
+        SayError("deliver", "could not send hash to installer");
+        return std::nullopt;
     }
 
     // Stage 2: ZET-HAVE (cached) or ZET-SEND (needs binary)
@@ -479,16 +504,10 @@ std::optional<std::vector<std::byte>> DeliverAgent(Process& process,
     }
 
     if (needSend) {
-        std::size_t sent = 0;
-        while (sent < binary.size()) {
-            const auto wr = io::WriteSome(
-                process.In.Get(),
-                ByteSpan{binary.data() + sent, binary.size() - sent});
-            if (!wr) {
-                SayError("deliver", "could not send agent binary");
-                return std::nullopt;
-            }
-            sent += *wr;
+        if (!WriteAllPipe(process.In.Get(),
+                          ByteSpan{binary.data(), binary.size()}, until)) {
+            SayError("deliver", "could not send agent binary");
+            return std::nullopt;
         }
 
         // Stage 3: ZET-STORED or ZET-FAILED <reason>

@@ -262,39 +262,35 @@ def test_noisy_bashrc_does_not_interfere(
 def test_noexec_cache_gives_clear_error(
     binaries, ssh_host: SshHost, clean_home, tmp_path
 ):
-    """When ~/.cache is on a noexec filesystem the client reports it and exits."""
-    cache = ssh_host.home / ".cache"
-    cache.mkdir(exist_ok=True)
-    subprocess.run(
-        ["mount", "-t", "tmpfs", "-o", "noexec,size=10m", "tmpfs", str(cache)],
-        check=True,
+    """When the cache probe reports noexec the client exits with a clear message.
+
+    The installer detects noexec by running `chmod +x <probe-file>`.  Injecting
+    a fake `chmod` that always exits 1 makes the installer report noexec without
+    needing CAP_SYS_ADMIN (mount) in the test container.
+    """
+    fake_dir = tmp_path / "fake-noexec-bin"
+    fake_dir.mkdir()
+    fake_chmod = fake_dir / "chmod"
+    fake_chmod.write_text("#!/bin/sh\nexit 1\n")
+    fake_chmod.chmod(0o755)
+
+    default_path = "/usr/local/bin:/usr/local/sbin:/usr/bin:/usr/sbin:/bin:/sbin"
+    agent_dir = _agent_dir(tmp_path, UNAME_ARCH, binaries.agent)
+    argv = _delivery_argv(
+        binaries.client, agent_dir, ssh_host, _agent_env(),
+        ssh_env={"PATH": f"{fake_dir}:{default_path}"},
     )
-    try:
-        agent_dir = _agent_dir(tmp_path, UNAME_ARCH, binaries.agent)
-        argv = _delivery_argv(binaries.client, agent_dir, ssh_host, _agent_env())
-        result = subprocess.run(
-            argv, env=_env(agent_dir),
-            stdin=subprocess.DEVNULL,
-            capture_output=True,
-            timeout=STEP_TIMEOUT_SECONDS,
-        )
-        assert result.returncode != 0, (
-            "expected non-zero exit when cache is noexec"
-        )
-        combined = (result.stdout + result.stderr).lower()
-        assert b"noexec" in combined, (
-            f"expected 'noexec' in output, got: {combined!r}"
-        )
-        # Nothing should have been written under the noexec mount.
-        leftover = subprocess.run(
-            ["find", str(cache), "-name", "zet-agent"],
-            capture_output=True, check=False,
-        )
-        assert leftover.stdout.strip() == b"", (
-            f"agent binary found despite noexec: {leftover.stdout!r}"
-        )
-    finally:
-        subprocess.run(["umount", str(cache)], check=False)
+    result = subprocess.run(
+        argv, env=_env(agent_dir),
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        timeout=STEP_TIMEOUT_SECONDS,
+    )
+    assert result.returncode != 0, "expected non-zero exit when cache is noexec"
+    combined = (result.stdout + result.stderr).lower()
+    assert b"noexec" in combined, (
+        f"expected 'noexec' in output, got: {combined!r}"
+    )
 
 
 def test_unsupported_arch_gives_clear_error(

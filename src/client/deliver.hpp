@@ -47,7 +47,7 @@ inline constexpr std::string_view INSTALLER_SCRIPT =
     "printf 'exit 0' >\"$p\"; "
     "chmod +x \"$p\" && \"$p\" >/dev/null 2>&1 && x=exec || x=noexec; "
     "rm -f \"$p\"; "
-    "printf 'ZET-PROBE 1 %s %s\\n' \"$(uname -m)\" \"$x\"; "
+    "printf '\\nZET-PROBE 1 %s %s\\n' \"$(uname -m)\" \"$x\"; "
     "read -r hs || exit 1; "
     "h=${hs%% *}; "
     "s=${hs##* }; "

@@ -26,11 +26,13 @@ constexpr std::string_view PROBE_VERSION_1 = "1";
 /// past the token and any trailing space. Returns empty when none remains.
 [[nodiscard]] std::string_view Next(std::string_view line,
                                     std::size_t& pos) noexcept {
-    while (pos < line.size() && line[pos] == ' ') {
+    // Use .data()[pos] to avoid std::string_view::operator[]'s libc++ hardening
+    // bounds check, which would pull __libcpp_verbose_abort into wire objects.
+    while (pos < line.size() && line.data()[pos] == ' ') {
         ++pos;
     }
     const std::size_t start = pos;
-    while (pos < line.size() && line[pos] != ' ') {
+    while (pos < line.size() && line.data()[pos] != ' ') {
         ++pos;
     }
     return line.substr(start, pos - start);
@@ -67,8 +69,10 @@ constexpr std::string_view PROBE_VERSION_1 = "1";
 
 ProbeScan ProbeScanner::Feed(ByteSpan chunk) noexcept {
     Ready_.reset();
+    // Use .data()[i] instead of operator[] to avoid the libc++ hardening check
+    // that would introduce a __libcpp_verbose_abort reference (banned in wire).
     for (std::size_t i = 0; i < chunk.size(); ++i) {
-        const char c = static_cast<char>(chunk[i]);
+        const char c = static_cast<char>(chunk.data()[i]);
         if (c == '\n') {
             EndLine();
             if (Ready_) {
@@ -90,7 +94,8 @@ ProbeScan ProbeScanner::Feed(ByteSpan chunk) noexcept {
 void ProbeScanner::EndLine() noexcept {
     std::string_view line{Line_.data(), LineLength_};
     // A pty may turn \n into \r\n.
-    if (!line.empty() && line.back() == '\r') {
+    // Use .data()[size()-1] instead of .back() for the same reason.
+    if (!line.empty() && line.data()[line.size() - 1] == '\r') {
         line.remove_suffix(1);
     }
     const bool tooLong = LineTooLong_;
