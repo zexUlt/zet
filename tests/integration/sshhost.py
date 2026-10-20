@@ -85,16 +85,27 @@ def free_port(address: str = "127.0.0.1") -> int:
         return probe.getsockname()[1]
 
 
-def ensure_user() -> pwd.struct_passwd:
+def ensure_user(name: str = TEST_USER, shell: str = "/bin/bash") -> pwd.struct_passwd:
     try:
-        return pwd.getpwnam(TEST_USER)
+        return pwd.getpwnam(name)
     except KeyError:
         pass
-    _run(["adduser", "-D", "-s", "/bin/bash", TEST_USER])
+    _run(["adduser", "-D", "-s", shell, name])
     # adduser -D locks the account with '!', and sshd refuses a locked
     # account even for a public key. '*' has no password and is not locked.
-    _run(["chpasswd", "-e"], input=f"{TEST_USER}:*\n".encode())
-    return pwd.getpwnam(TEST_USER)
+    _run(["chpasswd", "-e"], input=f"{name}:*\n".encode())
+    return pwd.getpwnam(name)
+
+
+def authorize(user: pwd.struct_passwd, public_key: str) -> None:
+    """Lets `public_key` log in as `user`."""
+    ssh_dir = Path(user.pw_dir) / ".ssh"
+    ssh_dir.mkdir(mode=0o700, exist_ok=True)
+    os.chown(ssh_dir, user.pw_uid, user.pw_gid)
+    authorized = ssh_dir / "authorized_keys"
+    authorized.write_text(public_key)
+    os.chown(authorized, user.pw_uid, user.pw_gid)
+    authorized.chmod(0o600)
 
 
 @dataclass
@@ -108,19 +119,12 @@ def make_keys(work: Path, user: pwd.struct_passwd) -> Keys:
     keys = Keys(host=work / "host_key", client=work / "client_key")
     _run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", str(keys.host)])
     _run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", str(keys.client)])
-    home = Path(user.pw_dir)
-    ssh_dir = home / ".ssh"
-    ssh_dir.mkdir(mode=0o700, exist_ok=True)
-    os.chown(ssh_dir, user.pw_uid, user.pw_gid)
-    authorized = ssh_dir / "authorized_keys"
-    authorized.write_text((work / "client_key.pub").read_text())
-    os.chown(authorized, user.pw_uid, user.pw_gid)
-    authorized.chmod(0o600)
+    authorize(user, (work / "client_key.pub").read_text())
     return keys
 
 
 def write_sshd_config(work: Path, keys: Keys, home: Path, listen: str,
-                      port: int) -> Path:
+                      port: int, users: tuple[str, ...] = (TEST_USER,)) -> Path:
     config = work / "sshd_config"
     config.write_text(f"""\
 ListenAddress {listen}
@@ -132,7 +136,7 @@ PubkeyAuthentication yes
 PasswordAuthentication no
 KbdInteractiveAuthentication no
 PermitRootLogin no
-AllowUsers {TEST_USER}
+AllowUsers {' '.join(users)}
 LogLevel INFO
 # Debian and Ubuntu build bash to read ~/.bashrc when sshd runs a command;
 # Alpine's does not. BASH_ENV makes it, so the noisy rc file reaches the
@@ -148,7 +152,8 @@ AcceptEnv ZET_* ASAN_OPTIONS UBSAN_OPTIONS
 def write_client_config(path: Path, *, hostname: str, port: int,
                         identity: Path, known_hosts: Path,
                         host_public_key: str,
-                        known_hosts_as: Path | None = None) -> Path:
+                        known_hosts_as: Path | None = None,
+                        user: str = TEST_USER, alias: str = HOST_ALIAS) -> Path:
     """An ssh_config for the client side, written at `path`, with
     known_hosts written at `known_hosts`. The address, `identity` and
     `known_hosts_as` are as the client sees them, which in host mode is not as
@@ -156,10 +161,10 @@ def write_client_config(path: Path, *, hostname: str, port: int,
     known_hosts.write_text(f"[{hostname}]:{port} {host_public_key}")
     seen = known_hosts_as if known_hosts_as is not None else known_hosts
     path.write_text(f"""\
-Host {HOST_ALIAS}
+Host {alias}
     HostName {hostname}
     Port {port}
-    User {TEST_USER}
+    User {user}
     IdentityFile {identity}
     IdentitiesOnly yes
     UserKnownHostsFile {seen}
@@ -171,14 +176,15 @@ Host {HOST_ALIAS}
 
 
 def start_sshd(work: Path, keys: Keys, home: Path, listen: str,
-               port: int | None = None) -> tuple[subprocess.Popen, int]:
+               port: int | None = None,
+               users: tuple[str, ...] = (TEST_USER,)) -> tuple[subprocess.Popen, int]:
     """sshd in the foreground, listening, its log draining into
     work/sshd.log. Returns the sshd and the port. With no port given, picks
     a free one, and another if sshd finds it taken."""
     attempts = SSHD_START_ATTEMPTS if port is None else 1
     for attempt in range(attempts):
         chosen = port if port is not None else free_port(listen)
-        config = write_sshd_config(work, keys, home, listen, chosen)
+        config = write_sshd_config(work, keys, home, listen, chosen, users)
         # -D keeps it in the foreground, -e sends the log to stderr, which
         # is how the caller learns that it listens: no polling the port. A
         # taken port shows as sshd exiting before that line.
