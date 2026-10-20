@@ -13,15 +13,39 @@ the remote host and resumes byte for byte — nothing typed and nothing printed 
 lost. Written from scratch in C++23, with its own protocol; there is no wire
 compatibility with EternalTerminal and no shared code with it.
 
+## Install
+
+Download a release tarball from
+[GitHub Releases](https://github.com/zexUlt/zet/releases), verify its
+integrity, and unpack:
+
+```sh
+# Verify the build-provenance attestation (requires gh ≥ 2.49)
+gh attestation verify zet-X.Y.Z-linux-x86_64.tar.gz \
+    --repo zexUlt/zet
+
+# Verify the checksum
+sha256sum --check --ignore-missing SHA256SUMS
+
+# Unpack (adjust the tarball name for your platform and version)
+tar -C ~/.local -xzf zet-X.Y.Z-linux-x86_64.tar.gz --strip-components=1
+```
+
+After unpacking, `bin/zet` and `bin/zet-agent` land under the prefix you chose.
+Both are statically linked; no other dependencies are needed. `zet --version`
+prints the release version.
+
+The Linux tarballs carry agents for both `x86_64` and `aarch64` under
+`libexec/zet/`, so the client (M5.5) can bootstrap either server from any
+client machine.
+
 ## Status
 
 In development, usable on Linux. `zet` and `zet-agent` work end to end:
 bootstrap over ssh, a session that survives cuts byte for byte, vim and htop,
 an orphan timeout that reaps the shell (milestone M4). The client also builds
 and runs on macOS against a Linux agent. `zet-muxd`, one port per machine for
-every user's sessions, is in place and under verification (M5). There are no
-releases or packages yet: build from source, and put `zet-agent` on the
-remote host yourself — the client installing it is milestone M5.5.
+every user's sessions, is in place and under verification (M5).
 
 The roadmap and its acceptance criteria are in
 [docs/design.md](docs/design.md), §17.

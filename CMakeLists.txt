@@ -9,6 +9,36 @@ project(zet
     LANGUAGES CXX
 )
 
+# The release version is separate from the protocol version above. It comes
+# from the nearest v* tag via git describe: "v0.1.0" → "0.1.0" (exact tag),
+# "v0.1.0-3-gabcdef7" → "0.1.0-3-gabcdef7-dev" (post-tag commits), or the
+# fallback "0.0.0-dev" when .git is absent or no v* tag exists yet. This
+# string is what --version prints; the protocol version (VERSION = 1) is not
+# tied to it and is never compared across machines.
+find_package(Git QUIET)
+if(Git_FOUND AND EXISTS "${CMAKE_SOURCE_DIR}/.git")
+    execute_process(
+        COMMAND ${GIT_EXECUTABLE} describe --tags --match "v[0-9]*" --abbrev=7
+        WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+        OUTPUT_VARIABLE _ZET_GIT_DESCRIBE
+        ERROR_QUIET
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+    )
+else()
+    set(_ZET_GIT_DESCRIBE "")
+endif()
+
+if(_ZET_GIT_DESCRIBE MATCHES "^v([0-9]+\\.[0-9]+\\.[0-9]+)$")
+    # Exact tag: v0.1.0 → "0.1.0"
+    set(ZET_RELEASE_VERSION "${CMAKE_MATCH_1}")
+elseif(_ZET_GIT_DESCRIBE MATCHES "^v([0-9]+\\.[0-9]+\\.[0-9]+)-([0-9]+)-g([0-9a-f]+)(-dirty)?$")
+    # Post-tag build: v0.1.0-3-gabcdef7 → "0.1.0-3-gabcdef7-dev"
+    set(ZET_RELEASE_VERSION "${CMAKE_MATCH_1}-${CMAKE_MATCH_2}-${CMAKE_MATCH_3}-dev")
+else()
+    set(ZET_RELEASE_VERSION "0.0.0-dev")
+endif()
+unset(_ZET_GIT_DESCRIBE)
+
 if(PROJECT_SOURCE_DIR STREQUAL PROJECT_BINARY_DIR)
     message(FATAL_ERROR "In-source builds are not allowed. Use a preset: cmake --preset dev")
 endif()
@@ -51,6 +81,10 @@ option(ZET_BUILD_FUZZERS "Build the libFuzzer targets" OFF)
 include(cmake/CompileOptions.cmake)
 
 add_subdirectory(src)
+
+# Install rules depend on the executable targets defined in src/, so this
+# include must come after add_subdirectory(src).
+include(cmake/Install.cmake)
 
 if(ZET_BUILD_TESTS)
     enable_testing()

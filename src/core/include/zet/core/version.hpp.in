@@ -1,16 +1,24 @@
 #pragma once
 
 #include <cstdint>
+#include <string_view>
 
 namespace zet {
 
-/// The version of the whole tree: client, agent and mux ship together and are
-/// versioned as one number. It is not a semantic version — there is nothing to
-/// promise compatibility for per component, and the protocol negotiates its own
-/// range separately (design.md §7).
+/// Protocol version: the single integer negotiated during bootstrap
+/// (design.md §4, ver_min/ver_max). Client, agent and mux all ship together
+/// and speak the same protocol, so there is one number for the whole tree.
+/// The value is the first argument to project() in CMakeLists.txt.
 ///
-/// The value comes from the `project()` call in the top-level CMakeLists.txt,
-/// substituted here at configure time.
+/// This is NOT the release version shown by --version; see RELEASE_VERSION.
 inline constexpr std::uint32_t VERSION = @PROJECT_VERSION@;
+
+/// Release version string, derived from the nearest v* tag via git describe
+/// at configure time. Format: "X.Y.Z" on a tagged commit, "X.Y.Z-N-gHASH-dev"
+/// for post-tag builds, or "0.0.0-dev" when .git is absent or no tag exists.
+///
+/// This is what --version prints. It is never compared across machines: the
+/// protocol uses VERSION (above), which is negotiated explicitly.
+inline constexpr std::string_view RELEASE_VERSION = "@ZET_RELEASE_VERSION@";
 
 }  // namespace zet
