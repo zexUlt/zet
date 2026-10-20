@@ -3,6 +3,7 @@
 #include <doctest/doctest.h>
 #include <fcntl.h>
 #include <sys/epoll.h>
+#include <sys/resource.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
@@ -43,6 +44,10 @@ int RunFiltered(TBody&& body) {
     const pid_t child = ::fork();
     REQUIRE(child >= 0);
     if (child == 0) {
+        // A process the filter kills dumps core like any other; this one is
+        // meant to die, and leaves no file behind for it.
+        const rlimit noCore{.rlim_cur = 0, .rlim_max = 0};
+        static_cast<void>(::setrlimit(RLIMIT_CORE, &noCore));
         if (!InstallSeccomp(ESeccompProfile::NoFileOperations)) {
             ::_exit(InstallFailed);
         }
