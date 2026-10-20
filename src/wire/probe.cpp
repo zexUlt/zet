@@ -69,16 +69,43 @@ constexpr std::string_view PROBE_VERSION_1 = "1";
 }  // namespace
 
 ProbeScan ProbeScanner::Feed(ByteSpan chunk) noexcept {
-    Ready_.reset();
+    ReadyTag_ = ReadyTag::None;
     // Use .data()[i] instead of operator[] to avoid the libc++ hardening check
     // that would introduce a __libcpp_verbose_abort reference (banned in wire).
     for (std::size_t i = 0; i < chunk.size(); ++i) {
         const char c = static_cast<char>(chunk.data()[i]);
         if (c == '\n') {
             EndLine();
-            if (Ready_) {
-                return ProbeScan{.Consumed = i + 1,
-                                 .Answer = std::move(Ready_)};
+            // Build ProbeScan directly from bare payload types — not from
+            // the ReadyTag_ field via optional copy/move — so that
+            // optional(U&&) (the single-arg converting constructor) is used
+            // rather than optional(optional&&), which would route through
+            // operator* and reference __libcpp_verbose_abort in hardened mode.
+            const std::size_t consumed = i + 1;
+            switch (ReadyTag_) {
+                case ReadyTag::Info:
+                    ReadyTag_ = ReadyTag::None;
+                    return ProbeScan{
+                        .Consumed = consumed,
+                        .Answer = ProbeInfo{ReadyArch_, ReadyNoExec_}};
+                case ReadyTag::Have:
+                    ReadyTag_ = ReadyTag::None;
+                    return ProbeScan{.Consumed = consumed,
+                                     .Answer = ProbeHave{}};
+                case ReadyTag::Send:
+                    ReadyTag_ = ReadyTag::None;
+                    return ProbeScan{.Consumed = consumed,
+                                     .Answer = ProbeSend{}};
+                case ReadyTag::Stored:
+                    ReadyTag_ = ReadyTag::None;
+                    return ProbeScan{.Consumed = consumed,
+                                     .Answer = ProbeStored{}};
+                case ReadyTag::Failed:
+                    ReadyTag_ = ReadyTag::None;
+                    return ProbeScan{.Consumed = consumed,
+                                     .Answer = ProbeFailed{ReadyReason_}};
+                case ReadyTag::None:
+                    break;
             }
             continue;
         }
@@ -117,24 +144,28 @@ void ProbeScanner::EndLine() noexcept {
     ProbeInfo probeInfo{};
     if (ParseProbe(line, probeInfo)) {
         // Arch string_view points into Line_; valid until next Feed.
-        Ready_ = ProbeAnswer{probeInfo};
+        ReadyTag_ = ReadyTag::Info;
+        ReadyArch_ = probeInfo.Arch;
+        ReadyNoExec_ = probeInfo.NoExec;
         return;
     }
 
     if (line == HAVE_MARKER) {
-        Ready_ = ProbeAnswer{ProbeHave{}};
+        ReadyTag_ = ReadyTag::Have;
         return;
     }
     if (line == SEND_MARKER) {
-        Ready_ = ProbeAnswer{ProbeSend{}};
+        ReadyTag_ = ReadyTag::Send;
         return;
     }
     if (line == STORED_MARKER) {
-        Ready_ = ProbeAnswer{ProbeStored{}};
+        ReadyTag_ = ReadyTag::Stored;
         return;
     }
     if (StartsWith(line, FAILED_MARKER)) {
-        Ready_ = ProbeAnswer{ProbeFailed{line.substr(FAILED_MARKER.size())}};
+        // Reason string_view points into Line_; valid until next Feed.
+        ReadyTag_ = ReadyTag::Failed;
+        ReadyReason_ = line.substr(FAILED_MARKER.size());
         return;
     }
 

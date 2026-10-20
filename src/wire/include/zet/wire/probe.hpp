@@ -83,7 +83,26 @@ private:
     std::array<char, MAX_PROBE_LINE> Line_{};
     std::size_t LineLength_{0};
     bool LineTooLong_{false};
-    std::optional<ProbeAnswer> Ready_;
+
+    // Pending answer from the most recent EndLine call.  A plain tag +
+    // payload instead of std::optional<ProbeAnswer> because optional's
+    // copy/move constructors and operator= route through operator*, which in
+    // libc++ hardened mode (_LIBCPP_HARDENING_MODE_EXTENSIVE) unconditionally
+    // references __libcpp_verbose_abort — banned in wire objects by
+    // check_no_abort.sh.
+    enum class ReadyTag : std::uint8_t {
+        None,
+        Info,
+        Have,
+        Send,
+        Stored,
+        Failed,
+    };
+    ReadyTag ReadyTag_{ReadyTag::None};
+    std::string_view ReadyArch_{};
+    bool ReadyNoExec_{false};
+    std::string_view ReadyReason_{};
+
     std::uint64_t Skipped_{0};
 };
 
