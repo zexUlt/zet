@@ -12,10 +12,13 @@ add_library(zet_io STATIC
 )
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     target_sources(zet_io PRIVATE
+        activation.cpp
         daemon.cpp
         poller_epoll.cpp
         pty.cpp
+        seccomp.cpp
         spawn.cpp
+        unix.cpp
     )
 elseif(CMAKE_SYSTEM_NAME STREQUAL "Darwin")
     target_sources(zet_io PRIVATE
