@@ -90,9 +90,14 @@ def ensure_user(name: str = TEST_USER, shell: str = "/bin/bash") -> pwd.struct_p
         return pwd.getpwnam(name)
     except KeyError:
         pass
-    _run(["adduser", "-D", "-s", shell, name])
-    # adduser -D locks the account with '!', and sshd refuses a locked
-    # account even for a public key. '*' has no password and is not locked.
+    if os.path.exists("/etc/alpine-release"):
+        _run(["adduser", "-D", "-s", shell, name])
+    else:
+        # The systemd suite runs on the Ubuntu runner itself, whose adduser
+        # is a different program; useradd is the same on every glibc distro.
+        _run(["useradd", "--create-home", "--shell", shell, name])
+    # Both lock a new account with '!', and sshd refuses a locked account
+    # even for a public key. '*' has no password and is not locked.
     _run(["chpasswd", "-e"], input=f"{name}:*\n".encode())
     return pwd.getpwnam(name)
 
