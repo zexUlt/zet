@@ -74,7 +74,7 @@ constexpr std::array FILE_OPERATIONS{
 #ifdef __NR_chmod
     __NR_chmod,
 #endif
-    __NR_fchmod,    __NR_fchmodat,
+    __NR_fchmod,         __NR_fchmodat,
 #ifdef __NR_fchmodat2
     __NR_fchmodat2,
 #endif
@@ -84,7 +84,13 @@ constexpr std::array FILE_OPERATIONS{
 #ifdef __NR_lchown
     __NR_lchown,
 #endif
-    __NR_fchown,    __NR_fchownat, __NR_truncate,
+    __NR_fchown,         __NR_fchownat,       __NR_truncate,
+// io_uring submits openat, unlinkat, renameat and the rest as ring entries,
+// never through the numbers above: allowed, it is a way around all of them.
+// Nothing in the mux needs it.
+#ifdef __NR_io_uring_setup
+    __NR_io_uring_setup, __NR_io_uring_enter, __NR_io_uring_register,
+#endif
 };
 
 constexpr std::array EXECUTION{__NR_execve, __NR_execveat};

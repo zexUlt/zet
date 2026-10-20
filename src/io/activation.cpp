@@ -62,6 +62,12 @@ IoResult<ActivatedSockets> TakeActivatedSockets() noexcept {
     for (std::size_t i = 0; i < count; ++i) {
         UniqueFd fd{FIRST_ACTIVATED_FD + static_cast<int>(i)};
         if (auto prepared = PrepareDescriptor(fd.Get()); !prepared) {
+            // The ones not reached yet are ours too: systemd handed them over,
+            // and nothing else will close them.
+            for (std::size_t rest = i + 1; rest < count; ++rest) {
+                static_cast<void>(
+                    ::close(FIRST_ACTIVATED_FD + static_cast<int>(rest)));
+            }
             return std::unexpected(prepared.error());
         }
         sockets.Items.at(i) = std::move(fd);

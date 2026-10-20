@@ -230,6 +230,55 @@ TEST_CASE("more than one descriptor in a message is refused and closed") {
     REQUIRE(::sigaction(SIGPIPE, &previous, nullptr) == 0);
 }
 
+TEST_CASE("descriptors beyond the control buffer are refused and closed") {
+    // More than ReceiveWithFd has room for: the kernel delivers what fits,
+    // closes the rest and sets MSG_CTRUNC. What did arrive must be closed too.
+    constexpr std::size_t sent = 5;
+    auto pair = MakeSocketPair();
+    REQUIRE(pair.has_value());
+    std::array<Pipe, sent> pipes{};
+    std::array<int, sent> fds{};
+    for (std::size_t i = 0; i < sent; ++i) {
+        auto made = MakePipe();
+        REQUIRE(made.has_value());
+        pipes.at(i) = std::move(*made);
+        fds.at(i) = pipes.at(i).Read.Get();
+    }
+    char byte = 'x';
+    iovec chunk{.iov_base = &byte, .iov_len = 1};
+    alignas(cmsghdr) std::array<char, CMSG_SPACE(sizeof(fds))> control{};
+    msghdr message{};
+    message.msg_iov = &chunk;
+    message.msg_iovlen = 1;
+    message.msg_control = control.data();
+    message.msg_controllen = control.size();
+    cmsghdr* header = CMSG_FIRSTHDR(&message);
+    header->cmsg_level = SOL_SOCKET;
+    header->cmsg_type = SCM_RIGHTS;
+    header->cmsg_len = CMSG_LEN(sizeof(fds));
+    std::memcpy(CMSG_DATA(header), fds.data(), sizeof(fds));
+    REQUIRE(::sendmsg(pair->First.Get(), &message, 0) == 1);
+
+    for (auto& pipe : pipes) {
+        pipe.Read.Reset();
+    }
+    struct sigaction ignore{};
+    ignore.sa_handler = SIG_IGN;
+    struct sigaction previous{};
+    REQUIRE(::sigaction(SIGPIPE, &ignore, &previous) == 0);
+    std::array<std::byte, 8> buffer{};
+    const auto got = ReceiveWithFd(pair->Second.Get(), MutableByteSpan{buffer});
+    REQUIRE_FALSE(got.has_value());
+    CHECK(got.error().Code == EBADMSG);
+    // Every read end is gone: none of the copies survived the refusal.
+    for (const auto& pipe : pipes) {
+        const auto written = ::write(pipe.Write.Get(), "y", 1);
+        CHECK(written == -1);
+        CHECK(errno == EPIPE);
+    }
+    REQUIRE(::sigaction(SIGPIPE, &previous, nullptr) == 0);
+}
+
 TEST_CASE("CheckDirectory wants a directory, its owner and its exact mode") {
     const ScratchDirectory scratch;
     const std::string inner = scratch.In("inner");
