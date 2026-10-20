@@ -99,6 +99,11 @@ jobs:
           # sshd's privilege separation directory; the runner's own sshd is
           # not running, ours starts on a free port.
           sudo mkdir -p /run/sshd
+          # The suite's two test users, made here rather than by the suite:
+          # under pytest useradd hung past its 30-second step on the runner.
+          for user in zettest zettest2; do
+            time sudo timeout 60 useradd --create-home --shell /bin/bash "$user"
+          done
 
       - name: Run the systemd suite
         run: |
