@@ -6,6 +6,8 @@ FetchContent_Declare(doctest
     GIT_SHALLOW TRUE
     SYSTEM
 )
+# Prevent doctest from installing its headers and CMake files into our prefix.
+set(DOCTEST_NO_INSTALL ON)
 FetchContent_MakeAvailable(doctest)
 
 add_executable(zet_tests

@@ -9,6 +9,76 @@ project(zet
     LANGUAGES CXX
 )
 
+# The release version is separate from the protocol version above. It comes
+# from the nearest v* tag via git describe: "v0.1.0" → "0.1.0" (exact tag),
+# "v0.1.0-3-gabcdef7" → "0.1.0-3-gabcdef7-dev" (post-tag commits), or the
+# fallback "0.0.0-dev" when .git is absent or no v* tag exists yet. This
+# string is what --version prints; the protocol version (VERSION = 1) is not
+# tied to it and is never compared across machines.
+#
+# Callers may pin the version explicitly via the ZET_RELEASE_VERSION
+# environment variable. git describe itself is invoked with -c safe.directory
+# so it works inside the Alpine container (Docker as root, repo owned by the
+# runner uid); ZET_RELEASE_VERSION remains a last-resort override.
+if(DEFINED ENV{ZET_RELEASE_VERSION} AND NOT "$ENV{ZET_RELEASE_VERSION}" STREQUAL "")
+    set(ZET_RELEASE_VERSION "$ENV{ZET_RELEASE_VERSION}")
+else()
+    find_package(Git QUIET)
+    if(Git_FOUND AND EXISTS "${CMAKE_SOURCE_DIR}/.git")
+        # -c safe.directory lets git run when the repo is owned by a different
+        # uid (e.g. inside the Alpine container where Docker runs as root but
+        # the checkout belongs to the runner uid).
+        #
+        # --match 'v[0-9]*.[0-9]*.[0-9]*' --exclude '*-*' ensures pre-release
+        # tags (v0.1.0-alpha, v0.1.0-rc1) are never treated as the nearest
+        # stable tag, which would give post-tag builds misleading distances.
+        execute_process(
+            COMMAND ${GIT_EXECUTABLE} -c "safe.directory=${CMAKE_SOURCE_DIR}"
+                    describe --tags
+                    --match "v[0-9]*.[0-9]*.[0-9]*" --exclude "*-*"
+                    --abbrev=7
+            WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+            OUTPUT_VARIABLE _ZET_GIT_DESCRIBE
+            ERROR_QUIET
+            OUTPUT_STRIP_TRAILING_WHITESPACE
+        )
+        # cmake re-runs configure whenever HEAD or the tag database changes.
+        # git rev-parse --git-dir resolves the real git dir for worktrees
+        # (where .git is a file pointing elsewhere).
+        execute_process(
+            COMMAND ${GIT_EXECUTABLE} -c "safe.directory=${CMAKE_SOURCE_DIR}"
+                    rev-parse --git-dir
+            WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+            OUTPUT_VARIABLE _ZET_GIT_DIR
+            ERROR_QUIET
+            OUTPUT_STRIP_TRAILING_WHITESPACE
+        )
+        if(NOT IS_ABSOLUTE "${_ZET_GIT_DIR}")
+            set(_ZET_GIT_DIR "${CMAKE_SOURCE_DIR}/${_ZET_GIT_DIR}")
+        endif()
+        foreach(_dep IN ITEMS HEAD packed-refs)
+            if(EXISTS "${_ZET_GIT_DIR}/${_dep}")
+                set_property(DIRECTORY APPEND PROPERTY
+                    CMAKE_CONFIGURE_DEPENDS "${_ZET_GIT_DIR}/${_dep}")
+            endif()
+        endforeach()
+        unset(_ZET_GIT_DIR)
+    else()
+        set(_ZET_GIT_DESCRIBE "")
+    endif()
+
+    if(_ZET_GIT_DESCRIBE MATCHES "^v([0-9]+\\.[0-9]+\\.[0-9]+)$")
+        # Exact tag: v0.1.0 → "0.1.0"
+        set(ZET_RELEASE_VERSION "${CMAKE_MATCH_1}")
+    elseif(_ZET_GIT_DESCRIBE MATCHES "^v([0-9]+\\.[0-9]+\\.[0-9]+)-([0-9]+)-g([0-9a-f]+)$")
+        # Post-tag build: v0.1.0-3-gabcdef7 → "0.1.0-3-gabcdef7-dev"
+        set(ZET_RELEASE_VERSION "${CMAKE_MATCH_1}-${CMAKE_MATCH_2}-${CMAKE_MATCH_3}-dev")
+    else()
+        set(ZET_RELEASE_VERSION "0.0.0-dev")
+    endif()
+    unset(_ZET_GIT_DESCRIBE)
+endif()
+
 if(PROJECT_SOURCE_DIR STREQUAL PROJECT_BINARY_DIR)
     message(FATAL_ERROR "In-source builds are not allowed. Use a preset: cmake --preset dev")
 endif()
@@ -51,6 +121,10 @@ option(ZET_BUILD_FUZZERS "Build the libFuzzer targets" OFF)
 include(cmake/CompileOptions.cmake)
 
 add_subdirectory(src)
+
+# Install rules depend on the executable targets defined in src/, so this
+# include must come after add_subdirectory(src).
+include(cmake/Install.cmake)
 
 if(ZET_BUILD_TESTS)
     enable_testing()

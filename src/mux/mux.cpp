@@ -29,6 +29,7 @@
 #include "zet/app/mux_frames.hpp"
 #include "zet/app/registration.hpp"
 #include "zet/core/byte_reader.hpp"
+#include "zet/core/version.hpp"
 #include "zet/crypto/crypto.hpp"
 #include "zet/io/activation.hpp"
 #include "zet/io/clock.hpp"
@@ -93,7 +94,8 @@ constexpr int DECIMAL = 10;
 
 constexpr std::string_view USAGE =
     "usage: zet-muxd [--port N]\n"
-    "The TCP port comes from systemd socket activation, or from --port.\n";
+    "The TCP port comes from systemd socket activation, or from --port.\n"
+    "  --version       print the release version and exit\n";
 
 void Say(std::string_view text) noexcept {
     static_cast<void>(::write(STDERR_FILENO, text.data(), text.size()));
@@ -214,6 +216,7 @@ session::PeerAddress PeerOf(int fd) noexcept {
 }
 
 struct Config {
+    bool PrintVersion{false};
     std::optional<std::uint16_t> Port;
 };
 
@@ -229,6 +232,9 @@ std::optional<Config> ReadConfig(std::span<char*> args) {
                 return std::nullopt;
             }
             config.Port = static_cast<std::uint16_t>(port);
+        } else if (arg == "--version") {
+            config.PrintVersion = true;
+            return config;
         } else {
             return std::nullopt;
         }
@@ -831,6 +837,16 @@ int Main(std::span<char*> args) noexcept {
     if (!config) {
         Say(USAGE);
         return USAGE_STATUS;
+    }
+    if (config->PrintVersion) {
+        constexpr std::string_view prefix = "zet-muxd ";
+        const bool ok = ::write(STDOUT_FILENO, prefix.data(), prefix.size()) ==
+                            static_cast<ssize_t>(prefix.size()) &&
+                        ::write(STDOUT_FILENO, zet::RELEASE_VERSION.data(),
+                                zet::RELEASE_VERSION.size()) ==
+                            static_cast<ssize_t>(zet::RELEASE_VERSION.size()) &&
+                        ::write(STDOUT_FILENO, "\n", 1) == 1;
+        return ok ? 0 : FAILURE_STATUS;
     }
     if (!crypto::Init()) {
         SayError("crypto", "libsodium did not initialise");
