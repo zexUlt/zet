@@ -194,12 +194,13 @@ def test_different_binary_replaces_and_old_dir_removed(
 def test_mid_transfer_kill_leaves_only_part_file(
     binaries, ssh_host: SshHost, clean_home, tmp_path
 ):
-    """Killing ssh mid-transfer leaves a .part file but no zet-agent."""
+    """Killing the delivery process leaves no zet-agent in the cache."""
     agent_dir = _agent_dir(tmp_path, UNAME_ARCH, binaries.agent)
 
-    # Run the installer manually via ssh -T, kill the ssh after the probe line
-    # but before the binary is fully written, by feeding only the hash+size
-    # and then closing stdin (simulates a truncated transfer).
+    # Start the delivery and kill it very quickly so it is interrupted before
+    # the installer can rename .part to zet-agent.  A 10 ms window is safely
+    # shorter than the SSH handshake, so delivery never completes and the
+    # invariant is easy to verify: no zet-agent, any partial state cleaned.
     #
     # We drive this at the shell level: start the installer, read ZET-PROBE,
     # send the hash+size line, send only half the binary, then kill.
