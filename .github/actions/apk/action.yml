@@ -11,4 +11,4 @@ runs:
     - uses: actions/cache@v4
       with:
         path: ${{ github.workspace }}/../apk-cache
-        key: apk-${{ runner.os }}-${{ hashFiles('tools/alpine-packages.txt', 'tools/integration-packages.txt', 'tools/in_alpine.sh') }}
+        key: apk-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('tools/alpine-packages.txt', 'tools/integration-packages.txt', 'tools/in_alpine.sh') }}
