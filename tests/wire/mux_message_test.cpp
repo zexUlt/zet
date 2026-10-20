@@ -80,7 +80,7 @@ TEST_CASE("a registration survives a round trip and stays a secret") {
     const MuxRegisterMessage message{.Registration = Registration(3)};
     const auto bytes =
         Encode([&](ByteWriter& w) { return WriteMuxRegister(w, message); });
-    CHECK(bytes.front() == std::byte{0x30});
+    CHECK(bytes.front() == std::byte{0x20});
     auto reader = Body(bytes, EMessageType::MuxRegister);
     const auto parsed = ParseMuxRegister(reader);
     REQUIRE(parsed.has_value());
@@ -139,7 +139,7 @@ TEST_CASE("a refusal carries one of its reasons and nothing else") {
     }
     for (const std::uint8_t reason : std::array<std::uint8_t, 3>{0, 4, 0xFF}) {
         CAPTURE(reason);
-        const std::vector<std::byte> bytes{std::byte{0x32},
+        const std::vector<std::byte> bytes{std::byte{0x22},
                                            static_cast<std::byte>(reason)};
         auto reader = Body(bytes, EMessageType::MuxRefused);
         CHECK(ParseMuxRefused(reader).error() == EProtoError::MalformedField);
@@ -151,10 +151,10 @@ TEST_CASE("a refusal carries one of its reasons and nothing else") {
                   MuxRefusedMessage{.Reason = static_cast<EMuxRefusal>(reason)})
                   .error() == EProtoError::MalformedField);
     }
-    const std::vector<std::byte> empty{std::byte{0x32}};
+    const std::vector<std::byte> empty{std::byte{0x22}};
     auto emptyReader = Body(empty, EMessageType::MuxRefused);
     CHECK(ParseMuxRefused(emptyReader).error() == EProtoError::Truncated);
-    const std::vector<std::byte> longer{std::byte{0x32}, std::byte{1},
+    const std::vector<std::byte> longer{std::byte{0x22}, std::byte{1},
                                         std::byte{0}};
     auto longReader = Body(longer, EMessageType::MuxRefused);
     CHECK(ParseMuxRefused(longReader).error() == EProtoError::MalformedField);
@@ -212,7 +212,7 @@ TEST_CASE("a handoff whose length lies is refused") {
               static_cast<std::uint16_t>(MAX_HANDOFF_PREFIX + 1)}) {
             CAPTURE(length);
             std::vector<std::byte> lying{
-                std::byte{0x33}, static_cast<std::byte>(length >> 8U),
+                std::byte{0x23}, static_cast<std::byte>(length >> 8U),
                 static_cast<std::byte>(length & 0xFFU)};
             auto reader = Body(lying, EMessageType::MuxHandoff);
             CHECK(ParseMuxHandoff(reader).error() ==
@@ -220,7 +220,7 @@ TEST_CASE("a handoff whose length lies is refused") {
         }
     }
     SUBCASE("no length at all") {
-        const std::vector<std::byte> bare{std::byte{0x33}, std::byte{0}};
+        const std::vector<std::byte> bare{std::byte{0x23}, std::byte{0}};
         auto reader = Body(bare, EMessageType::MuxHandoff);
         CHECK(ParseMuxHandoff(reader).error() == EProtoError::Truncated);
     }
@@ -327,13 +327,13 @@ TEST_CASE("PeekHello refuses what is not a cleartext Hello") {
 
 TEST_CASE("the mux range is known; the type after it is not") {
     for (const std::uint8_t type :
-         std::array<std::uint8_t, 4>{0x30, 0x31, 0x32, 0x33}) {
+         std::array<std::uint8_t, 4>{0x20, 0x21, 0x22, 0x23}) {
         CAPTURE(type);
         const std::vector<std::byte> bytes{static_cast<std::byte>(type)};
         ByteReader reader{ByteSpan{bytes}};
         CHECK(ParseMessageType(reader).has_value());
     }
-    const std::vector<std::byte> next{std::byte{0x34}};
+    const std::vector<std::byte> next{std::byte{0x24}};
     ByteReader reader{ByteSpan{next}};
     CHECK(ParseMessageType(reader).error() == EProtoError::UnknownMessageType);
 }

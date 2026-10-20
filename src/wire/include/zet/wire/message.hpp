@@ -51,10 +51,10 @@ enum class EMessageType : std::uint8_t {
     // The local socket between zet-muxd and the agents (§6): cleartext, and on
     // /run/zet/mux.sock only. On TCP the handshake and the channel refuse
     // them like the bootstrap's.
-    MuxRegister = 0x30,
-    MuxRegistered = 0x31,
-    MuxRefused = 0x32,
-    MuxHandoff = 0x33,
+    MuxRegister = 0x20,
+    MuxRegistered = 0x21,
+    MuxRefused = 0x22,
+    MuxHandoff = 0x23,
 };
 
 /// Upper bound on the stream bytes a Data message may carry (§7).
@@ -390,7 +390,7 @@ inline constexpr std::size_t MAX_HANDOFF_PREFIX =
 
 /// One TCP connection handed to the agent (§6). On the stream:
 ///
-///     frame header ‖ 0x33 ‖ prefix_len:u16be ‖ prefix[prefix_len]
+///     frame header ‖ 0x23 ‖ prefix_len:u16be ‖ prefix[prefix_len]
 ///
 /// in one frame, and the connection's descriptor rides as SCM_RIGHTS on the
 /// sendmsg that carries the frame's first byte. The prefix is what the mux
