@@ -13,43 +13,26 @@ env:
   ZET_APK_CACHE: ${{ github.workspace }}/../apk-cache
 
 jobs:
-  # Whether the change touches anything but documentation. The jobs below
-  # skip on a docs-only pull request rather than the workflow filtering by
-  # path: three of them are required checks, and a workflow that never runs
-  # leaves them missing and the pull request unmergeable, while a skipped
-  # job counts as passed. A push to trunk always runs everything.
+  # Which jobs this change needs (tools/ci_changes.sh). A job that is not
+  # needed skips rather than the workflow filtering by path: the jobs below
+  # are required checks, a workflow that never runs leaves them missing and
+  # the pull request unmergeable, and a skipped job counts as passed. Pushes
+  # to trunk run everything.
   changes:
     name: changes
     runs-on: ubuntu-24.04
     outputs:
-      code: ${{ steps.diff.outputs.code }}
+      test: ${{ steps.changes.outputs.test }}
+      integration: ${{ steps.changes.outputs.integration }}
+      coverage: ${{ steps.changes.outputs.coverage }}
+      checks: ${{ steps.changes.outputs.checks }}
+      macos: ${{ steps.changes.outputs.macos }}
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-
-      - name: Anything but documentation?
-        id: diff
-        env:
-          EVENT: ${{ github.event_name }}
-          BASE: ${{ github.event.pull_request.base.sha }}
-        run: |
-          if [ "$EVENT" != "pull_request" ]; then
-            echo "code=true" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          changed=$(git diff --name-only "$BASE"...HEAD)
-          printf '%s\n' "$changed"
-          # Documentation: design.md and prior-art.md, every Markdown file,
-          # the agent rules. Anything else — sources, tests, CMake, gates,
-          # workflows — is code.
-          code=$(printf '%s\n' "$changed" | grep -v -E '^(docs/|\.claude/)|\.md$' | grep -c . || true)
-          if [ "$code" -gt 0 ]; then
-            echo "code=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "code=false" >> "$GITHUB_OUTPUT"
-            echo "documentation only: the build and test jobs skip"
-          fi
+      - id: changes
+        uses: ./.github/actions/changes
 
   test:
     name: test (${{ matrix.preset }})
@@ -63,23 +46,23 @@ jobs:
       matrix:
         preset: [musl-dev, musl-asan-ubsan]
     env:
-      CODE: ${{ needs.changes.outputs.code }}
+      NEEDED: ${{ needs.changes.outputs.test }}
     steps:
       - uses: actions/checkout@v4
-        if: env.CODE == 'true'
+        if: env.NEEDED == 'true'
 
       - name: Restore the compiler cache
-        if: env.CODE == 'true'
+        if: env.NEEDED == 'true'
         uses: ./.github/actions/ccache
         with:
           key: ${{ matrix.preset }}
 
       - name: Restore the Alpine packages
-        if: env.CODE == 'true'
+        if: env.NEEDED == 'true'
         uses: ./.github/actions/apk
 
       - name: Build and test
-        if: env.CODE == 'true'
+        if: env.NEEDED == 'true'
         run: tools/musl_build.sh ${{ matrix.preset }} test
 
   # design.md §16: a real sshd on localhost, a real pty, iptables for
@@ -88,30 +71,37 @@ jobs:
   integration:
     name: integration (${{ matrix.preset }})
     needs: changes
-    if: needs.changes.outputs.code == 'true'
+    # Steps skip, not the job: a skipped matrix job never expands into the
+    # names a required check waits for (see test above).
     runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:
         preset: [musl-dev, musl-asan-ubsan]
+    env:
+      NEEDED: ${{ needs.changes.outputs.integration }}
     steps:
       - uses: actions/checkout@v4
+        if: env.NEEDED == 'true'
 
       - name: Restore the compiler cache
+        if: env.NEEDED == 'true'
         uses: ./.github/actions/ccache
         with:
           key: ${{ matrix.preset }}
 
       - name: Restore the Alpine packages
+        if: env.NEEDED == 'true'
         uses: ./.github/actions/apk
 
       - name: Build and run the integration suite
+        if: env.NEEDED == 'true'
         run: tools/integration.sh ${{ matrix.preset }} -rs
 
   coverage:
     name: coverage
     needs: changes
-    if: needs.changes.outputs.code == 'true'
+    if: needs.changes.outputs.coverage == 'true'
     runs-on: ubuntu-24.04
     permissions:
       contents: read
@@ -175,7 +165,7 @@ jobs:
   checks:
     name: checks
     needs: changes
-    if: needs.changes.outputs.code == 'true'
+    if: needs.changes.outputs.checks == 'true'
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -223,6 +213,9 @@ jobs:
 
       - name: Nothing sleeps
         run: tools/check_no_sleep.sh
+
+      - name: The CI change filter answers its table
+        run: tools/ci_changes_test.sh
 
       - name: The client's path builds on Linux and macOS
         run: tools/check_portable.sh
@@ -355,7 +348,7 @@ jobs:
   macos:
     name: macos
     needs: changes
-    if: needs.changes.outputs.code == 'true'
+    if: needs.changes.outputs.macos == 'true'
     runs-on: macos-14
     steps:
       - uses: actions/checkout@v4
