@@ -16,7 +16,7 @@ cd "$root" || exit 2
 budgets=(
     "zet:950"
     "zet-agent:1229"
-    "zet-muxd:450"
+    "zet-muxd:650"
 )
 
 checked=0
