@@ -276,7 +276,7 @@ jobs:
         # Use the known output path; fail if it is absent.
         run: |
           set -euo pipefail
-          zet_bin="build/macos-release/zet"
+          zet_bin="build/macos-release/src/client/zet"
           if [ ! -f "$zet_bin" ]; then
             echo "FAIL: $zet_bin not found"
             exit 1
