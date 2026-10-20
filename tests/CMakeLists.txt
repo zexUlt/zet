@@ -30,6 +30,7 @@ add_executable(zet_tests
     session/reconnect_property_test.cpp
     session/channel_test.cpp
     wire/armor_test.cpp
+    wire/probe_test.cpp
     wire/frame_test.cpp
     wire/handshake_test.cpp
     wire/frame_stream_test.cpp
@@ -53,6 +54,7 @@ target_link_libraries(zet_tests PRIVATE
 # and Detach, which only the agent needs, on Linux (src/CMakeLists.txt).
 if(ZET_HAVE_IO)
     target_sources(zet_tests PRIVATE
+        client/deliver_test.cpp
         client/escape_test.cpp
         io/clock_test.cpp
         io/fd_test.cpp
