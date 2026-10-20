@@ -1,5 +1,12 @@
 # zet
 
+[![CI](https://github.com/zexUlt/zet/actions/workflows/ci.yml/badge.svg?branch=trunk)](https://github.com/zexUlt/zet/actions/workflows/ci.yml?query=branch%3Atrunk)
+[![fuzz](https://github.com/zexUlt/zet/actions/workflows/fuzz.yml/badge.svg?branch=trunk)](https://github.com/zexUlt/zet/actions/workflows/fuzz.yml?query=branch%3Atrunk)
+[![fuzz soak](https://github.com/zexUlt/zet/actions/workflows/fuzz-soak.yml/badge.svg?event=schedule)](https://github.com/zexUlt/zet/actions/workflows/fuzz-soak.yml?query=event%3Aschedule)
+[![macOS e2e](https://github.com/zexUlt/zet/actions/workflows/macos-e2e.yml/badge.svg?branch=trunk)](https://github.com/zexUlt/zet/actions/workflows/macos-e2e.yml?query=branch%3Atrunk)
+[![systemd e2e](https://github.com/zexUlt/zet/actions/workflows/systemd-e2e.yml/badge.svg?branch=trunk)](https://github.com/zexUlt/zet/actions/workflows/systemd-e2e.yml?query=branch%3Atrunk)
+[![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
+
 A terminal session that survives what breaks ssh: a change of network, a laptop
 going to sleep, a connection dropping mid-command. The session keeps running on
 the remote host and resumes byte for byte — nothing typed and nothing printed is
@@ -8,11 +15,13 @@ compatibility with EternalTerminal and no shared code with it.
 
 ## Status
 
-In development. There are no working binaries: `zet`, `zet-agent` and
-`zet-muxd` do not exist yet as programs you can run. What is in the tree is the
-protocol core being built at milestone M1 — framing, AEAD, key derivation — plus
-the build and CI machinery around it. If you came here to use zet, there is
-nothing to install.
+In development, usable on Linux. `zet` and `zet-agent` work end to end:
+bootstrap over ssh, a session that survives cuts byte for byte, vim and htop,
+an orphan timeout that reaps the shell (milestone M4). The client also builds
+and runs on macOS against a Linux agent. `zet-muxd`, one port per machine for
+every user's sessions, is in place and under verification (M5). There are no
+releases or packages yet: build from source, and put `zet-agent` on the
+remote host yourself — the client installing it is milestone M5.5.
 
 The roadmap and its acceptance criteria are in
 [docs/design.md](docs/design.md), §17.
