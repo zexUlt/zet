@@ -15,3 +15,6 @@ htop
 iptables
 python3
 py3-pytest
+zsh
+fish
+tcsh

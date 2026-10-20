@@ -58,6 +58,14 @@ expect "fuzz/session_fuzz.cpp" "fuzz checks"
 expect "tools/check_no_abort.sh" "checks"
 expect "tools/check_coverage.sh" "coverage"
 
+# M5.5 delivery paths.
+expect "src/client/deliver.cpp" "test integration checks macos macos_e2e systemd"
+expect "src/client/deliver.hpp" "test integration checks macos macos_e2e systemd"
+expect "src/wire/probe.cpp" "$all"
+expect "fuzz/probe_fuzz.cpp" "fuzz checks"
+expect "tests/integration/test_deliver.py" "integration"
+expect "tools/integration-packages.txt" "integration macos_e2e"
+
 # A path the table does not know runs everything.
 expect "something/new.txt" "$all"
 

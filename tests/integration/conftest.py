@@ -8,6 +8,7 @@ the agent must work without root and is tested as the user it will run as.
 from __future__ import annotations
 
 import os
+import pwd as _pwd
 import shutil
 import subprocess
 from dataclasses import dataclass
@@ -19,8 +20,19 @@ from e2e import PROFILE, Zet, install_agent
 from harness import STEP_TIMEOUT_SECONDS
 
 from sshhost import (CLEAN_BASHRC, HOST_ALIAS, NOISY_BASHRC, SSHD, TEST_USER,
-                     SshHost, ensure_user, make_keys, start_sshd, stop_sshd,
-                     write_client_config)
+                     SshHost, authorize, ensure_user, make_keys, start_sshd,
+                     stop_sshd, write_client_config)
+
+
+# Shell users created for the login-shell delivery tests (M5.5 §16).
+# Each maps shell_name -> (username, shell_binary).
+SHELL_USERS = {
+    "ash":  ("zettest-ash",  "/bin/ash"),
+    "bash": ("zettest-bash", "/bin/bash"),
+    "zsh":  ("zettest-zsh",  "/usr/bin/zsh"),
+    "fish": ("zettest-fish", "/usr/bin/fish"),
+    "tcsh": ("zettest-tcsh", "/usr/bin/tcsh"),
+}
 
 
 
@@ -44,16 +56,69 @@ def ssh_host(tmp_path_factory) -> SshHost:
     user = ensure_user()
     home = Path(user.pw_dir)
     keys = make_keys(work, user)
-    sshd, port = start_sshd(work, keys, home, "127.0.0.1")
+
+    # Create shell users for the login-shell delivery tests and authorize the
+    # same client key for them.  Shells that are not installed are silently
+    # skipped; their tests will be skipped at collection time.
+    client_pub = (work / "client_key.pub").read_text()
+    shell_usernames: list[str] = []
+    for _shell_name, (username, shell) in SHELL_USERS.items():
+        if not Path(shell).exists():
+            continue
+        try:
+            su = ensure_user(username, shell)
+            authorize(su, client_pub)
+            shell_usernames.append(username)
+        except Exception:
+            pass
+
+    all_users = tuple([TEST_USER] + shell_usernames)
+    sshd, port = start_sshd(work, keys, home, "127.0.0.1", users=all_users)
     config = write_client_config(
         work / "ssh_config", hostname="127.0.0.1", port=port,
         identity=keys.client, known_hosts=work / "known_hosts",
         host_public_key=(work / "host_key.pub").read_text())
     try:
         yield SshHost(config=config, alias=HOST_ALIAS, user=TEST_USER,
-                      home=home, port=port)
+                      home=home, port=port, work_dir=work)
     finally:
         stop_sshd(sshd)
+
+
+@pytest.fixture(scope="session")
+def shell_ssh_hosts(ssh_host: SshHost, tmp_path_factory) -> dict[str, SshHost]:
+    """One SshHost per login-shell variant, all backed by the session sshd.
+
+    Keys absent from the dict mean the shell binary was not present at startup.
+    """
+    if ssh_host.work_dir is None:
+        return {}
+    work = tmp_path_factory.mktemp("shell_hosts")
+    identity = ssh_host.work_dir / "client_key"
+    host_pub = (ssh_host.work_dir / "host_key.pub").read_text()
+    result: dict[str, SshHost] = {}
+    for shell_name, (username, _shell) in SHELL_USERS.items():
+        try:
+            u = _pwd.getpwnam(username)
+        except KeyError:
+            continue
+        config = write_client_config(
+            work / f"ssh_config_{shell_name}",
+            hostname="127.0.0.1", port=ssh_host.port,
+            identity=identity,
+            known_hosts=work / f"known_hosts_{shell_name}",
+            host_public_key=host_pub,
+            user=username,
+            alias=f"zet-{shell_name}-host",
+        )
+        result[shell_name] = SshHost(
+            config=config,
+            alias=f"zet-{shell_name}-host",
+            user=username,
+            home=Path(u.pw_dir),
+            port=ssh_host.port,
+        )
+    return result
 
 
 @pytest.fixture

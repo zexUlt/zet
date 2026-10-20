@@ -15,11 +15,14 @@ Scenarios:
 
 from __future__ import annotations
 
+import hashlib
 import os
 import re
 import shutil
 import stat
 import subprocess
+import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -47,9 +50,17 @@ def _agent_dir(tmp_path: Path, arch: str, agent_binary: Path) -> Path:
 
 
 def _delivery_argv(client: Path, agent_dir: Path, host: SshHost,
-                   agent_env: dict[str, str]) -> list[str]:
-    """zet argv for delivery mode (no --agent flag)."""
-    settings = " ".join(f"{name}={value}" for name, value in agent_env.items())
+                   agent_env: dict[str, str],
+                   *, ssh_env: dict[str, str] | None = None) -> list[str]:
+    """zet argv for delivery mode (no --agent flag).
+
+    ssh_env, when given, is merged into the SetEnv passed to OpenSSH so the
+    remote installer sees the extra variables (requires AcceptEnv to match).
+    """
+    all_env = dict(agent_env)
+    if ssh_env:
+        all_env.update(ssh_env)
+    settings = " ".join(f"{name}={value}" for name, value in all_env.items())
     return [
         str(client),
         "--ssh-arg", "-F", "--ssh-arg", str(host.config),
@@ -256,3 +267,176 @@ def test_noisy_bashrc_does_not_interfere(
     finally:
         terminal.kill()
         ssh_host.write_home_file(".bashrc", CLEAN_BASHRC)
+
+
+def test_noexec_cache_gives_clear_error(
+    binaries, ssh_host: SshHost, clean_home, tmp_path
+):
+    """When ~/.cache is on a noexec filesystem the client reports it and exits."""
+    cache = ssh_host.home / ".cache"
+    cache.mkdir(exist_ok=True)
+    subprocess.run(
+        ["mount", "-t", "tmpfs", "-o", "noexec,size=10m", "tmpfs", str(cache)],
+        check=True,
+    )
+    try:
+        agent_dir = _agent_dir(tmp_path, UNAME_ARCH, binaries.agent)
+        argv = _delivery_argv(binaries.client, agent_dir, ssh_host, _agent_env())
+        result = subprocess.run(
+            argv, env=_env(agent_dir),
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            timeout=STEP_TIMEOUT_SECONDS,
+        )
+        assert result.returncode != 0, (
+            "expected non-zero exit when cache is noexec"
+        )
+        combined = (result.stdout + result.stderr).lower()
+        assert b"noexec" in combined, (
+            f"expected 'noexec' in output, got: {combined!r}"
+        )
+        # Nothing should have been written under the noexec mount.
+        leftover = subprocess.run(
+            ["find", str(cache), "-name", "zet-agent"],
+            capture_output=True, check=False,
+        )
+        assert leftover.stdout.strip() == b"", (
+            f"agent binary found despite noexec: {leftover.stdout!r}"
+        )
+    finally:
+        subprocess.run(["umount", str(cache)], check=False)
+
+
+def test_unsupported_arch_gives_clear_error(
+    binaries, ssh_host: SshHost, clean_home, tmp_path
+):
+    """A fake uname reporting an unknown arch stops delivery with a clear message."""
+    # Create a fake uname script on the remote host (we are root in the container).
+    fake_dir = Path("/tmp/zet-test-fake-uname")
+    fake_dir.mkdir(exist_ok=True)
+    fake_uname = fake_dir / "uname"
+    fake_uname.write_text("#!/bin/sh\necho mips64le\n")
+    fake_uname.chmod(0o755)
+    try:
+        agent_dir = _agent_dir(tmp_path, UNAME_ARCH, binaries.agent)
+        # Inject the fake-uname directory at the front of PATH.  The sshd
+        # config now accepts PATH via AcceptEnv so the installer sees it.
+        default_path = "/usr/local/bin:/usr/local/sbin:/usr/bin:/usr/sbin:/bin:/sbin"
+        argv = _delivery_argv(
+            binaries.client, agent_dir, ssh_host, _agent_env(),
+            ssh_env={"PATH": f"{fake_dir}:{default_path}"},
+        )
+        result = subprocess.run(
+            argv, env=_env(agent_dir),
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            timeout=STEP_TIMEOUT_SECONDS,
+        )
+        assert result.returncode != 0, (
+            "expected non-zero exit for unsupported arch"
+        )
+        combined = result.stdout + result.stderr
+        assert b"arch" in combined.lower() or b"unsupported" in combined.lower(), (
+            f"expected arch/unsupported in output, got: {combined!r}"
+        )
+    finally:
+        shutil.rmtree(str(fake_dir), ignore_errors=True)
+
+
+def test_remote_argv_has_no_secrets(
+    binaries, ssh_host: SshHost, clean_home, tmp_path
+):
+    """No process cmdline in /proc ever contains the agent hash during delivery.
+
+    The hash is transmitted via stdin, not argv, so it must not appear in any
+    running process's command line visible to an observer on the machine.
+    """
+    agent_data = binaries.agent.read_bytes()
+    expected_hash = hashlib.blake2b(agent_data, digest_size=32).hexdigest()
+
+    agent_dir = _agent_dir(tmp_path, UNAME_ARCH, binaries.agent)
+    argv = _delivery_argv(binaries.client, agent_dir, ssh_host, _agent_env())
+
+    violations: list[str] = []
+    stop_sniffing = threading.Event()
+
+    def sniff_proc():
+        while not stop_sniffing.is_set():
+            for pid_dir in sorted(Path("/proc").iterdir()):
+                try:
+                    raw = (pid_dir / "cmdline").read_bytes()
+                except (PermissionError, FileNotFoundError, OSError):
+                    continue
+                text = raw.decode(errors="replace")
+                if expected_hash in text:
+                    violations.append(f"pid={pid_dir.name}: {text!r}")
+            time.sleep(0.01)
+
+    sniffer = threading.Thread(target=sniff_proc, daemon=True)
+    sniffer.start()
+    try:
+        proc = subprocess.Popen(
+            argv, env=_env(agent_dir),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        try:
+            proc.wait(timeout=STEP_TIMEOUT_SECONDS)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
+    finally:
+        stop_sniffing.set()
+        sniffer.join(timeout=2)
+
+    assert not violations, (
+        "hash found in /proc cmdlines during delivery:\n" + "\n".join(violations)
+    )
+
+
+@pytest.mark.parametrize("shell", ["ash", "bash", "zsh", "fish", "tcsh"])
+def test_login_shell_delivers(
+    binaries, shell_ssh_hosts: dict, tmp_path, shell
+):
+    """Delivery works regardless of the user's login shell."""
+    host = shell_ssh_hosts.get(shell)
+    if host is None:
+        pytest.skip(f"shell {shell!r} not installed or user not created")
+
+    # Clear the cache so the test always does a fresh delivery.
+    cache_path = host.home / ZET_CACHE_SUBDIR
+    subprocess.run(["rm", "-rf", str(cache_path)], check=False)
+
+    # Write a minimal startup file for each shell so they print a known marker
+    # once the session opens.  The delivery itself runs under /bin/sh so these
+    # only fire after zet-agent execs the login shell interactively.
+    marker = b"ZET_SHELL_READY"
+    if shell in ("ash", "bash"):
+        host.write_home_file(".profile",
+                             f"echo {marker.decode()}\nexport PS1='[zet]$ '\n")
+    elif shell == "zsh":
+        host.write_home_file(".zprofile",
+                             f"echo {marker.decode()}\nexport PS1='[zet]$ '\n")
+        host.write_home_file(".zshrc", "# nothing\n")
+    elif shell == "fish":
+        host.write_home_file(
+            ".config/fish/config.fish",
+            f"echo {marker.decode()}\nfunction fish_prompt; echo -n '[zet]$ '; end\n",
+        )
+    elif shell == "tcsh":
+        host.write_home_file(".cshrc",
+                             f"echo {marker.decode()}\nset prompt='[zet]$ '\n")
+
+    agent_dir = _agent_dir(tmp_path, UNAME_ARCH, binaries.agent)
+    argv = _delivery_argv(binaries.client, agent_dir, host, _agent_env())
+    terminal = PtyProcess(argv, env=_env(agent_dir))
+    try:
+        output = terminal.read_until(marker, timeout=STEP_TIMEOUT_SECONDS)
+        assert marker in output, (
+            f"shell {shell!r}: session did not produce marker; got {output!r}"
+        )
+        terminal.send(b"exit 0\r")
+        terminal.wait(timeout=STEP_TIMEOUT_SECONDS)
+    finally:
+        terminal.kill()

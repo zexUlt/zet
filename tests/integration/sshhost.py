@@ -54,6 +54,7 @@ class SshHost:
     user: str
     home: Path
     port: int
+    work_dir: Path | None = None  # tmp dir with client_key, host_key.pub, etc.
 
     def argv(self, *args: str) -> list[str]:
         """An ssh command line to this host."""
@@ -153,7 +154,7 @@ LogLevel INFO
 SetEnv BASH_ENV={home / ".bashrc"}
 # What the client hands the agent through `ssh -o SetEnv` (the e2e suite's
 # timeouts, and the sanitizer options of an ASan build).
-AcceptEnv ZET_* ASAN_OPTIONS UBSAN_OPTIONS
+AcceptEnv ZET_* XDG_CACHE_HOME PATH ASAN_OPTIONS UBSAN_OPTIONS
 """)
     return config
 
