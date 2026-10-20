@@ -29,6 +29,7 @@
 #include "zet/app/mux_frames.hpp"
 #include "zet/app/registration.hpp"
 #include "zet/core/byte_reader.hpp"
+#include "zet/core/version.hpp"
 #include "zet/crypto/crypto.hpp"
 #include "zet/io/activation.hpp"
 #include "zet/io/clock.hpp"
@@ -827,6 +828,17 @@ Deadline Mux::NextDeadline() const noexcept {
 }  // namespace
 
 int Main(std::span<char*> args) noexcept {
+    for (std::size_t i = 1; i < args.size(); ++i) {
+        if (std::string_view{args[i]} == "--version") {
+            constexpr std::string_view line = "zet-muxd ";
+            static_cast<void>(::write(STDOUT_FILENO, line.data(), line.size()));
+            static_cast<void>(::write(STDOUT_FILENO,
+                                      zet::RELEASE_VERSION.data(),
+                                      zet::RELEASE_VERSION.size()));
+            static_cast<void>(::write(STDOUT_FILENO, "\n", 1));
+            return 0;
+        }
+    }
     const auto config = ReadConfig(args);
     if (!config) {
         Say(USAGE);

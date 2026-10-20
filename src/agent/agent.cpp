@@ -29,6 +29,7 @@
 #include "zet/app/fd_sink.hpp"
 #include "zet/app/registration.hpp"
 #include "zet/core/log.hpp"
+#include "zet/core/version.hpp"
 #include "zet/crypto/crypto.hpp"
 #include "zet/io/clock.hpp"
 #include "zet/io/daemon.hpp"
@@ -874,6 +875,17 @@ int Agent::Hangup() noexcept {
 }  // namespace
 
 int Main(std::span<char*> args) noexcept {
+    for (std::size_t i = 1; i < args.size(); ++i) {
+        if (std::string_view{args[i]} == "--version") {
+            constexpr std::string_view line = "zet-agent ";
+            static_cast<void>(::write(STDOUT_FILENO, line.data(), line.size()));
+            static_cast<void>(::write(STDOUT_FILENO,
+                                      zet::RELEASE_VERSION.data(),
+                                      zet::RELEASE_VERSION.size()));
+            static_cast<void>(::write(STDOUT_FILENO, "\n", 1));
+            return 0;
+        }
+    }
     auto config = ReadConfig(args);
     if (!config) {
         Say(USAGE);

@@ -1,24 +1,27 @@
 name: release
 
 # Triggered by pushing an annotated tag vX.Y.Z. The workflow:
-#   1. Validates the tag (on trunk, exact semver, version matches CMake).
+#   1. Validates the tag (annotated, on trunk, exact semver, exact match at HEAD).
 #   2. Builds static musl binaries for x86_64 and aarch64 (Linux) and the
 #      macOS arm64 client with statically-linked libsodium.
-#   3. Packages two Linux tarballs (one per arch), each carrying both
+#   3. Verifies --version output on each binary matches the tag.
+#   4. Packages two Linux tarballs (one per arch), each carrying both
 #      architectures' agents under libexec/zet/ so M5.5 delivery works
 #      from any client, plus one macOS tarball.
-#   4. Generates SHA256SUMS and build-provenance attestations.
-#   5. Creates a DRAFT GitHub release for the owner to review and publish.
+#   5. Generates SHA256SUMS and build-provenance attestations.
+#   6. Creates a DRAFT GitHub release for the owner to review and publish.
 #
+# The owner checks that CI and the fuzz soak gate are green before tagging.
+# The workflow does not poll CI; it validates the tag itself.
 # The owner publishes; this workflow never pushes a release live.
 
 on:
   push:
     tags:
       - 'v[0-9]*'
-  # A dry run on changes to the release itself: everything up to the
-  # tarballs, nothing attested or published. Otherwise the first time these
-  # jobs ran at all would be on a real tag.
+  # A dry run on changes to the release itself or the build: everything up to
+  # the tarballs, nothing attested or published. Otherwise the first time
+  # these jobs ever ran would be on a real tag.
   pull_request:
     paths:
       - .github/workflows/release.yml
@@ -27,10 +30,9 @@ on:
       - CMakePresets.json
       - src/crypto/CMakeLists.txt
 
+# Minimum permissions at the workflow level; jobs that need more declare it.
 permissions:
-  contents: write      # create release, upload assets
-  id-token: write      # attest-build-provenance
-  attestations: write  # attest-build-provenance
+  contents: read
 
 concurrency:
   group: release-${{ github.ref }}
@@ -41,11 +43,12 @@ env:
 
 jobs:
   # -------------------------------------------------------------------------
-  # 1. Validate: tag on trunk, vX.Y.Z format, exact match at HEAD.
+  # 1. Validate: annotated tag, on trunk, vX.Y.Z format, exact match at HEAD.
   #
   # The CMake version check is implicit: ZET_RELEASE_VERSION is derived by
   # the same git describe logic, so "exact match at HEAD" guarantees the tag
-  # and CMake agree.
+  # and CMake agree. The owner is responsible for checking that CI and the
+  # fuzz soak gate are green before pushing the tag.
   # -------------------------------------------------------------------------
   validate:
     name: validate tag
@@ -66,8 +69,16 @@ jobs:
             exit 1
           fi
 
+          # The tag must be annotated (not lightweight). The design says the
+          # owner pushes an annotated tag after green CI and green fuzz soak.
+          TAG_TYPE=$(git cat-file -t "refs/tags/$GITHUB_REF_NAME" 2>/dev/null || true)
+          if [ "$TAG_TYPE" != "tag" ]; then
+            echo "refs/tags/$GITHUB_REF_NAME is $TAG_TYPE; an annotated tag is required"
+            exit 1
+          fi
+
           # The tagged commit must sit on trunk.
-          git fetch origin trunk --depth=1
+          git fetch origin trunk
           if ! git merge-base --is-ancestor HEAD origin/trunk; then
             echo "Tagged commit $(git rev-parse --short HEAD) is not on trunk"
             exit 1
@@ -105,7 +116,19 @@ jobs:
         uses: ./.github/actions/apk
 
       - name: Build
-        run: tools/musl_build.sh musl-release
+        # Set ZET_RELEASE_VERSION so in_alpine.sh forwards it to the container
+        # as an env var. CMakeLists.txt reads $ENV{ZET_RELEASE_VERSION} and
+        # skips git describe, which fails inside the container because Docker
+        # runs as root while the checkout is owned by the runner uid (dubious
+        # ownership). On pull_request dry-runs the tag is absent so 0.0.0-dev
+        # flows through naturally.
+        env:
+          ZET_TAG: ${{ github.ref_name }}
+        run: |
+          if printf '%s' "$ZET_TAG" | grep -qE '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
+            export ZET_RELEASE_VERSION="${ZET_TAG#v}"
+          fi
+          tools/musl_build.sh musl-release
 
       - name: Install into staging directory
         # cmake --install must run inside Alpine where cmake is available.
@@ -115,6 +138,28 @@ jobs:
           tools/in_alpine.sh 'cmake --install build/musl-release --prefix /src/build/staging --strip'
           mkdir -p "$RUNNER_TEMP/stage-x86_64"
           cp -a build/staging/. "$RUNNER_TEMP/stage-x86_64/"
+
+      - name: Verify --version output
+        # Run the binaries on the host (they are statically linked musl, so
+        # they run on any Linux regardless of the host libc).
+        env:
+          ZET_TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          if ! printf '%s' "$ZET_TAG" | grep -qE '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "Dry-run: skipping --version check (no tag)"
+            exit 0
+          fi
+          WANT="${ZET_TAG#v}"
+          for bin in zet zet-agent zet-muxd; do
+            GOT=$("$RUNNER_TEMP/stage-x86_64/bin/$bin" --version 2>/dev/null || true)
+            WANT_LINE="$bin $WANT"
+            if [ "$GOT" != "$WANT_LINE" ]; then
+              echo "FAIL: $bin --version printed '$GOT', expected '$WANT_LINE'"
+              exit 1
+            fi
+          done
+          echo "All --version outputs match $WANT"
 
       - uses: actions/upload-artifact@v4
         with:
@@ -144,13 +189,39 @@ jobs:
         uses: ./.github/actions/apk
 
       - name: Build
-        run: tools/musl_build.sh musl-release
+        env:
+          ZET_TAG: ${{ github.ref_name }}
+        run: |
+          if printf '%s' "$ZET_TAG" | grep -qE '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
+            export ZET_RELEASE_VERSION="${ZET_TAG#v}"
+          fi
+          tools/musl_build.sh musl-release
 
       - name: Install into staging directory
         run: |
           tools/in_alpine.sh 'cmake --install build/musl-release --prefix /src/build/staging --strip'
           mkdir -p "$RUNNER_TEMP/stage-aarch64"
           cp -a build/staging/. "$RUNNER_TEMP/stage-aarch64/"
+
+      - name: Verify --version output
+        env:
+          ZET_TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          if ! printf '%s' "$ZET_TAG" | grep -qE '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "Dry-run: skipping --version check (no tag)"
+            exit 0
+          fi
+          WANT="${ZET_TAG#v}"
+          for bin in zet zet-agent zet-muxd; do
+            GOT=$("$RUNNER_TEMP/stage-aarch64/bin/$bin" --version 2>/dev/null || true)
+            WANT_LINE="$bin $WANT"
+            if [ "$GOT" != "$WANT_LINE" ]; then
+              echo "FAIL: $bin --version printed '$GOT', expected '$WANT_LINE'"
+              exit 1
+            fi
+          done
+          echo "All --version outputs match $WANT"
 
       - uses: actions/upload-artifact@v4
         with:
@@ -180,12 +251,19 @@ jobs:
         run: brew install libsodium ninja llvm pkg-config
 
       - name: Build
+        env:
+          ZET_TAG: ${{ github.ref_name }}
         run: |
           set -euo pipefail
           LLVM_PREFIX="$(brew --prefix llvm)"
           SODIUM_PREFIX="$(brew --prefix libsodium)"
           # pkg_check_modules needs to find libsodium's .pc file.
           export PKG_CONFIG_PATH="$SODIUM_PREFIX/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
+          # CMakeLists.txt reads ZET_RELEASE_VERSION from the environment as an
+          # override of git describe (same mechanism as the Linux/Alpine builds).
+          if printf '%s' "$ZET_TAG" | grep -qE '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
+            export ZET_RELEASE_VERSION="${ZET_TAG#v}"
+          fi
           # Homebrew's LLVM: the runner's Xcode ships Apple Clang 15, but the
           # project needs Clang 20 or newer (CMakeLists.txt).
           cmake --preset macos-release \
@@ -195,12 +273,13 @@ jobs:
       - name: Verify libsodium is statically linked
         # The only dynamic libraries should be system ones (/usr/lib).
         # Any /opt/homebrew or /usr/local path means a Homebrew dylib crept in.
+        # Use the known output path; fail if it is absent.
         run: |
           set -euo pipefail
-          zet_bin=$(find build/macos-release -name zet -type f -perm -u+x | head -1)
-          if [ -z "$zet_bin" ]; then
-            echo "no zet binary built — skipping otool check"
-            exit 0
+          zet_bin="build/macos-release/zet"
+          if [ ! -f "$zet_bin" ]; then
+            echo "FAIL: $zet_bin not found"
+            exit 1
           fi
           echo "Dynamic libraries in $zet_bin:"
           otool -L "$zet_bin"
@@ -214,6 +293,24 @@ jobs:
           set -euo pipefail
           prefix="$RUNNER_TEMP/stage-macos"
           cmake --install build/macos-release --prefix "$prefix" --strip
+
+      - name: Verify --version output
+        env:
+          ZET_TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          if ! printf '%s' "$ZET_TAG" | grep -qE '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "Dry-run: skipping --version check (no tag)"
+            exit 0
+          fi
+          WANT="${ZET_TAG#v}"
+          GOT=$("$RUNNER_TEMP/stage-macos/bin/zet" --version 2>/dev/null || true)
+          WANT_LINE="zet $WANT"
+          if [ "$GOT" != "$WANT_LINE" ]; then
+            echo "FAIL: zet --version printed '$GOT', expected '$WANT_LINE'"
+            exit 1
+          fi
+          echo "zet --version matches $WANT"
 
       - uses: actions/upload-artifact@v4
         with:
@@ -275,15 +372,25 @@ jobs:
           MAC="$RUNNER_TEMP/stage-macos"
           mkdir -p "$DIST"
 
-          # Copy any architecture-specific agents from both Linux stages into
+          # Require both arch agents before assembling any tarball. Missing an
+          # agent here would silently ship a tarball that cannot deliver to that
+          # architecture; fail fast instead.
+          for arch in x86_64 aarch64; do
+            src_dir="$RUNNER_TEMP/stage-$([ "$arch" = x86_64 ] && echo x86_64 || echo aarch64)/libexec/zet"
+            agent="$src_dir/zet-agent-$arch"
+            if [ ! -f "$agent" ]; then
+              echo "FAIL: expected $agent — stage artifact is incomplete"
+              exit 1
+            fi
+          done
+
+          # Copy architecture-specific agents from both Linux stages into
           # $1/libexec/zet/ so any client can deliver to either server.
           add_agents() {
             local libexec="$1/libexec/zet"
             mkdir -p "$libexec"
-            for src in "$X64/libexec/zet/"zet-agent-* \
-                        "$A64/libexec/zet/"zet-agent-*; do
-              [ -f "$src" ] && cp -p "$src" "$libexec/" || true
-            done
+            cp -p "$X64/libexec/zet/zet-agent-x86_64" "$libexec/"
+            cp -p "$A64/libexec/zet/zet-agent-aarch64" "$libexec/"
           }
 
           make_tarball() {
@@ -324,6 +431,9 @@ jobs:
     needs: package
     if: github.event_name == 'push'
     runs-on: ubuntu-24.04
+    permissions:
+      id-token: write
+      attestations: write
     steps:
       - name: Download dist
         uses: actions/download-artifact@v4
@@ -332,17 +442,17 @@ jobs:
           path: dist
 
       - name: Attest linux x86_64 tarball
-        uses: actions/attest-build-provenance@v1
+        uses: actions/attest-build-provenance@v2
         with:
           subject-path: dist/zet-*-linux-x86_64.tar.gz
 
       - name: Attest linux aarch64 tarball
-        uses: actions/attest-build-provenance@v1
+        uses: actions/attest-build-provenance@v2
         with:
           subject-path: dist/zet-*-linux-aarch64.tar.gz
 
       - name: Attest macOS tarball
-        uses: actions/attest-build-provenance@v1
+        uses: actions/attest-build-provenance@v2
         with:
           subject-path: dist/zet-*-macos-arm64.tar.gz
 
@@ -354,6 +464,8 @@ jobs:
     needs: [package, attest]
     if: github.event_name == 'push'
     runs-on: ubuntu-24.04
+    permissions:
+      contents: write
     steps:
       - name: Download dist
         uses: actions/download-artifact@v4

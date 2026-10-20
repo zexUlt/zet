@@ -509,7 +509,7 @@ K_master --"zet-sess"--> { R, K_auth, K_conn_seed[0] }
 
 Доставка: **пакет Alpine с закреплённой версией** — `libsodium-static=1.0.20-r1` в `tools/alpine-packages.txt`. Решение пересмотрено после переезда сборки на Alpine; прежняя редакция предписывала тарбол по SHA256 плюс `ExternalProject_Add`, и её обоснование опиралось на состояние Ubuntu.
 
-**macOS: статическая линковка libsodium.a.** Homebrew устанавливает и `.dylib`, и `.a`. `src/crypto/CMakeLists.txt` ищет именно `libsodium.a` через `find_library(SODIUM_STATIC_LIBRARY NAMES libsodium.a …)` и линкует архив напрямую. CI в job `release` проверяет `otool -L` и падает, если в списке есть путь `/opt/homebrew` или `/usr/local`: это гарантирует, что клиент не требует установленного Homebrew на машине пользователя. `libSystem.B.dylib` остаётся динамическим — Apple не поддерживает статическую линковку с системной библиотекой (Technical Q&A QA1118).
+**macOS: статическая линковка libsodium.a.** Homebrew устанавливает и `.dylib`, и `.a`. `src/crypto/CMakeLists.txt` ищет именно `libsodium.a` через `find_library(SODIUM_STATIC_LIBRARY NAMES libsodium.a …)` и линкует архив напрямую. CI в job `build-macos` проверяет `otool -L` и падает, если в списке есть путь `/opt/homebrew` или `/usr/local`: это гарантирует, что клиент не требует установленного Homebrew на машине пользователя. `libSystem.B.dylib` остаётся динамическим — Apple не поддерживает статическую линковку с системной библиотекой (Technical Q&A QA1118).
 
 Что изменилось и почему пакет теперь лучше своей сборки:
 
@@ -549,7 +549,7 @@ SemVer `0.y.z`: нули означают, что совместимость в�
 
 Версия выводится из тега через `git describe`: на точном теге `vX.Y.Z` получается `X.Y.Z`, на коммите после — `X.Y.Z-N-gHASH-dev`, при отсутствии `.git` или тегов в истории — `0.0.0-dev`. Все три варианта допустимы в CI и локальных сборках; отличить тегированный релиз от разработки можно по отсутствию суффикса `-dev`.
 
-**Стабильный релиз.** Коммит на trunk с зелёным CI и пройденным gate `fuzz soak (release gate)` (.github/workflows/fuzz-soak.yml) владелец помечает аннотированным тегом `vX.Y.Z`. Workflow `release` запускается на этот тег и проверяет три условия: тег соответствует формату `vX.Y.Z`; помеченный коммит принадлежит trunk (`git merge-base --is-ancestor`); тег стоит точно на HEAD, а не за несколько коммитов до него (`git describe --exact-match`). Несоответствие любому условию роняет workflow без артефактов.
+**Стабильный релиз.** Коммит на trunk с зелёным CI и пройденным gate `fuzz soak (release gate)` (.github/workflows/fuzz-soak.yml) владелец помечает аннотированным тегом `vX.Y.Z`. Workflow `release` запускается на этот тег и проверяет четыре условия: тег соответствует формату `vX.Y.Z`; тег аннотированный (`git cat-file -t`); помеченный коммит принадлежит trunk (`git merge-base --is-ancestor`); тег стоит точно на HEAD (`git describe --exact-match`). Зелёность CI и fuzz soak перед тегированием — ответственность владельца; workflow не опрашивает результаты проверок. Несоответствие любому из четырёх условий роняет workflow без артефактов.
 
 Workflow собирает статические musl-бинари для `x86_64` и `aarch64` (нативные раннеры без QEMU) и macOS-клиент для `arm64`, упаковывает тарболы с обеими архитектурами агента под `libexec/zet/` (для M5.5; §17), генерирует `SHA256SUMS` и attestations через `actions/attest-build-provenance`. Результат — draft-релиз, который владелец проверяет и публикует.
 

@@ -15,29 +15,38 @@ project(zet
 # fallback "0.0.0-dev" when .git is absent or no v* tag exists yet. This
 # string is what --version prints; the protocol version (VERSION = 1) is not
 # tied to it and is never compared across machines.
-find_package(Git QUIET)
-if(Git_FOUND AND EXISTS "${CMAKE_SOURCE_DIR}/.git")
-    execute_process(
-        COMMAND ${GIT_EXECUTABLE} describe --tags --match "v[0-9]*" --abbrev=7
-        WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
-        OUTPUT_VARIABLE _ZET_GIT_DESCRIBE
-        ERROR_QUIET
-        OUTPUT_STRIP_TRAILING_WHITESPACE
-    )
+#
+# Callers may pin the version explicitly via the ZET_RELEASE_VERSION
+# environment variable; the release workflow does this to avoid the "dubious
+# ownership" refusal that git emits when the Alpine container (root) sees a
+# repo owned by the runner uid.
+if(DEFINED ENV{ZET_RELEASE_VERSION} AND NOT "$ENV{ZET_RELEASE_VERSION}" STREQUAL "")
+    set(ZET_RELEASE_VERSION "$ENV{ZET_RELEASE_VERSION}")
 else()
-    set(_ZET_GIT_DESCRIBE "")
-endif()
+    find_package(Git QUIET)
+    if(Git_FOUND AND EXISTS "${CMAKE_SOURCE_DIR}/.git")
+        execute_process(
+            COMMAND ${GIT_EXECUTABLE} describe --tags --match "v[0-9]*" --abbrev=7
+            WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+            OUTPUT_VARIABLE _ZET_GIT_DESCRIBE
+            ERROR_QUIET
+            OUTPUT_STRIP_TRAILING_WHITESPACE
+        )
+    else()
+        set(_ZET_GIT_DESCRIBE "")
+    endif()
 
-if(_ZET_GIT_DESCRIBE MATCHES "^v([0-9]+\\.[0-9]+\\.[0-9]+)$")
-    # Exact tag: v0.1.0 → "0.1.0"
-    set(ZET_RELEASE_VERSION "${CMAKE_MATCH_1}")
-elseif(_ZET_GIT_DESCRIBE MATCHES "^v([0-9]+\\.[0-9]+\\.[0-9]+)-([0-9]+)-g([0-9a-f]+)(-dirty)?$")
-    # Post-tag build: v0.1.0-3-gabcdef7 → "0.1.0-3-gabcdef7-dev"
-    set(ZET_RELEASE_VERSION "${CMAKE_MATCH_1}-${CMAKE_MATCH_2}-${CMAKE_MATCH_3}-dev")
-else()
-    set(ZET_RELEASE_VERSION "0.0.0-dev")
+    if(_ZET_GIT_DESCRIBE MATCHES "^v([0-9]+\\.[0-9]+\\.[0-9]+)$")
+        # Exact tag: v0.1.0 → "0.1.0"
+        set(ZET_RELEASE_VERSION "${CMAKE_MATCH_1}")
+    elseif(_ZET_GIT_DESCRIBE MATCHES "^v([0-9]+\\.[0-9]+\\.[0-9]+)-([0-9]+)-g([0-9a-f]+)$")
+        # Post-tag build: v0.1.0-3-gabcdef7 → "0.1.0-3-gabcdef7-dev"
+        set(ZET_RELEASE_VERSION "${CMAKE_MATCH_1}-${CMAKE_MATCH_2}-${CMAKE_MATCH_3}-dev")
+    else()
+        set(ZET_RELEASE_VERSION "0.0.0-dev")
+    endif()
+    unset(_ZET_GIT_DESCRIBE)
 endif()
-unset(_ZET_GIT_DESCRIBE)
 
 if(PROJECT_SOURCE_DIR STREQUAL PROJECT_BINARY_DIR)
     message(FATAL_ERROR "In-source builds are not allowed. Use a preset: cmake --preset dev")

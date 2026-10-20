@@ -32,8 +32,9 @@ tar -C ~/.local -xzf zet-X.Y.Z-linux-x86_64.tar.gz --strip-components=1
 ```
 
 After unpacking, `bin/zet` and `bin/zet-agent` land under the prefix you chose.
-Both are statically linked; no other dependencies are needed. `zet --version`
-prints the release version.
+Linux binaries are statically linked (musl + libc++); no other dependencies are
+needed. The macOS client links `libSystem` dynamically and `libsodium`
+statically. `zet --version` prints the release version.
 
 The Linux tarballs carry agents for both `x86_64` and `aarch64` under
 `libexec/zet/`, so the client (M5.5) can bootstrap either server from any
