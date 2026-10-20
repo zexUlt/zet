@@ -103,6 +103,9 @@ jobs:
           # under pytest useradd hung past its 30-second step on the runner.
           for user in zettest zettest2; do
             time sudo timeout 60 useradd --create-home --shell /bin/bash "$user"
+            # useradd locks the account with '!', and sshd refuses a locked
+            # account even for a public key; '*' has no password, no lock.
+            sudo usermod --password '*' "$user"
           done
 
       - name: Run the systemd suite
