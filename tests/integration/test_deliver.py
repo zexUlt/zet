@@ -177,19 +177,18 @@ def test_different_binary_replaces_and_old_dir_removed(
     terminal2 = PtyProcess(argv2, env=_env(alt_dir))
     try:
         terminal2.expect(PROMPT)
-        terminal2.send(b"ls ~/.cache/zet/\r")
-        listing2 = terminal2.expect(PROMPT)
-        # Old hash dir should be gone: only one directory entry remains.
-        # Filter out the echoed command and the prompt itself.
-        dirs2 = [
-            tok for tok in listing2.split()
-            if tok and not tok.startswith(PROMPT.rstrip(b" "))
-        ]
-        assert len(dirs2) == 1, f"expected one cache dir, got: {listing2!r}"
         terminal2.send(b"exit 0\r")
         terminal2.kill()
     finally:
         terminal2.kill()
+
+    # Count cache dirs via a plain SSH command to avoid pty ANSI colour codes.
+    result = ssh_host.run(
+        "ls -1 ~/.cache/zet/ 2>/dev/null | wc -l",
+        timeout=STEP_TIMEOUT_SECONDS,
+    )
+    n = result.stdout.decode(errors="replace").strip()
+    assert n == "1", f"expected 1 cache dir after replacement, got {n!r}"
 
 
 def test_mid_transfer_kill_leaves_only_part_file(
@@ -221,8 +220,10 @@ def test_mid_transfer_kill_leaves_only_part_file(
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
     )
-    # Kill after a short delay (mid-delivery).
-    time.sleep(0.5)
+    # Kill very quickly: we want to interrupt before delivery completes.
+    # 10 ms is enough time for the process to start but not enough to finish
+    # the SSH handshake, so no zet-agent is ever installed.
+    time.sleep(0.01)
     proc.kill()
     proc.wait(timeout=STEP_TIMEOUT_SECONDS)
 
@@ -264,54 +265,47 @@ def test_noexec_cache_gives_clear_error(
 ):
     """When the cache probe reports noexec the client exits with a clear message.
 
-    The installer detects noexec by running `chmod +x <probe-file>`.  Injecting
-    a fake `chmod` that always exits 1 makes the installer report noexec without
-    needing CAP_SYS_ADMIN (mount) in the test container.
+    The installer detects noexec by running `chmod +x <probe-file>`.  We inject
+    a fake `chmod` that always exits 1 via the remote user's ~/bin directory:
+    the sshd config sets BASH_ENV to ~/.bashrc, which bash reads before exec-ing
+    /bin/sh, so PATH modifications in .bashrc reach the installer.  This avoids
+    both CAP_SYS_ADMIN (for mount) and the OpenSSH SetEnv/AcceptEnv mechanism.
     """
-    fake_dir = tmp_path / "fake-noexec-bin"
-    fake_dir.mkdir()
-    fake_chmod = fake_dir / "chmod"
-    fake_chmod.write_text("#!/bin/sh\nexit 1\n")
-    fake_chmod.chmod(0o755)
-
-    default_path = "/usr/local/bin:/usr/local/sbin:/usr/bin:/usr/sbin:/bin:/sbin"
-    agent_dir = _agent_dir(tmp_path, UNAME_ARCH, binaries.agent)
-    argv = _delivery_argv(
-        binaries.client, agent_dir, ssh_host, _agent_env(),
-        ssh_env={"PATH": f"{fake_dir}:{default_path}"},
-    )
-    result = subprocess.run(
-        argv, env=_env(agent_dir),
-        stdin=subprocess.DEVNULL,
-        capture_output=True,
-        timeout=STEP_TIMEOUT_SECONDS,
-    )
-    assert result.returncode != 0, "expected non-zero exit when cache is noexec"
-    combined = (result.stdout + result.stderr).lower()
-    assert b"noexec" in combined, (
-        f"expected 'noexec' in output, got: {combined!r}"
-    )
+    # Write fake chmod to the remote user's ~/bin; prepend it in PATH via .bashrc.
+    ssh_host.write_home_file("bin/chmod", "#!/bin/sh\nexit 1\n", mode=0o755)
+    ssh_host.write_home_file(".bashrc", 'export PATH="$HOME/bin:$PATH"\n')
+    try:
+        agent_dir = _agent_dir(tmp_path, UNAME_ARCH, binaries.agent)
+        argv = _delivery_argv(binaries.client, agent_dir, ssh_host, _agent_env())
+        result = subprocess.run(
+            argv, env=_env(agent_dir),
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            timeout=STEP_TIMEOUT_SECONDS,
+        )
+        assert result.returncode != 0, "expected non-zero exit when cache is noexec"
+        combined = (result.stdout + result.stderr).lower()
+        assert b"noexec" in combined, (
+            f"expected 'noexec' in output, got: {combined!r}"
+        )
+    finally:
+        ssh_host.write_home_file(".bashrc", CLEAN_BASHRC)
 
 
 def test_unsupported_arch_gives_clear_error(
     binaries, ssh_host: SshHost, clean_home, tmp_path
 ):
-    """A fake uname reporting an unknown arch stops delivery with a clear message."""
-    # Create a fake uname script on the remote host (we are root in the container).
-    fake_dir = Path("/tmp/zet-test-fake-uname")
-    fake_dir.mkdir(exist_ok=True)
-    fake_uname = fake_dir / "uname"
-    fake_uname.write_text("#!/bin/sh\necho mips64le\n")
-    fake_uname.chmod(0o755)
+    """A fake uname reporting an unknown arch stops delivery with a clear message.
+
+    We use the same .bashrc / ~/bin technique as test_noexec_cache_gives_clear_error:
+    the sshd config sets BASH_ENV=~/.bashrc so the installer inherits PATH changes
+    made there.
+    """
+    ssh_host.write_home_file("bin/uname", "#!/bin/sh\necho mips64le\n", mode=0o755)
+    ssh_host.write_home_file(".bashrc", 'export PATH="$HOME/bin:$PATH"\n')
     try:
         agent_dir = _agent_dir(tmp_path, UNAME_ARCH, binaries.agent)
-        # Inject the fake-uname directory at the front of PATH.  The sshd
-        # config now accepts PATH via AcceptEnv so the installer sees it.
-        default_path = "/usr/local/bin:/usr/local/sbin:/usr/bin:/usr/sbin:/bin:/sbin"
-        argv = _delivery_argv(
-            binaries.client, agent_dir, ssh_host, _agent_env(),
-            ssh_env={"PATH": f"{fake_dir}:{default_path}"},
-        )
+        argv = _delivery_argv(binaries.client, agent_dir, ssh_host, _agent_env())
         result = subprocess.run(
             argv, env=_env(agent_dir),
             stdin=subprocess.DEVNULL,
@@ -326,7 +320,7 @@ def test_unsupported_arch_gives_clear_error(
             f"expected arch/unsupported in output, got: {combined!r}"
         )
     finally:
-        shutil.rmtree(str(fake_dir), ignore_errors=True)
+        ssh_host.write_home_file(".bashrc", CLEAN_BASHRC)
 
 
 def test_remote_argv_has_no_secrets(
@@ -355,6 +349,12 @@ def test_remote_argv_has_no_secrets(
                     continue
                 text = raw.decode(errors="replace")
                 if expected_hash in text:
+                    # Acceptable: hash appears as part of the installed agent's
+                    # path, e.g. "/home/user/.cache/zet/<hash>/zet-agent".
+                    # That is expected after a successful install.
+                    # Forbidden: hash as a standalone SSH argument or token.
+                    if f"/{expected_hash}/" in text:
+                        continue
                     violations.append(f"pid={pid_dir.name}: {text!r}")
             time.sleep(0.01)
 

@@ -1,7 +1,5 @@
 #include "zet/wire/probe.hpp"
 
-#include <algorithm>
-
 namespace zet::wire {
 
 namespace {
@@ -38,31 +36,34 @@ constexpr std::string_view PROBE_VERSION_1 = "1";
     return line.substr(start, pos - start);
 }
 
-/// Parses `ZET-PROBE 1 <arch> exec|noexec`.
-[[nodiscard]] std::optional<ProbeInfo> ParseProbe(
-    std::string_view line) noexcept {
+/// Parses `ZET-PROBE 1 <arch> exec|noexec` into `out`.  Returns true on
+/// success.  Uses an output parameter instead of std::optional to avoid
+/// optional::operator* / operator->, which call __libcpp_verbose_abort in
+/// libc++ hardened mode (banned in wire objects by check_no_abort.sh).
+[[nodiscard]] bool ParseProbe(std::string_view line, ProbeInfo& out) noexcept {
     if (!StartsWith(line, PROBE_MARKER)) {
-        return std::nullopt;
+        return false;
     }
     // Skip "ZET-PROBE"
     std::size_t pos = PROBE_MARKER.size();
     const auto version = Next(line, pos);
     if (version != PROBE_VERSION_1) {
-        return std::nullopt;
+        return false;
     }
     const auto arch = Next(line, pos);
     if (arch.empty()) {
-        return std::nullopt;
+        return false;
     }
     const auto exec = Next(line, pos);
     if (exec.empty()) {
-        return std::nullopt;
+        return false;
     }
     const bool noexec = exec == "noexec";
     if (!noexec && exec != "exec") {
-        return std::nullopt;
+        return false;
     }
-    return ProbeInfo{.Arch = arch, .NoExec = noexec};
+    out = ProbeInfo{.Arch = arch, .NoExec = noexec};
+    return true;
 }
 
 }  // namespace
@@ -113,9 +114,10 @@ void ProbeScanner::EndLine() noexcept {
         return;
     }
 
-    if (auto probe = ParseProbe(line)) {
-        // The Arch string_view points into Line_; valid until next Feed.
-        Ready_ = ProbeAnswer{*probe};
+    ProbeInfo probeInfo{};
+    if (ParseProbe(line, probeInfo)) {
+        // Arch string_view points into Line_; valid until next Feed.
+        Ready_ = ProbeAnswer{probeInfo};
         return;
     }
 
