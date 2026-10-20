@@ -332,14 +332,18 @@ void MuxLink::OnTimer(io::Poller& poller, Timestamp now) noexcept {
     }
 }
 
-bool MuxLink::UpdateInterest(io::Poller& poller) noexcept {
+void MuxLink::UpdateInterest(io::Poller& poller, Timestamp now) noexcept {
     if (!Socket_) {
-        return true;
+        return;
     }
     if (!Watch_) {
         Watch_.emplace(Socket_.Get(), Token_);
     }
-    return static_cast<bool>(Watch_->Want(poller, true, !Output_.Empty()));
+    if (!Watch_->Want(poller, true, !Output_.Empty())) {
+        // A link the poller cannot watch is a lost link: Lose schedules the
+        // retry that registers the session again.
+        Lose(poller, now, "the poller refused the mux socket");
+    }
 }
 
 Deadline MuxLink::NextDeadline() const noexcept {

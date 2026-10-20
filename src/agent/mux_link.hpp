@@ -72,7 +72,9 @@ public:
     /// Reconnects when the backoff says so.
     void OnTimer(io::Poller& poller, Timestamp now) noexcept;
 
-    [[nodiscard]] bool UpdateInterest(io::Poller& poller) noexcept;
+    /// Asks the poller for what the link needs now. A refusal loses the link
+    /// and schedules its retry, like any other loss of the mux.
+    void UpdateInterest(io::Poller& poller, Timestamp now) noexcept;
 
     [[nodiscard]] Deadline NextDeadline() const noexcept;
 
