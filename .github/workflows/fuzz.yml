@@ -1,54 +1,16 @@
 name: fuzz
 
-# The one-minute smoke run, split out of ci.yml so that it can be filtered by
-# path: the filter belongs to a workflow, not to a job.
-#
-# The list names what fuzzing cannot see rather than what it can. A file
-# wrongly left off it costs a needless run; a directory wrongly left off a list
-# of what fuzzing does see would have been skipped without anyone noticing —
-# src/session arrives at M2, and nothing would have told the filter about it.
-#
-# The job is not a required check, so a pull request it skips still merges.
+# The one-minute smoke run, its own workflow because it is its own cache and
+# its own failure. Which pull requests it runs on is tools/ci_changes.sh's
+# call, shared with ci.yml and macos-e2e.yml; a path that script does not
+# know runs it, so a new directory cannot be skipped by omission.
 
 on:
+  # Every pull request, so that `fuzz` can be a required check; the job skips
+  # when the change touches nothing a fuzzer builds (tools/ci_changes.sh).
   pull_request:
-    paths-ignore:
-      - "docs/**"
-      - "tests/**"
-      - "**/*.md"
-      - ".claude/**"
-      - ".clang-format"
-      - ".clang-tidy"
-      - ".gitignore"
-      - "LICENSE"
-      - "NOTICE"
-      - "THIRD_PARTY_LICENSES"
-      - "tools/check_*.sh"
-      - "tools/git-hooks/**"
-      - ".github/workflows/ci.yml"
-      - ".github/workflows/fuzz-soak.yml"
-      - ".github/workflows/macos-e2e.yml"
-      - "tools/macos_e2e_host.sh"
   push:
     branches: [trunk]
-    # The same list: GitHub has no way to share it between the two triggers.
-    paths-ignore:
-      - "docs/**"
-      - "tests/**"
-      - "**/*.md"
-      - ".claude/**"
-      - ".clang-format"
-      - ".clang-tidy"
-      - ".gitignore"
-      - "LICENSE"
-      - "NOTICE"
-      - "THIRD_PARTY_LICENSES"
-      - "tools/check_*.sh"
-      - "tools/git-hooks/**"
-      - ".github/workflows/ci.yml"
-      - ".github/workflows/fuzz-soak.yml"
-      - ".github/workflows/macos-e2e.yml"
-      - "tools/macos_e2e_host.sh"
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -58,8 +20,22 @@ env:
   ZET_APK_CACHE: ${{ github.workspace }}/../apk-cache
 
 jobs:
+  changes:
+    name: changes
+    runs-on: ubuntu-24.04
+    outputs:
+      fuzz: ${{ steps.changes.outputs.fuzz }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - id: changes
+        uses: ./.github/actions/changes
+
   fuzz:
     name: fuzz
+    needs: changes
+    if: needs.changes.outputs.fuzz == 'true'
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4

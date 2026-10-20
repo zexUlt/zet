@@ -17,18 +17,10 @@ on:
   workflow_dispatch:
   schedule:
     - cron: "0 4 * * *"
-  # And on a pull request that changes the job itself or the host it stands
-  # on, so that a change to the setup is proven before it lands.
+  # And on every pull request, so that `macos e2e` can be a required check;
+  # the jobs skip when the change touches nothing on the path from the macOS
+  # client to the agent (tools/ci_changes.sh).
   pull_request:
-    paths:
-      - "src/client/**"
-      - "src/app/**"
-      - "src/io/**"
-      - ".github/workflows/macos-e2e.yml"
-      - "tools/macos_e2e_host.sh"
-      - "tests/macos_e2e/**"
-      - "tests/integration/sshhost.py"
-      - "tests/integration/host.py"
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -38,8 +30,22 @@ env:
   ZET_APK_CACHE: ${{ github.workspace }}/../apk-cache
 
 jobs:
+  changes:
+    name: changes
+    runs-on: ubuntu-24.04
+    outputs:
+      macos_e2e: ${{ steps.changes.outputs.macos_e2e }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - id: changes
+        uses: ./.github/actions/changes
+
   agent:
     name: build zet-agent
+    needs: changes
+    if: needs.changes.outputs.macos_e2e == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
@@ -75,7 +81,8 @@ jobs:
 
   macos-e2e:
     name: macos e2e
-    needs: agent
+    needs: [changes, agent]
+    if: needs.changes.outputs.macos_e2e == 'true'
     runs-on: macos-15-intel
     timeout-minutes: 60
     steps:

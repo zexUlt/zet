@@ -1,0 +1,42 @@
+name: Changes
+description: Which jobs this change needs, by tools/ci_changes.sh.
+
+# Needs a checkout with history enough to reach the base: fetch-depth 0.
+# Anything but a pull request — a push to trunk, a schedule, a dispatch —
+# needs every job.
+
+outputs:
+  test:
+    value: ${{ steps.decide.outputs.test }}
+  integration:
+    value: ${{ steps.decide.outputs.integration }}
+  coverage:
+    value: ${{ steps.decide.outputs.coverage }}
+  checks:
+    value: ${{ steps.decide.outputs.checks }}
+  macos:
+    value: ${{ steps.decide.outputs.macos }}
+  fuzz:
+    value: ${{ steps.decide.outputs.fuzz }}
+  macos_e2e:
+    value: ${{ steps.decide.outputs.macos_e2e }}
+
+runs:
+  using: composite
+  steps:
+    - name: Decide
+      id: decide
+      shell: bash
+      env:
+        EVENT: ${{ github.event_name }}
+        BASE: ${{ github.event.pull_request.base.sha }}
+      run: |
+        set -euo pipefail
+        if [ "$EVENT" = "pull_request" ]; then
+          changed=$(git diff --name-only "$BASE"...HEAD)
+        else
+          # Not a pull request: a path that runs everything.
+          changed=.github/everything
+        fi
+        printf '%s\n' "$changed"
+        printf '%s\n' "$changed" | tools/ci_changes.sh | tee -a "$GITHUB_OUTPUT"
