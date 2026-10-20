@@ -204,15 +204,22 @@ def test_an_intruder_cannot_take_a_session(binaries, installed_agent, two_hosts,
         terminal.expect(PROMPT)
         sid = bytes.fromhex(mux.wait_registered(_uid(TEST_USER)))
         assert len(sid) == SESSION_ID_SIZE
+        before = len(mux.registrations())
         for guess in (secrets.token_bytes(REGISTRATION_SECRET_SIZE),
                       sid + sid,
                       sid + bytes(REGISTRATION_SECRET_SIZE - SESSION_ID_SIZE)):
             conn = mux.connect_local(INTRUDER_USER)
             _send_regardless(conn, mux_register(guess))
             intruders.append(conn)
-        # Whatever the mux made of those, none of them is the victim's sid.
-        taken = [s for s, uid in mux.registrations() if uid == _uid(INTRUDER_USER)]
-        assert sid.hex() not in taken
+        # Each guess is a valid R of some other sid, so the mux takes all three
+        # — and none of them is the victim's. Waited for: the check is on what
+        # the mux did, not on what it got round to.
+        def intruder_sids() -> list[str]:
+            return [s for s, uid in mux.registrations()[before:]
+                    if uid == _uid(INTRUDER_USER)]
+        wait_until(lambda: len(intruder_sids()) == 3,
+                   "the intruder's three registrations")
+        assert sid.hex() not in intruder_sids()
 
         # The victim reconnects; the connection must go to the victim's agent.
         _cut_and_reconnect(terminal, victim, iptables, mux.port)

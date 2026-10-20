@@ -19,8 +19,10 @@ it root.
                            since every user's agent registers on it
     ZET_MUX_LOG      path  where it logs; nothing if unset
 
-Its log has one line per accepted registration, which is how the suite
-learns a live session's sid (public: it rides in every Hello, §5):
+Its log is opened for appending, never truncated — a restarted mux adds to
+what the one before it wrote — and has one line per accepted registration,
+which is how the suite learns a live session's sid (public: it rides in
+every Hello, §5):
 
     registered sid=<32 lowercase hex> uid=<decimal>
 
@@ -268,23 +270,34 @@ class Mux:
         """A connection to the agents' socket made as `user`: a child process
         becomes the user, connects, and hands the descriptor back over a
         socketpair, so that SO_PEERCRED at the mux says `user`."""
+        # Looked up before the fork: the child makes only system calls, and
+        # getpwnam is not one a forked child may count on.
+        drop = as_user(user)
         parent, child = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
+        parent.settimeout(STEP_TIMEOUT_SECONDS)
         pid = os.fork()
         if pid == 0:
             try:
                 parent.close()
-                as_user(user)()
+                drop()
                 conn = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                conn.settimeout(STEP_TIMEOUT_SECONDS)
                 conn.connect(str(self.socket_path))
                 socket.send_fds(child, [b"x"], [conn.fileno()])
                 os._exit(0)
             except BaseException:
                 os._exit(1)
         child.close()
+        fds: list[int] = []
         try:
             _, fds, _, _ = socket.recv_fds(parent, 1, 1)
+        except TimeoutError:
+            pass
         finally:
             parent.close()
+            if not fds:
+                # A child stuck in connect would hold waitpid for ever.
+                os.kill(pid, signal.SIGKILL)
             _, status = os.waitpid(pid, 0)
         if os.waitstatus_to_exitcode(status) != 0 or not fds:
             raise AssertionError(f"{user} could not connect to {self.socket_path}")
