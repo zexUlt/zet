@@ -17,24 +17,39 @@ compatibility with EternalTerminal and no shared code with it.
 
 Download a release tarball and `SHA256SUMS` from
 [GitHub Releases](https://github.com/zexUlt/zet/releases), verify them,
-and unpack:
+and unpack.
+
+**Linux (x86_64 or aarch64):**
 
 ```sh
-# Verify the build-provenance attestation (requires gh ≥ 2.49)
+# The attestation is the trust root (requires gh ≥ 2.49).
+# SHA256SUMS guards against transfer corruption only.
 gh attestation verify zet-X.Y.Z-linux-x86_64.tar.gz \
     --repo zexUlt/zet
 
-# Verify the checksum
 sha256sum --check --ignore-missing SHA256SUMS
 
-# Unpack (adjust the tarball name for your platform and version)
+mkdir -p ~/.local
 tar -C ~/.local -xzf zet-X.Y.Z-linux-x86_64.tar.gz --strip-components=1
 ```
 
-After unpacking, `bin/zet` and `bin/zet-agent` land under the prefix you chose.
-Linux binaries are statically linked (musl + libc++); no other dependencies are
-needed. The macOS client links `libSystem` dynamically and `libsodium`
-statically. `zet --version` prints the release version.
+**macOS (arm64, macOS 14 or later):**
+
+```sh
+gh attestation verify zet-X.Y.Z-macos-arm64.tar.gz \
+    --repo zexUlt/zet
+
+shasum -a 256 -c --ignore-missing SHA256SUMS
+
+mkdir -p ~/.local
+tar -C ~/.local -xzf zet-X.Y.Z-macos-arm64.tar.gz --strip-components=1
+```
+
+After unpacking, `bin/zet` lands under `~/.local`. Linux binaries are
+statically linked (musl + libc++); no other dependencies are needed. The
+macOS tarball contains `bin/zet` only; the macOS client links `libSystem`
+dynamically and `libsodium` statically. `zet --version` prints the release
+version.
 
 The Linux tarballs carry agents for both `x86_64` and `aarch64` under
 `libexec/zet/`, so the client (M5.5) can bootstrap either server from any

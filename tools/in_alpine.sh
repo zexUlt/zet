@@ -43,11 +43,6 @@ if [ -n "${CCACHE_DIR:-}" ]; then
     mkdir -p "$CCACHE_DIR"
     args+=(-v "$CCACHE_DIR:/ccache" -e CCACHE_DIR=/ccache -e ZET_COMPILER_LAUNCHER=ccache)
 fi
-# Forward the pinned release version when set by the CI release workflow.
-# CMakeLists.txt reads $ENV{ZET_RELEASE_VERSION} as an override of git describe.
-if [ -n "${ZET_RELEASE_VERSION:-}" ]; then
-    args+=(-e "ZET_RELEASE_VERSION=$ZET_RELEASE_VERSION")
-fi
 
 docker run "${args[@]}" "$ALPINE_IMAGE" sh -c "
 set -e

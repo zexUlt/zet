@@ -107,7 +107,8 @@ constexpr std::string_view ESCAPE_NOTICE = "zet: closed by ~.\r\n";
 constexpr std::string_view USAGE =
     "usage: zet [--agent PATH] [--ssh-arg ARG]... HOST\n"
     "  --agent PATH    zet-agent on the remote host (default: zet-agent)\n"
-    "  --ssh-arg ARG   passed to ssh as it is; repeat for several\n";
+    "  --ssh-arg ARG   passed to ssh as it is; repeat for several\n"
+    "  --version       print the release version and exit\n";
 
 void Say(std::string_view text) noexcept {
     static_cast<void>(::write(STDERR_FILENO, text.data(), text.size()));
@@ -122,6 +123,7 @@ void SayError(std::string_view what, std::string_view why) noexcept {
 }
 
 struct Options {
+    bool PrintVersion{false};
     std::string Agent{DEFAULT_AGENT};
     std::vector<std::string> SshArgs;
     std::string Host;
@@ -156,6 +158,9 @@ std::optional<Options> ReadOptions(std::span<char*> args) {
             options.Agent = args[++i];
         } else if (arg == "--ssh-arg" && i + 1 < args.size()) {
             options.SshArgs.emplace_back(args[++i]);
+        } else if (arg == "--version") {
+            options.PrintVersion = true;
+            return options;
         } else if (!arg.starts_with("-") && options.Host.empty()) {
             options.Host = arg;
         } else {
@@ -969,21 +974,20 @@ int Client::Finish(int status) noexcept {
 }  // namespace
 
 int Main(std::span<char*> args) noexcept {
-    for (std::size_t i = 1; i < args.size(); ++i) {
-        if (std::string_view{args[i]} == "--version") {
-            constexpr std::string_view line = "zet ";
-            static_cast<void>(::write(STDOUT_FILENO, line.data(), line.size()));
-            static_cast<void>(::write(STDOUT_FILENO,
-                                      zet::RELEASE_VERSION.data(),
-                                      zet::RELEASE_VERSION.size()));
-            static_cast<void>(::write(STDOUT_FILENO, "\n", 1));
-            return 0;
-        }
-    }
     auto options = ReadOptions(args);
     if (!options) {
         Say(USAGE);
         return USAGE_STATUS;
+    }
+    if (options->PrintVersion) {
+        constexpr std::string_view prefix = "zet ";
+        const bool ok = ::write(STDOUT_FILENO, prefix.data(), prefix.size()) ==
+                            static_cast<ssize_t>(prefix.size()) &&
+                        ::write(STDOUT_FILENO, zet::RELEASE_VERSION.data(),
+                                zet::RELEASE_VERSION.size()) ==
+                            static_cast<ssize_t>(zet::RELEASE_VERSION.size()) &&
+                        ::write(STDOUT_FILENO, "\n", 1) == 1;
+        return ok ? 0 : FAILURE_STATUS;
     }
     if (!crypto::Init()) {
         SayError("crypto", "libsodium did not initialise");

@@ -17,21 +17,52 @@ project(zet
 # tied to it and is never compared across machines.
 #
 # Callers may pin the version explicitly via the ZET_RELEASE_VERSION
-# environment variable; the release workflow does this to avoid the "dubious
-# ownership" refusal that git emits when the Alpine container (root) sees a
-# repo owned by the runner uid.
+# environment variable. git describe itself is invoked with -c safe.directory
+# so it works inside the Alpine container (Docker as root, repo owned by the
+# runner uid); ZET_RELEASE_VERSION remains a last-resort override.
 if(DEFINED ENV{ZET_RELEASE_VERSION} AND NOT "$ENV{ZET_RELEASE_VERSION}" STREQUAL "")
     set(ZET_RELEASE_VERSION "$ENV{ZET_RELEASE_VERSION}")
 else()
     find_package(Git QUIET)
     if(Git_FOUND AND EXISTS "${CMAKE_SOURCE_DIR}/.git")
+        # -c safe.directory lets git run when the repo is owned by a different
+        # uid (e.g. inside the Alpine container where Docker runs as root but
+        # the checkout belongs to the runner uid).
+        #
+        # --match 'v[0-9]*.[0-9]*.[0-9]*' --exclude '*-*' ensures pre-release
+        # tags (v0.1.0-alpha, v0.1.0-rc1) are never treated as the nearest
+        # stable tag, which would give post-tag builds misleading distances.
         execute_process(
-            COMMAND ${GIT_EXECUTABLE} describe --tags --match "v[0-9]*" --abbrev=7
+            COMMAND ${GIT_EXECUTABLE} -c "safe.directory=${CMAKE_SOURCE_DIR}"
+                    describe --tags
+                    --match "v[0-9]*.[0-9]*.[0-9]*" --exclude "*-*"
+                    --abbrev=7
             WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
             OUTPUT_VARIABLE _ZET_GIT_DESCRIBE
             ERROR_QUIET
             OUTPUT_STRIP_TRAILING_WHITESPACE
         )
+        # cmake re-runs configure whenever HEAD or the tag database changes.
+        # git rev-parse --git-dir resolves the real git dir for worktrees
+        # (where .git is a file pointing elsewhere).
+        execute_process(
+            COMMAND ${GIT_EXECUTABLE} -c "safe.directory=${CMAKE_SOURCE_DIR}"
+                    rev-parse --git-dir
+            WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+            OUTPUT_VARIABLE _ZET_GIT_DIR
+            ERROR_QUIET
+            OUTPUT_STRIP_TRAILING_WHITESPACE
+        )
+        if(NOT IS_ABSOLUTE "${_ZET_GIT_DIR}")
+            set(_ZET_GIT_DIR "${CMAKE_SOURCE_DIR}/${_ZET_GIT_DIR}")
+        endif()
+        foreach(_dep IN ITEMS HEAD packed-refs)
+            if(EXISTS "${_ZET_GIT_DIR}/${_dep}")
+                set_property(DIRECTORY APPEND PROPERTY
+                    CMAKE_CONFIGURE_DEPENDS "${_ZET_GIT_DIR}/${_dep}")
+            endif()
+        endforeach()
+        unset(_ZET_GIT_DIR)
     else()
         set(_ZET_GIT_DESCRIBE "")
     endif()

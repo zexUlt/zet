@@ -25,11 +25,14 @@ include(GNUInstallDirs)
 install(FILES LICENSE NOTICE THIRD_PARTY_LICENSES
     DESTINATION ${CMAKE_INSTALL_DATADIR}/zet)
 
-install(DIRECTORY units/
-    DESTINATION ${CMAKE_INSTALL_DATADIR}/zet/units
-    FILES_MATCHING
-        PATTERN "*.service"
-        PATTERN "*.socket")
+# systemd units are Linux-only; the macOS client has no use for them.
+if(NOT APPLE)
+    install(DIRECTORY units/
+        DESTINATION ${CMAKE_INSTALL_DATADIR}/zet/units
+        FILES_MATCHING
+            PATTERN "*.service"
+            PATTERN "*.socket")
+endif()
 
 # --- Executables (guarded by platform) -------------------------------------
 

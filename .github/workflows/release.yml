@@ -25,10 +25,21 @@ on:
   pull_request:
     paths:
       - .github/workflows/release.yml
+      - .github/actions/**
       - cmake/**
       - CMakeLists.txt
       - CMakePresets.json
-      - src/crypto/CMakeLists.txt
+      - tools/musl_build.sh
+      - tools/in_alpine.sh
+      - tools/alpine-packages.txt
+      - units/**
+      - LICENSE
+      - NOTICE
+      - THIRD_PARTY_LICENSES
+      - src/**/CMakeLists.txt
+      - src/client/main.cpp
+      - src/agent/main.cpp
+      - src/mux/main.cpp
 
 # Minimum permissions at the workflow level; jobs that need more declare it.
 permissions:
@@ -105,6 +116,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
+          ref: ${{ github.sha }}
           fetch-depth: 0   # git describe needs tag history
 
       - name: Restore the compiler cache
@@ -116,18 +128,11 @@ jobs:
         uses: ./.github/actions/apk
 
       - name: Build
-        # Set ZET_RELEASE_VERSION so in_alpine.sh forwards it to the container
-        # as an env var. CMakeLists.txt reads $ENV{ZET_RELEASE_VERSION} and
-        # skips git describe, which fails inside the container because Docker
-        # runs as root while the checkout is owned by the runner uid (dubious
-        # ownership). On pull_request dry-runs the tag is absent so 0.0.0-dev
-        # flows through naturally.
-        env:
-          ZET_TAG: ${{ github.ref_name }}
+        # CMakeLists.txt runs git describe with -c safe.directory, which works
+        # even inside the Alpine container where Docker runs as root but the
+        # checkout is owned by the runner uid. On pull_request dry-runs where
+        # no v* tag is reachable, git describe falls back to 0.0.0-dev.
         run: |
-          if printf '%s' "$ZET_TAG" | grep -qE '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
-            export ZET_RELEASE_VERSION="${ZET_TAG#v}"
-          fi
           tools/musl_build.sh musl-release
 
       - name: Install into staging directory
@@ -142,24 +147,30 @@ jobs:
       - name: Verify --version output
         # Run the binaries on the host (they are statically linked musl, so
         # they run on any Linux regardless of the host libc).
+        # On a tag: exact match against the tag version.
+        # On a pull_request dry-run: check that output matches the version
+        # pattern so the flag is not silently broken.
         env:
           ZET_TAG: ${{ github.ref_name }}
         run: |
           set -euo pipefail
-          if ! printf '%s' "$ZET_TAG" | grep -qE '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
-            echo "Dry-run: skipping --version check (no tag)"
-            exit 0
-          fi
-          WANT="${ZET_TAG#v}"
+          VERSION_RE='^[^ ]+ (0\.0\.0-dev|[0-9]+\.[0-9]+\.[0-9]+(-[0-9]+-g[0-9a-f]+-dev)?)$'
           for bin in zet zet-agent zet-muxd; do
             GOT=$("$RUNNER_TEMP/stage-x86_64/bin/$bin" --version 2>/dev/null || true)
-            WANT_LINE="$bin $WANT"
-            if [ "$GOT" != "$WANT_LINE" ]; then
-              echo "FAIL: $bin --version printed '$GOT', expected '$WANT_LINE'"
-              exit 1
+            if printf '%s' "$ZET_TAG" | grep -qE '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
+              WANT_LINE="$bin ${ZET_TAG#v}"
+              if [ "$GOT" != "$WANT_LINE" ]; then
+                echo "FAIL: $bin --version printed '$GOT', expected '$WANT_LINE'"
+                exit 1
+              fi
+            else
+              if ! printf '%s' "$GOT" | grep -qE "$VERSION_RE"; then
+                echo "FAIL: $bin --version printed '$GOT', does not match $VERSION_RE"
+                exit 1
+              fi
             fi
           done
-          echo "All --version outputs match $WANT"
+          echo "All --version outputs are valid"
 
       - uses: actions/upload-artifact@v4
         with:
@@ -178,6 +189,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
+          ref: ${{ github.sha }}
           fetch-depth: 0
 
       - name: Restore the compiler cache
@@ -189,12 +201,7 @@ jobs:
         uses: ./.github/actions/apk
 
       - name: Build
-        env:
-          ZET_TAG: ${{ github.ref_name }}
         run: |
-          if printf '%s' "$ZET_TAG" | grep -qE '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
-            export ZET_RELEASE_VERSION="${ZET_TAG#v}"
-          fi
           tools/musl_build.sh musl-release
 
       - name: Install into staging directory
@@ -208,20 +215,23 @@ jobs:
           ZET_TAG: ${{ github.ref_name }}
         run: |
           set -euo pipefail
-          if ! printf '%s' "$ZET_TAG" | grep -qE '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
-            echo "Dry-run: skipping --version check (no tag)"
-            exit 0
-          fi
-          WANT="${ZET_TAG#v}"
+          VERSION_RE='^[^ ]+ (0\.0\.0-dev|[0-9]+\.[0-9]+\.[0-9]+(-[0-9]+-g[0-9a-f]+-dev)?)$'
           for bin in zet zet-agent zet-muxd; do
             GOT=$("$RUNNER_TEMP/stage-aarch64/bin/$bin" --version 2>/dev/null || true)
-            WANT_LINE="$bin $WANT"
-            if [ "$GOT" != "$WANT_LINE" ]; then
-              echo "FAIL: $bin --version printed '$GOT', expected '$WANT_LINE'"
-              exit 1
+            if printf '%s' "$ZET_TAG" | grep -qE '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
+              WANT_LINE="$bin ${ZET_TAG#v}"
+              if [ "$GOT" != "$WANT_LINE" ]; then
+                echo "FAIL: $bin --version printed '$GOT', expected '$WANT_LINE'"
+                exit 1
+              fi
+            else
+              if ! printf '%s' "$GOT" | grep -qE "$VERSION_RE"; then
+                echo "FAIL: $bin --version printed '$GOT', does not match $VERSION_RE"
+                exit 1
+              fi
             fi
           done
-          echo "All --version outputs match $WANT"
+          echo "All --version outputs are valid"
 
       - uses: actions/upload-artifact@v4
         with:
@@ -245,25 +255,19 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
+          ref: ${{ github.sha }}
           fetch-depth: 0
 
       - name: Install toolchain and libsodium
         run: brew install libsodium ninja llvm pkg-config
 
       - name: Build
-        env:
-          ZET_TAG: ${{ github.ref_name }}
         run: |
           set -euo pipefail
           LLVM_PREFIX="$(brew --prefix llvm)"
           SODIUM_PREFIX="$(brew --prefix libsodium)"
           # pkg_check_modules needs to find libsodium's .pc file.
           export PKG_CONFIG_PATH="$SODIUM_PREFIX/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
-          # CMakeLists.txt reads ZET_RELEASE_VERSION from the environment as an
-          # override of git describe (same mechanism as the Linux/Alpine builds).
-          if printf '%s' "$ZET_TAG" | grep -qE '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
-            export ZET_RELEASE_VERSION="${ZET_TAG#v}"
-          fi
           # Homebrew's LLVM: the runner's Xcode ships Apple Clang 15, but the
           # project needs Clang 20 or newer (CMakeLists.txt).
           cmake --preset macos-release \
@@ -299,18 +303,21 @@ jobs:
           ZET_TAG: ${{ github.ref_name }}
         run: |
           set -euo pipefail
-          if ! printf '%s' "$ZET_TAG" | grep -qE '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
-            echo "Dry-run: skipping --version check (no tag)"
-            exit 0
-          fi
-          WANT="${ZET_TAG#v}"
+          VERSION_RE='^[^ ]+ (0\.0\.0-dev|[0-9]+\.[0-9]+\.[0-9]+(-[0-9]+-g[0-9a-f]+-dev)?)$'
           GOT=$("$RUNNER_TEMP/stage-macos/bin/zet" --version 2>/dev/null || true)
-          WANT_LINE="zet $WANT"
-          if [ "$GOT" != "$WANT_LINE" ]; then
-            echo "FAIL: zet --version printed '$GOT', expected '$WANT_LINE'"
-            exit 1
+          if printf '%s' "$ZET_TAG" | grep -qE '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
+            WANT_LINE="zet ${ZET_TAG#v}"
+            if [ "$GOT" != "$WANT_LINE" ]; then
+              echo "FAIL: zet --version printed '$GOT', expected '$WANT_LINE'"
+              exit 1
+            fi
+          else
+            if ! printf '%s' "$GOT" | grep -qE "$VERSION_RE"; then
+              echo "FAIL: zet --version printed '$GOT', does not match $VERSION_RE"
+              exit 1
+            fi
           fi
-          echo "zet --version matches $WANT"
+          echo "zet --version is valid"
 
       - uses: actions/upload-artifact@v4
         with:
@@ -415,6 +422,37 @@ jobs:
           cd "$DIST"
           sha256sum zet-*.tar.gz > SHA256SUMS
           cat SHA256SUMS
+
+      - name: Verify tarball contents
+        run: |
+          set -euo pipefail
+          VERSION="${{ steps.version.outputs.version }}"
+          DIST="$RUNNER_TEMP/dist"
+          check_tarball() {
+            local tarball="$1"; shift
+            local required=("$@")
+            local contents
+            contents=$(tar tzf "$tarball")
+            for entry in "${required[@]}"; do
+              if ! printf '%s' "$contents" | grep -qF "/$entry"; then
+                echo "FAIL: $tarball missing $entry"
+                echo "Contents:"
+                printf '%s\n' "$contents"
+                exit 1
+              fi
+            done
+            echo "ok $tarball"
+          }
+          # Both Linux tarballs carry all three binaries plus both arch agents.
+          linux_required=(
+            bin/zet bin/zet-agent bin/zet-muxd
+            libexec/zet/zet-agent-x86_64
+            libexec/zet/zet-agent-aarch64
+          )
+          check_tarball "$DIST/zet-${VERSION}-linux-x86_64.tar.gz" "${linux_required[@]}"
+          check_tarball "$DIST/zet-${VERSION}-linux-aarch64.tar.gz" "${linux_required[@]}"
+          # The macOS tarball is client-only.
+          check_tarball "$DIST/zet-${VERSION}-macos-arm64.tar.gz" bin/zet
 
       - uses: actions/upload-artifact@v4
         with:
