@@ -46,11 +46,11 @@ TEST_CASE("RELEASE_VERSION is non-empty and has a known format") {
         if (d2 == std::string::npos) {
             return false;
         }
-        const auto hash_part = core.substr(d2 + 1);
-        if (hash_part.size() < 2 || hash_part[0] != 'g') {
+        const auto hashPart = core.substr(d2 + 1);
+        if (hashPart.size() < 2 || hashPart[0] != 'g') {
             return false;
         }
-        for (char c : hash_part.substr(1)) {
+        for (char c : hashPart.substr(1)) {
             if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) {
                 return false;
             }
