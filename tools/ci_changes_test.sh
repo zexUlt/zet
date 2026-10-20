@@ -26,7 +26,7 @@ expect() {
     fi
 }
 
-all="test integration coverage checks macos fuzz macos_e2e"
+all="test integration coverage checks macos fuzz macos_e2e systemd"
 
 expect "docs/design.md" ""
 expect "README.md,.claude/rules/invariants.md,tests/integration/README.md" ""
@@ -40,16 +40,18 @@ expect "tools/alpine-packages.txt" "$all"
 
 expect "src/wire/message.cpp" "$all"
 expect "src/session/channel.cpp" "$all"
-expect "src/io/poller_kqueue.cpp" "test integration checks macos macos_e2e"
-expect "src/client/client.cpp" "test integration checks macos macos_e2e"
-expect "src/agent/agent.cpp" "test integration checks macos_e2e"
-expect "src/mux/mux.cpp" "test integration checks"
-expect "units/zet-muxd.socket" "test integration checks"
+expect "src/io/poller_kqueue.cpp" "test integration checks macos macos_e2e systemd"
+expect "src/client/client.cpp" "test integration checks macos macos_e2e systemd"
+expect "src/agent/agent.cpp" "test integration checks macos_e2e systemd"
+expect "src/mux/mux.cpp" "test integration checks systemd"
+expect "units/zet-muxd.socket" "test integration checks systemd"
 
 expect "tests/wire/message_test.cpp" "test coverage checks macos"
 expect "tests/io/poller_test.cpp" "test checks macos"
 expect "tests/integration/test_mux.py" "integration"
-expect "tests/integration/sshhost.py" "integration macos_e2e"
+expect "tests/integration/sshhost.py" "integration macos_e2e systemd"
+expect "tests/integration/host.py" "integration macos_e2e"
+expect "tests/systemd/test_systemd.py" "systemd"
 expect "tests/macos_e2e/test_client.py" "macos_e2e"
 
 expect "fuzz/session_fuzz.cpp" "fuzz checks"

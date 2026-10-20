@@ -20,6 +20,8 @@ outputs:
     value: ${{ steps.decide.outputs.fuzz }}
   macos_e2e:
     value: ${{ steps.decide.outputs.macos_e2e }}
+  systemd:
+    value: ${{ steps.decide.outputs.systemd }}
 
 runs:
   using: composite

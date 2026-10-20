@@ -6,26 +6,15 @@ name: systemd e2e
 # Ubuntu runner itself, whose PID 1 is systemd. On the host, not in a
 # container, and as root through sudo, which the runner gives.
 #
-# Not a required check: it runs on changes to what it tests, nightly and on
-# demand.
+# On every pull request, so that it can be a required check: tools/
+# ci_changes.sh decides whether the change reaches what it tests, and the
+# jobs skip otherwise. Also nightly and on demand.
 
 on:
   workflow_dispatch:
   schedule:
     - cron: "30 4 * * *"
   pull_request:
-    paths:
-      - "src/mux/**"
-      - "src/agent/**"
-      - "src/app/**"
-      - "src/io/**"
-      - "src/session/**"
-      - "units/**"
-      - "tests/systemd/**"
-      - "tests/integration/e2e.py"
-      - "tests/integration/harness.py"
-      - "tests/integration/sshhost.py"
-      - ".github/workflows/systemd-e2e.yml"
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -35,8 +24,22 @@ env:
   ZET_APK_CACHE: ${{ github.workspace }}/../apk-cache
 
 jobs:
+  changes:
+    name: changes
+    runs-on: ubuntu-24.04
+    outputs:
+      systemd: ${{ steps.changes.outputs.systemd }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - id: changes
+        uses: ./.github/actions/changes
+
   build:
     name: build the binaries
+    needs: changes
+    if: needs.changes.outputs.systemd == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
@@ -74,7 +77,8 @@ jobs:
 
   systemd:
     name: systemd e2e
-    needs: build
+    needs: [changes, build]
+    if: needs.changes.outputs.systemd == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
