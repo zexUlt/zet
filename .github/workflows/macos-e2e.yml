@@ -59,7 +59,8 @@ jobs:
       # 20 or newer (CMakeLists.txt), which the runner's Xcode does not have.
       - name: Build the native client
         run: |
-          brew install llvm
+          # ccache too: the compiler-cache action names it as the launcher.
+          brew install llvm ccache
           cmake --preset dev -DCMAKE_CXX_COMPILER="$(brew --prefix llvm)/bin/clang++" >/dev/null
           cmake --build --preset dev --target zet
 
