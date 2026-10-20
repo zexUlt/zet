@@ -346,6 +346,8 @@ private:
     void Decide(std::uint64_t id, const session::MuxDecision& decision,
                 Timestamp now) noexcept;
     void ReadAgent(std::uint64_t id, Agent& agent) noexcept;
+    [[nodiscard]] std::optional<wire::EMuxRefusal> Register(
+        std::uint64_t id, const Agent& agent, ByteSpan body) noexcept;
     void Answer(std::uint64_t id, Agent& agent, ByteSpan body) noexcept;
     void WriteAgent(Agent& agent) noexcept;
     void PumpDecoy(Decoy& decoy, Timestamp now) noexcept;
@@ -612,23 +614,39 @@ void Mux::ReadAgent(std::uint64_t id, Agent& agent) noexcept {
     }
 }
 
-void Mux::Answer(std::uint64_t id, Agent& agent, ByteSpan body) noexcept {
+std::optional<wire::EMuxRefusal> Mux::Register(std::uint64_t id,
+                                               const Agent& agent,
+                                               ByteSpan body) noexcept {
     ByteReader reader{body};
     const auto type = wire::ParseMessageType(reader);
-    std::optional<wire::EMuxRefusal> refusal;
     if (!type || *type != wire::EMessageType::MuxRegister) {
-        refusal = wire::EMuxRefusal::Malformed;
-    } else if (auto message = wire::ParseMuxRegister(reader); !message) {
-        refusal = wire::EMuxRefusal::Malformed;
-    } else if (auto registered =
-                   Router_->Register(id, agent.Uid, message->Registration);
-               !registered) {
-        refusal = registered.error();
-    } else {
-        const auto sid = wire::SessionIdOf(message->Registration);
-        Log_.Line("registered sid=" + Hex(ByteSpan{sid}) +
-                  " uid=" + std::to_string(agent.Uid));
+        return wire::EMuxRefusal::Malformed;
     }
+    const auto message = wire::ParseMuxRegister(reader);
+    if (!message) {
+        return wire::EMuxRefusal::Malformed;
+    }
+    const auto sid = wire::SessionIdOf(message->Registration);
+    const auto previous = Router_->Find(sid);
+    if (auto registered =
+            Router_->Register(id, agent.Uid, message->Registration);
+        !registered) {
+        return registered.error();
+    }
+    // The same uid with the same R is the agent itself, back before we saw
+    // its old connection end (§6): that one is closed.
+    if (previous && *previous != id) {
+        if (auto old = AgentPeers_.find(*previous); old != AgentPeers_.end()) {
+            old->second->Closing = true;
+        }
+    }
+    Log_.Line("registered sid=" + Hex(ByteSpan{sid}) +
+              " uid=" + std::to_string(agent.Uid));
+    return std::nullopt;
+}
+
+void Mux::Answer(std::uint64_t id, Agent& agent, ByteSpan body) noexcept {
+    const std::optional<wire::EMuxRefusal> refusal = Register(id, agent, body);
     std::vector<std::byte> frame;
     if (refusal) {
         Log_.Line("refused a registration uid=" + std::to_string(agent.Uid) +
