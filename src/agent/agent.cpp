@@ -1,5 +1,7 @@
 #include "agent.hpp"
 
+#include "mux_link.hpp"
+
 #include <fcntl.h>
 #include <poll.h>
 #include <pwd.h>
@@ -88,6 +90,7 @@ constexpr std::size_t EVENTS_PER_WAIT = 32;
 constexpr std::uint64_t LISTENER_TOKEN = 1;
 constexpr std::uint64_t PTY_TOKEN = 2;
 constexpr std::uint64_t SIGNAL_TOKEN = 3;
+constexpr std::uint64_t MUX_TOKEN = 4;
 constexpr std::uint64_t FIRST_CONNECTION_TOKEN = 16;
 
 constexpr int USAGE_STATUS = 2;
@@ -177,16 +180,25 @@ bool WriteAll(int fd, ByteSpan bytes) noexcept {
 
 struct Bootstrapped {
     session::BootstrapResult Result;
-    io::Listener Listener;
+    /// Ours, as in M4; or none, and the mux's port in the Accept (§6).
+    std::optional<io::Listener> Listener;
+    std::unique_ptr<MuxLink> Mux;
 };
 
-/// The §4 exchange on stdin and stdout, with the port bound first so that
-/// the Accept can name it.
+/// The §4 exchange on stdin and stdout. Without a mux the port is bound
+/// first so that the Accept can name it; with one it is the mux's, learned
+/// by registering the R the Offer gives — before the Accept goes out, so
+/// that the client's first connect finds the sid registered (§6).
 std::optional<Bootstrapped> Bootstrap(const Config& config) noexcept {
-    auto listener = io::ListenTcp();
-    if (!listener) {
-        SayError("listen", listener.error().Description());
-        return std::nullopt;
+    const std::string muxPath = MuxSocketPath();
+    std::optional<io::Listener> listener;
+    if (!MuxSocketExists(muxPath)) {
+        auto bound = io::ListenTcp();
+        if (!bound) {
+            SayError("listen", bound.error().Description());
+            return std::nullopt;
+        }
+        listener = std::move(*bound);
     }
     // The client learns how long we keep a session without it, which is how
     // long its reconnecting can make sense.
@@ -194,9 +206,9 @@ std::optional<Bootstrapped> Bootstrap(const Config& config) noexcept {
         std::chrono::duration_cast<std::chrono::seconds>(
             config.Limits.OrphanTimeout)
             .count());
-    session::BootstrapAgent bootstrap{RandomKey(),
-                                      RandomNonce<wire::BootstrapNonce>(),
-                                      listener->Port, orphanSeconds};
+    session::BootstrapAgent bootstrap{
+        RandomKey(), RandomNonce<wire::BootstrapNonce>(),
+        listener ? listener->Port : std::uint16_t{0}, orphanSeconds};
 
     const Timestamp until = io::MonotonicNow() + BOOTSTRAP_TIMEOUT;
     std::array<std::byte, 4096> chunk{};
@@ -233,6 +245,28 @@ std::optional<Bootstrapped> Bootstrap(const Config& config) noexcept {
         result = std::move(step->Result);
     }
 
+    std::unique_ptr<MuxLink> mux;
+    if (!listener) {
+        mux = std::make_unique<MuxLink>(
+            muxPath, crypto::Key{result->Secrets.Registration.Expose()},
+            MUX_TOKEN);
+        if (auto port = mux->RegisterNow(until)) {
+            bootstrap.AnnouncePort(*port);
+        } else {
+            // A mux that is down or not to be trusted leaves the agent where
+            // M4 had it: on a port of its own.
+            SayError("mux", port.error());
+            mux.reset();
+            auto bound = io::ListenTcp();
+            if (!bound) {
+                SayError("listen", bound.error().Description());
+                return std::nullopt;
+            }
+            listener = std::move(*bound);
+            bootstrap.AnnouncePort(listener->Port);
+        }
+    }
+
     std::array<char, session::BOOTSTRAP_ACCEPT_TEXT_SIZE> text{};
     const auto length = bootstrap.WriteAccept(text);
     if (!length || !WriteAll(STDOUT_FILENO,
@@ -241,7 +275,8 @@ std::optional<Bootstrapped> Bootstrap(const Config& config) noexcept {
         return std::nullopt;
     }
     return Bootstrapped{.Result = std::move(*result),
-                        .Listener = std::move(*listener)};
+                        .Listener = std::move(listener),
+                        .Mux = std::move(mux)};
 }
 
 /// The user's login shell and the environment it starts with: the agent's
@@ -353,6 +388,7 @@ public:
         : Config_(std::move(config)),
           ShellEnvironment_(bootstrapped.Result.Environment),
           Listener_(std::move(bootstrapped.Listener)),
+          Mux_(std::move(bootstrapped.Mux)),
           Poller_(std::move(poller)),
           Storage_(
               std::max(Config_.Limits.ResendMax, Config_.Limits.DisconnectMax)),
@@ -361,8 +397,11 @@ public:
                                            .Now = io::MonotonicNow(),
                                            .Limits = Config_.Limits}),
           LocalSecret_(RandomKey()),
-          ListenerWatch_(Listener_.Socket.Get(), LISTENER_TOKEN),
-          PtyInput_(PTY_INPUT_MAX) {}
+          PtyInput_(PTY_INPUT_MAX) {
+        if (Listener_) {
+            ListenerWatch_.emplace(Listener_->Socket.Get(), LISTENER_TOKEN);
+        }
+    }
 
     int Run() noexcept;
 
@@ -375,6 +414,7 @@ private:
     [[nodiscard]] Deadline NextDeadline() const noexcept;
     void Handle(const io::PollEvent& event) noexcept;
     void AcceptAll() noexcept;
+    void Adopt(io::UniqueFd socket, ByteSpan prefix) noexcept;
     void ReadPty() noexcept;
     void WritePty() noexcept;
     void ReadSocket(Connection& connection) noexcept;
@@ -386,12 +426,15 @@ private:
     Config Config_;
     /// What the client asked the shell's environment to have (§4).
     wire::BootstrapEnvironment ShellEnvironment_;
-    io::Listener Listener_;
+    std::optional<io::Listener> Listener_;
+    /// Behind zet-muxd, in place of the listener.
+    std::unique_ptr<MuxLink> Mux_;
     io::Poller Poller_;
     std::vector<std::byte> Storage_;
     session::AgentSession Session_;
     crypto::Key LocalSecret_;
-    app::Registration ListenerWatch_;
+    std::optional<app::Registration> ListenerWatch_;
+    std::vector<HandedOver> HandedOver_;
 
     io::Child Child_;
     std::optional<app::Registration> PtyWatch_;
@@ -429,8 +472,11 @@ bool Agent::Start() noexcept {
     }
     Child_ = std::move(*child);
     PtyWatch_.emplace(Child_.Master.Get(), PTY_TOKEN);
-    const std::array fields{log::Field::Unsigned("port", Listener_.Port),
-                            log::Field::Signed("shell", Child_.Pid)};
+    const std::array fields{
+        log::Field::Unsigned("port",
+                             Listener_ ? Listener_->Port : Mux_->Port()),
+        log::Field::Text("via", Mux_ ? "mux" : "own"),
+        log::Field::Signed("shell", Child_.Pid)};
     Log(log::ELevel::Info, "serving", fields);
     return true;
 }
@@ -446,6 +492,9 @@ int Agent::Run() noexcept {
         if (Session_.State() == session::ESessionState::Reaped ||
             Terminating_) {
             return Hangup();
+        }
+        if (Mux_) {
+            Mux_->OnTimer(Poller_, now);
         }
         MovePtyOutput();
         if (ChildStatus_ && PtyEnded_ && PtyFrom_ == PtyTo_ &&
@@ -565,7 +614,12 @@ void Agent::DropClosed(Timestamp now) noexcept {
 }
 
 bool Agent::UpdateInterest() noexcept {
-    bool ok = static_cast<bool>(ListenerWatch_.Want(Poller_, true, false));
+    bool ok = !ListenerWatch_ ||
+              static_cast<bool>(ListenerWatch_->Want(Poller_, true, false));
+    if (Mux_ && !Mux_->UpdateInterest(Poller_)) {
+        // Lost like any other loss of the mux: registered again later.
+        Mux_->Close(Poller_);
+    }
     if (PtyWatch_) {
         const bool read =
             !PtyEnded_ && PtyFrom_ == PtyTo_ && Session_.AcceptsWrites();
@@ -586,6 +640,9 @@ bool Agent::UpdateInterest() noexcept {
 
 Deadline Agent::NextDeadline() const noexcept {
     Deadline next = Session_.NextDeadline();
+    if (Mux_) {
+        next = Earliest(next, Mux_->NextDeadline());
+    }
     for (const auto& connection : Connections_) {
         next = Earliest(next, connection->Link.NextDeadline());
     }
@@ -605,6 +662,15 @@ void Agent::Handle(const io::PollEvent& event) noexcept {
     switch (event.Token) {
         case LISTENER_TOKEN:
             AcceptAll();
+            return;
+        case MUX_TOKEN:
+            if (Mux_) {
+                Mux_->OnEvent(event, Poller_, io::MonotonicNow(), HandedOver_);
+                for (HandedOver& handed : HandedOver_) {
+                    Adopt(std::move(handed.Socket), ByteSpan{handed.Prefix});
+                }
+                HandedOver_.clear();
+            }
             return;
         case PTY_TOKEN:
             if (event.Writable) {
@@ -638,7 +704,7 @@ void Agent::Handle(const io::PollEvent& event) noexcept {
 
 void Agent::AcceptAll() noexcept {
     for (;;) {
-        auto socket = io::Accept(Listener_.Socket.Get());
+        auto socket = io::Accept(Listener_->Socket.Get());
         if (!socket) {
             if (!socket.error().WouldBlock()) {
                 const std::array fields{
@@ -656,6 +722,24 @@ void Agent::AcceptAll() noexcept {
             Config_.Limits.ResendMax + SOCKET_OUTPUT_SLACK));
         Log(log::ELevel::Info, "connection accepted");
     }
+}
+
+/// A connection zet-muxd has passed over (§6): what the mux read off it
+/// goes in before anything the socket has, as if it had been read here.
+void Agent::Adopt(io::UniqueFd socket, ByteSpan prefix) noexcept {
+    if (Connections_.size() >= MAX_CONNECTIONS) {
+        Log(log::ELevel::Warn, "too many connections; refusing a handoff");
+        return;
+    }
+    auto connection = std::make_unique<Connection>(
+        std::move(socket), NextToken_++, io::MonotonicNow(),
+        Config_.Limits.ResendMax + SOCKET_OUTPUT_SLACK);
+    if (!connection->Link.OnBytes(prefix)) {
+        Log(log::ELevel::Info, "a handoff with a bad prefix");
+        return;
+    }
+    Connections_.push_back(std::move(connection));
+    Log(log::ELevel::Info, "connection handed over");
 }
 
 void Agent::ReadPty() noexcept {
@@ -752,6 +836,9 @@ int Agent::Hangup() noexcept {
         connection->Watch.Forget(Poller_);
     }
     Connections_.clear();
+    if (Mux_) {
+        Mux_->Close(Poller_);
+    }
     if (PtyWatch_) {
         PtyWatch_->Forget(Poller_);
     }

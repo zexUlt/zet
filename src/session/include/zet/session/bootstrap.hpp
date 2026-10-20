@@ -127,6 +127,12 @@ public:
     /// the client writes and there is no second Offer to wait for.
     [[nodiscard]] ChannelResult<BootstrapStep> Feed(ByteSpan chunk) noexcept;
 
+    /// Names the port the Accept announces, in place of the one the agent
+    /// was built with. Behind zet-muxd the port is the mux's, and the agent
+    /// learns it by registering — which takes the session's R, which only a
+    /// read Offer gives (design.md §6). Call before WriteAccept.
+    void AnnouncePort(std::uint16_t port) noexcept;
+
     /// The armored Accept, once Feed has produced a result.
     [[nodiscard]] ProtoResult<std::size_t> WriteAccept(
         std::span<char> out) const noexcept;

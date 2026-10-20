@@ -2,6 +2,7 @@
 # binary is one main() and nothing else.
 add_library(zet_agent_loop STATIC
     agent.cpp
+    mux_link.cpp
 )
 target_link_libraries(zet_agent_loop PRIVATE zet::core_options)
 target_link_libraries(zet_agent_loop PUBLIC

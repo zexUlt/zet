@@ -1,0 +1,28 @@
+# zet-muxd (docs/design.md §6), started by zet-muxd.socket. Runs as the
+# unprivileged user zet; needs no root and no capability, since systemd binds
+# its ports. Create the user first:
+#   useradd --system --no-create-home --shell /usr/sbin/nologin zet
+
+[Unit]
+Description=zet mux: hands each connection to its user's zet-agent
+Requires=zet-muxd.socket
+After=zet-muxd.socket
+
+[Service]
+ExecStart=/usr/local/bin/zet-muxd
+User=zet
+Group=zet
+# Opened once, before the seccomp filter that forbids file operations.
+LogsDirectory=zet
+Environment=ZET_MUX_LOG=/var/log/zet/muxd.log
+Restart=on-failure
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+CapabilityBoundingSet=
+
+[Install]
+WantedBy=multi-user.target

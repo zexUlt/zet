@@ -377,3 +377,21 @@ TEST_CASE_FIXTURE(SodiumFixture,
     CHECK(accepted->Environment == environment);
     CHECK(SameSecrets(accepted->Secrets, offered->Secrets));
 }
+
+TEST_CASE_FIXTURE(SodiumFixture,
+                  "an agent behind the mux announces the port it learns late") {
+    // Behind zet-muxd the port comes from registering, which needs the
+    // session's R, which needs the Offer: it is named after Feed.
+    constexpr std::uint16_t muxPort = 2022;
+    BootstrapClient client{MakeSeed(1), MakeNonce(1)};
+    BootstrapAgent agent{MakeSeed(2), MakeNonce(2), 0};
+    auto [offered, read] = Run(agent, OfferText(client));
+    REQUIRE(offered.has_value());
+    // Not yet named: an Accept on port 0 is refused rather than written.
+    std::string text(BOOTSTRAP_ACCEPT_TEXT_SIZE, '\0');
+    CHECK_FALSE(agent.WriteAccept(std::span{text}).has_value());
+    agent.AnnouncePort(muxPort);
+    auto [accepted, taken] = Run(client, AcceptText(agent));
+    REQUIRE(accepted.has_value());
+    CHECK(accepted->Port == muxPort);
+}
