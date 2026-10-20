@@ -68,6 +68,19 @@
       }
     },
     {
+      "name": "macos-release",
+      "inherits": "base",
+      "displayName": "macos-release — release build for macOS (dynamic libSystem, no musl)",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "CMAKE_CXX_FLAGS": "-O2 -ffunction-sections -fdata-sections",
+        "CMAKE_EXE_LINKER_FLAGS": "-Wl,-dead_strip",
+        "CMAKE_INTERPROCEDURAL_OPTIMIZATION": "ON",
+        "ZET_BUILD_TESTS": "OFF",
+        "CMAKE_OSX_DEPLOYMENT_TARGET": "14.0"
+      }
+    },
+    {
       "name": "musl-base",
       "hidden": true,
       "inherits": "base",
@@ -170,6 +183,10 @@
     {
       "name": "musl-release",
       "configurePreset": "musl-release"
+    },
+    {
+      "name": "macos-release",
+      "configurePreset": "macos-release"
     }
   ],
   "testPresets": [

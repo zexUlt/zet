@@ -15,6 +15,7 @@ allowed=(
     "sodium:the one runtime dependency (from M1)"
     "PkgConfig:how libsodium is located, not a dependency of its own"
     "Threads:system"
+    "Git:build-time only; reads the tag via git describe to produce RELEASE_VERSION (ADR 027)"
 )
 
 mapfile -t cmake_files < <(find . -name 'CMakeLists.txt' -o -name '*.cmake' \

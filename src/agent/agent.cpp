@@ -29,6 +29,7 @@
 #include "zet/app/fd_sink.hpp"
 #include "zet/app/registration.hpp"
 #include "zet/core/log.hpp"
+#include "zet/core/version.hpp"
 #include "zet/crypto/crypto.hpp"
 #include "zet/io/clock.hpp"
 #include "zet/io/daemon.hpp"
@@ -98,7 +99,8 @@ constexpr int FAILURE_STATUS = 1;
 
 constexpr std::string_view USAGE =
     "usage: zet-agent --bootstrap\n"
-    "Started by zet over ssh; not meant to be run by hand.\n";
+    "Started by zet over ssh; not meant to be run by hand.\n"
+    "  --version       print the release version and exit\n";
 
 void Say(std::string_view text) noexcept {
     static_cast<void>(::write(STDERR_FILENO, text.data(), text.size()));
@@ -118,6 +120,7 @@ void Log(log::ELevel level, std::string_view message,
 }
 
 struct Config {
+    bool PrintVersion{false};
     session::SessionLimits Limits;
 };
 
@@ -129,6 +132,9 @@ std::optional<Config> ReadConfig(std::span<char*> args) {
         const std::string_view arg{args[i]};
         if (arg == "--bootstrap") {
             bootstrap = true;
+        } else if (arg == "--version") {
+            config.PrintVersion = true;
+            return config;
         } else {
             return std::nullopt;
         }
@@ -878,6 +884,16 @@ int Main(std::span<char*> args) noexcept {
     if (!config) {
         Say(USAGE);
         return USAGE_STATUS;
+    }
+    if (config->PrintVersion) {
+        constexpr std::string_view prefix = "zet-agent ";
+        const bool ok = ::write(STDOUT_FILENO, prefix.data(), prefix.size()) ==
+                            static_cast<ssize_t>(prefix.size()) &&
+                        ::write(STDOUT_FILENO, zet::RELEASE_VERSION.data(),
+                                zet::RELEASE_VERSION.size()) ==
+                            static_cast<ssize_t>(zet::RELEASE_VERSION.size()) &&
+                        ::write(STDOUT_FILENO, "\n", 1) == 1;
+        return ok ? 0 : FAILURE_STATUS;
     }
     if (!crypto::Init()) {
         SayError("crypto", "libsodium did not initialise");

@@ -13,15 +13,55 @@ the remote host and resumes byte for byte — nothing typed and nothing printed 
 lost. Written from scratch in C++23, with its own protocol; there is no wire
 compatibility with EternalTerminal and no shared code with it.
 
+## Install
+
+Download a release tarball and `SHA256SUMS` from
+[GitHub Releases](https://github.com/zexUlt/zet/releases), verify them,
+and unpack.
+
+**Linux (x86_64 or aarch64):**
+
+```sh
+# The attestation is the trust root (requires gh ≥ 2.49).
+# SHA256SUMS guards against transfer corruption only.
+gh attestation verify zet-X.Y.Z-linux-x86_64.tar.gz \
+    --repo zexUlt/zet
+
+sha256sum --check --ignore-missing SHA256SUMS
+
+mkdir -p ~/.local
+tar -C ~/.local -xzf zet-X.Y.Z-linux-x86_64.tar.gz --strip-components=1
+```
+
+**macOS (arm64, macOS 14 or later):**
+
+```sh
+gh attestation verify zet-X.Y.Z-macos-arm64.tar.gz \
+    --repo zexUlt/zet
+
+shasum -a 256 -c --ignore-missing SHA256SUMS
+
+mkdir -p ~/.local
+tar -C ~/.local -xzf zet-X.Y.Z-macos-arm64.tar.gz --strip-components=1
+```
+
+After unpacking, `bin/zet` lands under `~/.local`. Linux binaries are
+statically linked (musl + libc++); no other dependencies are needed. The
+macOS tarball contains `bin/zet` only; the macOS client links `libSystem`
+dynamically and `libsodium` statically. `zet --version` prints the release
+version.
+
+The Linux tarballs carry agents for both `x86_64` and `aarch64` under
+`libexec/zet/`, so the client (M5.5) can bootstrap either server from any
+client machine.
+
 ## Status
 
 In development, usable on Linux. `zet` and `zet-agent` work end to end:
 bootstrap over ssh, a session that survives cuts byte for byte, vim and htop,
 an orphan timeout that reaps the shell (milestone M4). The client also builds
 and runs on macOS against a Linux agent. `zet-muxd`, one port per machine for
-every user's sessions, is in place and under verification (M5). There are no
-releases or packages yet: build from source, and put `zet-agent` on the
-remote host yourself — the client installing it is milestone M5.5.
+every user's sessions, is in place and under verification (M5).
 
 The roadmap and its acceptance criteria are in
 [docs/design.md](docs/design.md), §17.

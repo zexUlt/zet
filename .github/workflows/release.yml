@@ -1,0 +1,527 @@
+name: release
+
+# Triggered by pushing an annotated tag vX.Y.Z. The workflow:
+#   1. Validates the tag (annotated, on trunk, exact semver, exact match at HEAD).
+#   2. Builds static musl binaries for x86_64 and aarch64 (Linux) and the
+#      macOS arm64 client with statically-linked libsodium.
+#   3. Verifies --version output on each binary matches the tag.
+#   4. Packages two Linux tarballs (one per arch), each carrying both
+#      architectures' agents under libexec/zet/ so M5.5 delivery works
+#      from any client, plus one macOS tarball.
+#   5. Generates SHA256SUMS and build-provenance attestations.
+#   6. Creates a DRAFT GitHub release for the owner to review and publish.
+#
+# The owner checks that CI and the fuzz soak gate are green before tagging.
+# The workflow does not poll CI; it validates the tag itself.
+# The owner publishes; this workflow never pushes a release live.
+
+on:
+  push:
+    tags:
+      - 'v[0-9]*'
+  # A dry run on changes to the release itself or the build: everything up to
+  # the tarballs, nothing attested or published. Otherwise the first time
+  # these jobs ever ran would be on a real tag.
+  pull_request:
+    paths:
+      - .github/workflows/release.yml
+      - .github/actions/**
+      - cmake/**
+      - CMakeLists.txt
+      - CMakePresets.json
+      - tools/musl_build.sh
+      - tools/in_alpine.sh
+      - tools/alpine-packages.txt
+      - units/**
+      - LICENSE
+      - NOTICE
+      - THIRD_PARTY_LICENSES
+      - src/**/CMakeLists.txt
+      - src/client/main.cpp
+      - src/agent/main.cpp
+      - src/mux/main.cpp
+
+# Minimum permissions at the workflow level; jobs that need more declare it.
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  ZET_APK_CACHE: ${{ github.workspace }}/../apk-cache
+
+jobs:
+  # -------------------------------------------------------------------------
+  # 1. Validate: annotated tag, on trunk, vX.Y.Z format, exact match at HEAD.
+  #
+  # The CMake version check is implicit: ZET_RELEASE_VERSION is derived by
+  # the same git describe logic, so "exact match at HEAD" guarantees the tag
+  # and CMake agree. The owner is responsible for checking that CI and the
+  # fuzz soak gate are green before pushing the tag.
+  # -------------------------------------------------------------------------
+  validate:
+    name: validate tag
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check tag format and placement
+        if: github.event_name == 'push'
+        run: |
+          set -euo pipefail
+
+          # Tag must be vX.Y.Z only — no pre-release suffixes in the tag.
+          if ! printf '%s' "$GITHUB_REF_NAME" | grep -qE '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "Tag must be vX.Y.Z; got $GITHUB_REF_NAME"
+            exit 1
+          fi
+
+          # The tag must be annotated (not lightweight). The design says the
+          # owner pushes an annotated tag after green CI and green fuzz soak.
+          TAG_TYPE=$(git cat-file -t "refs/tags/$GITHUB_REF_NAME" 2>/dev/null || true)
+          if [ "$TAG_TYPE" != "tag" ]; then
+            echo "refs/tags/$GITHUB_REF_NAME is $TAG_TYPE; an annotated tag is required"
+            exit 1
+          fi
+
+          # The tagged commit must sit on trunk.
+          git fetch origin trunk
+          if ! git merge-base --is-ancestor HEAD origin/trunk; then
+            echo "Tagged commit $(git rev-parse --short HEAD) is not on trunk"
+            exit 1
+          fi
+
+          # HEAD must be exactly at this tag (no commits since it). This also
+          # ensures ZET_RELEASE_VERSION == tag version: both use git describe.
+          DESCRIBED=$(git describe --tags --match 'v[0-9]*' --exact-match HEAD \
+                        2>/dev/null || true)
+          if [ "$DESCRIBED" != "$GITHUB_REF_NAME" ]; then
+            echo "HEAD is not exactly at $GITHUB_REF_NAME (got: $DESCRIBED)"
+            exit 1
+          fi
+
+          echo "Tag $GITHUB_REF_NAME validated"
+
+  # -------------------------------------------------------------------------
+  # 2a. Linux x86_64 — static musl release build.
+  # -------------------------------------------------------------------------
+  build-linux-x86_64:
+    name: build linux (x86_64)
+    needs: validate
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0   # git describe needs tag history
+
+      - name: Restore the compiler cache
+        uses: ./.github/actions/ccache
+        with:
+          key: musl-release
+
+      - name: Restore the Alpine packages
+        uses: ./.github/actions/apk
+
+      - name: Build
+        # CMakeLists.txt runs git describe with -c safe.directory, which works
+        # even inside the Alpine container where Docker runs as root but the
+        # checkout is owned by the runner uid. On pull_request dry-runs where
+        # no v* tag is reachable, git describe falls back to 0.0.0-dev.
+        run: |
+          tools/musl_build.sh musl-release
+
+      - name: Install into staging directory
+        # cmake --install must run inside Alpine where cmake is available.
+        # The container mounts the repo root as /src, so the staging path
+        # must be inside it. We use build/staging, then copy out.
+        run: |
+          tools/in_alpine.sh 'cmake --install build/musl-release --prefix /src/build/staging --strip'
+          mkdir -p "$RUNNER_TEMP/stage-x86_64"
+          cp -a build/staging/. "$RUNNER_TEMP/stage-x86_64/"
+
+      - name: Verify --version output
+        # Run the binaries on the host (they are statically linked musl, so
+        # they run on any Linux regardless of the host libc).
+        # On a tag: exact match against the tag version.
+        # On a pull_request dry-run: check that output matches the version
+        # pattern so the flag is not silently broken.
+        env:
+          ZET_TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          VERSION_RE='^[^ ]+ (0\.0\.0-dev|[0-9]+\.[0-9]+\.[0-9]+(-[0-9]+-g[0-9a-f]+-dev)?)$'
+          for bin in zet zet-agent zet-muxd; do
+            GOT=$("$RUNNER_TEMP/stage-x86_64/bin/$bin" --version 2>/dev/null || true)
+            if printf '%s' "$ZET_TAG" | grep -qE '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
+              WANT_LINE="$bin ${ZET_TAG#v}"
+              if [ "$GOT" != "$WANT_LINE" ]; then
+                echo "FAIL: $bin --version printed '$GOT', expected '$WANT_LINE'"
+                exit 1
+              fi
+            else
+              if ! printf '%s' "$GOT" | grep -qE "$VERSION_RE"; then
+                echo "FAIL: $bin --version printed '$GOT', does not match $VERSION_RE"
+                exit 1
+              fi
+            fi
+          done
+          echo "All --version outputs are valid"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: stage-linux-x86_64
+          path: ${{ runner.temp }}/stage-x86_64
+          if-no-files-found: error
+          retention-days: 1
+
+  # -------------------------------------------------------------------------
+  # 2b. Linux aarch64 — same build on a native ARM runner (no QEMU).
+  # -------------------------------------------------------------------------
+  build-linux-aarch64:
+    name: build linux (aarch64)
+    needs: validate
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+
+      - name: Restore the compiler cache
+        uses: ./.github/actions/ccache
+        with:
+          key: musl-release
+
+      - name: Restore the Alpine packages
+        uses: ./.github/actions/apk
+
+      - name: Build
+        run: |
+          tools/musl_build.sh musl-release
+
+      - name: Install into staging directory
+        run: |
+          tools/in_alpine.sh 'cmake --install build/musl-release --prefix /src/build/staging --strip'
+          mkdir -p "$RUNNER_TEMP/stage-aarch64"
+          cp -a build/staging/. "$RUNNER_TEMP/stage-aarch64/"
+
+      - name: Verify --version output
+        env:
+          ZET_TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          VERSION_RE='^[^ ]+ (0\.0\.0-dev|[0-9]+\.[0-9]+\.[0-9]+(-[0-9]+-g[0-9a-f]+-dev)?)$'
+          for bin in zet zet-agent zet-muxd; do
+            GOT=$("$RUNNER_TEMP/stage-aarch64/bin/$bin" --version 2>/dev/null || true)
+            if printf '%s' "$ZET_TAG" | grep -qE '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
+              WANT_LINE="$bin ${ZET_TAG#v}"
+              if [ "$GOT" != "$WANT_LINE" ]; then
+                echo "FAIL: $bin --version printed '$GOT', expected '$WANT_LINE'"
+                exit 1
+              fi
+            else
+              if ! printf '%s' "$GOT" | grep -qE "$VERSION_RE"; then
+                echo "FAIL: $bin --version printed '$GOT', does not match $VERSION_RE"
+                exit 1
+              fi
+            fi
+          done
+          echo "All --version outputs are valid"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: stage-linux-aarch64
+          path: ${{ runner.temp }}/stage-aarch64
+          if-no-files-found: error
+          retention-days: 1
+
+  # -------------------------------------------------------------------------
+  # 2c. macOS arm64 — dynamic libSystem, libsodium.a from Homebrew.
+  #
+  # design.md §12: the macOS build is client-only (no agent, no muxd).
+  # design.md §13: libsodium is linked from the Homebrew .a archive by
+  # find_library(NAMES libsodium.a HINTS …); the shared .dylib is never
+  # pulled in. Verified below with otool -L.
+  # -------------------------------------------------------------------------
+  build-macos:
+    name: build macos (arm64)
+    needs: validate
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+
+      - name: Install toolchain and libsodium
+        run: brew install libsodium ninja llvm pkg-config
+
+      - name: Build
+        run: |
+          set -euo pipefail
+          LLVM_PREFIX="$(brew --prefix llvm)"
+          SODIUM_PREFIX="$(brew --prefix libsodium)"
+          # pkg_check_modules needs to find libsodium's .pc file.
+          export PKG_CONFIG_PATH="$SODIUM_PREFIX/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
+          # Homebrew's LLVM: the runner's Xcode ships Apple Clang 15, but the
+          # project needs Clang 20 or newer (CMakeLists.txt).
+          cmake --preset macos-release \
+            -DCMAKE_CXX_COMPILER="$LLVM_PREFIX/bin/clang++"
+          cmake --build --preset macos-release
+
+      - name: Verify libsodium is statically linked
+        # The only dynamic libraries should be system ones (/usr/lib).
+        # Any /opt/homebrew or /usr/local path means a Homebrew dylib crept in.
+        # Use the known output path; fail if it is absent.
+        run: |
+          set -euo pipefail
+          zet_bin="build/macos-release/src/client/zet"
+          if [ ! -f "$zet_bin" ]; then
+            echo "FAIL: $zet_bin not found"
+            exit 1
+          fi
+          echo "Dynamic libraries in $zet_bin:"
+          otool -L "$zet_bin"
+          if otool -L "$zet_bin" | grep -qE '/opt/homebrew|/usr/local'; then
+            echo "FAIL: Homebrew dynamic library path in binary"
+            exit 1
+          fi
+
+      - name: Install into staging directory
+        run: |
+          set -euo pipefail
+          prefix="$RUNNER_TEMP/stage-macos"
+          cmake --install build/macos-release --prefix "$prefix" --strip
+
+      - name: Verify --version output
+        env:
+          ZET_TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          VERSION_RE='^[^ ]+ (0\.0\.0-dev|[0-9]+\.[0-9]+\.[0-9]+(-[0-9]+-g[0-9a-f]+-dev)?)$'
+          GOT=$("$RUNNER_TEMP/stage-macos/bin/zet" --version 2>/dev/null || true)
+          if printf '%s' "$ZET_TAG" | grep -qE '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
+            WANT_LINE="zet ${ZET_TAG#v}"
+            if [ "$GOT" != "$WANT_LINE" ]; then
+              echo "FAIL: zet --version printed '$GOT', expected '$WANT_LINE'"
+              exit 1
+            fi
+          else
+            if ! printf '%s' "$GOT" | grep -qE "$VERSION_RE"; then
+              echo "FAIL: zet --version printed '$GOT', does not match $VERSION_RE"
+              exit 1
+            fi
+          fi
+          echo "zet --version is valid"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: stage-macos-arm64
+          path: ${{ runner.temp }}/stage-macos
+          if-no-files-found: error
+          retention-days: 1
+
+  # -------------------------------------------------------------------------
+  # 3. Package — assemble tarballs and SHA256SUMS.
+  #
+  # Each Linux tarball carries both architectures' agents under libexec/zet/
+  # so that M5.5 delivery works from any client (design.md §4).
+  # The macOS tarball does the same: the macOS client also delivers agents.
+  # -------------------------------------------------------------------------
+  package:
+    name: package
+    needs: [build-linux-x86_64, build-linux-aarch64, build-macos]
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - name: Derive release version
+        id: version
+        run: |
+          if [ "$GITHUB_EVENT_NAME" = push ]; then
+            VERSION="${GITHUB_REF_NAME#v}"
+          else
+            VERSION=0.0.0-dryrun
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Packaging version $VERSION"
+
+      - name: Download x86_64 stage
+        uses: actions/download-artifact@v4
+        with:
+          name: stage-linux-x86_64
+          path: ${{ runner.temp }}/stage-x86_64
+
+      - name: Download aarch64 stage
+        uses: actions/download-artifact@v4
+        with:
+          name: stage-linux-aarch64
+          path: ${{ runner.temp }}/stage-aarch64
+
+      - name: Download macOS stage
+        uses: actions/download-artifact@v4
+        with:
+          name: stage-macos-arm64
+          path: ${{ runner.temp }}/stage-macos
+
+      - name: Assemble tarballs
+        run: |
+          set -euo pipefail
+          VERSION="${{ steps.version.outputs.version }}"
+          DIST="$RUNNER_TEMP/dist"
+          X64="$RUNNER_TEMP/stage-x86_64"
+          A64="$RUNNER_TEMP/stage-aarch64"
+          MAC="$RUNNER_TEMP/stage-macos"
+          mkdir -p "$DIST"
+
+          # Require both arch agents before assembling any tarball. Missing an
+          # agent here would silently ship a tarball that cannot deliver to that
+          # architecture; fail fast instead.
+          for arch in x86_64 aarch64; do
+            src_dir="$RUNNER_TEMP/stage-$([ "$arch" = x86_64 ] && echo x86_64 || echo aarch64)/libexec/zet"
+            agent="$src_dir/zet-agent-$arch"
+            if [ ! -f "$agent" ]; then
+              echo "FAIL: expected $agent — stage artifact is incomplete"
+              exit 1
+            fi
+          done
+
+          # Copy architecture-specific agents from both Linux stages into
+          # $1/libexec/zet/ so any client can deliver to either server.
+          add_agents() {
+            local libexec="$1/libexec/zet"
+            mkdir -p "$libexec"
+            cp -p "$X64/libexec/zet/zet-agent-x86_64" "$libexec/"
+            cp -p "$A64/libexec/zet/zet-agent-aarch64" "$libexec/"
+          }
+
+          make_tarball() {
+            local arch="$1" stage="$2"
+            local pkg="$RUNNER_TEMP/pkg-$arch"
+            cp -a "$stage" "$pkg"
+            add_agents "$pkg"
+            # Restore executable bits lost by upload-artifact.
+            chmod -R +x "$pkg/bin/"* 2>/dev/null || true
+            chmod -R +x "$pkg/libexec/zet/"* 2>/dev/null || true
+            tar -C "$RUNNER_TEMP" -czf \
+              "$DIST/zet-${VERSION}-${arch}.tar.gz" \
+              --transform "s|^pkg-${arch}|zet-${VERSION}|" \
+              "pkg-${arch}"
+          }
+
+          make_tarball linux-x86_64 "$X64"
+          make_tarball linux-aarch64 "$A64"
+          make_tarball macos-arm64 "$MAC"
+
+          # SHA256SUMS covers all three tarballs.
+          cd "$DIST"
+          sha256sum zet-*.tar.gz > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Verify tarball contents
+        run: |
+          set -euo pipefail
+          VERSION="${{ steps.version.outputs.version }}"
+          DIST="$RUNNER_TEMP/dist"
+          check_tarball() {
+            local tarball="$1"; shift
+            local required=("$@")
+            local contents
+            contents=$(tar tzf "$tarball")
+            for entry in "${required[@]}"; do
+              if ! printf '%s' "$contents" | grep -qF "/$entry"; then
+                echo "FAIL: $tarball missing $entry"
+                echo "Contents:"
+                printf '%s\n' "$contents"
+                exit 1
+              fi
+            done
+            echo "ok $tarball"
+          }
+          # Both Linux tarballs carry all three binaries plus both arch agents.
+          linux_required=(
+            bin/zet bin/zet-agent bin/zet-muxd
+            libexec/zet/zet-agent-x86_64
+            libexec/zet/zet-agent-aarch64
+          )
+          check_tarball "$DIST/zet-${VERSION}-linux-x86_64.tar.gz" "${linux_required[@]}"
+          check_tarball "$DIST/zet-${VERSION}-linux-aarch64.tar.gz" "${linux_required[@]}"
+          # The macOS tarball is client-only.
+          check_tarball "$DIST/zet-${VERSION}-macos-arm64.tar.gz" bin/zet
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-dist
+          path: ${{ runner.temp }}/dist
+          if-no-files-found: error
+          retention-days: 7
+
+  # -------------------------------------------------------------------------
+  # 4. Attest — SLSA build-provenance attestations for each tarball.
+  # -------------------------------------------------------------------------
+  attest:
+    name: attest
+    needs: package
+    if: github.event_name == 'push'
+    runs-on: ubuntu-24.04
+    permissions:
+      id-token: write
+      attestations: write
+    steps:
+      - name: Download dist
+        uses: actions/download-artifact@v4
+        with:
+          name: release-dist
+          path: dist
+
+      - name: Attest linux x86_64 tarball
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: dist/zet-*-linux-x86_64.tar.gz
+
+      - name: Attest linux aarch64 tarball
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: dist/zet-*-linux-aarch64.tar.gz
+
+      - name: Attest macOS tarball
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: dist/zet-*-macos-arm64.tar.gz
+
+  # -------------------------------------------------------------------------
+  # 5. Release — create a DRAFT GitHub release. The owner publishes.
+  # -------------------------------------------------------------------------
+  release:
+    name: create draft release
+    needs: [package, attest]
+    if: github.event_name == 'push'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - name: Download dist
+        uses: actions/download-artifact@v4
+        with:
+          name: release-dist
+          path: dist
+
+      - name: Create draft release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ needs.package.outputs.version }}
+        run: |
+          set -euo pipefail
+          gh release create "v${VERSION}" \
+            --draft \
+            --title "zet v${VERSION}" \
+            --repo "$GITHUB_REPOSITORY" \
+            dist/zet-*.tar.gz \
+            dist/SHA256SUMS
+          echo "Draft release v${VERSION} created. Verify with:"
+          echo "  gh attestation verify <tarball> --repo $GITHUB_REPOSITORY"
