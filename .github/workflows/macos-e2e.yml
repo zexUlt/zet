@@ -7,8 +7,8 @@ name: macos e2e
 # it any Linux container, does not run. The Intel image can, and GitHub
 # supports it until about August 2027 — this job has that expiry.
 #
-# Nightly, on demand and on changes to itself for now: a cold colima start and agent build cost
-# minutes, measured in design.md §16 before this goes on pull requests.
+# Nightly, on demand and on changes to itself: the first run took 13.5
+# minutes, six of them starting colima and six building the agent cold.
 
 on:
   workflow_dispatch:
