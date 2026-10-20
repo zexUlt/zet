@@ -189,6 +189,10 @@ ChannelResult<IncomingEvent> Channel::Receive(
         case wire::EMessageType::Resume:
         case wire::EMessageType::BootstrapOffer:
         case wire::EMessageType::BootstrapAccept:
+        case wire::EMessageType::MuxRegister:
+        case wire::EMessageType::MuxRegistered:
+        case wire::EMessageType::MuxRefused:
+        case wire::EMessageType::MuxHandoff:
             break;
     }
 
