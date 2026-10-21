@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
 import shutil
 import subprocess
 import threading
@@ -25,9 +26,10 @@ from pathlib import Path
 
 import pytest
 
+from conftest import SHELL_SETUP_ERRORS, SHELL_USERS
 from e2e import PROFILE, PROMPT, SANITIZER_OPTIONS
 from harness import STEP_TIMEOUT_SECONDS, PtyProcess
-from sshhost import CLEAN_BASHRC, NOISY_BASHRC, SshHost
+from sshhost import CLEAN_BASHRC, NOISY_BASHRC, SSHD, SshHost
 
 # Architecture string uname -m returns inside the container (always x86_64
 # on CI); the agent binary the test installs is named for it.
@@ -530,7 +532,16 @@ def test_login_shell_delivers(
     """Delivery works regardless of the user's login shell."""
     host = shell_ssh_hosts.get(shell)
     if host is None:
-        pytest.skip(f"shell {shell!r} not installed or user not created")
+        _username, shell_binary = SHELL_USERS[shell]
+        if Path(shell_binary).exists():
+            # Binary is present but the user was not created: that is a setup
+            # failure, not an absent package.  Fail so CI catches regressions.
+            err = SHELL_SETUP_ERRORS.get(shell, "user absent after setup")
+            pytest.fail(
+                f"shell {shell!r} binary exists at {shell_binary!r} "
+                f"but user setup failed: {err}"
+            )
+        pytest.skip(f"shell {shell!r} not installed at {shell_binary!r}")
 
     # Clear the cache so the test always does a fresh delivery.
     cache_path = host.home / ZET_CACHE_SUBDIR
@@ -565,6 +576,64 @@ def test_login_shell_delivers(
         terminal.kill()
     finally:
         terminal.kill()
+
+
+def _extract_installer_script(hpp: Path) -> str:
+    """Extract the INSTALLER_SCRIPT string literal from deliver.hpp."""
+    text = hpp.read_text()
+    # Match: INSTALLER_SCRIPT = <one or more C string literals> ;
+    m = re.search(
+        r"INSTALLER_SCRIPT\s*=\s*((?:\s*\"(?:[^\"\\]|\\.)*\")+)\s*;",
+        text,
+        re.DOTALL,
+    )
+    if m is None:
+        raise ValueError(f"INSTALLER_SCRIPT not found in {hpp}")
+    parts = re.findall(r'"((?:[^"\\]|\\.)*)"', m.group(1))
+    raw = "".join(parts)
+    # Unescape the C escape sequences used in the constant.
+    raw = raw.replace('\\"', '"').replace("\\\\", "\\").replace("\\n", "\n")
+    return raw
+
+
+def test_installer_script_passes_ash_syntax_check():
+    """The installer POSIX sh one-liner is syntactically valid under busybox ash.
+
+    Parses deliver.hpp from the source tree mounted at /src inside the
+    integration container, then pipes the script to ash -n (and dash -n if
+    dash is available as a small pinned Alpine package).
+    """
+    if not os.path.exists(SSHD):
+        pytest.skip("not inside integration container")
+
+    # /src is where in_alpine.sh mounts the repo root.
+    hpp = Path("/src/src/client/deliver.hpp")
+    if not hpp.exists():
+        pytest.skip(f"{hpp} not found — source not mounted at /src")
+
+    script = _extract_installer_script(hpp)
+
+    result = subprocess.run(
+        ["/bin/ash", "-n"],
+        input=script.encode(),
+        capture_output=True,
+    )
+    assert result.returncode == 0, (
+        f"/bin/ash -n rejected the installer script:\n"
+        f"{result.stderr.decode(errors='replace')}"
+    )
+
+    dash = shutil.which("dash")
+    if dash:
+        result2 = subprocess.run(
+            [dash, "-n"],
+            input=script.encode(),
+            capture_output=True,
+        )
+        assert result2.returncode == 0, (
+            f"dash -n rejected the installer script:\n"
+            f"{result2.stderr.decode(errors='replace')}"
+        )
 
 
 def test_agent_flag_disables_delivery(

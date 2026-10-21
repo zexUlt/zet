@@ -87,12 +87,28 @@ def free_port(address: str = "127.0.0.1") -> int:
         return probe.getsockname()[1]
 
 
+def _register_shell(shell: str) -> None:
+    """Add shell to /etc/shells if missing (Alpine adduser rejects unknown shells)."""
+    etc_shells = Path("/etc/shells")
+    try:
+        lines = etc_shells.read_text().splitlines()
+    except OSError:
+        lines = []
+    if shell in lines:
+        return
+    with etc_shells.open("a") as f:
+        f.write(shell + "\n")
+
+
 def ensure_user(name: str = TEST_USER, shell: str = "/bin/bash") -> pwd.struct_passwd:
     try:
         return pwd.getpwnam(name)
     except KeyError:
         pass
     if os.path.exists("/etc/alpine-release"):
+        # Alpine's adduser rejects a shell that is not in /etc/shells.
+        # Packages like zsh and tcsh do not always self-register, so we do it.
+        _register_shell(shell)
         _run(["adduser", "-D", "-s", shell, name])
     else:
         # The systemd suite runs on the Ubuntu runner itself, whose adduser

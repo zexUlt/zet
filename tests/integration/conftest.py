@@ -34,6 +34,11 @@ SHELL_USERS = {
     "tcsh": ("zettest-tcsh", "/usr/bin/tcsh"),
 }
 
+# Populated by the ssh_host fixture: shell_name -> error string for any shell
+# whose user could not be created (binary present but adduser failed).
+# Tests use this to distinguish "not installed" (skip) from "setup broke" (fail).
+SHELL_SETUP_ERRORS: dict[str, str] = {}
+
 
 
 def pytest_collection_modifyitems(config, items):
@@ -58,8 +63,10 @@ def ssh_host(tmp_path_factory) -> SshHost:
     keys = make_keys(work, user)
 
     # Create shell users for the login-shell delivery tests and authorize the
-    # same client key for them.  Shells that are not installed are silently
-    # skipped; their tests will be skipped at collection time.
+    # same client key for them.  Shells whose binary is absent are silently
+    # skipped; their tests will be skipped.  Shells whose binary is present but
+    # whose user cannot be created are recorded in SHELL_SETUP_ERRORS so the
+    # test can fail instead of silently skip.
     client_pub = (work / "client_key.pub").read_text()
     shell_usernames: list[str] = []
     for _shell_name, (username, shell) in SHELL_USERS.items():
@@ -69,8 +76,8 @@ def ssh_host(tmp_path_factory) -> SshHost:
             su = ensure_user(username, shell)
             authorize(su, client_pub)
             shell_usernames.append(username)
-        except Exception:
-            pass
+        except Exception as exc:
+            SHELL_SETUP_ERRORS[_shell_name] = str(exc)
 
     all_users = tuple([TEST_USER] + shell_usernames)
     sshd, port = start_sshd(work, keys, home, "127.0.0.1", users=all_users)
