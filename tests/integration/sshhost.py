@@ -36,6 +36,7 @@ echo 'bm90IGEgcmVhbCBmcmFtZSwganVzdCBub2lzZQ=='
 echo '-----END ZET BOOTSTRAP-----'
 printf '\000\001\377\376 not text\r\n'
 echo 'noise on stderr' >&2
+echo 'ZET-HAVE'
 printf 'no newline at the end'
 """
 

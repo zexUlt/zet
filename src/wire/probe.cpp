@@ -56,7 +56,12 @@ constexpr std::string_view PROBE_VERSION_1 = "1";
     if (!StartsWith(line, PROBE_MARKER)) {
         return false;
     }
-    // Skip "ZET-PROBE"
+    // Require a space immediately after "ZET-PROBE": "ZET-PROBE1 …" is not
+    // this marker.
+    if (line.size() <= PROBE_MARKER.size() ||
+        line.data()[PROBE_MARKER.size()] != ' ') {
+        return false;
+    }
     std::size_t pos = PROBE_MARKER.size();
     const auto version = Next(line, pos);
     if (version != PROBE_VERSION_1) {
@@ -72,6 +77,10 @@ constexpr std::string_view PROBE_VERSION_1 = "1";
     }
     const bool noexec = exec == "noexec";
     if (!noexec && exec != "exec") {
+        return false;
+    }
+    // Reject trailing fields: "ZET-PROBE 1 x86_64 exec extra" is not valid.
+    if (!Next(line, pos).empty()) {
         return false;
     }
     out = ProbeInfo{.Arch = arch, .NoExec = noexec};
@@ -189,6 +198,12 @@ void ProbeScanner::EndLine() noexcept {
         // FAILED_MARKER.size() <= line.size() here.
         ReadyReason_ = {line.data() + FAILED_MARKER.size(),
                         line.size() - FAILED_MARKER.size()};
+        return;
+    }
+    // "ZET-FAILED" with no reason text (no trailing space or word).
+    if (line == "ZET-FAILED") {
+        ReadyTag_ = EReadyTag::Failed;
+        ReadyReason_ = {};
         return;
     }
 

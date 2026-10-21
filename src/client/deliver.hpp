@@ -39,6 +39,12 @@ namespace zet::client {
 ///
 /// The constant is tested (tests/client/deliver_test.cpp) to have no `!`, no
 /// newline, and to survive ShellQuote.
+/// The cleanup loop checks kill -0 on each .part.<pid> file so that stale
+/// partial files left by a crashed installer do not protect a dead hash dir
+/// forever.  A live .part (kill -0 succeeds) means delivery is still in
+/// flight from another client: leave that dir alone.  The remaining race —
+/// cleanup by another client can remove a dir between its ZET-HAVE and exec
+/// → bootstrap failure — is accepted; the next connect reinstalls.
 inline constexpr std::string_view INSTALLER_SCRIPT =
     "d=${XDG_CACHE_HOME:-$HOME/.cache}/zet; "
     "mkdir -p \"$d\"; "
@@ -58,15 +64,18 @@ inline constexpr std::string_view INSTALLER_SCRIPT =
     "printf 'ZET-HAVE\\n'; "
     "else "
     "printf 'ZET-SEND\\n'; "
-    "head -c \"$s\" >\"$t/.part.$$\"; "
+    "if head -c \"$s\" >\"$t/.part.$$\"; then "
     "n=$(wc -c <\"$t/.part.$$\"); "
     "n=\"${n##* }\"; "
     "if test \"$n\" -eq \"$s\" 2>/dev/null; then "
     "if chmod 0755 \"$t/.part.$$\" && mv \"$t/.part.$$\" \"$t/zet-agent\"; "
     "then "
-    "for od in \"$d\"/*/; do "
-    "case $od in \"$t/\") ;; "
-    "*) set -- \"$od\".part.*; test -e \"$1\" || rm -rf \"$od\";; "
+    "for _pf in \"$t\"/.part.*; do test -f \"$_pf\" || continue; "
+    "_pp=\"${_pf##*.}\"; kill -0 \"$_pp\" 2>/dev/null || rm -f \"$_pf\"; done; "
+    "for od in \"$d\"/*/; do case $od in \"$t/\") ;; "
+    "*) _lv=0; for _pf in \"$od\".part.*; do test -f \"$_pf\" || continue; "
+    "_pp=\"${_pf##*.}\"; kill -0 \"$_pp\" 2>/dev/null && _lv=1 && break; "
+    "done; test \"$_lv\" = 0 && rm -rf \"$od\";; "
     "esac; done; "
     "printf 'ZET-STORED\\n'; "
     "else "
@@ -76,6 +85,10 @@ inline constexpr std::string_view INSTALLER_SCRIPT =
     "else "
     "rm -f \"$t/.part.$$\"; "
     "printf 'ZET-FAILED size\\n'; "
+    "fi; "
+    "else "
+    "rm -f \"$t/.part.$$\"; "
+    "printf 'ZET-FAILED write\\n'; "
     "fi; "
     "fi; "
     "exec \"$t/zet-agent\" --bootstrap";

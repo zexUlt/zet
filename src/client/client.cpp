@@ -50,8 +50,12 @@ namespace {
 
 using namespace std::chrono_literals;
 
-/// How long ssh may take to bring back the agent's Accept. Generous: ssh may
-/// be asking for a passphrase on the terminal meanwhile.
+/// How long the delivery phase (probe exchange + binary transfer) may take.
+/// 1–2 MiB over an ssh pipe: generous for a slow link.
+constexpr Duration DELIVER_TIMEOUT = 60s;
+
+/// How long the bootstrap phase (after delivery) may take.  ssh may be asking
+/// for a passphrase on the terminal meanwhile.
 constexpr Duration BOOTSTRAP_TIMEOUT = 120s;
 
 /// How long ssh gets to exit once the agent has answered and detached.
@@ -468,7 +472,12 @@ std::optional<std::vector<std::byte>> DeliverAgent(Process& process,
         return std::nullopt;
     }
     // Copy arch before the next scanner.Feed() call overwrites the line buffer.
-    const std::string arch{probeInfo->Arch};
+    // Sanitize to printable ASCII so remote-controlled text is safe to print.
+    std::string arch;
+    arch.reserve(probeInfo->Arch.size());
+    for (const unsigned char c : probeInfo->Arch) {
+        arch += (c >= 0x20U && c < 0x7FU) ? static_cast<char>(c) : '?';
+    }
     if (arch != AGENT_ARCH_X86_64 && arch != AGENT_ARCH_AARCH64) {
         SayError("deliver", "unsupported remote architecture: " + arch);
         return std::nullopt;
@@ -481,7 +490,8 @@ std::optional<std::vector<std::byte>> DeliverAgent(Process& process,
     const auto binary = LoadAgentBinary(agentDir, arch);
     if (binary.empty()) {
         SayError("deliver", "no agent binary for " + arch + " in " +
-                                std::string{agentDir});
+                                std::string{agentDir} +
+                                " (set ZET_AGENT_DIR or use --agent PATH)");
         return std::nullopt;
     }
 
@@ -495,10 +505,20 @@ std::optional<std::vector<std::byte>> DeliverAgent(Process& process,
         return std::nullopt;
     }
 
-    // Stage 2: ZET-HAVE (cached) or ZET-SEND (needs binary)
+    // Stage 2: ZET-HAVE (cached), ZET-SEND (needs binary), or ZET-FAILED
     const auto answer2 = next();
     if (!answer2) {
         SayError("deliver", "no ZET-HAVE/ZET-SEND from installer");
+        return std::nullopt;
+    }
+    if (const auto* f2 = std::get_if<wire::ProbeFailed>(&*answer2)) {
+        // Sanitize reason before printing.
+        std::string reason;
+        reason.reserve(f2->Reason.size());
+        for (const unsigned char c : f2->Reason) {
+            reason += (c >= 0x20U && c < 0x7FU) ? static_cast<char>(c) : '?';
+        }
+        SayError("deliver", "installer failed at probe: " + reason);
         return std::nullopt;
     }
     const bool needSend = std::holds_alternative<wire::ProbeSend>(*answer2);
@@ -512,6 +532,26 @@ std::optional<std::vector<std::byte>> DeliverAgent(Process& process,
     if (needSend) {
         if (!WriteAllPipe(process.In.Get(),
                           ByteSpan{binary.data(), binary.size()}, until)) {
+            // Close stdin so the installer is unblocked, then drain briefly:
+            // it may have already printed ZET-FAILED with a reason.
+            process.In.Reset();
+            const Timestamp drainUntil = io::MonotonicNow() + 2s;
+            until = drainUntil;
+            const auto drainAnswer = next();
+            if (drainAnswer) {
+                if (const auto* fd =
+                        std::get_if<wire::ProbeFailed>(&*drainAnswer)) {
+                    std::string reason;
+                    reason.reserve(fd->Reason.size());
+                    for (const unsigned char c : fd->Reason) {
+                        reason += (c >= 0x20U && c < 0x7FU)
+                                      ? static_cast<char>(c)
+                                      : '?';
+                    }
+                    SayError("deliver", "installer failed: " + reason);
+                    return std::nullopt;
+                }
+            }
             SayError("deliver", "could not send agent binary");
             return std::nullopt;
         }
@@ -525,7 +565,13 @@ std::optional<std::vector<std::byte>> DeliverAgent(Process& process,
         if (std::holds_alternative<wire::ProbeStored>(*answer3)) {
             // Delivery complete.
         } else if (const auto* f = std::get_if<wire::ProbeFailed>(&*answer3)) {
-            SayError("deliver", "installer failed: " + std::string{f->Reason});
+            std::string reason;
+            reason.reserve(f->Reason.size());
+            for (const unsigned char c : f->Reason) {
+                reason +=
+                    (c >= 0x20U && c < 0x7FU) ? static_cast<char>(c) : '?';
+            }
+            SayError("deliver", "installer failed: " + reason);
             return std::nullopt;
         } else {
             SayError("deliver",
@@ -560,12 +606,12 @@ std::optional<session::BootstrapResult> Bootstrap(
         return std::nullopt;
     }
 
-    const Timestamp until = io::MonotonicNow() + BOOTSTRAP_TIMEOUT;
-
     // Delivery mode: probe exchange before the bootstrap offer.
+    // Delivery gets its own deadline; bootstrap restarts fresh after it.
     std::vector<std::byte> leftovers;
     if (agentDir) {
-        auto maybe = DeliverAgent(*process, *agentDir, until);
+        const Timestamp deliverUntil = io::MonotonicNow() + DELIVER_TIMEOUT;
+        auto maybe = DeliverAgent(*process, *agentDir, deliverUntil);
         if (!maybe) {
             process->In.Reset();
             static_cast<void>(Reap(process->Pid, false));
@@ -573,6 +619,8 @@ std::optional<session::BootstrapResult> Bootstrap(
         }
         leftovers = std::move(*maybe);
     }
+
+    const Timestamp until = io::MonotonicNow() + BOOTSTRAP_TIMEOUT;
 
     // Far below what a pipe holds, so one write takes it all.
     const auto written = io::WriteSome(
@@ -1210,15 +1258,14 @@ int Main(std::span<char*> args) noexcept {
     static_cast<void>(::signal(SIGPIPE, SIG_IGN));
 
     // Delivery mode unless --agent was given explicitly.  ZET_AGENT_DIR
-    // overrides the compile-time default from deliver.hpp.
+    // overrides the compile-time default from deliver.hpp.  An empty
+    // ZET_AGENT_DIR is treated the same as unset: use the compiled-in default.
     std::optional<std::string_view> agentDir;
     std::string agentDirBuf;
     if (!options->AgentExplicit) {
-        if (const char* env = ::getenv("ZET_AGENT_DIR"); env != nullptr) {
-            agentDirBuf = env;
-        } else {
-            agentDirBuf = ZET_DEFAULT_AGENT_DIR;
-        }
+        const char* env = ::getenv("ZET_AGENT_DIR");
+        agentDirBuf =
+            (env != nullptr && env[0] != '\0') ? env : ZET_DEFAULT_AGENT_DIR;
         agentDir = agentDirBuf;
     }
 

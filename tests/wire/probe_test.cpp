@@ -214,6 +214,60 @@ TEST_SUITE("ProbeScanner") {
         CHECK(!scan.Answer.has_value());
     }
 
+    TEST_CASE("ZET-FAILED without reason is parsed with empty reason") {
+        // ZET-FAILED with no space or text parses as ProbeFailed{Reason=""}.
+        ProbeScanner scanner;
+        const auto scan = scanner.Feed(AsBytes("ZET-FAILED\n"));
+        REQUIRE(scan.Answer.has_value());
+        const auto* f = std::get_if<ProbeFailed>(&*scan.Answer);
+        REQUIRE(f != nullptr);
+        CHECK(f->Reason.empty());
+    }
+
+    TEST_CASE("ZET- marker embedded mid-line is noise") {
+        // A ZET- prefix that is not at the start of the line is plain noise.
+        const auto answer =
+            FeedAll("some noise ZET-HAVE in the middle\nZET-HAVE\n");
+        REQUIRE(answer.has_value());
+        CHECK(std::holds_alternative<ProbeHave>(*answer));
+        // The noise line does not count as a skipped marker.
+        ProbeScanner scanner;
+        static_cast<void>(
+            scanner.Feed(AsBytes("some noise ZET-HAVE in the middle\n")));
+        CHECK(scanner.SkippedMarkers() == 0);
+    }
+
+    TEST_CASE("overlong line followed by valid marker is parsed") {
+        // A line that exceeds the scanner's buffer does not prevent parsing
+        // subsequent valid lines.
+        std::string overlong = "ZET-";
+        overlong.append(MAX_PROBE_LINE, 'X');
+        overlong += '\n';
+        overlong += "ZET-HAVE\n";
+        const auto answer = FeedAll(overlong);
+        REQUIRE(answer.has_value());
+        CHECK(std::holds_alternative<ProbeHave>(*answer));
+    }
+
+    TEST_CASE("bare CR without LF is not a line terminator") {
+        // A lone \r must not terminate a line; only \n (and \r\n) do.
+        CHECK(!FeedAll("ZET-HAVE\r").has_value());
+        // When \n arrives after a \r, the accumulated line is parsed correctly.
+        ProbeScanner scanner;
+        static_cast<void>(scanner.Feed(AsBytes("ZET-HAVE\r")));
+        const auto scan = scanner.Feed(AsBytes("\n"));
+        REQUIRE(scan.Answer.has_value());
+        CHECK(std::holds_alternative<ProbeHave>(*scan.Answer));
+    }
+
+    TEST_CASE("ZET-PROBE no space after marker returns no answer") {
+        CHECK(!FeedAll("ZET-PROBE1 x86_64 exec\n").has_value());
+    }
+
+    TEST_CASE("ZET-PROBE trailing field returns no answer") {
+        CHECK(!FeedAll("ZET-PROBE 1 x86_64 exec extra\n").has_value());
+    }
+
 }  // TEST_SUITE
 
 }  // namespace

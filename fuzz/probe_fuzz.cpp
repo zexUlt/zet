@@ -46,8 +46,32 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data,
             __builtin_trap();
         }
 
-        // If we got an answer, stop; the remainder would be bootstrap data.
+        // If we got an answer, consume any leftover bytes by continuing to
+        // feed them until the input is exhausted.  This exercises the scanner
+        // state after an answer (residual bytes belong to the bootstrap armor).
         if (scan.Answer) {
+            // Touch Arch and Reason fields so the sanitizer can check them.
+            if (const auto* info =
+                    std::get_if<zet::wire::ProbeInfo>(&*scan.Answer)) {
+                volatile char sink = info->Arch.empty() ? 0 : info->Arch[0];
+                (void)sink;
+            }
+            if (const auto* f =
+                    std::get_if<zet::wire::ProbeFailed>(&*scan.Answer)) {
+                volatile char sink = f->Reason.empty() ? 0 : f->Reason[0];
+                (void)sink;
+            }
+            // Feed leftover bytes until the input is exhausted.
+            offset += scan.Consumed;
+            while (offset < input.size()) {
+                const std::size_t n2 =
+                    std::min(chunkSize, input.size() - offset);
+                const auto scan2 = scanner.Feed(input.subspan(offset, n2));
+                if (scan2.Consumed > n2) {
+                    __builtin_trap();
+                }
+                offset += scan2.Consumed > 0 ? scan2.Consumed : n2;
+            }
             break;
         }
     }

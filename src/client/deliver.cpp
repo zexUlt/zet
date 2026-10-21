@@ -44,7 +44,12 @@ std::vector<std::byte> LoadAgentBinary(std::string_view agentDir,
         return {};
     }
 
+    constexpr std::size_t MAX_AGENT_SIZE = 16 * 1024 * 1024;  // 16 MiB
     const auto size = static_cast<std::size_t>(st.st_size);
+    if (size > MAX_AGENT_SIZE) {
+        static_cast<void>(::close(fd));
+        return {};
+    }
     std::vector<std::byte> data(size);
     std::size_t read = 0;
     while (read < size) {

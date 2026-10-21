@@ -120,29 +120,50 @@ def test_fresh_host_delivers_agent_and_session_connects(
 def test_second_connect_does_not_retransmit(
     binaries, ssh_host: SshHost, clean_home, tmp_path
 ):
-    """If the binary is already cached (ZET-HAVE), the inode stays the same."""
+    """If the binary is already cached (ZET-HAVE), inode and mtime stay the same.
+
+    The client must reply ZET-HAVE on the second connect, not ZET-SEND.
+    We verify this indirectly: if the file were rewritten its mtime would
+    change.  Both inode and mtime staying equal proves no bytes were sent.
+    """
     agent_dir = _agent_dir(tmp_path, UNAME_ARCH, binaries.agent)
 
-    def connect_and_stat() -> bytes:
+    def connect() -> None:
+        """Run one delivery connect and wait for a shell prompt."""
         argv = _delivery_argv(binaries.client, agent_dir, ssh_host, _agent_env())
         terminal = PtyProcess(argv, env=_env(agent_dir))
         try:
             terminal.expect(PROMPT)
-            terminal.send(b'stat -c "%i" ~/.cache/zet/*/zet-agent\r')
-            # Consume the echoed command line and read up to the next prompt.
-            out = terminal.expect(PROMPT)
             terminal.send(b"exit 0\r")
-            terminal.kill()
+            assert terminal.finish().status == 0
         finally:
             terminal.kill()
-        # The inode is the last non-empty token before the final prompt.
-        lines = [ln.strip() for ln in out.split(b"\r\n") if ln.strip()]
-        return lines[0] if lines else b""
 
-    inode_1 = connect_and_stat()
-    inode_2 = connect_and_stat()
+    def stat_agent() -> tuple[str, str]:
+        """Return (inode, mtime_seconds) of the cached zet-agent via a plain ssh run."""
+        result = ssh_host.run(
+            "stat -c '%i %Y' ~/.cache/zet/*/zet-agent",
+            timeout=STEP_TIMEOUT_SECONDS,
+        )
+        assert result.returncode == 0, (
+            f"stat failed: {result.stderr.decode(errors='replace')}"
+        )
+        parts = result.stdout.decode().strip().split()
+        assert len(parts) == 2, f"unexpected stat output: {result.stdout!r}"
+        return parts[0], parts[1]  # inode, mtime_seconds
+
+    connect()
+    inode_1, mtime_1 = stat_agent()
+
+    connect()
+    inode_2, mtime_2 = stat_agent()
+
     assert inode_1 == inode_2, (
-        f"inode changed on second connect: {inode_1!r} → {inode_2!r}"
+        f"inode changed on second connect: {inode_1!r} -> {inode_2!r}"
+    )
+    assert mtime_1 == mtime_2, (
+        f"mtime changed on second connect (binary rewritten): "
+        f"{mtime_1!r} -> {mtime_2!r}"
     )
 
 
@@ -194,50 +215,125 @@ def test_different_binary_replaces_and_old_dir_removed(
 def test_mid_transfer_kill_leaves_only_part_file(
     binaries, ssh_host: SshHost, clean_home, tmp_path
 ):
-    """Killing the delivery process leaves no zet-agent in the cache."""
-    agent_dir = _agent_dir(tmp_path, UNAME_ARCH, binaries.agent)
+    """Killing the delivery connection mid-transfer leaves no runnable zet-agent.
 
-    # Start the delivery and kill it very quickly so it is interrupted before
-    # the installer can rename .part to zet-agent.  A 10 ms window is safely
-    # shorter than the SSH handshake, so delivery never completes and the
-    # invariant is easy to verify: no zet-agent, any partial state cleaned.
-    #
-    # We drive this at the shell level: start the installer, read ZET-PROBE,
-    # send the hash+size line, send only half the binary, then kill.
-    # The simplest proxy: use `head -c <half>` piped into the installer.
-    result = ssh_host.run(
-        "ls ~/.cache/zet/ 2>/dev/null; echo NO_CACHE",
-        timeout=STEP_TIMEOUT_SECONDS,
-    )
-    assert b"NO_CACHE" in result.stdout
+    We use a padded (2 MiB) binary so the transfer takes long enough that we
+    can reliably kill the process group while head -c is still running on the
+    remote side.  The kill leaves a .part.* file and no zet-agent.
 
-    # Check that after a delivery that was cancelled partway (simulated by
-    # starting zet and killing it after a brief pause), no zet-agent appears.
-    argv = _delivery_argv(binaries.client, agent_dir, ssh_host, _agent_env())
+    Checks:
+    - After the kill, no zet-agent is executable in the cache.
+    - A .part.* file exists in the hash dir (partial transfer recorded).
+    - A subsequent normal connect with the real agent succeeds (stale .part
+      from the dead installer PID is cleaned up by the stale-check logic).
+    - A dir containing a .part file whose PID is still alive is NOT removed
+      by a different-hash install.
+    """
+    import signal as _signal
+
+    agent_data = binaries.agent.read_bytes()
+
+    # Pad to ~2 MiB so the transfer takes > 200 ms on loopback.
+    pad_size = max(0, 2 * 1024 * 1024 - len(agent_data))
+    large_data = agent_data + b"\x00" * pad_size
+    large_hash = hashlib.blake2b(large_data, digest_size=32).hexdigest()
+    large_dir = tmp_path / "large-agents"
+    large_dir.mkdir(mode=0o755)
+    large_bin = large_dir / f"zet-agent-{UNAME_ARCH}"
+    large_bin.write_bytes(large_data)
+    large_bin.chmod(0o755)
+
+    large_env = _env(large_dir)
+    argv = _delivery_argv(binaries.client, large_dir, ssh_host, _agent_env())
+    # start_new_session=True puts zet and its ssh child in a new process group
+    # so we can kill both without affecting the test runner.
     proc = subprocess.Popen(
-        argv,
-        env=_env(agent_dir),
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        argv, env=large_env, stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        start_new_session=True,
     )
-    # Kill very quickly: we want to interrupt before delivery completes.
-    # 10 ms is enough time for the process to start but not enough to finish
-    # the SSH handshake, so no zet-agent is ever installed.
-    time.sleep(0.01)
-    proc.kill()
+
+    # Poll until the .part.* file appears in the cache (head -c has started
+    # writing), or the process exits first (transfer completed / failed early).
+    part_appeared = False
+    deadline = time.monotonic() + STEP_TIMEOUT_SECONDS
+    while time.monotonic() < deadline and proc.poll() is None:
+        r = ssh_host.run(
+            f"ls ~/.cache/zet/{large_hash}/.part.* 2>/dev/null | wc -l",
+            timeout=5,
+        )
+        if r.returncode == 0 and r.stdout.decode().strip() != "0":
+            part_appeared = True
+            break
+        time.sleep(0.05)
+
+    # SIGKILL the entire process group (zet + its ssh child).
+    try:
+        os.killpg(os.getpgid(proc.pid), _signal.SIGKILL)
+    except ProcessLookupError:
+        pass
     proc.wait(timeout=STEP_TIMEOUT_SECONDS)
 
-    # If a .part file was left, no zet-agent should exist at that path.
-    result2 = ssh_host.run(
-        "find ~/.cache/zet/ -name 'zet-agent' 2>/dev/null | wc -l; echo DONE",
+    assert part_appeared, (
+        "delivery completed or failed before a .part file appeared; "
+        "the binary may be too small or the host too fast"
+    )
+
+    # No runnable zet-agent must exist.
+    r2 = ssh_host.run(
+        f"test -x ~/.cache/zet/{large_hash}/zet-agent && echo FOUND || echo ABSENT",
         timeout=STEP_TIMEOUT_SECONDS,
     )
-    # Either no cache at all (killed before anything written) or zet-agent
-    # count is 0 (partial write).
-    count_line = result2.stdout.decode().split("DONE")[0].strip()
-    count = int(count_line) if count_line.isdigit() else 0
-    assert count == 0, f"unexpected zet-agent after mid-transfer kill: {result2.stdout!r}"
+    assert b"ABSENT" in r2.stdout, (
+        f"zet-agent is executable after mid-transfer kill: {r2.stdout!r}"
+    )
+
+    # A normal connect with the real agent must succeed.  The stale .part
+    # (PID of the now-dead sh process) is treated as stale by kill -0 and
+    # cleaned up during the next install's cleanup pass.
+    agent_dir = _agent_dir(tmp_path, UNAME_ARCH, binaries.agent)
+    argv2 = _delivery_argv(binaries.client, agent_dir, ssh_host, _agent_env())
+    terminal = PtyProcess(argv2, env=_env(agent_dir))
+    try:
+        terminal.expect(PROMPT)
+        terminal.send(b"exit 0\r")
+        assert terminal.finish().status == 0
+    finally:
+        terminal.kill()
+
+    # A dir with a LIVE .part must not be removed by a different-hash install.
+    # Use the test process's own PID: it is alive on the (same) machine, so
+    # kill -0 on the remote side succeeds and the dir is protected.
+    fake_hash = "a" * 64
+    r3 = ssh_host.run(
+        f"mkdir -p ~/.cache/zet/{fake_hash} && "
+        f"touch ~/.cache/zet/{fake_hash}/.part.{os.getpid()}",
+        timeout=STEP_TIMEOUT_SECONDS,
+    )
+    assert r3.returncode == 0
+
+    alt_data = agent_data + b"\xff"
+    alt_dir = tmp_path / "zet-agents-alt"
+    alt_dir.mkdir(mode=0o755)
+    alt_bin = alt_dir / f"zet-agent-{UNAME_ARCH}"
+    alt_bin.write_bytes(alt_data)
+    alt_bin.chmod(0o755)
+    argv3 = _delivery_argv(binaries.client, alt_dir, ssh_host, _agent_env())
+    terminal2 = PtyProcess(argv3, env=_env(alt_dir))
+    try:
+        terminal2.expect(PROMPT)
+        terminal2.send(b"exit 0\r")
+        terminal2.kill()
+    finally:
+        terminal2.kill()
+
+    r4 = ssh_host.run(
+        f"test -d ~/.cache/zet/{fake_hash} && echo ALIVE || echo GONE",
+        timeout=STEP_TIMEOUT_SECONDS,
+    )
+    assert b"ALIVE" in r4.stdout, (
+        f"live .part dir was removed by a different-hash install: {r4.stdout!r}"
+    )
 
 
 def test_noisy_bashrc_does_not_interfere(
@@ -266,13 +362,13 @@ def test_noexec_cache_gives_clear_error(
 ):
     """When the cache probe reports noexec the client exits with a clear message.
 
-    The installer detects noexec by running `chmod +x <probe-file>`.  We inject
-    a fake `chmod` that always exits 1 via the remote user's ~/bin directory:
-    the sshd config sets BASH_ENV to ~/.bashrc, which bash reads before exec-ing
-    /bin/sh, so PATH modifications in .bashrc reach the installer.  This avoids
-    both CAP_SYS_ADMIN (for mount) and the OpenSSH SetEnv/AcceptEnv mechanism.
+    We inject a fake `chmod` that always exits 1 via the remote user's ~/bin:
+    the sshd config sets BASH_ENV=~/.bashrc, so PATH changes reach the installer.
+    This substitutes for a real noexec mount (which would require CAP_SYS_ADMIN).
+
+    Nothing must be copied to the cache (no zet-agent, no .part file).
+    The error output must contain the word "noexec".
     """
-    # Write fake chmod to the remote user's ~/bin; prepend it in PATH via .bashrc.
     ssh_host.write_home_file("bin/chmod", "#!/bin/sh\nexit 1\n", mode=0o755)
     ssh_host.write_home_file(".bashrc", 'export PATH="$HOME/bin:$PATH"\n')
     try:
@@ -285,9 +381,19 @@ def test_noexec_cache_gives_clear_error(
             timeout=STEP_TIMEOUT_SECONDS,
         )
         assert result.returncode != 0, "expected non-zero exit when cache is noexec"
-        combined = (result.stdout + result.stderr).lower()
-        assert b"noexec" in combined, (
-            f"expected 'noexec' in output, got: {combined!r}"
+        combined = result.stdout + result.stderr
+        assert b"noexec" in combined.lower(), (
+            f"expected 'noexec' in error output, got: {combined!r}"
+        )
+        # Nothing must have been written to the cache.
+        r = ssh_host.run(
+            "find ~/.cache/zet/ \\( -name 'zet-agent' -o -name '.part.*' \\) "
+            "2>/dev/null | wc -l",
+            timeout=STEP_TIMEOUT_SECONDS,
+        )
+        count = r.stdout.decode().strip()
+        assert count == "0", (
+            f"files were written to the cache despite noexec error: count={count!r}"
         )
     finally:
         ssh_host.write_home_file(".bashrc", CLEAN_BASHRC)
@@ -298,9 +404,9 @@ def test_unsupported_arch_gives_clear_error(
 ):
     """A fake uname reporting an unknown arch stops delivery with a clear message.
 
-    We use the same .bashrc / ~/bin technique as test_noexec_cache_gives_clear_error:
-    the sshd config sets BASH_ENV=~/.bashrc so the installer inherits PATH changes
-    made there.
+    We use the same .bashrc / ~/bin technique as test_noexec_cache_gives_clear_error.
+    The error output must contain both "arch" and "mips64le" (the fake arch value).
+    Nothing must be copied to the cache before the error is reported.
     """
     ssh_host.write_home_file("bin/uname", "#!/bin/sh\necho mips64le\n", mode=0o755)
     ssh_host.write_home_file(".bashrc", 'export PATH="$HOME/bin:$PATH"\n')
@@ -313,12 +419,24 @@ def test_unsupported_arch_gives_clear_error(
             capture_output=True,
             timeout=STEP_TIMEOUT_SECONDS,
         )
-        assert result.returncode != 0, (
-            "expected non-zero exit for unsupported arch"
-        )
+        assert result.returncode != 0, "expected non-zero exit for unsupported arch"
         combined = result.stdout + result.stderr
+        # The error must name the unsupported arch so the user knows what to fix.
+        assert b"mips64le" in combined, (
+            f"expected fake arch 'mips64le' in error output, got: {combined!r}"
+        )
         assert b"arch" in combined.lower() or b"unsupported" in combined.lower(), (
-            f"expected arch/unsupported in output, got: {combined!r}"
+            f"expected 'arch' or 'unsupported' in error output, got: {combined!r}"
+        )
+        # Nothing must have been written to the cache.
+        r = ssh_host.run(
+            "find ~/.cache/zet/ \\( -name 'zet-agent' -o -name '.part.*' \\) "
+            "2>/dev/null | wc -l",
+            timeout=STEP_TIMEOUT_SECONDS,
+        )
+        count = r.stdout.decode().strip()
+        assert count == "0", (
+            f"files were written to the cache despite unsupported arch: count={count!r}"
         )
     finally:
         ssh_host.write_home_file(".bashrc", CLEAN_BASHRC)
@@ -327,10 +445,24 @@ def test_unsupported_arch_gives_clear_error(
 def test_remote_argv_has_no_secrets(
     binaries, ssh_host: SshHost, clean_home, tmp_path
 ):
-    """No process cmdline in /proc ever contains the agent hash during delivery.
+    """The remote sh argv is exactly the installer constant; no secrets appear.
 
-    The hash is transmitted via stdin, not argv, so it must not appear in any
-    running process's command line visible to an observer on the machine.
+    The hash and size are transmitted via stdin, not argv, so they must not
+    appear in any running process's command line visible to a local observer.
+
+    Expected in argv (not secret):
+    - The installer script text itself (a constant, no variable data).
+    - The hash as part of the installed agent path after a successful install:
+      e.g. "/home/user/.cache/zet/<hash>/zet-agent" — expected and acceptable.
+    - "head -c <size>" as part of the installer script literal — acceptable
+      because the size is fixed by the script text, not the current binary.
+
+    Forbidden in any /proc cmdline during delivery:
+    - The 64-char hex hash as a standalone argument or token (not in a path).
+    - Any key, nonce, or Offer material (bootstrap secrets, not yet generated
+      during delivery).
+
+    The test also verifies that the session connected successfully.
     """
     agent_data = binaries.agent.read_bytes()
     expected_hash = hashlib.blake2b(agent_data, digest_size=32).hexdigest()
@@ -341,7 +473,7 @@ def test_remote_argv_has_no_secrets(
     violations: list[str] = []
     stop_sniffing = threading.Event()
 
-    def sniff_proc():
+    def sniff_proc() -> None:
         while not stop_sniffing.is_set():
             for pid_dir in sorted(Path("/proc").iterdir()):
                 try:
@@ -349,36 +481,36 @@ def test_remote_argv_has_no_secrets(
                 except (PermissionError, FileNotFoundError, OSError):
                     continue
                 text = raw.decode(errors="replace")
-                if expected_hash in text:
-                    # Acceptable: hash appears as part of the installed agent's
-                    # path, e.g. "/home/user/.cache/zet/<hash>/zet-agent".
-                    # That is expected after a successful install.
-                    # Forbidden: hash as a standalone SSH argument or token.
-                    if f"/{expected_hash}/" in text:
-                        continue
-                    violations.append(f"pid={pid_dir.name}: {text!r}")
+                if expected_hash not in text:
+                    continue
+                # Acceptable: hash in the installed agent's exec path after a
+                # successful install, e.g. "…/.cache/zet/<hash>/zet-agent".
+                if f"/{expected_hash}/" in text:
+                    continue
+                violations.append(f"pid={pid_dir.name}: {text!r}")
             time.sleep(0.01)
 
     sniffer = threading.Thread(target=sniff_proc, daemon=True)
     sniffer.start()
     try:
-        proc = subprocess.Popen(
-            argv, env=_env(agent_dir),
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-        )
+        terminal = PtyProcess(argv, env=_env(agent_dir))
         try:
-            proc.wait(timeout=STEP_TIMEOUT_SECONDS)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-            proc.wait()
+            # Session must connect successfully: if the argv contained a
+            # secret, the installer or bootstrap would likely fail too.
+            terminal.expect(PROMPT)
+            terminal.send(b"exit 0\r")
+            rc = terminal.finish().status
+        finally:
+            terminal.kill()
     finally:
         stop_sniffing.set()
         sniffer.join(timeout=2)
 
+    assert rc == 0, f"session did not succeed (exit {rc})"
     assert not violations, (
-        "hash found in /proc cmdlines during delivery:\n" + "\n".join(violations)
+        "agent hash found as a standalone argv token during delivery "
+        "(should only appear as part of the exec path after install):\n"
+        + "\n".join(violations)
     )
 
 
@@ -424,3 +556,74 @@ def test_login_shell_delivers(
         terminal.kill()
     finally:
         terminal.kill()
+
+
+def test_agent_flag_disables_delivery(
+    binaries, ssh_host: SshHost, clean_home, tmp_path
+):
+    """--agent PATH skips delivery and runs the agent directly at PATH.
+
+    The cache must remain empty after a connect with --agent: no installer ran
+    and no zet-agent was written to ~/.cache/zet.
+    """
+    from e2e import install_agent  # noqa: PLC0415 (local import)
+
+    installed = install_agent(binaries.agent)
+    ssh_host.write_home_file(".bash_profile", PROFILE)
+
+    # Build the ssh argv with --agent pointing to the already-installed agent.
+    ssh_args = ["-F", str(ssh_host.config)]
+    argv = [
+        str(binaries.client),
+        "--agent", str(installed),
+        "--ssh-arg", "-F", "--ssh-arg", str(ssh_host.config),
+        ssh_host.alias,
+    ]
+    env = dict(os.environ)
+    env["ZET_KEEPALIVE_INTERVAL"] = "300"
+    env["ZET_PEER_SILENCE_TIMEOUT"] = "2000"
+    env["ZET_RECONNECT_MAX"] = "500"
+    env["TERM"] = "xterm"
+
+    terminal = PtyProcess(argv, env=env)
+    try:
+        terminal.expect(PROMPT)
+        terminal.send(b"exit 0\r")
+        assert terminal.finish().status == 0
+    finally:
+        terminal.kill()
+
+    # The cache must be empty: delivery was skipped.
+    r = ssh_host.run(
+        "find ~/.cache/zet/ -name 'zet-agent' 2>/dev/null | wc -l",
+        timeout=STEP_TIMEOUT_SECONDS,
+    )
+    count = r.stdout.decode().strip()
+    assert count == "0", (
+        f"zet-agent appeared in cache despite --agent flag: count={count!r}"
+    )
+
+
+def test_agent_dir_missing_arch_gives_clear_error(
+    binaries, ssh_host: SshHost, clean_home, tmp_path
+):
+    """ZET_AGENT_DIR that lacks the remote arch binary gives a clear error.
+
+    The directory exists but contains no zet-agent-<arch> file.  The client
+    must exit non-zero and the error must mention ZET_AGENT_DIR or --agent.
+    """
+    empty_dir = tmp_path / "empty-agents"
+    empty_dir.mkdir(mode=0o755)
+
+    env = _env(empty_dir)
+    argv = _delivery_argv(binaries.client, empty_dir, ssh_host, _agent_env())
+    result = subprocess.run(
+        argv, env=env, stdin=subprocess.DEVNULL,
+        capture_output=True, timeout=STEP_TIMEOUT_SECONDS,
+    )
+    assert result.returncode != 0, "expected non-zero exit for missing arch binary"
+    combined = result.stdout + result.stderr
+    # Must mention ZET_AGENT_DIR or --agent so the user knows how to fix it.
+    assert b"ZET_AGENT_DIR" in combined or b"--agent" in combined, (
+        f"expected ZET_AGENT_DIR or --agent in error output, got: {combined!r}"
+    )
