@@ -72,7 +72,7 @@ else()
         set(ZET_RELEASE_VERSION "${CMAKE_MATCH_1}")
     elseif(_ZET_GIT_DESCRIBE MATCHES "^v([0-9]+\\.[0-9]+\\.[0-9]+)-([0-9]+)-g([0-9a-f]+)$")
         # Post-tag build: v0.1.0-3-gabcdef7 → "0.1.0-3-gabcdef7-dev"
-        set(ZET_RELEASE_VERSION "${CMAKE_MATCH_1}-${CMAKE_MATCH_2}-${CMAKE_MATCH_3}-dev")
+        set(ZET_RELEASE_VERSION "${CMAKE_MATCH_1}-${CMAKE_MATCH_2}-g${CMAKE_MATCH_3}-dev")
     else()
         set(ZET_RELEASE_VERSION "0.0.0-dev")
     endif()
