@@ -15,6 +15,7 @@ Scenarios:
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import os
 import re
@@ -37,6 +38,39 @@ UNAME_ARCH = subprocess.check_output(["uname", "-m"], text=True).strip()
 
 # The cache directory the installer creates on the remote host.
 ZET_CACHE_SUBDIR = ".cache/zet"
+
+
+@contextlib.contextmanager
+def _throttle_loopback(rate: str = "64mbit", burst: str = "1mbit"):
+    """Apply a tc TBF rate limit on lo for the duration of the with-block.
+
+    SSH pre-buffers the entire transfer payload into the kernel's TCP send
+    buffer before the remote head -c starts reading; without a rate limit,
+    loopback delivers the full binary in milliseconds and the mid-transfer
+    kill race is unreliable.  With a 64 Mbit/s shaped rate the transfer
+    takes roughly (size / 8 MB/s) seconds; a 16 MiB binary takes ~2s,
+    giving the SIGKILL more than a second of window after we detect
+    kill_threshold bytes written.
+
+    The context manager is a no-op if tc is not installed (not inside the
+    integration container).
+    """
+    tc = shutil.which("tc")
+    if tc is None:
+        yield
+        return
+    subprocess.run(
+        [tc, "qdisc", "add", "dev", "lo", "root", "tbf",
+         "rate", rate, "burst", burst, "latency", "20ms"],
+        check=True, capture_output=True, timeout=10,
+    )
+    try:
+        yield
+    finally:
+        subprocess.run(
+            [tc, "qdisc", "del", "dev", "lo", "root"],
+            check=False, capture_output=True, timeout=10,
+        )
 
 
 def _agent_dir(tmp_path: Path, arch: str, agent_binary: Path) -> Path:
@@ -252,39 +286,44 @@ def test_mid_transfer_kill_leaves_only_part_file(
 
     large_env = _env(large_dir)
     argv = _delivery_argv(binaries.client, large_dir, ssh_host, _agent_env())
-    # start_new_session=True puts zet and its ssh child in a new process group
-    # so we can kill both without affecting the test runner.
-    proc = subprocess.Popen(
-        argv, env=large_env, stdin=subprocess.DEVNULL,
-        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-        start_new_session=True,
-    )
 
-    # Poll until the .part.* file has grown to at least kill_threshold bytes
-    # (head -c is well into the transfer), or the process exits first.
-    # Checking size rather than mere existence avoids killing after the rename
-    # has already happened.
-    part_appeared = False
-    deadline = time.monotonic() + STEP_TIMEOUT_SECONDS
-    while time.monotonic() < deadline and proc.poll() is None:
-        r = ssh_host.run(
-            f"pf=$(ls ~/.cache/zet/{large_hash}/.part.* 2>/dev/null | head -1); "
-            f"[ -f \"$pf\" ] && wc -c < \"$pf\" || echo 0",
-            timeout=5,
+    # Rate-limit loopback so SSH cannot pre-buffer the full binary before
+    # head -c starts reading: without this, 16 MiB over loopback completes
+    # in < 1 ms and the SIGKILL arrives after the rename.
+    with _throttle_loopback():
+        # start_new_session=True puts zet and its ssh child in a new process
+        # group so we can kill both without affecting the test runner.
+        proc = subprocess.Popen(
+            argv, env=large_env, stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            start_new_session=True,
         )
-        if r.returncode == 0:
-            written = int(r.stdout.decode().strip() or "0")
-            if written >= kill_threshold:
-                part_appeared = True
-                break
-        time.sleep(0.05)
 
-    # SIGKILL the entire process group (zet + its ssh child).
-    try:
-        os.killpg(os.getpgid(proc.pid), _signal.SIGKILL)
-    except ProcessLookupError:
-        pass
-    proc.wait(timeout=STEP_TIMEOUT_SECONDS)
+        # Poll until the .part.* file has grown to at least kill_threshold
+        # bytes (head -c is well into the transfer), or the process exits.
+        # Checking size rather than mere existence avoids killing after the
+        # rename has already happened.
+        part_appeared = False
+        deadline = time.monotonic() + STEP_TIMEOUT_SECONDS
+        while time.monotonic() < deadline and proc.poll() is None:
+            r = ssh_host.run(
+                f"pf=$(ls ~/.cache/zet/{large_hash}/.part.* 2>/dev/null | head -1); "
+                f"[ -f \"$pf\" ] && wc -c < \"$pf\" || echo 0",
+                timeout=5,
+            )
+            if r.returncode == 0:
+                written = int(r.stdout.decode().strip() or "0")
+                if written >= kill_threshold:
+                    part_appeared = True
+                    break
+            time.sleep(0.05)
+
+        # SIGKILL the entire process group (zet + its ssh child).
+        try:
+            os.killpg(os.getpgid(proc.pid), _signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        proc.wait(timeout=STEP_TIMEOUT_SECONDS)
 
     assert part_appeared, (
         f"delivery completed or failed before {kill_threshold} bytes of "

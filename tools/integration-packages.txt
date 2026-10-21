@@ -18,3 +18,4 @@ py3-pytest
 zsh
 fish
 tcsh
+iproute2
