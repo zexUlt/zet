@@ -371,14 +371,24 @@ def test_mid_transfer_kill_leaves_no_agent(
     # --- Dead-pid case ---
     # Plant ~/.cache/zet/<deadhash>/.part.<dead_pid>.  A subsequent install
     # must remove the dir (kill -0 on the dead PID fails → stale).
+    # Create the dir as the remote user (via SSH) so the installer's rm -rf
+    # has permission to remove it; a root-owned dir cannot be removed by the
+    # zettest installer.
     dead_proc = subprocess.Popen(["true"])
     dead_proc.wait()
     dead_pid = dead_proc.pid
 
     dead_hash = "d" * 64
     dead_dir = ssh_host.home / ZET_CACHE_SUBDIR / dead_hash
-    dead_dir.mkdir(parents=True, exist_ok=True)
-    (dead_dir / f".part.{dead_pid}").touch()
+    r_dead_setup = ssh_host.run(
+        f"mkdir -p ~/.cache/zet/{dead_hash} && "
+        f"touch ~/.cache/zet/{dead_hash}/.part.{dead_pid}",
+        timeout=STEP_TIMEOUT_SECONDS,
+    )
+    assert r_dead_setup.returncode == 0, (
+        f"could not create dead-pid .part fixture: "
+        f"{r_dead_setup.stderr.decode(errors='replace')}"
+    )
 
     alt_data = agent_data + b"\xde"
     alt_dir = tmp_path / "zet-agents-dead"
@@ -411,8 +421,14 @@ def test_mid_transfer_kill_leaves_no_agent(
     assert r_sleep.returncode == 0
     live_pid = r_sleep.stdout.decode().strip()
     live_dir = ssh_host.home / ZET_CACHE_SUBDIR / live_hash
-    live_dir.mkdir(parents=True, exist_ok=True)
-    (live_dir / f".part.{live_pid}").touch()
+    # Create dir and .part file as the remote user so the installer can
+    # manipulate them (root-owned files would be invisible to the cleanup).
+    r_live_setup = ssh_host.run(
+        f"mkdir -p ~/.cache/zet/{live_hash} && "
+        f"touch ~/.cache/zet/{live_hash}/.part.{live_pid}",
+        timeout=STEP_TIMEOUT_SECONDS,
+    )
+    assert r_live_setup.returncode == 0
 
     alt2_data = agent_data + b"\xff"
     alt2_dir = tmp_path / "zet-agents-alt"
