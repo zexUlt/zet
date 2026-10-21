@@ -50,8 +50,9 @@ namespace {
 
 using namespace std::chrono_literals;
 
-/// How long the delivery phase (probe exchange + binary transfer) may take.
-/// 1–2 MiB over an ssh pipe: generous for a slow link.
+/// Minimum transfer budget once the remote has responded (ZET-PROBE received).
+/// The actual budget is max(DELIVER_TIMEOUT, size_bytes / MIN_RATE + margin)
+/// so that a 16 MiB binary at 1 Mbit/s (128 KiB/s) always fits.
 constexpr Duration DELIVER_TIMEOUT = 60s;
 
 /// How long the bootstrap phase (after delivery) may take.  ssh may be asking
@@ -119,6 +120,19 @@ constexpr std::string_view USAGE =
 
 void Say(std::string_view text) noexcept {
     static_cast<void>(::write(STDERR_FILENO, text.data(), text.size()));
+}
+
+/// Returns a copy of `text` with every byte outside printable ASCII (0x20–0x7E)
+/// replaced by '?'.  Used so that remote-controlled strings (arch names, error
+/// reasons) are safe to print on the local terminal.
+[[nodiscard]] std::string SanitizeAscii(std::string_view text) noexcept {
+    std::string out;
+    out.reserve(text.size());
+    for (const char raw : text) {
+        const auto c = static_cast<unsigned char>(raw);
+        out += (c >= 0x20U && c < 0x7FU) ? raw : '?';
+    }
+    return out;
 }
 
 void SayError(std::string_view what, std::string_view why) noexcept {
@@ -481,12 +495,7 @@ std::optional<std::vector<std::byte>> DeliverAgent(Process& process,
     }
     // Copy arch before the next scanner.Feed() call overwrites the line buffer.
     // Sanitize to printable ASCII so remote-controlled text is safe to print.
-    std::string arch;
-    arch.reserve(probeInfo->Arch.size());
-    for (const char raw : probeInfo->Arch) {
-        const auto c = static_cast<unsigned char>(raw);
-        arch += (c >= 0x20U && c < 0x7FU) ? raw : '?';
-    }
+    const std::string arch = SanitizeAscii(probeInfo->Arch);
     if (arch != AGENT_ARCH_X86_64 && arch != AGENT_ARCH_AARCH64) {
         SayError("deliver", "unsupported remote architecture: " + arch);
         return std::nullopt;
@@ -496,12 +505,32 @@ std::optional<std::vector<std::byte>> DeliverAgent(Process& process,
         return std::nullopt;
     }
 
-    const auto binary = LoadAgentBinary(agentDir, arch);
+    std::string loadReason;
+    const auto binary = LoadAgentBinary(agentDir, arch, &loadReason);
     if (binary.empty()) {
-        SayError("deliver", "no agent binary for " + arch + " in " +
-                                std::string{agentDir} +
-                                " (set ZET_AGENT_DIR or use --agent PATH)");
+        if (!loadReason.empty()) {
+            SayError("deliver",
+                     loadReason + " (set ZET_AGENT_DIR or use --agent PATH)");
+        } else {
+            SayError("deliver", "no agent binary for " + arch + " in " +
+                                    std::string{agentDir} +
+                                    " (set ZET_AGENT_DIR or use --agent PATH)");
+        }
         return std::nullopt;
+    }
+
+    // ZET-PROBE proves SSH auth is done; reset the deadline to a transfer
+    // budget scaled by actual binary size: at 1 Mbit/s (128 KiB/s) plus 30s
+    // margin, a 16 MiB binary gets ~158 s, a 1 MiB binary gets at least
+    // DELIVER_TIMEOUT (60 s).
+    {
+        constexpr std::size_t kMinBytesPerSec = 128UZ * 1024UZ;  // 1 Mbit/s
+        constexpr Duration kMargin = 30s;
+        const auto secs =
+            (binary.size() + kMinBytesPerSec - 1UZ) / kMinBytesPerSec;
+        const Duration budget =
+            std::max(DELIVER_TIMEOUT, std::chrono::seconds(secs) + kMargin);
+        until = io::MonotonicNow() + budget;
     }
 
     const std::string hashSize =
@@ -521,14 +550,8 @@ std::optional<std::vector<std::byte>> DeliverAgent(Process& process,
         return std::nullopt;
     }
     if (const auto* f2 = std::get_if<wire::ProbeFailed>(&*answer2)) {
-        // Sanitize reason before printing.
-        std::string reason;
-        reason.reserve(f2->Reason.size());
-        for (const char raw : f2->Reason) {
-            const auto c = static_cast<unsigned char>(raw);
-            reason += (c >= 0x20U && c < 0x7FU) ? raw : '?';
-        }
-        SayError("deliver", "installer failed at probe: " + reason);
+        SayError("deliver",
+                 "installer failed at probe: " + SanitizeAscii(f2->Reason));
         return std::nullopt;
     }
     const bool needSend = std::holds_alternative<wire::ProbeSend>(*answer2);
@@ -551,13 +574,8 @@ std::optional<std::vector<std::byte>> DeliverAgent(Process& process,
             if (drainAnswer) {
                 if (const auto* fd =
                         std::get_if<wire::ProbeFailed>(&*drainAnswer)) {
-                    std::string reason;
-                    reason.reserve(fd->Reason.size());
-                    for (const char raw : fd->Reason) {
-                        const auto c = static_cast<unsigned char>(raw);
-                        reason += (c >= 0x20U && c < 0x7FU) ? raw : '?';
-                    }
-                    SayError("deliver", "installer failed: " + reason);
+                    SayError("deliver",
+                             "installer failed: " + SanitizeAscii(fd->Reason));
                     return std::nullopt;
                 }
             }
@@ -574,13 +592,8 @@ std::optional<std::vector<std::byte>> DeliverAgent(Process& process,
         if (std::holds_alternative<wire::ProbeStored>(*answer3)) {
             // Delivery complete.
         } else if (const auto* f = std::get_if<wire::ProbeFailed>(&*answer3)) {
-            std::string reason;
-            reason.reserve(f->Reason.size());
-            for (const char raw : f->Reason) {
-                const auto c = static_cast<unsigned char>(raw);
-                reason += (c >= 0x20U && c < 0x7FU) ? raw : '?';
-            }
-            SayError("deliver", "installer failed: " + reason);
+            SayError("deliver",
+                     "installer failed: " + SanitizeAscii(f->Reason));
             return std::nullopt;
         } else {
             SayError("deliver",
@@ -616,11 +629,14 @@ std::optional<session::BootstrapResult> Bootstrap(
     }
 
     // Delivery mode: probe exchange before the bootstrap offer.
-    // Delivery gets its own deadline; bootstrap restarts fresh after it.
+    // Auth cap is BOOTSTRAP_TIMEOUT — generous enough for passphrase / 2FA.
+    // DeliverAgent resets the deadline to a size-scaled budget once ZET-PROBE
+    // arrives (proving auth is done), so the 60-second transfer minimum only
+    // starts after the first remote byte.  Bootstrap restarts fresh after.
     std::vector<std::byte> leftovers;
     if (agentDir) {
-        const Timestamp deliverUntil = io::MonotonicNow() + DELIVER_TIMEOUT;
-        auto maybe = DeliverAgent(*process, *agentDir, deliverUntil);
+        const Timestamp authUntil = io::MonotonicNow() + BOOTSTRAP_TIMEOUT;
+        auto maybe = DeliverAgent(*process, *agentDir, authUntil);
         if (!maybe) {
             process->In.Reset();
             static_cast<void>(Reap(process->Pid, false));

@@ -24,7 +24,8 @@ constexpr char HEX_CHARS[] = "0123456789abcdef";
 }  // namespace
 
 std::vector<std::byte> LoadAgentBinary(std::string_view agentDir,
-                                       std::string_view arch) noexcept {
+                                       std::string_view arch,
+                                       std::string* reason) noexcept {
     std::string path;
     path.reserve(agentDir.size() + 1 + 10 + arch.size());
     path.append(agentDir);
@@ -47,6 +48,9 @@ std::vector<std::byte> LoadAgentBinary(std::string_view agentDir,
     constexpr std::size_t maxAgentSize = 16 * 1024 * 1024;  // 16 MiB
     const auto size = static_cast<std::size_t>(st.st_size);
     if (size > maxAgentSize) {
+        if (reason != nullptr) {
+            *reason = "agent binary too large (> 16 MiB): " + std::string{arch};
+        }
         static_cast<void>(::close(fd));
         return {};
     }

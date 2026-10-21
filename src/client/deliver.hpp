@@ -45,6 +45,12 @@ namespace zet::client {
 /// flight from another client: leave that dir alone.  The remaining race —
 /// cleanup by another client can remove a dir between its ZET-HAVE and exec
 /// → bootstrap failure — is accepted; the next connect reinstalls.
+///
+/// Known limit: on a shared NFS home across hosts, each host installs its own
+/// architecture into the same cache path, so installs for different
+/// architectures evict each other.  Also, kill -0 on a .part.<pid> from
+/// another host checks the local PID namespace and is meaningless — stale
+/// locks are not reclaimed until a same-host installer runs.
 inline constexpr std::string_view INSTALLER_SCRIPT =
     "d=${XDG_CACHE_HOME:-$HOME/.cache}/zet; "
     "mkdir -p \"$d\"; "
@@ -60,6 +66,8 @@ inline constexpr std::string_view INSTALLER_SCRIPT =
     "t=\"$d/$h\"; "
     "mkdir -p \"$t\"; "
     "chmod 0700 \"$t\"; "
+    "if printf '' >\"$t/.wchk.$$\" 2>/dev/null; then rm -f \"$t/.wchk.$$\"; "
+    "else printf 'ZET-FAILED unwritable\\n'; exit 1; fi; "
     "if test -x \"$t/zet-agent\"; then "
     "printf 'ZET-HAVE\\n'; "
     "else "
@@ -110,9 +118,13 @@ inline constexpr std::string_view AGENT_ARCH_AARCH64 = "aarch64";
 
 /// Reads the agent binary for `arch` from `agentDir`
 /// (`<agentDir>/zet-agent-<arch>`). Returns the binary on success, or an
-/// empty vector if the file cannot be read (the caller prints a clear error).
+/// empty vector on any error.  When `reason` is non-null and the file cannot
+/// be used, it is set to a human-readable explanation (e.g. "binary too
+/// large"); callers use it to print a specific error instead of the generic
+/// "no agent binary" message.
 [[nodiscard]] std::vector<std::byte> LoadAgentBinary(
-    std::string_view agentDir, std::string_view arch) noexcept;
+    std::string_view agentDir, std::string_view arch,
+    std::string* reason = nullptr) noexcept;
 
 // ---------------------------------------------------------------------------
 // Hash → hex

@@ -27,14 +27,17 @@ constexpr std::string_view PROBE_VERSION_1 = "1";
 }
 
 /// The next space-delimited token starting at `pos` in `line`; advances `pos`
-/// past the token and any trailing space. Returns empty when none remains.
+/// past exactly one space separator and then the token. Returns empty when
+/// none remains or when there is no space at `pos` (repeated spaces are
+/// rejected: "ZET-PROBE  1" is not valid).
 [[nodiscard]] std::string_view Next(std::string_view line,
                                     std::size_t& pos) noexcept {
     // Use .data()[pos] to avoid std::string_view::operator[]'s libc++ hardening
     // bounds check, which would pull __libcpp_verbose_abort into wire objects.
-    while (pos < line.size() && line.data()[pos] == ' ') {
-        ++pos;
+    if (pos >= line.size() || line.data()[pos] != ' ') {
+        return {};  // no separator → no token
     }
+    ++pos;  // skip exactly one space
     const std::size_t start = pos;
     while (pos < line.size() && line.data()[pos] != ' ') {
         ++pos;

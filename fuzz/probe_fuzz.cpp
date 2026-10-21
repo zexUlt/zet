@@ -4,8 +4,10 @@
 // The scanner must never abort, access out-of-bounds memory, or produce an
 // inconsistent Consumed count.
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <variant>
 
 #include "zet/core/bytes.hpp"
 #include "zet/wire/probe.hpp"
@@ -62,7 +64,8 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data,
                 (void)sink;
             }
             // Feed leftover bytes until the input is exhausted.
-            offset += scan.Consumed;
+            // (offset was already advanced past scan.Consumed by the outer
+            // `offset += scan.Consumed` above; do not advance again here.)
             while (offset < input.size()) {
                 const std::size_t n2 =
                     std::min(chunkSize, input.size() - offset);
