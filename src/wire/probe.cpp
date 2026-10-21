@@ -1,0 +1,217 @@
+#include "zet/wire/probe.hpp"
+
+namespace zet::wire {
+
+namespace {
+
+constexpr std::string_view PROBE_MARKER = "ZET-PROBE";
+constexpr std::string_view HAVE_MARKER = "ZET-HAVE";
+constexpr std::string_view SEND_MARKER = "ZET-SEND";
+constexpr std::string_view STORED_MARKER = "ZET-STORED";
+constexpr std::string_view FAILED_MARKER = "ZET-FAILED ";
+
+/// Supported probe version in this implementation.
+constexpr std::string_view PROBE_VERSION_1 = "1";
+
+/// Whether `line` starts with `prefix`.
+[[nodiscard]] bool StartsWith(std::string_view line,
+                              std::string_view prefix) noexcept {
+    // Use string_view{data(), prefix.size()} rather than substr(0, n) to
+    // avoid triggering the pos<=size() assertion in substr
+    // (_LIBCPP_ASSERT_VALID_ELEMENT_ACCESS in
+    // _LIBCPP_HARDENING_MODE_EXTENSIVE). Even though pos=0 is trivially
+    // <=size(), clang at -O0 may not eliminate the dead branch when the
+    // condition involves a runtime size() value.
+    return line.size() >= prefix.size() &&
+           std::string_view{line.data(), prefix.size()} == prefix;
+}
+
+/// The next space-delimited token starting at `pos` in `line`; advances `pos`
+/// past exactly one space separator and then the token. Returns empty when
+/// none remains or when there is no space at `pos` (repeated spaces are
+/// rejected: "ZET-PROBE  1" is not valid).
+[[nodiscard]] std::string_view Next(std::string_view line,
+                                    std::size_t& pos) noexcept {
+    // Use .data()[pos] to avoid std::string_view::operator[]'s libc++ hardening
+    // bounds check, which would pull __libcpp_verbose_abort into wire objects.
+    if (pos >= line.size() || line.data()[pos] != ' ') {
+        return {};  // no separator → no token
+    }
+    ++pos;  // skip exactly one space
+    const std::size_t start = pos;
+    while (pos < line.size() && line.data()[pos] != ' ') {
+        ++pos;
+    }
+    // Use the pointer+length constructor instead of substr: substr's
+    // pos<=size() assertion (_LIBCPP_ASSERT_VALID_ELEMENT_ACCESS, enabled in
+    // _LIBCPP_HARDENING_MODE_EXTENSIVE) references __libcpp_verbose_abort.
+    // The assertion is not eliminable at -O0 because `start <= line.size()`
+    // requires range inference from the loop bound that the optimiser skips
+    // in non-Release builds.
+    return {line.data() + start, pos - start};
+}
+
+/// Parses `ZET-PROBE 1 <arch> exec|noexec` into `out`.  Returns true on
+/// success.  Uses an output parameter instead of std::optional to avoid
+/// optional::operator* / operator->, which call __libcpp_verbose_abort in
+/// libc++ hardened mode (banned in wire objects by check_no_abort.sh).
+[[nodiscard]] bool ParseProbe(std::string_view line, ProbeInfo& out) noexcept {
+    if (!StartsWith(line, PROBE_MARKER)) {
+        return false;
+    }
+    // Require a space immediately after "ZET-PROBE": "ZET-PROBE1 …" is not
+    // this marker.
+    if (line.size() <= PROBE_MARKER.size() ||
+        line.data()[PROBE_MARKER.size()] != ' ') {
+        return false;
+    }
+    std::size_t pos = PROBE_MARKER.size();
+    const auto version = Next(line, pos);
+    if (version != PROBE_VERSION_1) {
+        return false;
+    }
+    const auto arch = Next(line, pos);
+    if (arch.empty()) {
+        return false;
+    }
+    const auto exec = Next(line, pos);
+    if (exec.empty()) {
+        return false;
+    }
+    const bool noexec = exec == "noexec";
+    if (!noexec && exec != "exec") {
+        return false;
+    }
+    // Reject trailing fields: "ZET-PROBE 1 x86_64 exec extra" is not valid.
+    if (!Next(line, pos).empty()) {
+        return false;
+    }
+    out = ProbeInfo{.Arch = arch, .NoExec = noexec};
+    return true;
+}
+
+}  // namespace
+
+ProbeScan ProbeScanner::Feed(ByteSpan chunk) noexcept {
+    ReadyTag_ = EReadyTag::None;
+    // Use .data()[i] instead of operator[] to avoid the libc++ hardening check
+    // that would introduce a __libcpp_verbose_abort reference (banned in wire).
+    for (std::size_t i = 0; i < chunk.size(); ++i) {
+        const char c = static_cast<char>(chunk.data()[i]);
+        if (c == '\n') {
+            EndLine();
+            // Build ProbeScan directly from bare payload types — not from
+            // the ReadyTag_ field via optional copy/move — so that
+            // optional(U&&) (the single-arg converting constructor) is used
+            // rather than optional(optional&&), which would route through
+            // operator* and reference __libcpp_verbose_abort in hardened mode.
+            const std::size_t consumed = i + 1;
+            switch (ReadyTag_) {
+                case EReadyTag::Info:
+                    ReadyTag_ = EReadyTag::None;
+                    return ProbeScan{
+                        .Consumed = consumed,
+                        .Answer = ProbeInfo{ReadyArch_, ReadyNoExec_}};
+                case EReadyTag::Have:
+                    ReadyTag_ = EReadyTag::None;
+                    return ProbeScan{.Consumed = consumed,
+                                     .Answer = ProbeHave{}};
+                case EReadyTag::Send:
+                    ReadyTag_ = EReadyTag::None;
+                    return ProbeScan{.Consumed = consumed,
+                                     .Answer = ProbeSend{}};
+                case EReadyTag::Stored:
+                    ReadyTag_ = EReadyTag::None;
+                    return ProbeScan{.Consumed = consumed,
+                                     .Answer = ProbeStored{}};
+                case EReadyTag::Failed:
+                    ReadyTag_ = EReadyTag::None;
+                    return ProbeScan{.Consumed = consumed,
+                                     .Answer = ProbeFailed{ReadyReason_}};
+                case EReadyTag::None:
+                    break;
+            }
+            continue;
+        }
+        if (LineLength_ < Line_.size()) {
+            Line_.data()[LineLength_] = c;
+            ++LineLength_;
+        } else {
+            LineTooLong_ = true;
+        }
+    }
+    return ProbeScan{.Consumed = chunk.size(), .Answer = std::nullopt};
+}
+
+void ProbeScanner::EndLine() noexcept {
+    std::string_view line{Line_.data(), LineLength_};
+    // A pty may turn \n into \r\n.
+    // Use .data()[size()-1] instead of .back() to avoid the back() assertion.
+    // Use the pointer+length constructor instead of remove_suffix(1) to avoid
+    // the n<=size() assertion: even though the !empty() guard makes it
+    // trivially safe, clang at -O0 may not eliminate the dead branch without
+    // the always-inline path propagating the guard across the function
+    // boundary.
+    if (!line.empty() && line.data()[line.size() - 1] == '\r') {
+        line = {line.data(), line.size() - 1};
+    }
+    const bool tooLong = LineTooLong_;
+    LineLength_ = 0;
+    LineTooLong_ = false;
+
+    // A line that didn't start with ZET- is noise; skip silently.
+    if (!StartsWith(line, "ZET-")) {
+        return;
+    }
+
+    // Line begins ZET- but was cut: not a valid marker.
+    if (tooLong) {
+        ++Skipped_;
+        return;
+    }
+
+    ProbeInfo probeInfo{};
+    if (ParseProbe(line, probeInfo)) {
+        // Arch string_view points into Line_; valid until next Feed.
+        ReadyTag_ = EReadyTag::Info;
+        ReadyArch_ = probeInfo.Arch;
+        ReadyNoExec_ = probeInfo.NoExec;
+        return;
+    }
+
+    if (line == HAVE_MARKER) {
+        ReadyTag_ = EReadyTag::Have;
+        return;
+    }
+    if (line == SEND_MARKER) {
+        ReadyTag_ = EReadyTag::Send;
+        return;
+    }
+    if (line == STORED_MARKER) {
+        ReadyTag_ = EReadyTag::Stored;
+        return;
+    }
+    if (StartsWith(line, FAILED_MARKER)) {
+        // Reason string_view points into Line_; valid until next Feed.
+        ReadyTag_ = EReadyTag::Failed;
+        // Pointer+length, not substr: substr's pos<=size() assertion
+        // (_LIBCPP_ASSERT_VALID_ELEMENT_ACCESS in EXTENSIVE mode) is not
+        // provably dead at -O0 because the StartsWith guard is a separate
+        // non-inlined function, so the compiler cannot see that
+        // FAILED_MARKER.size() <= line.size() here.
+        ReadyReason_ = {line.data() + FAILED_MARKER.size(),
+                        line.size() - FAILED_MARKER.size()};
+        return;
+    }
+    // "ZET-FAILED" with no reason text (no trailing space or word).
+    if (line == "ZET-FAILED") {
+        ReadyTag_ = EReadyTag::Failed;
+        ReadyReason_ = {};
+        return;
+    }
+
+    // ZET- line that we don't recognise.
+    ++Skipped_;
+}
+
+}  // namespace zet::wire

@@ -1,6 +1,7 @@
 # zet, the client (design.md §3): the loop in a library, the binary a main().
 add_library(zet_client_loop STATIC
     client.cpp
+    deliver.cpp
     escape.cpp
 )
 target_include_directories(zet_client_loop PUBLIC .)

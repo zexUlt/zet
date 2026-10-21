@@ -22,6 +22,7 @@
 #include <variant>
 #include <vector>
 
+#include "deliver.hpp"
 #include "escape.hpp"
 #include "zet/app/byte_queue.hpp"
 #include "zet/app/env.hpp"
@@ -39,6 +40,7 @@
 #include "zet/session/client_session.hpp"
 #include "zet/session/connection.hpp"
 #include "zet/session/limits.hpp"
+#include "zet/wire/probe.hpp"
 
 extern char** environ;
 
@@ -48,8 +50,13 @@ namespace {
 
 using namespace std::chrono_literals;
 
-/// How long ssh may take to bring back the agent's Accept. Generous: ssh may
-/// be asking for a passphrase on the terminal meanwhile.
+/// Minimum transfer budget once the remote has responded (ZET-PROBE received).
+/// The actual budget is max(DELIVER_TIMEOUT, size_bytes / MIN_RATE + margin)
+/// so that a 16 MiB binary at 1 Mbit/s (128 KiB/s) always fits.
+constexpr Duration DELIVER_TIMEOUT = 60s;
+
+/// How long the bootstrap phase (after delivery) may take.  ssh may be asking
+/// for a passphrase on the terminal meanwhile.
 constexpr Duration BOOTSTRAP_TIMEOUT = 120s;
 
 /// How long ssh gets to exit once the agent has answered and detached.
@@ -106,12 +113,26 @@ constexpr std::string_view ESCAPE_NOTICE = "zet: closed by ~.\r\n";
 
 constexpr std::string_view USAGE =
     "usage: zet [--agent PATH] [--ssh-arg ARG]... HOST\n"
-    "  --agent PATH    zet-agent on the remote host (default: zet-agent)\n"
+    "  --agent PATH    use PATH as zet-agent on the remote host (disables "
+    "delivery)\n"
     "  --ssh-arg ARG   passed to ssh as it is; repeat for several\n"
     "  --version       print the release version and exit\n";
 
 void Say(std::string_view text) noexcept {
     static_cast<void>(::write(STDERR_FILENO, text.data(), text.size()));
+}
+
+/// Returns a copy of `text` with every byte outside printable ASCII (0x20–0x7E)
+/// replaced by '?'.  Used so that remote-controlled strings (arch names, error
+/// reasons) are safe to print on the local terminal.
+[[nodiscard]] std::string SanitizeAscii(std::string_view text) noexcept {
+    std::string out;
+    out.reserve(text.size());
+    for (const char raw : text) {
+        const auto c = static_cast<unsigned char>(raw);
+        out += (c >= 0x20U && c < 0x7FU) ? raw : '?';
+    }
+    return out;
 }
 
 void SayError(std::string_view what, std::string_view why) noexcept {
@@ -125,6 +146,8 @@ void SayError(std::string_view what, std::string_view why) noexcept {
 struct Options {
     bool PrintVersion{false};
     std::string Agent{DEFAULT_AGENT};
+    /// True when --agent was given: skip delivery and run the agent directly.
+    bool AgentExplicit{false};
     std::vector<std::string> SshArgs;
     std::string Host;
     session::SessionLimits Limits;
@@ -156,6 +179,7 @@ std::optional<Options> ReadOptions(std::span<char*> args) {
         const std::string_view arg{args[i]};
         if (arg == "--agent" && i + 1 < args.size()) {
             options.Agent = args[++i];
+            options.AgentExplicit = true;
         } else if (arg == "--ssh-arg" && i + 1 < args.size()) {
             options.SshArgs.emplace_back(args[++i]);
         } else if (arg == "--version") {
@@ -355,8 +379,238 @@ TNonce RandomNonce() noexcept {
     return nonce;
 }
 
-/// §4 over `ssh -T HOST agent --bootstrap`.
-std::optional<session::BootstrapResult> Bootstrap(const Options& options) {
+/// Delivery remote command (M5.5): wraps the constant installer script in
+/// `exec /bin/sh -c '...'` so the user's login shell cannot interfere.
+std::string DeliveryCommand() {
+    return "exec /bin/sh -c " + Quoted(INSTALLER_SCRIPT);
+}
+
+/// Writes all of `bytes` to the non-blocking pipe `fd`, using poll() to wait
+/// when the kernel buffer is full.  Returns false on a real write error or if
+/// `until` is reached before all bytes are sent.
+[[nodiscard]] bool WriteAllPipe(int fd, ByteSpan bytes,
+                                Timestamp until) noexcept {
+    std::size_t sent = 0;
+    while (sent < bytes.size()) {
+        const Timestamp now = io::MonotonicNow();
+        if (now >= until) {
+            return false;
+        }
+        const auto wr = io::WriteSome(
+            fd, ByteSpan{bytes.data() + sent, bytes.size() - sent});
+        if (!wr) {
+            if (!wr.error().WouldBlock()) {
+                return false;
+            }
+            pollfd pfd{.fd = fd, .events = POLLOUT, .revents = 0};
+            static_cast<void>(
+                ::poll(&pfd, 1, io::TimeoutMillis(Deadline{until}, now)));
+            continue;
+        }
+        sent += *wr;
+    }
+    return true;
+}
+
+/// Runs the probe exchange with the installer and delivers the agent binary
+/// if needed (design.md §4, "Доставка агента (M5.5)").  Returns any bytes
+/// that followed the last installer line — they belong to the bootstrap
+/// armor and must be fed to BootstrapClient next. Returns std::nullopt on
+/// any error; the caller must SIGTERM and reap the process.
+std::optional<std::vector<std::byte>> DeliverAgent(Process& process,
+                                                   std::string_view agentDir,
+                                                   Timestamp until) noexcept {
+    wire::ProbeScanner scanner;
+    std::array<std::byte, 4096> buf{};
+    /// Bytes the scanner did not consume yet — carried to the next stage.
+    std::vector<std::byte> leftover;
+    bool ended = false;
+
+    // Returns the next ProbeAnswer from the installer. Bytes that arrived
+    // after the answer's newline are left in `leftover` for later.
+    const auto next = [&]() -> std::optional<wire::ProbeAnswer> {
+        while (!leftover.empty()) {
+            const auto scan =
+                scanner.Feed(ByteSpan{leftover.data(), leftover.size()});
+            leftover.erase(
+                leftover.begin(),
+                leftover.begin() + static_cast<std::ptrdiff_t>(scan.Consumed));
+            if (scan.Answer) {
+                return scan.Answer;
+            }
+        }
+        while (!ended) {
+            const Timestamp now = io::MonotonicNow();
+            if (now >= until) {
+                return std::nullopt;
+            }
+            pollfd w{.fd = process.Out.Get(), .events = POLLIN, .revents = 0};
+            if (::poll(&w, 1, io::TimeoutMillis(Deadline{until}, now)) <= 0) {
+                continue;
+            }
+            const auto n =
+                io::ReadSome(process.Out.Get(), MutableByteSpan{buf});
+            if (!n) {
+                if (!n.error().WouldBlock()) {
+                    ended = true;
+                }
+                continue;
+            }
+            if (*n == 0) {
+                ended = true;
+                break;
+            }
+            const auto scan = scanner.Feed(ByteSpan{buf.data(), *n});
+            if (scan.Consumed < *n) {
+                const std::byte* rem = buf.data() + scan.Consumed;
+                leftover.insert(leftover.end(), rem,
+                                rem + (*n - scan.Consumed));
+            }
+            if (scan.Answer) {
+                return scan.Answer;
+            }
+        }
+        return std::nullopt;
+    };
+
+    // Stage 1: ZET-PROBE <version> <arch> exec|noexec
+    // The login shell may emit ZET-HAVE, ZET-SEND, ZET-STORED, or ZET-FAILED
+    // before the installer starts (e.g. a noisy .bashrc).  Skip them: only
+    // ZET-PROBE opens the exchange.
+    // answer1 is declared outside the loop so that probeInfo (which points
+    // into it) remains valid after the loop exits.
+    std::optional<wire::ProbeAnswer> answer1;
+    const wire::ProbeInfo* probeInfo = nullptr;
+    for (;;) {
+        answer1 = next();
+        if (!answer1) {
+            SayError("deliver", "no ZET-PROBE from installer");
+            return std::nullopt;
+        }
+        probeInfo = std::get_if<wire::ProbeInfo>(&*answer1);
+        if (probeInfo) {
+            break;
+        }
+        // Out-of-stage marker: treat as noise and keep waiting.
+    }
+    // Copy arch before the next scanner.Feed() call overwrites the line buffer.
+    // Sanitize to printable ASCII so remote-controlled text is safe to print.
+    const std::string arch = SanitizeAscii(probeInfo->Arch);
+    if (arch != AGENT_ARCH_X86_64 && arch != AGENT_ARCH_AARCH64) {
+        SayError("deliver", "unsupported remote architecture: " + arch);
+        return std::nullopt;
+    }
+    if (probeInfo->NoExec) {
+        SayError("deliver", "remote agent cache is on a noexec filesystem");
+        return std::nullopt;
+    }
+
+    std::string loadReason;
+    const auto binary = LoadAgentBinary(agentDir, arch, &loadReason);
+    if (binary.empty()) {
+        if (!loadReason.empty()) {
+            SayError("deliver",
+                     loadReason + " (set ZET_AGENT_DIR or use --agent PATH)");
+        } else {
+            SayError("deliver", "no agent binary for " + arch + " in " +
+                                    std::string{agentDir} +
+                                    " (set ZET_AGENT_DIR or use --agent PATH)");
+        }
+        return std::nullopt;
+    }
+
+    // ZET-PROBE proves SSH auth is done; reset the deadline to a transfer
+    // budget scaled by actual binary size: at 1 Mbit/s (128 KiB/s) plus 30s
+    // margin, a 16 MiB binary gets ~158 s, a 1 MiB binary gets at least
+    // DELIVER_TIMEOUT (60 s).
+    {
+        constexpr std::size_t kMinBytesPerSec = 128UZ * 1024UZ;  // 1 Mbit/s
+        constexpr Duration kMargin = 30s;
+        const auto secs =
+            (binary.size() + kMinBytesPerSec - 1UZ) / kMinBytesPerSec;
+        const Duration budget =
+            std::max(DELIVER_TIMEOUT, std::chrono::seconds(secs) + kMargin);
+        until = io::MonotonicNow() + budget;
+    }
+
+    const std::string hashSize =
+        HashHex(std::span{binary}) + " " + std::to_string(binary.size()) + "\n";
+    if (!WriteAllPipe(
+            process.In.Get(),
+            std::as_bytes(std::span{hashSize.data(), hashSize.size()}),
+            until)) {
+        SayError("deliver", "could not send hash to installer");
+        return std::nullopt;
+    }
+
+    // Stage 2: ZET-HAVE (cached), ZET-SEND (needs binary), or ZET-FAILED
+    const auto answer2 = next();
+    if (!answer2) {
+        SayError("deliver", "no ZET-HAVE/ZET-SEND from installer");
+        return std::nullopt;
+    }
+    if (const auto* f2 = std::get_if<wire::ProbeFailed>(&*answer2)) {
+        SayError("deliver",
+                 "installer failed at probe: " + SanitizeAscii(f2->Reason));
+        return std::nullopt;
+    }
+    const bool needSend = std::holds_alternative<wire::ProbeSend>(*answer2);
+    if (!needSend && !std::holds_alternative<wire::ProbeHave>(*answer2)) {
+        SayError(
+            "deliver",
+            "unexpected installer message (expected ZET-HAVE or ZET-SEND)");
+        return std::nullopt;
+    }
+
+    if (needSend) {
+        if (!WriteAllPipe(process.In.Get(),
+                          ByteSpan{binary.data(), binary.size()}, until)) {
+            // Close stdin so the installer is unblocked, then drain briefly:
+            // it may have already printed ZET-FAILED with a reason.
+            process.In.Reset();
+            const Timestamp drainUntil = io::MonotonicNow() + 2s;
+            until = drainUntil;
+            const auto drainAnswer = next();
+            if (drainAnswer) {
+                if (const auto* fd =
+                        std::get_if<wire::ProbeFailed>(&*drainAnswer)) {
+                    SayError("deliver",
+                             "installer failed: " + SanitizeAscii(fd->Reason));
+                    return std::nullopt;
+                }
+            }
+            SayError("deliver", "could not send agent binary");
+            return std::nullopt;
+        }
+
+        // Stage 3: ZET-STORED or ZET-FAILED <reason>
+        const auto answer3 = next();
+        if (!answer3) {
+            SayError("deliver", "no ZET-STORED/ZET-FAILED from installer");
+            return std::nullopt;
+        }
+        if (std::holds_alternative<wire::ProbeStored>(*answer3)) {
+            // Delivery complete.
+        } else if (const auto* f = std::get_if<wire::ProbeFailed>(&*answer3)) {
+            SayError("deliver",
+                     "installer failed: " + SanitizeAscii(f->Reason));
+            return std::nullopt;
+        } else {
+            SayError("deliver",
+                     "unexpected installer message (expected "
+                     "ZET-STORED/ZET-FAILED)");
+            return std::nullopt;
+        }
+    }
+
+    return leftover;
+}
+
+/// §4 over `ssh -T HOST agent --bootstrap` (direct) or `exec /bin/sh -c
+/// '<installer>'` (delivery, M5.5).  `agentDir` is set for delivery mode;
+/// nullopt means the caller gave --agent PATH and wants the old direct path.
+std::optional<session::BootstrapResult> Bootstrap(
+    const Options& options, std::optional<std::string_view> agentDir) {
     session::BootstrapClient bootstrap{RandomKey(),
                                        RandomNonce<wire::BootstrapNonce>(),
                                        ForwardedEnvironment()};
@@ -367,12 +621,32 @@ std::optional<session::BootstrapResult> Bootstrap(const Options& options) {
         return std::nullopt;
     }
     auto argv = SshArgv(options, {"-T"});
-    argv.push_back(RemoteCommand(options));
+    argv.push_back(agentDir ? DeliveryCommand() : RemoteCommand(options));
     auto process = Run(argv);
     if (!process) {
         SayError("ssh", std::strerror(errno));
         return std::nullopt;
     }
+
+    // Delivery mode: probe exchange before the bootstrap offer.
+    // Auth cap is BOOTSTRAP_TIMEOUT — generous enough for passphrase / 2FA.
+    // DeliverAgent resets the deadline to a size-scaled budget once ZET-PROBE
+    // arrives (proving auth is done), so the 60-second transfer minimum only
+    // starts after the first remote byte.  Bootstrap restarts fresh after.
+    std::vector<std::byte> leftovers;
+    if (agentDir) {
+        const Timestamp authUntil = io::MonotonicNow() + BOOTSTRAP_TIMEOUT;
+        auto maybe = DeliverAgent(*process, *agentDir, authUntil);
+        if (!maybe) {
+            process->In.Reset();
+            static_cast<void>(Reap(process->Pid, false));
+            return std::nullopt;
+        }
+        leftovers = std::move(*maybe);
+    }
+
+    const Timestamp until = io::MonotonicNow() + BOOTSTRAP_TIMEOUT;
+
     // Far below what a pipe holds, so one write takes it all.
     const auto written = io::WriteSome(
         process->In.Get(), std::as_bytes(std::span{offer}.first(*length)));
@@ -385,10 +659,23 @@ std::optional<session::BootstrapResult> Bootstrap(const Options& options) {
         return std::nullopt;
     }
 
-    const Timestamp until = io::MonotonicNow() + BOOTSTRAP_TIMEOUT;
     std::array<std::byte, 4096> chunk{};
     std::optional<session::BootstrapResult> result;
     bool ended = false;
+
+    // Feed bytes that arrived before the offer (delivery leftovers) first.
+    if (!leftovers.empty()) {
+        auto step =
+            bootstrap.Feed(ByteSpan{leftovers.data(), leftovers.size()});
+        if (!step) {
+            SayError("bootstrap", step.error().Description());
+            process->In.Reset();
+            static_cast<void>(Reap(process->Pid, false));
+            return std::nullopt;
+        }
+        result = std::move(step->Result);
+    }
+
     while (!result && !ended) {
         const Timestamp now = io::MonotonicNow();
         if (now >= until) {
@@ -995,7 +1282,19 @@ int Main(std::span<char*> args) noexcept {
     }
     static_cast<void>(::signal(SIGPIPE, SIG_IGN));
 
-    auto bootstrapped = Bootstrap(*options);
+    // Delivery mode unless --agent was given explicitly.  ZET_AGENT_DIR
+    // overrides the compile-time default from deliver.hpp.  An empty
+    // ZET_AGENT_DIR is treated the same as unset: use the compiled-in default.
+    std::optional<std::string_view> agentDir;
+    std::string agentDirBuf;
+    if (!options->AgentExplicit) {
+        const char* env = ::getenv("ZET_AGENT_DIR");
+        agentDirBuf =
+            (env != nullptr && env[0] != '\0') ? env : ZET_DEFAULT_AGENT_DIR;
+        agentDir = agentDirBuf;
+    }
+
+    auto bootstrapped = Bootstrap(*options, agentDir);
     if (!bootstrapped) {
         return FAILURE_STATUS;
     }
