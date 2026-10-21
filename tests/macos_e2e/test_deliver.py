@@ -79,7 +79,7 @@ def test_delivery_installs_agent_and_session_works(macos_zet, clean_cache, agent
         terminal.send(b"echo delivery-ok\r")
         terminal.expect(b"delivery-ok")
         terminal.send(b"exit 0\r")
-        assert terminal.finish() == 0
+        assert terminal.finish().status == 0
     finally:
         terminal.kill()
 
@@ -91,6 +91,30 @@ def test_delivery_installs_agent_and_session_works(macos_zet, clean_cache, agent
     count = result.stdout.decode(errors="replace").strip()
     assert count == "1", (
         f"expected exactly one cached zet-agent after delivery, got {count!r}"
+    )
+
+    # The delivered binary must match the host's architecture.
+    arch_result = clean_cache.run(
+        r"""
+set -e
+arch=$(uname -m)
+agent=$(find ~/.cache/zet -name zet-agent -perm -u+x | head -1)
+elf_byte=$(od -An -tx1 -j18 -N1 "$agent" | tr -d ' \n')
+case "$arch" in
+    x86_64)  expect=3e ;;
+    aarch64) expect=b7 ;;
+    *)       echo "unknown arch $arch"; exit 1 ;;
+esac
+if [ "$elf_byte" != "$expect" ]; then
+    echo "arch-mismatch: uname=$arch expect_elf=$expect got_elf=$elf_byte"
+    exit 1
+fi
+echo "arch-ok"
+""",
+        timeout=STEP_TIMEOUT_SECONDS,
+    )
+    assert arch_result.returncode == 0, (
+        f"architecture check failed: {arch_result.stdout.decode(errors='replace').strip()}"
     )
 
 
@@ -108,21 +132,23 @@ def test_second_connect_copies_nothing(macos_zet, clean_cache, agent_dir):
         try:
             terminal.expect(PROMPT)
             terminal.send(b"exit 0\r")
-            assert terminal.finish() == 0
+            assert terminal.finish().status == 0
         finally:
             terminal.kill()
 
     def _stat() -> tuple[str, str]:
         result = clean_cache.run(
-            "stat -c '%i %Y' $(find ~/.cache/zet -name zet-agent -perm -u+x | head -1)",
+            "stat -c '%i %y' $(find ~/.cache/zet -name zet-agent -perm -u+x | head -1)",
             timeout=STEP_TIMEOUT_SECONDS,
         )
         assert result.returncode == 0, (
             f"stat failed: {result.stderr.decode(errors='replace')}"
         )
-        parts = result.stdout.decode().strip().split()
-        assert len(parts) == 2, f"unexpected stat output: {result.stdout!r}"
-        return parts[0], parts[1]  # inode, mtime_seconds
+        # %i = inode, %y = "YYYY-MM-DD HH:MM:SS.NNNNNNNNN +ZZZZ" (nanoseconds)
+        line = result.stdout.decode().strip()
+        inode, *rest = line.split(None, 1)
+        assert rest, f"unexpected stat output: {result.stdout!r}"
+        return inode, rest[0]  # inode, mtime_nanoseconds
 
     _connect()
     inode_1, mtime_1 = _stat()

@@ -124,10 +124,11 @@ def agent_dir() -> Path:
     """
     env_dir = os.environ.get("ZET_AGENT_DIR")
     if not env_dir:
-        pytest.skip(
-            "ZET_AGENT_DIR is not set — run with ZET_AGENT_DIR pointing to "
-            "a directory that contains zet-agent-x86_64 (or the arch the host uses)"
-        )
+        msg = ("ZET_AGENT_DIR is not set — run with ZET_AGENT_DIR pointing to "
+               "a directory that contains zet-agent-x86_64 (or the arch the host uses)")
+        if os.environ.get("CI"):
+            pytest.fail(msg)
+        pytest.skip(msg)
     return Path(env_dir)
 
 

@@ -1,8 +1,12 @@
 #!/usr/bin/env bash
 # The test host for end-to-end runs of a client outside Linux (design.md §16):
-# a long-lived Alpine container with sshd, the test user and zet-agent, on a
-# machine with docker — colima on a Mac, locally or on the macos-15-intel
-# runner.
+# a long-lived Alpine container with sshd and the test user, on a machine with
+# docker — colima on a Mac, locally or on the macos-15-intel runner.
+#
+# The container starts with no pre-installed zet-agent.  The macOS client
+# delivers the agent over the ssh -T session at connect time (M5.5 delivery
+# mode, design.md §4).  ZET_AGENT_DIR on the client side names the directory
+# that holds zet-agent-x86_64 (or the arch the host runs).
 #
 # The agent binds an ephemeral port and announces it in BootstrapAccept, and
 # the client connects to that port on the address ssh resolves to. The
@@ -11,12 +15,12 @@
 # with the same numbers, so whatever port the agent picks is reachable as is.
 # No test-only switch in the agent: it does what it does on any host.
 #
-#     tools/macos_e2e_host.sh up      build zet-agent, start the host, wait
+#     tools/macos_e2e_host.sh up      start the host, wait for ready
 #     tools/macos_e2e_host.sh down    stop and remove it
 #
-# With ZET_E2E_AGENT set to a zet-agent built elsewhere — CI builds it once on
-# Linux and hands it over as an artifact — `up` skips the build and the
-# toolchain: the agent is static, and the host needs only what the tests run.
+# ZET_E2E_AGENT (optional): path to a pre-built zet-agent.  When set the host
+# installs it before sshd starts (legacy / local development).  CI leaves this
+# unset and relies on M5.5 delivery.
 #
 # `up` leaves build/macos-e2e/ssh_config and build/macos-e2e/host.json for the
 # client side: tests/macos_e2e reads the latter.
