@@ -82,6 +82,9 @@ jobs:
 
           # The tag must be annotated (not lightweight). The design says the
           # owner pushes an annotated tag after green CI and green fuzz soak.
+          # actions/checkout writes the pushed tag as a lightweight ref to the
+          # commit, whatever was pushed; fetch the tag object itself.
+          git fetch --force origin "refs/tags/$GITHUB_REF_NAME:refs/tags/$GITHUB_REF_NAME"
           TAG_TYPE=$(git cat-file -t "refs/tags/$GITHUB_REF_NAME" 2>/dev/null || true)
           if [ "$TAG_TYPE" != "tag" ]; then
             echo "refs/tags/$GITHUB_REF_NAME is $TAG_TYPE; an annotated tag is required"
