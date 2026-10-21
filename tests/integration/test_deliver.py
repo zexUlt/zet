@@ -52,18 +52,27 @@ def _throttle_loopback(rate: str = "64mbit", burst: str = "1mbit"):
     giving the SIGKILL more than a second of window after we detect
     kill_threshold bytes written.
 
-    The context manager is a no-op if tc is not installed (not inside the
-    integration container).
+    Fails the test if tc (iproute2) is not installed or the qdisc cannot be
+    added: the rate limit is mandatory for a reliable mid-transfer kill test.
     """
     tc = shutil.which("tc")
     if tc is None:
-        yield
-        return
-    subprocess.run(
+        pytest.fail(
+            "tc (iproute2) is not installed — cannot rate-limit loopback; "
+            "add iproute2 to tools/integration-packages.txt"
+        )
+        return  # unreachable; satisfies type checker
+    result = subprocess.run(
         [tc, "qdisc", "add", "dev", "lo", "root", "tbf",
          "rate", rate, "burst", burst, "latency", "20ms"],
-        check=True, capture_output=True, timeout=10,
+        capture_output=True, timeout=10,
     )
+    if result.returncode != 0:
+        pytest.fail(
+            f"tc qdisc add failed (rc={result.returncode}): "
+            f"{result.stderr.decode(errors='replace').strip()}"
+        )
+        return  # unreachable
     try:
         yield
     finally:
@@ -248,22 +257,21 @@ def test_different_binary_replaces_and_old_dir_removed(
     assert n == "1", f"expected 1 cache dir after replacement, got {n!r}"
 
 
-def test_mid_transfer_kill_leaves_only_part_file(
+def test_mid_transfer_kill_leaves_no_agent(
     binaries, ssh_host: SshHost, clean_home, tmp_path
 ):
     """Killing the delivery connection mid-transfer leaves no runnable zet-agent.
 
-    We use a padded (2 MiB) binary so the transfer takes long enough that we
-    can reliably kill the process group while head -c is still running on the
-    remote side.  The kill leaves a .part.* file and no zet-agent.
+    When the client process group is SIGKILLed, sshd closes stdin, head -c
+    returns a short read, and the installer script removes .part and prints
+    ZET-FAILED size.  So after the kill: no zet-agent, no .part file.
 
     Checks:
     - After the kill, no zet-agent is executable in the cache.
-    - A .part.* file exists in the hash dir (partial transfer recorded).
-    - A subsequent normal connect with the real agent succeeds (stale .part
-      from the dead installer PID is cleaned up by the stale-check logic).
-    - A dir containing a .part file whose PID is still alive is NOT removed
-      by a different-hash install.
+    - No .part file remains (the installer's cleanup ran after stdin closed).
+    - A subsequent normal connect with the real agent succeeds.
+    - A dir containing a .part whose PID is alive is NOT removed (live-pid).
+    - A dir containing a .part whose PID is dead IS removed (dead-pid).
     """
     import signal as _signal
 
@@ -271,9 +279,7 @@ def test_mid_transfer_kill_leaves_only_part_file(
 
     # Pad to ~16 MiB so the transfer takes long enough to kill mid-flight.
     # We wait until the .part file contains at least 1/4 of the binary before
-    # killing, which leaves 3/4 of the data still in transit at kill time.
-    # 16 MiB at > 100 MB/s loopback gives a ~120 ms window — enough for the
-    # SIGKILL to arrive before the rename.
+    # killing; at that point 3/4 remains in transit and the rename has not run.
     pad_size = max(0, 16 * 1024 * 1024 - len(agent_data))
     large_data = agent_data + b"\x00" * pad_size
     kill_threshold = len(large_data) // 4
@@ -283,6 +289,10 @@ def test_mid_transfer_kill_leaves_only_part_file(
     large_bin = large_dir / f"zet-agent-{UNAME_ARCH}"
     large_bin.write_bytes(large_data)
     large_bin.chmod(0o755)
+
+    # The hash dir the installer will create on the remote side.
+    # sshd is on the same host, so we can stat these paths directly.
+    hash_dir = ssh_host.home / ZET_CACHE_SUBDIR / large_hash
 
     large_env = _env(large_dir)
     argv = _delivery_argv(binaries.client, large_dir, ssh_host, _agent_env())
@@ -299,20 +309,17 @@ def test_mid_transfer_kill_leaves_only_part_file(
             start_new_session=True,
         )
 
-        # Poll until the .part.* file has grown to at least kill_threshold
-        # bytes (head -c is well into the transfer), or the process exits.
-        # Checking size rather than mere existence avoids killing after the
-        # rename has already happened.
+        # Poll the .part.* file size directly on the filesystem (sshd is on
+        # the same host, so no extra SSH connection is needed).
         part_appeared = False
         deadline = time.monotonic() + STEP_TIMEOUT_SECONDS
         while time.monotonic() < deadline and proc.poll() is None:
-            r = ssh_host.run(
-                f"pf=$(ls ~/.cache/zet/{large_hash}/.part.* 2>/dev/null | head -1); "
-                f"[ -f \"$pf\" ] && wc -c < \"$pf\" || echo 0",
-                timeout=5,
-            )
-            if r.returncode == 0:
-                written = int(r.stdout.decode().strip() or "0")
+            parts = sorted(hash_dir.glob(".part.*")) if hash_dir.exists() else []
+            if parts:
+                try:
+                    written = parts[0].stat().st_size
+                except OSError:
+                    written = 0
                 if written >= kill_threshold:
                     part_appeared = True
                     break
@@ -330,18 +337,27 @@ def test_mid_transfer_kill_leaves_only_part_file(
         f".part appeared; the binary may be too small or the host too fast"
     )
 
+    # Give the remote installer a moment to run its cleanup (rm .part + print
+    # ZET-FAILED) after sshd closes stdin.
+    deadline2 = time.monotonic() + STEP_TIMEOUT_SECONDS
+    while time.monotonic() < deadline2:
+        parts_after = sorted(hash_dir.glob(".part.*")) if hash_dir.exists() else []
+        agent_path = hash_dir / "zet-agent"
+        if not parts_after and not agent_path.exists():
+            break
+        time.sleep(0.05)
+
     # No runnable zet-agent must exist.
-    r2 = ssh_host.run(
-        f"test -x ~/.cache/zet/{large_hash}/zet-agent && echo FOUND || echo ABSENT",
-        timeout=STEP_TIMEOUT_SECONDS,
+    assert not agent_path.exists(), (
+        f"zet-agent exists after mid-transfer kill: {agent_path}"
     )
-    assert b"ABSENT" in r2.stdout, (
-        f"zet-agent is executable after mid-transfer kill: {r2.stdout!r}"
+    # No .part file: the installer's cleanup removed it after short read.
+    assert not parts_after, (
+        f".part files remain after mid-transfer kill: {parts_after}"
     )
 
-    # A normal connect with the real agent must succeed.  The stale .part
-    # (PID of the now-dead sh process) is treated as stale by kill -0 and
-    # cleaned up during the next install's cleanup pass.
+    # A normal connect with the real agent must succeed.  If any stale .part
+    # survived (dead installer PID), kill -0 detects it stale and removes it.
     agent_dir = _agent_dir(tmp_path, UNAME_ARCH, binaries.agent)
     argv2 = _delivery_argv(binaries.client, agent_dir, ssh_host, _agent_env())
     terminal = PtyProcess(argv2, env=_env(agent_dir))
@@ -352,46 +368,71 @@ def test_mid_transfer_kill_leaves_only_part_file(
     finally:
         terminal.kill()
 
-    # A dir with a LIVE .part must not be removed by a different-hash install.
+    # --- Dead-pid case ---
+    # Plant ~/.cache/zet/<deadhash>/.part.<dead_pid>.  A subsequent install
+    # must remove the dir (kill -0 on the dead PID fails → stale).
+    dead_proc = subprocess.Popen(["true"])
+    dead_proc.wait()
+    dead_pid = dead_proc.pid
+
+    dead_hash = "d" * 64
+    dead_dir = ssh_host.home / ZET_CACHE_SUBDIR / dead_hash
+    dead_dir.mkdir(parents=True, exist_ok=True)
+    (dead_dir / f".part.{dead_pid}").touch()
+
+    alt_data = agent_data + b"\xde"
+    alt_dir = tmp_path / "zet-agents-dead"
+    alt_dir.mkdir(mode=0o755)
+    alt_bin = alt_dir / f"zet-agent-{UNAME_ARCH}"
+    alt_bin.write_bytes(alt_data)
+    alt_bin.chmod(0o755)
+    argv_dead = _delivery_argv(binaries.client, alt_dir, ssh_host, _agent_env())
+    terminal_dead = PtyProcess(argv_dead, env=_env(alt_dir))
+    try:
+        terminal_dead.expect(PROMPT)
+        terminal_dead.send(b"exit 0\r")
+        terminal_dead.finish()
+    finally:
+        terminal_dead.kill()
+
+    assert not dead_dir.exists(), (
+        f"dead-pid dir was not removed by a subsequent install: {dead_dir}"
+    )
+
+    # --- Live-pid case ---
+    # A dir with a LIVE .part must NOT be removed by a different-hash install.
     # Start a long-lived background process *as the remote user* so that
     # kill -0 <pid> from within an SSH session (same user) returns 0.
-    fake_hash = "a" * 64
+    live_hash = "a" * 64
     r_sleep = ssh_host.run(
         "sh -c 'sleep 600 </dev/null >/dev/null 2>&1 & echo $!'",
         timeout=STEP_TIMEOUT_SECONDS,
     )
     assert r_sleep.returncode == 0
     live_pid = r_sleep.stdout.decode().strip()
-    r3 = ssh_host.run(
-        f"mkdir -p ~/.cache/zet/{fake_hash} && "
-        f"touch ~/.cache/zet/{fake_hash}/.part.{live_pid}",
-        timeout=STEP_TIMEOUT_SECONDS,
-    )
-    assert r3.returncode == 0
+    live_dir = ssh_host.home / ZET_CACHE_SUBDIR / live_hash
+    live_dir.mkdir(parents=True, exist_ok=True)
+    (live_dir / f".part.{live_pid}").touch()
 
-    alt_data = agent_data + b"\xff"
-    alt_dir = tmp_path / "zet-agents-alt"
-    alt_dir.mkdir(mode=0o755)
-    alt_bin = alt_dir / f"zet-agent-{UNAME_ARCH}"
-    alt_bin.write_bytes(alt_data)
-    alt_bin.chmod(0o755)
-    argv3 = _delivery_argv(binaries.client, alt_dir, ssh_host, _agent_env())
-    terminal2 = PtyProcess(argv3, env=_env(alt_dir))
+    alt2_data = agent_data + b"\xff"
+    alt2_dir = tmp_path / "zet-agents-alt"
+    alt2_dir.mkdir(mode=0o755)
+    alt2_bin = alt2_dir / f"zet-agent-{UNAME_ARCH}"
+    alt2_bin.write_bytes(alt2_data)
+    alt2_bin.chmod(0o755)
+    argv_live = _delivery_argv(binaries.client, alt2_dir, ssh_host, _agent_env())
+    terminal_live = PtyProcess(argv_live, env=_env(alt2_dir))
     try:
-        terminal2.expect(PROMPT)
-        terminal2.send(b"exit 0\r")
-        terminal2.kill()
+        terminal_live.expect(PROMPT)
+        terminal_live.send(b"exit 0\r")
+        terminal_live.kill()
     finally:
-        terminal2.kill()
-        # Clean up the background sleep regardless of test outcome.
-        ssh_host.run(f"kill {live_pid} 2>/dev/null; true", timeout=STEP_TIMEOUT_SECONDS)
+        terminal_live.kill()
+        ssh_host.run(f"kill {live_pid} 2>/dev/null; true",
+                     timeout=STEP_TIMEOUT_SECONDS)
 
-    r4 = ssh_host.run(
-        f"test -d ~/.cache/zet/{fake_hash} && echo ALIVE || echo GONE",
-        timeout=STEP_TIMEOUT_SECONDS,
-    )
-    assert b"ALIVE" in r4.stdout, (
-        f"live .part dir was removed by a different-hash install: {r4.stdout!r}"
+    assert live_dir.exists(), (
+        f"live .part dir was removed by a different-hash install: {live_dir}"
     )
 
 
@@ -509,44 +550,49 @@ def test_remote_argv_has_no_secrets(
     The hash and size are transmitted via stdin, not argv, so they must not
     appear in any running process's command line visible to a local observer.
 
-    Expected in argv (not secret):
-    - The installer script text itself (a constant, no variable data).
-    - The hash as part of the installed agent path after a successful install:
-      e.g. "/home/user/.cache/zet/<hash>/zet-agent" — expected and acceptable.
-    - "head -c <size>" as part of the installer script literal — acceptable
-      because the size is fixed by the script text, not the current binary.
-
-    Forbidden in any /proc cmdline during delivery:
-    - The 64-char hex hash as a standalone argument or token (not in a path).
-    - Any key, nonce, or Offer material (bootstrap secrets, not yet generated
-      during delivery).
-
-    The test also verifies that the session connected successfully.
+    Checked:
+    - A process with argv exactly ["/bin/sh", "-c", INSTALLER_SCRIPT] was
+      observed (the installer ran and was visible in /proc before completing).
+    - No /proc cmdline contains the agent hash as a standalone token.
+    - Session connected successfully.
     """
+    # Load the installer script constant from source to compare against argv.
+    hpp = Path("/src/src/client/deliver.hpp")
+    if not hpp.exists():
+        pytest.skip(f"{hpp} not found — source not mounted at /src")
+    installer_script = _extract_installer_script(hpp)
+
     agent_data = binaries.agent.read_bytes()
     expected_hash = hashlib.blake2b(agent_data, digest_size=32).hexdigest()
+    expected_argv2 = installer_script.encode()
 
     agent_dir = _agent_dir(tmp_path, UNAME_ARCH, binaries.agent)
     argv = _delivery_argv(binaries.client, agent_dir, ssh_host, _agent_env())
 
     violations: list[str] = []
+    installer_observed = False
     stop_sniffing = threading.Event()
 
     def sniff_proc() -> None:
+        nonlocal installer_observed
         while not stop_sniffing.is_set():
-            for pid_dir in sorted(Path("/proc").iterdir()):
+            for pid_dir in Path("/proc").iterdir():
                 try:
                     raw = (pid_dir / "cmdline").read_bytes()
                 except (PermissionError, FileNotFoundError, OSError):
                     continue
+                # Check that installer ran with the expected exact argv.
+                parts = raw.split(b"\x00")
+                if (len(parts) >= 3
+                        and parts[0] in (b"/bin/sh", b"sh")
+                        and parts[1] == b"-c"
+                        and parts[2] == expected_argv2):
+                    installer_observed = True
+                # Reject any cmdline containing the hash as a standalone token
+                # (not embedded in a path like "/.cache/zet/<hash>/zet-agent").
                 text = raw.decode(errors="replace")
-                if expected_hash not in text:
-                    continue
-                # Acceptable: hash in the installed agent's exec path after a
-                # successful install, e.g. "…/.cache/zet/<hash>/zet-agent".
-                if f"/{expected_hash}/" in text:
-                    continue
-                violations.append(f"pid={pid_dir.name}: {text!r}")
+                if expected_hash in text and f"/{expected_hash}/" not in text:
+                    violations.append(f"pid={pid_dir.name}: {text!r}")
             time.sleep(0.01)
 
     sniffer = threading.Thread(target=sniff_proc, daemon=True)
@@ -555,8 +601,6 @@ def test_remote_argv_has_no_secrets(
     try:
         terminal = PtyProcess(argv, env=_env(agent_dir))
         try:
-            # Session must connect successfully: if the argv contained a
-            # secret, the installer or bootstrap would likely fail too.
             terminal.expect(PROMPT)
             terminal.send(b"exit 0\r")
             rc = terminal.finish().status
@@ -567,6 +611,11 @@ def test_remote_argv_has_no_secrets(
         sniffer.join(timeout=2)
 
     assert rc == 0, f"session did not succeed (exit {rc})"
+    assert installer_observed, (
+        "sniffer never observed a process with argv "
+        "['/bin/sh', '-c', INSTALLER_SCRIPT] — "
+        "either the installer did not run or it completed before the first poll"
+    )
     assert not violations, (
         "agent hash found as a standalone argv token during delivery "
         "(should only appear as part of the exec path after install):\n"
@@ -583,12 +632,18 @@ def test_login_shell_delivers(
     if host is None:
         _username, shell_binary = SHELL_USERS[shell]
         if Path(shell_binary).exists():
-            # Binary is present but the user was not created: that is a setup
-            # failure, not an absent package.  Fail so CI catches regressions.
+            # Binary is present but the user was not created: setup failure.
             err = SHELL_SETUP_ERRORS.get(shell, "user absent after setup")
             pytest.fail(
                 f"shell {shell!r} binary exists at {shell_binary!r} "
                 f"but user setup failed: {err}"
+            )
+        # In CI the shell packages must be installed; missing binary is a
+        # failure, not a skip.
+        if os.environ.get("CI"):
+            pytest.fail(
+                f"shell {shell!r} binary not found at {shell_binary!r} in CI; "
+                f"add the package to tools/integration-packages.txt"
             )
         pytest.skip(f"shell {shell!r} not installed at {shell_binary!r}")
 
@@ -622,7 +677,10 @@ def test_login_shell_delivers(
     try:
         terminal.expect(marker)
         terminal.send(b"exit 0\r")
-        terminal.kill()
+        result = terminal.finish()
+        assert result.status == 0, (
+            f"shell {shell!r}: session exit status {result.status!r}, expected 0"
+        )
     finally:
         terminal.kill()
 
@@ -640,8 +698,12 @@ def _extract_installer_script(hpp: Path) -> str:
         raise ValueError(f"INSTALLER_SCRIPT not found in {hpp}")
     parts = re.findall(r'"((?:[^"\\]|\\.)*)"', m.group(1))
     raw = "".join(parts)
-    # Unescape the C escape sequences used in the constant.
-    raw = raw.replace('\\"', '"').replace("\\\\", "\\").replace("\\n", "\n")
+    # Unescape only the C escape sequences that appear in INSTALLER_SCRIPT:
+    # \" → " and \\ → \.  Do NOT convert \\n → newline: the constant uses \\n
+    # as a printf escape (backslash-n in the shell string), not as a C newline.
+    # After replacing \\  →  \, any remaining \n is the literal two-char
+    # sequence that printf interprets as a newline — which is correct.
+    raw = raw.replace('\\"', '"').replace("\\\\", "\\")
     return raw
 
 
