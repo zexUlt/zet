@@ -463,9 +463,12 @@ std::optional<std::vector<std::byte>> DeliverAgent(Process& process,
     // The login shell may emit ZET-HAVE, ZET-SEND, ZET-STORED, or ZET-FAILED
     // before the installer starts (e.g. a noisy .bashrc).  Skip them: only
     // ZET-PROBE opens the exchange.
+    // answer1 is declared outside the loop so that probeInfo (which points
+    // into it) remains valid after the loop exits.
+    std::optional<wire::ProbeAnswer> answer1;
     const wire::ProbeInfo* probeInfo = nullptr;
     for (;;) {
-        const auto answer1 = next();
+        answer1 = next();
         if (!answer1) {
             SayError("deliver", "no ZET-PROBE from installer");
             return std::nullopt;
