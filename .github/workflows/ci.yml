@@ -583,3 +583,38 @@ jobs:
           path: ${{ runner.temp }}/agent-aarch64/zet-agent-aarch64
           if-no-files-found: error
           retention-days: 7
+
+  # design.md §17 M5.5: the delivery scenario runs on every architecture the
+  # agent is built for.  The x86_64 delivery tests are already in the
+  # integration job above; this job covers aarch64, natively on GitHub's ARM
+  # runner, no qemu.  Only the two §17-required scenarios run here:
+  #   - a machine without the agent gets it and connects
+  #   - a second connect with the same binary copies nothing
+  # The full delivery suite (mid-transfer kill, noexec, login-shell variants,
+  # …) stays in the x86_64 integration job where the setup cost is shared.
+  integration-deliver-aarch64:
+    name: integration deliver (aarch64)
+    needs: changes
+    runs-on: ubuntu-24.04-arm
+    env:
+      NEEDED: ${{ needs.changes.outputs.integration }}
+    steps:
+      - uses: actions/checkout@v4
+        if: env.NEEDED == 'true'
+
+      - name: Restore the compiler cache
+        if: env.NEEDED == 'true'
+        uses: ./.github/actions/ccache
+        with:
+          key: musl-dev
+
+      - name: Restore the Alpine packages
+        if: env.NEEDED == 'true'
+        uses: ./.github/actions/apk
+
+      - name: Build and run the delivery scenarios
+        if: env.NEEDED == 'true'
+        run: |
+          tools/integration.sh musl-dev \
+            -k "fresh_host_delivers_agent_and_session_connects or second_connect_does_not_retransmit" \
+            -rs

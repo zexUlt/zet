@@ -32,7 +32,6 @@ readonly AGENT_PORT_FIRST=${ZET_E2E_AGENT_PORT_FIRST:-42300}
 # timeout.
 readonly AGENT_PORT_COUNT=50
 readonly AGENT_PORT_LAST=$((AGENT_PORT_FIRST + AGENT_PORT_COUNT - 1))
-readonly PRESET=musl-dev
 readonly ALPINE_IMAGE=alpine:3.22
 readonly OUT=build/macos-e2e
 # A cold build of zet-agent on a 4-core runner, with room to spare. The wait
@@ -50,8 +49,7 @@ up() {
     mkdir -p "$OUT"
     local apk_cache=${ZET_APK_CACHE:-$root/build/.apk-cache}
     mkdir -p "$apk_cache"
-    local toolchain host_packages
-    toolchain="$(grep -v '^#' tools/alpine-packages.txt | tr '\n' ' ')"
+    local host_packages
     host_packages="$(grep -v '^#' tools/integration-packages.txt | tr '\n' ' ')"
 
     local common=(
@@ -64,26 +62,18 @@ up() {
     fi
     local apk="apk add --no-progress --cache-dir /apk-cache --update-cache"
     local install="$apk $host_packages >/dev/null"
-    local agent_glob="build/$PRESET"
 
+    # When ZET_E2E_AGENT is set the caller provides a pre-built binary and the
+    # host starts with that agent pre-installed (legacy / local development).
+    # Without it the host starts with no agent: the client delivers it over ssh
+    # at connect time (M5.5 delivery mode, what CI uses).
+    local agent_arg=""
     if [ -n "${ZET_E2E_AGENT:-}" ]; then
         # Under the checkout, which is what the container mounts.
         mkdir -p "$OUT/agent"
         cp "$ZET_E2E_AGENT" "$OUT/agent/zet-agent"
         chmod 755 "$OUT/agent/zet-agent"
-        agent_glob="$OUT/agent"
-    else
-        # The build runs in a container of its own, with the full ephemeral
-        # range: a cold build fetches every package, and fifty ports in
-        # TIME_WAIT for a minute each is a budget it could run through.
-        docker run --rm "${common[@]}" "$ALPINE_IMAGE" sh -c "
-set -e
-$apk $toolchain $host_packages >/dev/null
-chmod -R a+rw /apk-cache 2>/dev/null || true
-cmake --preset $PRESET >/dev/null
-cmake --build --preset $PRESET --target zet-agent
-chown -R \$ZET_UID:\$ZET_GID build 2>/dev/null || true
-"
+        agent_arg="--agent /src/$OUT/agent/zet-agent"
     fi
 
     local args=(
@@ -94,14 +84,11 @@ chown -R \$ZET_UID:\$ZET_GID build 2>/dev/null || true
         -p "127.0.0.1:$AGENT_PORT_FIRST-$AGENT_PORT_LAST:$AGENT_PORT_FIRST-$AGENT_PORT_LAST"
         "${common[@]}"
     )
-    # The host itself only installs from the cache the build just filled.
     docker run "${args[@]}" "$ALPINE_IMAGE" sh -c "
 set -e
 $install
-agent=\$(find $agent_glob -type f -name zet-agent -perm -u+x | head -1)
-[ -n \"\$agent\" ] || { echo \"no zet-agent under $agent_glob\" >&2; exit 1; }
 cd tests/integration
-exec python3 host.py --agent \"/src/\$agent\" --out /src/$OUT \
+exec python3 host.py $agent_arg --out /src/$OUT \
     --client-dir '$root/$OUT' --client-port $SSH_PORT \
     --agent-ports $AGENT_PORT_FIRST-$AGENT_PORT_LAST --container $CONTAINER
 " >/dev/null

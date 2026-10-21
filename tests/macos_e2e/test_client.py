@@ -72,13 +72,16 @@ class MacZet:
         return env
 
     def argv(self) -> list[str]:
+        # No --agent: the client uses ZET_AGENT_DIR (delivery mode). The
+        # remote cache persists across tests in the session; the first test
+        # pays the delivery cost and subsequent ones skip it.
         settings = " ".join(f"{name}={value}" for name, value in {
             "ZET_KEEPALIVE_INTERVAL": KEEPALIVE_INTERVAL_MS,
             "ZET_PEER_SILENCE_TIMEOUT": PEER_SILENCE_TIMEOUT_MS,
             "ZET_ORPHAN_TIMEOUT": DEFAULT_ORPHAN_TIMEOUT_S,
             "ASAN_OPTIONS": "detect_leaks=0",
         }.items())
-        return [str(self.client), "--agent", self.host.agent,
+        return [str(self.client),
                 "--ssh-arg", "-F", "--ssh-arg", str(self.host.config),
                 "--ssh-arg", f"-oSetEnv={settings}", self.host.alias]
 
@@ -87,7 +90,7 @@ class MacZet:
 
 
 @pytest.fixture
-def zet(macos_zet, clean_bashrc) -> MacZet:
+def zet(macos_zet, clean_bashrc, agent_dir) -> MacZet:  # agent_dir skips if ZET_AGENT_DIR unset
     clean_bashrc.write_home_file(".bash_profile", PROFILE)
     return MacZet(macos_zet, clean_bashrc)
 
