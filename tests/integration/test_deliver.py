@@ -492,6 +492,7 @@ def test_remote_argv_has_no_secrets(
 
     sniffer = threading.Thread(target=sniff_proc, daemon=True)
     sniffer.start()
+    rc = -1
     try:
         terminal = PtyProcess(argv, env=_env(agent_dir))
         try:
@@ -571,8 +572,7 @@ def test_agent_flag_disables_delivery(
     installed = install_agent(binaries.agent)
     ssh_host.write_home_file(".bash_profile", PROFILE)
 
-    # Build the ssh argv with --agent pointing to the already-installed agent.
-    ssh_args = ["-F", str(ssh_host.config)]
+    # Build the argv with --agent pointing to the already-installed agent.
     argv = [
         str(binaries.client),
         "--agent", str(installed),
