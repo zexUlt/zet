@@ -475,8 +475,9 @@ std::optional<std::vector<std::byte>> DeliverAgent(Process& process,
     // Sanitize to printable ASCII so remote-controlled text is safe to print.
     std::string arch;
     arch.reserve(probeInfo->Arch.size());
-    for (const unsigned char c : probeInfo->Arch) {
-        arch += (c >= 0x20U && c < 0x7FU) ? static_cast<char>(c) : '?';
+    for (const char raw : probeInfo->Arch) {
+        const auto c = static_cast<unsigned char>(raw);
+        arch += (c >= 0x20U && c < 0x7FU) ? raw : '?';
     }
     if (arch != AGENT_ARCH_X86_64 && arch != AGENT_ARCH_AARCH64) {
         SayError("deliver", "unsupported remote architecture: " + arch);
@@ -515,8 +516,9 @@ std::optional<std::vector<std::byte>> DeliverAgent(Process& process,
         // Sanitize reason before printing.
         std::string reason;
         reason.reserve(f2->Reason.size());
-        for (const unsigned char c : f2->Reason) {
-            reason += (c >= 0x20U && c < 0x7FU) ? static_cast<char>(c) : '?';
+        for (const char raw : f2->Reason) {
+            const auto c = static_cast<unsigned char>(raw);
+            reason += (c >= 0x20U && c < 0x7FU) ? raw : '?';
         }
         SayError("deliver", "installer failed at probe: " + reason);
         return std::nullopt;
@@ -543,10 +545,9 @@ std::optional<std::vector<std::byte>> DeliverAgent(Process& process,
                         std::get_if<wire::ProbeFailed>(&*drainAnswer)) {
                     std::string reason;
                     reason.reserve(fd->Reason.size());
-                    for (const unsigned char c : fd->Reason) {
-                        reason += (c >= 0x20U && c < 0x7FU)
-                                      ? static_cast<char>(c)
-                                      : '?';
+                    for (const char raw : fd->Reason) {
+                        const auto c = static_cast<unsigned char>(raw);
+                        reason += (c >= 0x20U && c < 0x7FU) ? raw : '?';
                     }
                     SayError("deliver", "installer failed: " + reason);
                     return std::nullopt;
@@ -567,9 +568,9 @@ std::optional<std::vector<std::byte>> DeliverAgent(Process& process,
         } else if (const auto* f = std::get_if<wire::ProbeFailed>(&*answer3)) {
             std::string reason;
             reason.reserve(f->Reason.size());
-            for (const unsigned char c : f->Reason) {
-                reason +=
-                    (c >= 0x20U && c < 0x7FU) ? static_cast<char>(c) : '?';
+            for (const char raw : f->Reason) {
+                const auto c = static_cast<unsigned char>(raw);
+                reason += (c >= 0x20U && c < 0x7FU) ? raw : '?';
             }
             SayError("deliver", "installer failed: " + reason);
             return std::nullopt;
