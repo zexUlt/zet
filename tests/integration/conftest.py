@@ -16,6 +16,15 @@ from pathlib import Path
 
 import pytest
 
+
+def _find_shell(preferred: str) -> str:
+    """Return preferred if it exists; fall back to shutil.which by basename."""
+    if Path(preferred).exists():
+        return preferred
+    name = Path(preferred).name
+    found = shutil.which(name)
+    return found if found else preferred
+
 from e2e import PROFILE, Zet, install_agent
 from harness import STEP_TIMEOUT_SECONDS
 
@@ -29,9 +38,9 @@ from sshhost import (CLEAN_BASHRC, HOST_ALIAS, NOISY_BASHRC, SSHD, TEST_USER,
 SHELL_USERS = {
     "ash":  ("zettest-ash",  "/bin/ash"),
     "bash": ("zettest-bash", "/bin/bash"),
-    "zsh":  ("zettest-zsh",  "/usr/bin/zsh"),
-    "fish": ("zettest-fish", "/usr/bin/fish"),
-    "tcsh": ("zettest-tcsh", "/usr/bin/tcsh"),
+    "zsh":  ("zettest-zsh",  _find_shell("/usr/bin/zsh")),
+    "fish": ("zettest-fish", _find_shell("/usr/bin/fish")),
+    "tcsh": ("zettest-tcsh", _find_shell("/usr/bin/tcsh")),
 }
 
 # Populated by the ssh_host fixture: shell_name -> error string for any shell

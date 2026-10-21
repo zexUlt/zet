@@ -235,9 +235,14 @@ def test_mid_transfer_kill_leaves_only_part_file(
 
     agent_data = binaries.agent.read_bytes()
 
-    # Pad to ~2 MiB so the transfer takes > 200 ms on loopback.
-    pad_size = max(0, 2 * 1024 * 1024 - len(agent_data))
+    # Pad to ~16 MiB so the transfer takes long enough to kill mid-flight.
+    # We wait until the .part file contains at least 1/4 of the binary before
+    # killing, which leaves 3/4 of the data still in transit at kill time.
+    # 16 MiB at > 100 MB/s loopback gives a ~120 ms window — enough for the
+    # SIGKILL to arrive before the rename.
+    pad_size = max(0, 16 * 1024 * 1024 - len(agent_data))
     large_data = agent_data + b"\x00" * pad_size
+    kill_threshold = len(large_data) // 4
     large_hash = hashlib.blake2b(large_data, digest_size=32).hexdigest()
     large_dir = tmp_path / "large-agents"
     large_dir.mkdir(mode=0o755)
@@ -255,18 +260,23 @@ def test_mid_transfer_kill_leaves_only_part_file(
         start_new_session=True,
     )
 
-    # Poll until the .part.* file appears in the cache (head -c has started
-    # writing), or the process exits first (transfer completed / failed early).
+    # Poll until the .part.* file has grown to at least kill_threshold bytes
+    # (head -c is well into the transfer), or the process exits first.
+    # Checking size rather than mere existence avoids killing after the rename
+    # has already happened.
     part_appeared = False
     deadline = time.monotonic() + STEP_TIMEOUT_SECONDS
     while time.monotonic() < deadline and proc.poll() is None:
         r = ssh_host.run(
-            f"ls ~/.cache/zet/{large_hash}/.part.* 2>/dev/null | wc -l",
+            f"pf=$(ls ~/.cache/zet/{large_hash}/.part.* 2>/dev/null | head -1); "
+            f"[ -f \"$pf\" ] && wc -c < \"$pf\" || echo 0",
             timeout=5,
         )
-        if r.returncode == 0 and r.stdout.decode().strip() != "0":
-            part_appeared = True
-            break
+        if r.returncode == 0:
+            written = int(r.stdout.decode().strip() or "0")
+            if written >= kill_threshold:
+                part_appeared = True
+                break
         time.sleep(0.05)
 
     # SIGKILL the entire process group (zet + its ssh child).
@@ -277,8 +287,8 @@ def test_mid_transfer_kill_leaves_only_part_file(
     proc.wait(timeout=STEP_TIMEOUT_SECONDS)
 
     assert part_appeared, (
-        "delivery completed or failed before a .part file appeared; "
-        "the binary may be too small or the host too fast"
+        f"delivery completed or failed before {kill_threshold} bytes of "
+        f".part appeared; the binary may be too small or the host too fast"
     )
 
     # No runnable zet-agent must exist.
