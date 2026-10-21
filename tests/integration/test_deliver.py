@@ -306,7 +306,7 @@ def test_mid_transfer_kill_leaves_only_part_file(
     # kill -0 <pid> from within an SSH session (same user) returns 0.
     fake_hash = "a" * 64
     r_sleep = ssh_host.run(
-        "sh -c 'sleep 600 & echo $!'",
+        "sh -c 'sleep 600 </dev/null >/dev/null 2>&1 & echo $!'",
         timeout=STEP_TIMEOUT_SECONDS,
     )
     assert r_sleep.returncode == 0
