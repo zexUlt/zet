@@ -48,8 +48,10 @@ def _hand_to_client(path: Path, mode: int) -> None:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--agent", required=True, type=Path,
-                        help="zet-agent as built, inside the container")
+    parser.add_argument("--agent", required=False, default=None, type=Path,
+                        help="zet-agent as built, inside the container; "
+                             "if omitted the host starts without a pre-installed agent "
+                             "(delivery mode: the client pushes it at connect time)")
     parser.add_argument("--out", required=True, type=Path,
                         help="the shared directory, as the container sees it")
     parser.add_argument("--client-dir", required=True, type=Path,
@@ -70,7 +72,7 @@ def main() -> int:
     keys = make_keys(args.out, user)
     _hand_to_client(keys.client, 0o600)
     _hand_to_client(args.out / "client_key.pub", 0o644)
-    agent = install_agent(args.agent)
+    agent = install_agent(args.agent) if args.agent is not None else None
     sshd, _ = start_sshd(args.out, keys, home, "0.0.0.0", SSHD_PORT)
 
     config = write_client_config(
@@ -88,8 +90,7 @@ def main() -> int:
         "user": TEST_USER,
         "home": str(home),
         "ssh_config": str(args.client_dir / "ssh_config"),
-        "agent": str(agent),
-        "agent_dir": str(AGENT_DIR),
+        "agent": str(agent) if agent is not None else None,
         "agent_ports": args.agent_ports,
         "container": args.container,
     }, indent=2) + "\n")

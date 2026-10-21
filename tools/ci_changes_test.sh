@@ -53,6 +53,7 @@ expect "tests/integration/sshhost.py" "integration macos_e2e systemd"
 expect "tests/integration/host.py" "integration macos_e2e"
 expect "tests/systemd/test_systemd.py" "systemd"
 expect "tests/macos_e2e/test_client.py" "macos_e2e"
+expect "tests/macos_e2e/test_deliver.py" "macos_e2e"
 
 expect "fuzz/session_fuzz.cpp" "fuzz checks"
 expect "tools/check_no_abort.sh" "checks"

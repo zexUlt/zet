@@ -47,7 +47,7 @@ class RemoteHost:
     alias: str
     user: str
     home: str
-    agent: str
+    agent: str | None  # None in delivery mode: no pre-installed agent
     agent_ports: range
     container: str
 
@@ -113,6 +113,23 @@ def macos_zet() -> Path:
             return path
     pytest.skip(f"no native zet at {', '.join(map(str, candidates))}: "
                 "the macOS client is not built yet")
+
+
+@pytest.fixture(scope="session")
+def agent_dir() -> Path:
+    """The directory that contains zet-agent-<arch>, set via ZET_AGENT_DIR.
+
+    Skips the test session if the variable is not set — delivery tests only
+    run when a client-side agent directory is provided (always true in CI).
+    """
+    env_dir = os.environ.get("ZET_AGENT_DIR")
+    if not env_dir:
+        msg = ("ZET_AGENT_DIR is not set — run with ZET_AGENT_DIR pointing to "
+               "a directory that contains zet-agent-x86_64 (or the arch the host uses)")
+        if os.environ.get("CI"):
+            pytest.fail(msg)
+        pytest.skip(msg)
+    return Path(env_dir)
 
 
 @pytest.fixture(scope="session")

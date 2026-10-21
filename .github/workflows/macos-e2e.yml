@@ -69,13 +69,16 @@ jobs:
           '
           agent=$(find build/musl-dev -type f -name zet-agent -perm -u+x | head -1)
           test -n "$agent" || { echo "no zet-agent was built"; exit 1; }
-          mkdir -p "$RUNNER_TEMP/agent"
-          cp "$agent" "$RUNNER_TEMP/agent/zet-agent"
+          # e_machine at offset 18 of the ELF header: confirms x86_64.
+          machine=$(od -An -tx1 -j18 -N1 "$agent" | tr -d ' ')
+          test "$machine" = 3e || { echo "zet-agent is e_machine 0x$machine, not x86_64"; exit 1; }
+          mkdir -p "$RUNNER_TEMP/agent-x86_64"
+          cp "$agent" "$RUNNER_TEMP/agent-x86_64/zet-agent-x86_64"
 
       - uses: actions/upload-artifact@v4
         with:
-          name: zet-agent
-          path: ${{ runner.temp }}/agent/zet-agent
+          name: zet-agent-x86_64
+          path: ${{ runner.temp }}/agent-x86_64/zet-agent-x86_64
           if-no-files-found: error
           retention-days: 1
 
@@ -133,15 +136,21 @@ jobs:
           [ "$status" -eq 0 ] || exit 1
           docker version --format 'docker {{.Server.Version}}'
 
+      # The agent directory is ZET_AGENT_DIR on the client side: the client
+      # delivers zet-agent-x86_64 to the remote host automatically without a
+      # pre-placed agent. The host container starts with no zet-agent; the
+      # tests assert that the client installs it under ~/.cache/zet/<hash>/.
       - uses: actions/download-artifact@v4
         with:
-          name: zet-agent
-          path: ${{ runner.temp }}/agent
+          name: zet-agent-x86_64
+          path: ${{ runner.temp }}/agent-x86_64
 
       - name: Start the host
-        run: ZET_E2E_AGENT="$RUNNER_TEMP/agent/zet-agent" tools/macos_e2e_host.sh up
+        run: tools/macos_e2e_host.sh up
 
       - name: Run the macOS suite
+        env:
+          ZET_AGENT_DIR: ${{ runner.temp }}/agent-x86_64
         run: |
           python3 -m venv "$RUNNER_TEMP/venv"
           "$RUNNER_TEMP/venv/bin/pip" install --quiet pytest

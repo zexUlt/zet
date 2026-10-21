@@ -32,9 +32,12 @@ from e2e import PROFILE, PROMPT, SANITIZER_OPTIONS
 from harness import STEP_TIMEOUT_SECONDS, PtyProcess
 from sshhost import CLEAN_BASHRC, NOISY_BASHRC, SSHD, SshHost
 
-# Architecture string uname -m returns inside the container (always x86_64
-# on CI); the agent binary the test installs is named for it.
+# Architecture string uname -m returns inside the container (x86_64, or
+# aarch64 on the ARM runner); the agent binary the test installs is named
+# for it.
 UNAME_ARCH = subprocess.check_output(["uname", "-m"], text=True).strip()
+# e_machine of an ELF header, per architecture zet-agent is built for.
+ELF_MACHINE = {"x86_64": 0x3E, "aarch64": 0xB7}
 
 # The cache directory the installer creates on the remote host.
 ZET_CACHE_SUBDIR = ".cache/zet"
@@ -160,6 +163,12 @@ def test_fresh_host_delivers_agent_and_session_connects(
         assert terminal.finish().status == 0
     finally:
         terminal.kill()
+    # What was installed is an agent for the machine it landed on: the
+    # ELF e_machine at offset 18 matches uname -m, on x86_64 and on aarch64.
+    installed = list((ssh_host.home / ZET_CACHE_SUBDIR).glob("*/zet-agent"))
+    assert len(installed) == 1, installed
+    machine = installed[0].read_bytes()[18]
+    assert machine == ELF_MACHINE[UNAME_ARCH], (UNAME_ARCH, hex(machine))
 
 
 def test_second_connect_does_not_retransmit(

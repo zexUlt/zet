@@ -13,6 +13,8 @@ import shlex
 import socket
 import subprocess
 
+import pytest
+
 from harness import NOISE_BANNER, STEP_TIMEOUT_SECONDS, Timeout
 
 CHANNEL_BYTES = 1024 * 1024
@@ -99,6 +101,8 @@ def test_this_side_reaches_the_host_as_an_ordinary_user(clean_bashrc):
 
 
 def test_the_agent_is_installed_for_the_test_user(clean_bashrc):
+    if clean_bashrc.agent is None:
+        pytest.skip("no pre-installed agent in delivery mode")
     result = clean_bashrc.run(f"test -x '{clean_bashrc.agent}' && echo found")
     assert result.stdout.strip() == b"found", result.stderr
 
