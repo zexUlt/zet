@@ -302,12 +302,18 @@ def test_mid_transfer_kill_leaves_only_part_file(
         terminal.kill()
 
     # A dir with a LIVE .part must not be removed by a different-hash install.
-    # Use the test process's own PID: it is alive on the (same) machine, so
-    # kill -0 on the remote side succeeds and the dir is protected.
+    # Start a long-lived background process *as the remote user* so that
+    # kill -0 <pid> from within an SSH session (same user) returns 0.
     fake_hash = "a" * 64
+    r_sleep = ssh_host.run(
+        "sh -c 'sleep 600 & echo $!'",
+        timeout=STEP_TIMEOUT_SECONDS,
+    )
+    assert r_sleep.returncode == 0
+    live_pid = r_sleep.stdout.decode().strip()
     r3 = ssh_host.run(
         f"mkdir -p ~/.cache/zet/{fake_hash} && "
-        f"touch ~/.cache/zet/{fake_hash}/.part.{os.getpid()}",
+        f"touch ~/.cache/zet/{fake_hash}/.part.{live_pid}",
         timeout=STEP_TIMEOUT_SECONDS,
     )
     assert r3.returncode == 0
@@ -326,6 +332,8 @@ def test_mid_transfer_kill_leaves_only_part_file(
         terminal2.kill()
     finally:
         terminal2.kill()
+        # Clean up the background sleep regardless of test outcome.
+        ssh_host.run(f"kill {live_pid} 2>/dev/null; true", timeout=STEP_TIMEOUT_SECONDS)
 
     r4 = ssh_host.run(
         f"test -d ~/.cache/zet/{fake_hash} && echo ALIVE || echo GONE",

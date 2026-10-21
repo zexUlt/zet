@@ -460,16 +460,21 @@ std::optional<std::vector<std::byte>> DeliverAgent(Process& process,
     };
 
     // Stage 1: ZET-PROBE <version> <arch> exec|noexec
-    const auto answer1 = next();
-    if (!answer1) {
-        SayError("deliver", "no ZET-PROBE from installer");
-        return std::nullopt;
-    }
-    const auto* probeInfo = std::get_if<wire::ProbeInfo>(&*answer1);
-    if (!probeInfo) {
-        SayError("deliver",
-                 "unexpected installer message (expected ZET-PROBE)");
-        return std::nullopt;
+    // The login shell may emit ZET-HAVE, ZET-SEND, ZET-STORED, or ZET-FAILED
+    // before the installer starts (e.g. a noisy .bashrc).  Skip them: only
+    // ZET-PROBE opens the exchange.
+    const wire::ProbeInfo* probeInfo = nullptr;
+    for (;;) {
+        const auto answer1 = next();
+        if (!answer1) {
+            SayError("deliver", "no ZET-PROBE from installer");
+            return std::nullopt;
+        }
+        probeInfo = std::get_if<wire::ProbeInfo>(&*answer1);
+        if (probeInfo) {
+            break;
+        }
+        // Out-of-stage marker: treat as noise and keep waiting.
     }
     // Copy arch before the next scanner.Feed() call overwrites the line buffer.
     // Sanitize to printable ASCII so remote-controlled text is safe to print.
