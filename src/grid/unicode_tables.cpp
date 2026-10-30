@@ -15,7 +15,7 @@ struct Range {
 
 // East Asian Width W (Wide) and F (Fullwidth) — width 2.
 // Source: EastAsianWidth.txt, Unicode 16.0.0.
-static constexpr Range kWide[] = {
+static constexpr Range WIDE[] = {
     {0x1100, 0x115F},   {0x231A, 0x231B},   {0x2329, 0x232A},
     {0x23E9, 0x23F3},   {0x23F8, 0x23FA},   {0x25FD, 0x25FE},
     {0x2614, 0x2615},   {0x2648, 0x2653},   {0x267F, 0x267F},
@@ -68,7 +68,7 @@ static constexpr Range kWide[] = {
 // Zero-width: Non-spacing (Mn), Enclosing (Me) marks, Default_Ignorable.
 // Source: DerivedCoreProperties.txt + DerivedGeneralCategory.txt,
 // Unicode 16.0.0.
-static constexpr Range kZeroWidth[] = {
+static constexpr Range ZERO_WIDTH[] = {
     // Combining Diacritical Marks
     {0x0300, 0x036F},
     // Combining Diacritical Marks Extended (Mn)
@@ -259,10 +259,10 @@ int Wcwidth(char32_t cp) noexcept {
     // and should not appear here, but be defensive).
     if (cp >= 0x80 && cp < 0xA0) return -1;
     // Zero-width (combining marks, default-ignorable, etc.).
-    if (InRanges(kZeroWidth, sizeof(kZeroWidth) / sizeof(*kZeroWidth), cp))
+    if (InRanges(ZERO_WIDTH, sizeof(ZERO_WIDTH) / sizeof(*ZERO_WIDTH), cp))
         return 0;
     // Wide / Fullwidth.
-    if (InRanges(kWide, sizeof(kWide) / sizeof(*kWide), cp)) return 2;
+    if (InRanges(WIDE, sizeof(WIDE) / sizeof(*WIDE), cp)) return 2;
     return 1;
 }
 

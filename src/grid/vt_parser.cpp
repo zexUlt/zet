@@ -59,7 +59,7 @@ void VtParser::FeedByte(std::byte b, Grid& grid) noexcept {
     // -----------------------------------------------------------------------
     // Bypass state: DCS/OSC/APC/PM/SOS payload forwarding.
     // -----------------------------------------------------------------------
-    if (State_ == EParserState::kBypass) {
+    if (State_ == EParserState::Bypass) {
         // CAN (0x18) / SUB (0x1A) abort the sequence.
         if (raw == 0x18 || raw == 0x1A) {
             BypassBytes_ = 0;
@@ -125,14 +125,21 @@ void VtParser::FeedByte(std::byte b, Grid& grid) noexcept {
             --Utf8Remaining_;
             if (Utf8Remaining_ == 0) {
                 char32_t cp = static_cast<char32_t>(Utf8Accumulator_);
-                // Validate: reject overlong / surrogates / > U+10FFFF.
-                if (cp < 0x80 || cp > 0x10FFFF ||
+                // Per-length overlong minimums (RFC 3629 §3).
+                static constexpr char32_t minCp[] = {0, 0x80, 0x800, 0x10000};
+                const std::uint8_t sl = Utf8SeqLen_;
+                if (cp < minCp[sl < 4 ? sl : 3] || cp > 0x10FFFF ||
                     (cp >= 0xD800 && cp <= 0xDFFF)) {
                     cp = 0xFFFD;
                 }
+                // C1 controls (U+0080–U+009F): do not store as cell content.
+                if (cp >= 0x0080 && cp <= 0x009F) {
+                    return;
+                }
                 if (State_ == EParserState::Ground) {
                     const int w = Wcwidth(cp);
-                    grid.PutChar(cp, w > 0 ? w : 1);
+                    // Zero-width combining marks (w==0) attach to prev cell.
+                    grid.PutChar(cp, w >= 0 ? w : 1);
                 }
                 // In other states, printable high codepoints are ignored per
                 // Paul Williams' spec (we are not in Ground).
@@ -150,9 +157,10 @@ void VtParser::FeedByte(std::byte b, Grid& grid) noexcept {
         const std::uint8_t extra = Utf8LeadLength(raw);
         if (extra > 0) {
             // Strip lead bits: 2-byte=0x1F, 3-byte=0x0F, 4-byte=0x07.
-            static constexpr std::uint8_t kMask[] = {0, 0x1F, 0x0F, 0x07};
-            Utf8Accumulator_ = raw & kMask[extra];
+            static constexpr std::uint8_t mask[] = {0, 0x1F, 0x0F, 0x07};
+            Utf8Accumulator_ = raw & mask[extra];
             Utf8Remaining_ = extra;
+            Utf8SeqLen_ = extra;
             return;
         }
         // 0xC0/0xC1 are overlong; 0xFE/0xFF are invalid: emit replacement.
@@ -204,12 +212,12 @@ void VtParser::FeedByte(std::byte b, Grid& grid) noexcept {
             } else if (raw == 0x5D) {  // ']' → OSC
                 InOsc_ = true;
                 BypassBytes_ = 0;
-                State_ = EParserState::kBypass;
+                State_ = EParserState::Bypass;
             } else if (raw == 0x58 || raw == 0x5E || raw == 0x5F) {
                 // SOS (0x58), PM (0x5E), APC (0x5F) → bypass
                 InOsc_ = false;
                 BypassBytes_ = 0;
-                State_ = EParserState::kBypass;
+                State_ = EParserState::Bypass;
             } else if (raw >= 0x51 && raw <= 0x57) {
                 // 0x51–0x57 (Q–W): single-char ESC dispatch.
                 DispatchEsc(static_cast<char32_t>(raw), grid);
@@ -298,13 +306,13 @@ void VtParser::FeedByte(std::byte b, Grid& grid) noexcept {
             // DCS → immediately bypass without accumulating params.
             InOsc_ = false;
             BypassBytes_ = 0;
-            State_ = EParserState::kBypass;
+            State_ = EParserState::Bypass;
             // Re-process this byte as a bypass payload.
             EmitBypass(b);
             break;
 
         // DcsParam, DcsIntermediate, DcsPassthrough, DcsIgnore are handled
-        // via the kBypass shortcut above; these states are only reached if
+        // via the Bypass shortcut above; these states are only reached if
         // a future refactor splits them.
         case EParserState::DcsParam:
         case EParserState::DcsIntermediate:
@@ -313,18 +321,18 @@ void VtParser::FeedByte(std::byte b, Grid& grid) noexcept {
             // Shouldn't normally land here.  Route everything to bypass.
             InOsc_ = false;
             BypassBytes_ = 0;
-            State_ = EParserState::kBypass;
+            State_ = EParserState::Bypass;
             EmitBypass(b);
             break;
 
         case EParserState::OscString:
         case EParserState::SosPmApcString:
             // Also reachable only in edge cases; route to bypass.
-            State_ = EParserState::kBypass;
+            State_ = EParserState::Bypass;
             EmitBypass(b);
             break;
 
-        case EParserState::kBypass:
+        case EParserState::Bypass:
             // Handled at the top of FeedByte; cannot reach here.
             break;
     }
@@ -474,7 +482,7 @@ void VtParser::DispatchEsc(char32_t final, Grid& grid) noexcept {
                 grid.Reset(/*hard=*/true);
                 return;
             case '\\':  // ST – string terminator (ends bypass)
-                // If we arrived here from kBypass (via the ESC 0x5C path),
+                // If we arrived here from Bypass (via the ESC 0x5C path),
                 // the bypass state has already exited before calling Escape.
                 // Nothing more to do.
                 return;
@@ -511,13 +519,13 @@ void VtParser::DispatchCsi(char32_t final, Grid& grid) noexcept {
     const std::size_t nparams = ParseParams(params, MAX_PARAMS);
 
     // Helper: first param or default.
-    auto P = [&](std::size_t idx, std::uint16_t def) noexcept -> std::uint16_t {
+    auto p = [&](std::size_t idx, std::uint16_t def) noexcept -> std::uint16_t {
         if (idx < nparams && (params[idx] > 0 || idx < nparams))
             return params[idx] > 0 ? params[idx] : def;
         return def;
     };
     // Helper: first param, 0 if absent (no default substitution).
-    auto P0 = [&](std::size_t idx) noexcept -> std::uint16_t {
+    auto p0 = [&](std::size_t idx) noexcept -> std::uint16_t {
         return idx < nparams ? params[idx] : 0;
     };
 
@@ -542,65 +550,65 @@ void VtParser::DispatchCsi(char32_t final, Grid& grid) noexcept {
     switch (static_cast<std::uint8_t>(final)) {
         // Cursor movement.
         case 'A':  // CUU – cursor up
-            grid.MoveCursorUp(P(0, 1));
+            grid.MoveCursorUp(p(0, 1));
             break;
         case 'B':  // CUD – cursor down
-            grid.MoveCursorDown(P(0, 1));
+            grid.MoveCursorDown(p(0, 1));
             break;
         case 'C':  // CUF – cursor forward (right)
-            grid.MoveCursorRight(P(0, 1));
+            grid.MoveCursorRight(p(0, 1));
             break;
         case 'D':  // CUB – cursor back (left)
-            grid.MoveCursorLeft(P(0, 1));
+            grid.MoveCursorLeft(p(0, 1));
             break;
         case 'E':  // CNL – cursor next line
-            grid.CursorNextLine(P(0, 1));
+            grid.CursorNextLine(p(0, 1));
             break;
         case 'F':  // CPL – cursor preceding line
-            grid.CursorPrevLine(P(0, 1));
+            grid.CursorPrevLine(p(0, 1));
             break;
         case 'G':  // CHA – cursor horizontal absolute
-            grid.MoveCursorToCol(P(0, 1));
+            grid.MoveCursorToCol(p(0, 1));
             break;
         case 'H':  // CUP – cursor position
         case 'f':  // HVP – horizontal vertical position (same as CUP)
-            grid.MoveCursorTo(P(0, 1), P(1, 1));
+            grid.MoveCursorTo(p(0, 1), p(1, 1));
             break;
         case 'd':  // VPA – vertical line position absolute
-            grid.MoveCursorToRow(P(0, 1));
+            grid.MoveCursorToRow(p(0, 1));
             break;
 
         // Erase.
         case 'J':  // ED – erase in display
-            grid.EraseInDisplay(static_cast<std::uint8_t>(P0(0)));
+            grid.EraseInDisplay(static_cast<std::uint8_t>(p0(0)));
             break;
         case 'K':  // EL – erase in line
-            grid.EraseInLine(static_cast<std::uint8_t>(P0(0)));
+            grid.EraseInLine(static_cast<std::uint8_t>(p0(0)));
             break;
         case 'X':  // ECH – erase character
-            grid.EraseChars(P(0, 1));
+            grid.EraseChars(p(0, 1));
             break;
 
         // Insert / delete.
         case 'L':  // IL – insert lines
-            grid.InsertLines(P(0, 1));
+            grid.InsertLines(p(0, 1));
             break;
         case 'M':  // DL – delete lines
-            grid.DeleteLines(P(0, 1));
+            grid.DeleteLines(p(0, 1));
             break;
         case 'P':  // DCH – delete character
-            grid.DeleteChars(P(0, 1));
+            grid.DeleteChars(p(0, 1));
             break;
         case '@':  // ICH – insert character
-            grid.InsertChars(P(0, 1));
+            grid.InsertChars(p(0, 1));
             break;
 
         // Scroll.
         case 'S':  // SU – scroll up
-            grid.ScrollUp(P(0, 1));
+            grid.ScrollUp(p(0, 1));
             break;
         case 'T':  // SD – scroll down
-            grid.ScrollDown(P(0, 1));
+            grid.ScrollDown(p(0, 1));
             break;
 
         // SGR.
@@ -624,13 +632,13 @@ void VtParser::DispatchCsi(char32_t final, Grid& grid) noexcept {
 
         // Scroll region.
         case 'r':  // DECSTBM – set top and bottom margins
-            grid.SetScrollRegion(P(0, 1),
-                                 P(1, static_cast<std::uint16_t>(grid.Rows())));
+            grid.SetScrollRegion(p(0, 1),
+                                 p(1, static_cast<std::uint16_t>(grid.Rows())));
             break;
 
         // Tab stops.
         case 'g':  // TBC – tab clear
-            grid.ClearTabStop(static_cast<std::uint8_t>(P0(0)));
+            grid.ClearTabStop(static_cast<std::uint8_t>(p0(0)));
             break;
 
         // Cursor save/restore (ANSI).
@@ -653,7 +661,7 @@ void VtParser::DispatchCsi(char32_t final, Grid& grid) noexcept {
         // Cursor style.
         case 'q':  // DECSCUSR – set cursor style (intermediate ' ')
             if (IntermediateCount_ == 1 && Intermediates_[0] == ' ') {
-                grid.SetCursorStyle(static_cast<std::uint8_t>(P0(0)));
+                grid.SetCursorStyle(static_cast<std::uint8_t>(p0(0)));
             } else {
                 ++UnknownSeqCount_;
             }
@@ -661,7 +669,7 @@ void VtParser::DispatchCsi(char32_t final, Grid& grid) noexcept {
 
         // Repeat char.
         case 'b':  // REP – repeat preceding character
-            grid.RepeatChar(P(0, 1));
+            grid.RepeatChar(p(0, 1));
             break;
 
         // Window ops / device attributes – ignore silently (not tracked).

@@ -11,7 +11,7 @@ class Grid;
 
 /// VT parser states (Paul Williams' DEC ANSI state machine, design.md §9).
 ///
-/// 14 states matching the published diagram.  kBypass is not an official
+/// 14 states matching the published diagram.  Bypass is not an official
 /// state name but captures the DCS/OSC/APC/PM/SOS pass-through behaviour:
 /// bytes are forwarded to the caller without accumulation until ST is seen.
 enum class EParserState : std::uint8_t {
@@ -31,7 +31,7 @@ enum class EParserState : std::uint8_t {
     SosPmApcString,
     /// Bypass: DCS/OSC/APC/PM/SOS content streaming without accumulation.
     /// Exits to Ground on ST (ESC \), BEL (in OSC only), or CAN/SUB/ESC.
-    kBypass,
+    Bypass,
 };
 
 /// A single parsed action (what the parser dispatches to the Grid).
@@ -61,7 +61,7 @@ enum class EAction : std::uint8_t {
 /// additions:
 ///   - UTF-8 decoding: multibyte sequences are assembled and dispatched
 ///     as a single Print action with the decoded codepoint.
-///   - kBypass: DCS/OSC/APC/PM/SOS content is forwarded without accumulation.
+///   - Bypass: DCS/OSC/APC/PM/SOS content is forwarded without accumulation.
 ///     The BypassCallback, if set, receives each bypass byte.
 ///   - UnknownSeqCount: monotonically incremented for unrecognised sequences.
 ///
@@ -139,6 +139,7 @@ private:
     // -----------------------------------------------------------------------
     std::uint32_t Utf8Accumulator_{0};
     std::uint8_t Utf8Remaining_{0};
+    std::uint8_t Utf8SeqLen_{0};  ///< extra bytes in current sequence (1,2,3)
 
     // -----------------------------------------------------------------------
     // Parser state
