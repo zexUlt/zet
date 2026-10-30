@@ -1119,37 +1119,21 @@ void Grid::SwitchAltScreen(bool enter) noexcept {
     }
 }
 
-bool Grid::Resize(std::uint16_t newCols, std::uint16_t newRows) noexcept {
+GridResult<void> Grid::Resize(std::uint16_t newCols,
+                              std::uint16_t newRows) noexcept {
     if (newCols == 0) newCols = 1;
     if (newRows == 0) newRows = 1;
     if (newCols > MAX_COLS) newCols = MAX_COLS;
     if (newRows > MAX_ROWS) newRows = MAX_ROWS;
 
-    if (newCols == Cols_ && newRows == Rows_) return true;
+    if (newCols == Cols_ && newRows == Rows_) return {};
 
     const std::uint16_t oldRows = Rows_;
-
-    // When shrinking, content shifts up: adjust cursor accordingly.
-    if (newRows < oldRows) {
-        const std::uint16_t lost =
-            static_cast<std::uint16_t>(oldRows - newRows);
-        CursorRow_ = (CursorRow_ >= lost)
-                         ? static_cast<std::uint16_t>(CursorRow_ - lost)
-                         : 0;
-    } else if (CursorRow_ >= newRows) {
-        CursorRow_ = static_cast<std::uint16_t>(newRows - 1);
-    }
-    if (CursorCol_ >= newCols)
-        CursorCol_ = static_cast<std::uint16_t>(newCols - 1);
-    PendingWrap_ = false;
-
     const std::uint16_t clampCols = newCols < Cols_ ? newCols : Cols_;
-    auto truncateCellsUsed = [&](Line* lines, std::uint16_t rows) noexcept {
-        for (std::uint16_t r = 0; r < rows; ++r)
-            if (lines[r].CellsUsed > clampCols) lines[r].CellsUsed = clampCols;
-    };
-    truncateCellsUsed(MainLines_, oldRows);
-    truncateCellsUsed(AltLines_, oldRows);
+
+    // -----------------------------------------------------------------------
+    // Phase 1: allocate all new buffers.  Do NOT mutate any grid state yet.
+    // -----------------------------------------------------------------------
 
     const std::size_t newScreen = static_cast<std::size_t>(newCols) * newRows;
     Cell* newMain = new (std::nothrow) Cell[newScreen]{};
@@ -1162,28 +1146,56 @@ bool Grid::Resize(std::uint16_t newCols, std::uint16_t newRows) noexcept {
         delete[] newAlt;
         delete[] newMainLines;
         delete[] newAltLines;
-        Cols_ = (newCols < Cols_) ? newCols : Cols_;
-        Rows_ = (newRows < Rows_) ? newRows : Rows_;
-        ScrollTop_ = 0;
-        ScrollBot_ = static_cast<std::uint16_t>(Rows_ - 1);
-        return false;
+        return std::unexpected(EGridError::AllocationFailed);
     }
 
-    // When shrinking rows, push the main-screen rows that fall off the top
-    // into scrollback so they are not lost.  Alt-screen rows are discarded.
+    // History reallocation (only needed when column count changes).
+    Cell* newHistCellsArena = nullptr;
+    Line* newHistLines = nullptr;
+    if (newCols != Cols_ && HistoryLines_) {
+        const std::size_t newHistCells =
+            static_cast<std::size_t>(ScrollbackLimit_) * newCols;
+        newHistCellsArena =
+            (newHistCells * sizeof(Cell) <= MAX_SCROLLBACK_BYTES)
+                ? new (std::nothrow) Cell[newHistCells]{}
+                : nullptr;
+        newHistLines = new (std::nothrow) Line[ScrollbackLimit_]{};
+        if (!newHistCellsArena || !newHistLines) {
+            delete[] newMain;
+            delete[] newAlt;
+            delete[] newMainLines;
+            delete[] newAltLines;
+            delete[] newHistCellsArena;
+            delete[] newHistLines;
+            return std::unexpected(EGridError::AllocationFailed);
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Phase 2: all allocations succeeded — now mutate grid state.
+    // -----------------------------------------------------------------------
+
+    // Truncate CellsUsed on the old lines before copying them (shrink case).
+    auto truncateCellsUsed = [&](Line* lines, std::uint16_t rows) noexcept {
+        for (std::uint16_t r = 0; r < rows; ++r)
+            if (lines[r].CellsUsed > clampCols) lines[r].CellsUsed = clampCols;
+    };
+    truncateCellsUsed(MainLines_, oldRows);
+    truncateCellsUsed(AltLines_, oldRows);
+
+    // When shrinking rows, push the rows that fall off the top of the
+    // main screen into scrollback before swapping the line arrays.
     if (newRows < oldRows && !IsAltScreen()) {
         const std::uint16_t lost =
             static_cast<std::uint16_t>(oldRows - newRows);
         for (std::uint16_t r = 0; r < lost; ++r) PushScrollback(r);
     }
 
+    // Wire line-to-cell pointers and copy content from old buffers.
     for (std::uint16_t r = 0; r < newRows; ++r) {
         newMainLines[r].Cells = newMain + static_cast<std::size_t>(r) * newCols;
         newAltLines[r].Cells = newAlt + static_cast<std::size_t>(r) * newCols;
     }
-
-    // When shrinking rows, copy from the bottom of the old screen so the most
-    // recent content (near the cursor) is preserved.
     const std::uint16_t copyRows = newRows < oldRows ? newRows : oldRows;
     const std::uint16_t srcStart =
         newRows < oldRows ? static_cast<std::uint16_t>(oldRows - newRows) : 0;
@@ -1199,6 +1211,7 @@ bool Grid::Resize(std::uint16_t newCols, std::uint16_t newRows) noexcept {
                                        : newCols;
     }
 
+    // Swap screen buffers.
     delete[] MainCells_;
     delete[] AltCells_;
     delete[] MainLines_;
@@ -1208,47 +1221,34 @@ bool Grid::Resize(std::uint16_t newCols, std::uint16_t newRows) noexcept {
     MainLines_ = newMainLines;
     AltLines_ = newAltLines;
 
-    if (newCols != Cols_ && HistoryLines_) {
-        const std::size_t newHistCells =
-            static_cast<std::size_t>(ScrollbackLimit_) * newCols;
-        Cell* newHistCellsArena =
-            (newHistCells * sizeof(Cell) <= MAX_SCROLLBACK_BYTES)
-                ? new (std::nothrow) Cell[newHistCells]{}
-                : nullptr;
-        Line* newHistLines = new (std::nothrow) Line[ScrollbackLimit_]{};
-        if (newHistCellsArena && newHistLines) {
-            // Wire all Cells pointers before the copy loop (clang-analyzer).
-            for (std::uint32_t r = 0; r < ScrollbackLimit_; ++r) {
-                newHistLines[r].Cells =
-                    newHistCellsArena + static_cast<std::size_t>(r) * newCols;
-            }
-            // HistorySize_ <= ScrollbackLimit_ is an invariant so i is always
-            // in the wired range.  Compute the arena pointer directly so
-            // clang-analyzer can follow the provenance without index math.
-            for (std::uint32_t i = 0; i < HistorySize_ && i < ScrollbackLimit_;
-                 ++i) {
-                const std::uint32_t src =
-                    (HistoryStart_ + i) % ScrollbackLimit_;
-                Cell* const dstCells =
-                    newHistCellsArena + static_cast<std::size_t>(i) * newCols;
-                newHistLines[i].Cells = dstCells;
-                CopyCells(dstCells, HistoryLines_[src].Cells, clampCols);
-                newHistLines[i].CellsUsed =
-                    HistoryLines_[src].CellsUsed < newCols
-                        ? HistoryLines_[src].CellsUsed
-                        : newCols;
-            }
-            delete[] HistoryCells_;
-            delete[] HistoryLines_;
-            HistoryCells_ = newHistCellsArena;
-            HistoryLines_ = newHistLines;
-            HistoryStart_ = 0;
-        } else {
-            delete[] newHistCellsArena;
-            delete[] newHistLines;
+    // Swap history buffers (if reallocated).
+    if (newHistCellsArena) {
+        // Wire all Cells pointers before the copy loop (clang-analyzer).
+        for (std::uint32_t r = 0; r < ScrollbackLimit_; ++r) {
+            newHistLines[r].Cells =
+                newHistCellsArena + static_cast<std::size_t>(r) * newCols;
         }
+        // HistorySize_ <= ScrollbackLimit_ is an invariant so i is always
+        // in the wired range.
+        for (std::uint32_t i = 0; i < HistorySize_ && i < ScrollbackLimit_;
+             ++i) {
+            const std::uint32_t src = (HistoryStart_ + i) % ScrollbackLimit_;
+            Cell* const dstCells =
+                newHistCellsArena + static_cast<std::size_t>(i) * newCols;
+            newHistLines[i].Cells = dstCells;
+            CopyCells(dstCells, HistoryLines_[src].Cells, clampCols);
+            newHistLines[i].CellsUsed = HistoryLines_[src].CellsUsed < newCols
+                                            ? HistoryLines_[src].CellsUsed
+                                            : newCols;
+        }
+        delete[] HistoryCells_;
+        delete[] HistoryLines_;
+        HistoryCells_ = newHistCellsArena;
+        HistoryLines_ = newHistLines;
+        HistoryStart_ = 0;
     }
 
+    // Add new tab stops for any columns that didn't exist before.
     if (newCols > Cols_) {
         // Start at the first multiple of DEFAULT_TAB_INTERVAL at or above Cols_
         // to avoid duplicating the last existing stop.
@@ -1260,10 +1260,25 @@ bool Grid::Resize(std::uint16_t newCols, std::uint16_t newRows) noexcept {
             TabStops_[c / 64] |= (std::uint64_t{1} << (c % 64));
     }
 
+    // Update dimensions and reset scroll region.
     Cols_ = newCols;
     Rows_ = newRows;
     ScrollTop_ = 0;
     ScrollBot_ = static_cast<std::uint16_t>(newRows - 1);
+
+    // Clamp cursor and saved cursors to new bounds.
+    if (newRows < oldRows) {
+        const std::uint16_t lost =
+            static_cast<std::uint16_t>(oldRows - newRows);
+        CursorRow_ = (CursorRow_ >= lost)
+                         ? static_cast<std::uint16_t>(CursorRow_ - lost)
+                         : 0;
+    } else if (CursorRow_ >= newRows) {
+        CursorRow_ = static_cast<std::uint16_t>(newRows - 1);
+    }
+    if (CursorCol_ >= newCols)
+        CursorCol_ = static_cast<std::uint16_t>(newCols - 1);
+    PendingWrap_ = false;
 
     auto clampSC = [&](SavedCursor& sc) noexcept {
         if (sc.Row >= newRows) sc.Row = static_cast<std::uint16_t>(newRows - 1);
@@ -1271,7 +1286,7 @@ bool Grid::Resize(std::uint16_t newCols, std::uint16_t newRows) noexcept {
     };
     clampSC(SavedCursorMain_);
     clampSC(SavedCursorAlt_);
-    return true;
+    return {};
 }
 
 }  // namespace zet::grid

@@ -278,9 +278,12 @@ public:
     void SwitchAltScreen(bool enter) noexcept;
 
     /// Resize (design.md §9 — truncate, no reflow).
-    /// Returns false on allocation failure (grid is partially resized).
-    [[nodiscard]] bool Resize(std::uint16_t newCols,
-                              std::uint16_t newRows) noexcept;
+    ///
+    /// Allocates all new buffers before mutating any grid state.  On
+    /// allocation failure the grid is left completely unchanged and
+    /// EGridError::AllocationFailed is returned.
+    [[nodiscard]] GridResult<void> Resize(std::uint16_t newCols,
+                                          std::uint16_t newRows) noexcept;
 
 private:
     explicit Grid() noexcept = default;

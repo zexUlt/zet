@@ -2565,8 +2565,7 @@ TEST_CASE("Resize with scrollback and col change rewires history cells") {
     Feed(p, *g, "row4\r\n");  // scroll: "row0" enters scrollback
     CHECK(g->ScrollbackSize() >= 1);
     // Now resize with a column change — triggers history cell reallocation
-    bool ok = g->Resize(30, 5);
-    CHECK(ok);
+    CHECK(g->Resize(30, 5).has_value());
     CHECK(g->Cols() == 30);
     CHECK(g->ScrollbackSize() >= 1);  // history preserved
     delete g;
@@ -2584,8 +2583,7 @@ TEST_CASE("Resize shrink cols with scrollback rewires history cells") {
     Feed(p, *g, "DDDD\r\n");
     Feed(p, *g, "EEEE\r\n");
     // Shrink columns — triggers history resize code path
-    bool ok = g->Resize(10, 5);
-    CHECK(ok);
+    CHECK(g->Resize(10, 5).has_value());
     CHECK(g->Cols() == 10);
     delete g;
 }
@@ -2672,8 +2670,7 @@ TEST_CASE("tab stops are correct after Resize grows columns") {
     VtParser p;
     // Grow to 40 columns; new tab stops should be at multiples of 8 in [10,40)
     // The first new stop should be at 16 (next multiple of 8 >= 10)
-    bool ok = g->Resize(40, 24);
-    CHECK(ok);
+    CHECK(g->Resize(40, 24).has_value());
     // Move cursor to col 9 (0-based) then tab → should land at 16
     Feed(p, *g,
          "\x1b[1;10H");  // cursor to row 1, col 10 (1-based) = col 9 (0-based)
@@ -2773,5 +2770,27 @@ TEST_CASE("LF scroll via pointer rotation preserves row content order") {
     CHECK(g->CellAt(1, 0).Codepoint == U'C');
     CHECK(g->CellAt(2, 0).Codepoint == U'D');
     CHECK(g->CellAt(3, 0).Codepoint == 0);
+    delete g;
+}
+
+TEST_CASE(
+    "Resize returns GridResult<void> and leaves grid unchanged on normal "
+    "resize") {
+    Grid* g = MakeGrid(10, 5, 0);
+    VtParser p;
+    Feed(p, *g, "hello");
+    auto res = g->Resize(20, 10);
+    REQUIRE(res.has_value());
+    CHECK(g->Cols() == 20);
+    CHECK(g->Rows() == 10);
+    // Content from the old 10x5 grid is preserved in the bottom-left.
+    CHECK(g->CellAt(0, 0).Codepoint == U'h');
+    CHECK(g->CellAt(0, 4).Codepoint == U'o');
+    delete g;
+}
+
+TEST_CASE("Resize no-op returns success when dimensions are unchanged") {
+    Grid* g = MakeGrid(80, 24, 0);
+    CHECK(g->Resize(80, 24).has_value());
     delete g;
 }
