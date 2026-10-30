@@ -190,11 +190,11 @@ ProtoResult<void> WriteResumeV1(ByteWriter& w,
     return WriteResume(w, m, PROTOCOL_VERSION_MIN);
 }
 ProtoResult<ResumeMessage> ParseResumeV2(ByteReader& r) noexcept {
-    return ParseResume(r, PROTOCOL_VERSION_MAX);
+    return ParseResume(r, PROTOCOL_VERSION_GRID);
 }
 ProtoResult<void> WriteResumeV2(ByteWriter& w,
                                 const ResumeMessage& m) noexcept {
-    return WriteResume(w, m, PROTOCOL_VERSION_MAX);
+    return WriteResume(w, m, PROTOCOL_VERSION_GRID);
 }
 ProtoResult<SessionEndMessage> ParseSessionEndV1(ByteReader& r) noexcept {
     return ParseSessionEnd(r, PROTOCOL_VERSION_MIN);
@@ -204,11 +204,11 @@ ProtoResult<void> WriteSessionEndV1(ByteWriter& w,
     return WriteSessionEnd(w, m, PROTOCOL_VERSION_MIN);
 }
 ProtoResult<SessionEndMessage> ParseSessionEndV2(ByteReader& r) noexcept {
-    return ParseSessionEnd(r, PROTOCOL_VERSION_MAX);
+    return ParseSessionEnd(r, PROTOCOL_VERSION_GRID);
 }
 ProtoResult<void> WriteSessionEndV2(ByteWriter& w,
                                     const SessionEndMessage& m) noexcept {
-    return WriteSessionEnd(w, m, PROTOCOL_VERSION_MAX);
+    return WriteSessionEnd(w, m, PROTOCOL_VERSION_GRID);
 }
 
 template <typename TMessage>
@@ -297,6 +297,18 @@ void ParseBody(ByteSpan input) noexcept {
             ParseThenRoundTrip(r1, *type, ParseResumeV1, WriteResumeV1);
             ByteReader r2{body};
             ParseThenRoundTrip(r2, *type, ParseResumeV2, WriteResumeV2);
+            // Cross-version trap: v1 and v2 have different wire lengths (9 vs
+            // 13 bytes total), so the same body cannot be accepted by both.  If
+            // both parse successfully the codec has a structural defect.
+            {
+                ByteReader check1{body};
+                ByteReader check2{body};
+                const auto ok1 = ParseResume(check1, PROTOCOL_VERSION_MIN);
+                const auto ok2 = ParseResume(check2, PROTOCOL_VERSION_GRID);
+                if (ok1.has_value() && ok2.has_value()) {
+                    __builtin_trap();
+                }
+            }
             return;
         }
         case EMessageType::BootstrapOffer:
