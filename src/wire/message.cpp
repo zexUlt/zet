@@ -294,7 +294,7 @@ ProtoResult<ResumeMessage> ParseResume(ByteReader& reader,
                                        std::uint16_t version) noexcept {
     ResumeMessage message{};
     // ver=2 prepends stream_gen:u32be before c_recv_offset (§5, ADR-035).
-    if (version >= PROTOCOL_VERSION_MAX) {
+    if (version >= PROTOCOL_VERSION_GRID) {
         auto gen = reader.ReadU32BE();
         if (!gen) {
             return std::unexpected(gen.error());
@@ -317,7 +317,7 @@ ProtoResult<void> WriteResume(ByteWriter& writer, const ResumeMessage& message,
     if (auto type = WriteMessageType(writer, EMessageType::Resume); !type) {
         return type;
     }
-    if (version >= PROTOCOL_VERSION_MAX) {
+    if (version >= PROTOCOL_VERSION_GRID) {
         if (auto gen = writer.WriteU32BE(message.StreamGen); !gen) {
             return gen;
         }
@@ -723,7 +723,7 @@ namespace {
 /// True for every kind value recognised at or below `version`.
 ///
 /// kind=2 (Overflow) is a v2 addition; it is rejected by ParseSessionEnd at
-/// version < PROTOCOL_VERSION_MAX rather than here, so that the error message
+/// version < PROTOCOL_VERSION_GRID rather than here, so that the error message
 /// is MalformedField rather than an unrelated predicate failure.
 [[nodiscard]] bool IsSessionEndKind(std::uint8_t kind) noexcept {
     switch (static_cast<ESessionEndKind>(kind)) {
@@ -751,9 +751,14 @@ ProtoResult<SessionEndMessage> ParseSessionEnd(ByteReader& reader,
         return std::unexpected(EProtoError::MalformedField);
     }
     // Overflow (kind=2) is ver=2 only; v1 rejects it as the design requires.
-    if (static_cast<ESessionEndKind>(*kind) == ESessionEndKind::Overflow &&
-        version < PROTOCOL_VERSION_MAX) {
-        return std::unexpected(EProtoError::MalformedField);
+    if (static_cast<ESessionEndKind>(*kind) == ESessionEndKind::Overflow) {
+        if (version < PROTOCOL_VERSION_GRID) {
+            return std::unexpected(EProtoError::MalformedField);
+        }
+        // The value field is reserved for Overflow and must be zero.
+        if (*value != 0) {
+            return std::unexpected(EProtoError::MalformedField);
+        }
     }
     if (auto rest = RequireExhausted(reader); !rest) {
         return std::unexpected(rest.error());
@@ -770,7 +775,7 @@ ProtoResult<void> WriteSessionEnd(ByteWriter& writer,
         return std::unexpected(EProtoError::MalformedField);
     }
     if (message.Kind == ESessionEndKind::Overflow &&
-        version < PROTOCOL_VERSION_MAX) {
+        version < PROTOCOL_VERSION_GRID) {
         return std::unexpected(EProtoError::MalformedField);
     }
     if (auto type = WriteMessageType(writer, EMessageType::SessionEnd); !type) {
@@ -979,6 +984,11 @@ ProtoResult<GridBeginMessage> ParseGridBegin(ByteReader& reader) noexcept {
     if (*total == 0 || *total > SNAPSHOT_MAX_BYTES) {
         return std::unexpected(EProtoError::LengthLimitExceeded);
     }
+    // ScrollbackLen is the portion of TotalLen that is scrollback; it cannot
+    // exceed TotalLen itself (§7 violation table).
+    if (*scrollback > *total) {
+        return std::unexpected(EProtoError::LengthLimitExceeded);
+    }
     if (auto rest = RequireExhausted(reader); !rest) {
         return std::unexpected(rest.error());
     }
@@ -994,6 +1004,9 @@ ProtoResult<void> WriteGridBegin(ByteWriter& writer,
         return std::unexpected(EProtoError::MalformedField);
     }
     if (message.TotalLen == 0 || message.TotalLen > SNAPSHOT_MAX_BYTES) {
+        return std::unexpected(EProtoError::LengthLimitExceeded);
+    }
+    if (message.ScrollbackLen > message.TotalLen) {
         return std::unexpected(EProtoError::LengthLimitExceeded);
     }
     if (auto type = WriteMessageType(writer, EMessageType::GridBegin); !type) {
@@ -1078,6 +1091,53 @@ ProtoResult<void> WriteGridApplied(ByteWriter& writer,
         return type;
     }
     return writer.WriteU32BE(message.StreamGen);
+}
+
+ProtoResult<std::size_t> AppendGridCapableTlv(MutableByteSpan out) noexcept {
+    // Layout: type(u16be) + length(u16be) + value(u16be) = 6 bytes.
+    constexpr std::size_t TLV_SIZE = 3 * sizeof(std::uint16_t);
+    if (out.size() < TLV_SIZE) {
+        return std::unexpected(EProtoError::BufferTooSmall);
+    }
+    ByteWriter writer{out.first(TLV_SIZE)};
+    std::ignore = writer.WriteU16BE(TLV_GRID_CAPABLE);
+    std::ignore = writer.WriteU16BE(sizeof(std::uint16_t));
+    std::ignore = writer.WriteU16BE(1);
+    return TLV_SIZE;
+}
+
+ProtoResult<bool> HasGridCapableTlv(ByteSpan tlvs) noexcept {
+    ByteReader reader{tlvs};
+    while (!reader.Exhausted()) {
+        auto type = reader.ReadU16BE();
+        if (!type) {
+            return std::unexpected(type.error());
+        }
+        auto length = reader.ReadU16BE();
+        if (!length) {
+            return std::unexpected(length.error());
+        }
+        auto value = reader.ReadBytes(*length);
+        if (!value) {
+            return std::unexpected(value.error());
+        }
+        if (*type == TLV_GRID_CAPABLE) {
+            // Must be exactly a u16be with value 1; anything else is malformed.
+            if (*length != sizeof(std::uint16_t)) {
+                return std::unexpected(EProtoError::MalformedField);
+            }
+            ByteReader vr{*value};
+            auto v = vr.ReadU16BE();
+            if (!v) {
+                return std::unexpected(v.error());
+            }
+            if (*v != 1) {
+                return std::unexpected(EProtoError::MalformedField);
+            }
+            return true;
+        }
+    }
+    return false;
 }
 
 }  // namespace zet::wire
