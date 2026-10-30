@@ -1,7 +1,5 @@
 #pragma once
 
-#include <array>
-#include <bitset>
 #include <cstddef>
 #include <cstdint>
 #include <expected>
@@ -64,10 +62,10 @@ struct SavedCursor {
     std::uint8_t Attrs{0};
     EColorKind FgKind{EColorKind::Default};
     EColorKind BgKind{EColorKind::Default};
-    std::uint8_t FgIdx{0};
-    std::uint8_t BgIdx{0};
-    std::uint16_t FgExtIdx{0};
-    std::uint16_t BgExtIdx{0};
+    std::uint8_t Fg[3]{};    ///< inline color (see Cell::Fg)
+    std::uint8_t Bg[3]{};    ///< inline color (see Cell::Bg)
+    std::uint8_t AttrEx{0};  ///< underline style
+    std::uint8_t UlIdx{0};   ///< underline colour index
 };
 
 /// Sans-I/O terminal grid (design.md §9).
@@ -156,14 +154,14 @@ public:
     [[nodiscard]] std::uint8_t PenAttrs() const noexcept { return PenAttrs_; }
     [[nodiscard]] EColorKind PenFgKind() const noexcept { return PenFgKind_; }
     [[nodiscard]] EColorKind PenBgKind() const noexcept { return PenBgKind_; }
-    [[nodiscard]] std::uint8_t PenFgIdx() const noexcept { return PenFgIdx_; }
-    [[nodiscard]] std::uint8_t PenBgIdx() const noexcept { return PenBgIdx_; }
-    [[nodiscard]] std::uint16_t PenFgExtIdx() const noexcept {
-        return PenFgExtIdx_;
-    }
-    [[nodiscard]] std::uint16_t PenBgExtIdx() const noexcept {
-        return PenBgExtIdx_;
-    }
+    /// Palette index when PenFgKind() == Indexed; undefined otherwise.
+    [[nodiscard]] std::uint8_t PenFgIdx() const noexcept { return PenFg_[0]; }
+    /// Palette index when PenBgKind() == Indexed; undefined otherwise.
+    [[nodiscard]] std::uint8_t PenBgIdx() const noexcept { return PenBg_[0]; }
+    /// Raw 3-byte inline fg color: [0]=R or palette idx, [1]=G, [2]=B.
+    [[nodiscard]] const std::uint8_t* PenFg() const noexcept { return PenFg_; }
+    /// Raw 3-byte inline bg color.
+    [[nodiscard]] const std::uint8_t* PenBg() const noexcept { return PenBg_; }
 
     // -----------------------------------------------------------------------
     // Cell and line accessors
@@ -272,20 +270,6 @@ public:
     /// Resize (design.md §9 — truncate, no reflow).
     void Resize(std::uint16_t newCols, std::uint16_t newRows) noexcept;
 
-    // -----------------------------------------------------------------------
-    // ExtColor pool (used by ApplySgr for truecolor)
-    // -----------------------------------------------------------------------
-
-    /// Allocate an ExtColor slot. Returns MAX_EXT_CELLS on exhaustion
-    /// (caller should degrade to indexed color).
-    [[nodiscard]] std::uint16_t AllocExt(std::uint8_t r, std::uint8_t g,
-                                         std::uint8_t b) noexcept;
-    void FreeExt(std::uint16_t idx) noexcept;
-    [[nodiscard]] ExtColor GetExt(std::uint16_t idx) const noexcept;
-
-    /// Number of ExtColor entries currently in use.
-    [[nodiscard]] std::uint32_t ExtCount() const noexcept { return ExtCount_; }
-
 private:
     explicit Grid() noexcept = default;
 
@@ -294,11 +278,10 @@ private:
                   std::uint32_t scrollbackLimit) noexcept;
 
     // Internal helpers.
-    void ScrollRegionUp(std::uint16_t n) noexcept;
+    void ScrollRegionUp(std::uint16_t n, bool pushScrollback = true) noexcept;
     void ScrollRegionDown(std::uint16_t n) noexcept;
     void ClearLine(Line& line) noexcept;
     void ClearCells(Cell* cells, std::uint16_t count) noexcept;
-    void EraseExtRefs(Cell& cell) noexcept;
     void CopyCells(Cell* dst, const Cell* src, std::uint16_t count) noexcept;
     void MoveCells(Cell* dst, const Cell* src, std::uint16_t count) noexcept;
     void BlankCell(Cell& cell) noexcept;
@@ -320,8 +303,6 @@ private:
     // -----------------------------------------------------------------------
     // Screen buffers
     // -----------------------------------------------------------------------
-    // Each buffer has Rows_ Lines, each Line has Cols_ Cells.
-    // main_cells_ and alt_cells_ are flat arenas: buf[row * Cols_ + col].
     Line* MainLines_{nullptr};  ///< [Rows_] line metadata for main screen
     Cell* MainCells_{nullptr};  ///< [Rows_ * Cols_] cell arena for main screen
     Line* AltLines_{nullptr};   ///< [Rows_] line metadata for alt screen
@@ -365,10 +346,10 @@ private:
     std::uint8_t PenAttrs_{0};
     EColorKind PenFgKind_{EColorKind::Default};
     EColorKind PenBgKind_{EColorKind::Default};
-    std::uint8_t PenFgIdx_{0};
-    std::uint8_t PenBgIdx_{0};
-    std::uint16_t PenFgExtIdx_{0};
-    std::uint16_t PenBgExtIdx_{0};
+    std::uint8_t PenFg_[3]{};  ///< [0]=R or palette idx, [1]=G, [2]=B
+    std::uint8_t PenBg_[3]{};
+    std::uint8_t PenAttrEx_{0};  ///< underline style for pen
+    std::uint8_t PenUlIdx_{0};   ///< underline colour pen palette index
 
     SavedCursor SavedCursorMain_{};
     SavedCursor SavedCursorAlt_{};
@@ -379,21 +360,13 @@ private:
 
     std::uint8_t CursorStyle_{0};
 
-    // Tab stops: bitset over MAX_COLS columns.
-    std::bitset<MAX_COLS> TabStops_{};
+    // Tab stops: one bit per column.  MAX_COLS=4096, 4096/64 = 64 uint64_t.
+    static constexpr std::size_t TAB_WORDS = MAX_COLS / 64;
+    std::uint64_t TabStops_[TAB_WORDS]{};
 
     // Last printed character (for REP).
     char32_t LastPrintedChar_{0};
     int LastPrintedWidth_{1};
-
-    // -----------------------------------------------------------------------
-    // ExtColor arena (shared between main and alt screens)
-    // -----------------------------------------------------------------------
-    ExtColor* ExtColors_{nullptr};         ///< [MAX_EXT_CELLS] flat arena
-    std::uint16_t* ExtFreeList_{nullptr};  ///< [MAX_EXT_CELLS] free stack
-    std::uint32_t ExtCount_{0};            ///< occupied entries (for stats)
-    std::uint32_t ExtBump_{0};             ///< next bump-allocator slot
-    std::uint32_t ExtFreeTop_{0};          ///< free stack top
 
     bool PossiblyDiverged_{false};
 };
