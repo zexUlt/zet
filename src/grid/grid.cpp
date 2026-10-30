@@ -50,6 +50,7 @@ bool Grid::Allocate(std::uint16_t cols, std::uint16_t rows,
     if (scrollbackLimit > 0) {
         const std::size_t histCells =
             static_cast<std::size_t>(scrollbackLimit) * cols;
+        if (histCells * sizeof(Cell) > MAX_SCROLLBACK_BYTES) return false;
         HistoryCells_ = new (std::nothrow) Cell[histCells]{};
         HistoryLines_ = new (std::nothrow) Line[scrollbackLimit]{};
         if (!HistoryCells_ || !HistoryLines_) return false;
@@ -201,15 +202,17 @@ void Grid::ScrollRegionUp(std::uint16_t n, bool push) noexcept {
         for (std::uint16_t i = 0; i < n; ++i) PushScrollback(i);
     }
 
-    for (std::uint16_t r = ScrollTop_; r + n <= ScrollBot_; ++r) {
-        Line& dst = ActiveLine(r);
-        const Line& src = ActiveLine(static_cast<std::uint16_t>(r + n));
-        CopyCells(dst.Cells, src.Cells, Cols_);
-        dst.CellsUsed = src.CellsUsed;
-    }
+    // Rotate line pointers instead of copying cell data: O(regionHeight) for
+    // the rotate + O(n * cols) to clear vacated rows vs O(regionHeight * cols)
+    // before. A single LF (n=1) costs O(cols) total.
+    Line* active = IsAltScreen() ? AltLines_ : MainLines_;
+    Line* lo = active + ScrollTop_;
+    Line* mid = active + ScrollTop_ + n;
+    Line* hi = active + ScrollBot_ + 1;
+    std::rotate(lo, mid, hi);
     for (std::uint16_t r = static_cast<std::uint16_t>(ScrollBot_ - n + 1);
          r <= ScrollBot_; ++r)
-        ClearLine(ActiveLine(r));
+        ClearLine(active[r]);
 }
 
 void Grid::ScrollRegionDown(std::uint16_t n) noexcept {
@@ -248,20 +251,9 @@ void Grid::PutChar(char32_t cp, int width) noexcept {
         if (cs == 1 && cp >= 0x60 && cp <= 0x7E) cp = DEC_GFX[cp - 0x60];
     }
 
-    // Zero-width combining mark: per design.md §9 GRAPHEME_MAX_CODEPOINTS = 1.
-    // Overwrite the previous cell's codepoint; discard if there is none.
-    if (width == 0) {
-        if (CursorCol_ > 0) {
-            Cell& prev =
-                CellAt(CursorRow_, static_cast<std::uint16_t>(CursorCol_ - 1));
-            if (prev.Codepoint != 0) prev.Codepoint = cp;
-        } else if (PendingWrap_ && CursorRow_ > 0) {
-            Cell& prev = CellAt(static_cast<std::uint16_t>(CursorRow_ - 1),
-                                static_cast<std::uint16_t>(Cols_ - 1));
-            if (prev.Codepoint != 0) prev.Codepoint = cp;
-        }
-        return;
-    }
+    // Zero-width combining mark: GRAPHEME_MAX_CODEPOINTS=1 — keep base, drop
+    // mark.
+    if (width == 0) return;
 
     if (PendingWrap_ && ModeSet(EMode::Awm)) {
         ActiveLine(CursorRow_).CellsUsed = Cols_;
@@ -398,7 +390,11 @@ void Grid::HorizontalTabBack(std::uint16_t n) noexcept {
 
 void Grid::MoveCursorUp(std::uint16_t n) noexcept {
     PendingWrap_ = false;
-    const std::uint16_t limit = ModeSet(EMode::Decom) ? ScrollTop_ : 0;
+    // When cursor is inside the scroll region, always stop at ScrollTop_
+    // regardless of DECOM (CUU must not cross the scroll margin).
+    const std::uint16_t limit = (CursorRow_ >= ScrollTop_)
+                                    ? ScrollTop_
+                                    : (ModeSet(EMode::Decom) ? ScrollTop_ : 0);
     if (n > CursorRow_ - limit)
         n = static_cast<std::uint16_t>(CursorRow_ - limit);
     CursorRow_ = static_cast<std::uint16_t>(CursorRow_ - n);
@@ -406,9 +402,13 @@ void Grid::MoveCursorUp(std::uint16_t n) noexcept {
 
 void Grid::MoveCursorDown(std::uint16_t n) noexcept {
     PendingWrap_ = false;
-    const std::uint16_t limit = ModeSet(EMode::Decom)
-                                    ? ScrollBot_
-                                    : static_cast<std::uint16_t>(Rows_ - 1);
+    // When cursor is inside the scroll region, always stop at ScrollBot_
+    // regardless of DECOM (CUD must not cross the scroll margin).
+    const std::uint16_t limit =
+        (CursorRow_ <= ScrollBot_)
+            ? ScrollBot_
+            : (ModeSet(EMode::Decom) ? ScrollBot_
+                                     : static_cast<std::uint16_t>(Rows_ - 1));
     if (CursorRow_ + n > limit)
         n = static_cast<std::uint16_t>(limit - CursorRow_);
     CursorRow_ = static_cast<std::uint16_t>(CursorRow_ + n);
@@ -591,6 +591,12 @@ void Grid::DeleteChars(std::uint16_t n) noexcept {
     Line& line = ActiveLine(CursorRow_);
     const std::uint16_t avail = static_cast<std::uint16_t>(Cols_ - CursorCol_);
     if (n > avail) n = avail;
+    // If cursor is on a continuation cell, its lead (at CursorCol_-1) will
+    // become an orphan after the shift — blank it before moving cells.
+    if (CursorCol_ > 0 && line.Cells[CursorCol_].Width == 0) {
+        BlankCell(line.Cells[CursorCol_ - 1]);
+        BlankCell(line.Cells[CursorCol_]);
+    }
     MoveCells(line.Cells + CursorCol_, line.Cells + CursorCol_ + n,
               static_cast<std::uint16_t>(avail - n));
     ClearCells(line.Cells + Cols_ - n, n);
@@ -1205,7 +1211,10 @@ bool Grid::Resize(std::uint16_t newCols, std::uint16_t newRows) noexcept {
     if (newCols != Cols_ && HistoryLines_) {
         const std::size_t newHistCells =
             static_cast<std::size_t>(ScrollbackLimit_) * newCols;
-        Cell* newHistCellsArena = new (std::nothrow) Cell[newHistCells]{};
+        Cell* newHistCellsArena =
+            (newHistCells * sizeof(Cell) <= MAX_SCROLLBACK_BYTES)
+                ? new (std::nothrow) Cell[newHistCells]{}
+                : nullptr;
         Line* newHistLines = new (std::nothrow) Line[ScrollbackLimit_]{};
         if (newHistCellsArena && newHistLines) {
             // Wire all Cells pointers before the copy loop (clang-analyzer).
@@ -1241,7 +1250,13 @@ bool Grid::Resize(std::uint16_t newCols, std::uint16_t newRows) noexcept {
     }
 
     if (newCols > Cols_) {
-        for (std::uint16_t c = Cols_; c < newCols; c += DEFAULT_TAB_INTERVAL)
+        // Start at the first multiple of DEFAULT_TAB_INTERVAL at or above Cols_
+        // to avoid duplicating the last existing stop.
+        const std::uint16_t firstStop = static_cast<std::uint16_t>(
+            ((Cols_ + DEFAULT_TAB_INTERVAL - 1) / DEFAULT_TAB_INTERVAL) *
+            DEFAULT_TAB_INTERVAL);
+        for (std::uint16_t c = firstStop; c < newCols;
+             c = static_cast<std::uint16_t>(c + DEFAULT_TAB_INTERVAL))
             TabStops_[c / 64] |= (std::uint64_t{1} << (c % 64));
     }
 

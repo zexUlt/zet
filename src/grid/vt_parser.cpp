@@ -18,7 +18,7 @@ void VtParser::Reset() noexcept {
     Utf8Remaining_ = 0;
     ParamLen_ = 0;
     IntermediateCount_ = 0;
-    PrivateMode_ = false;
+    PrivateMarker_ = 0;
     InOsc_ = false;
     BypassBytes_ = 0;
     // Leave UnknownSeqCount_ intact (monotonic counter).
@@ -118,7 +118,7 @@ void VtParser::FeedByte(std::byte b, Grid& grid) noexcept {
         Utf8Remaining_ = 0;
         ClearParams();
         IntermediateCount_ = 0;
-        PrivateMode_ = false;
+        PrivateMarker_ = 0;
         State_ = EParserState::Escape;
         return;
     }
@@ -221,7 +221,7 @@ void VtParser::FeedByte(std::byte b, Grid& grid) noexcept {
             } else if (raw == 0x5B) {  // '[' → CSI
                 ClearParams();
                 IntermediateCount_ = 0;
-                PrivateMode_ = false;
+                PrivateMarker_ = 0;
                 State_ = EParserState::CsiEntry;
             } else if (raw == 0x5D) {  // ']' → OSC
                 InOsc_ = true;
@@ -268,7 +268,7 @@ void VtParser::FeedByte(std::byte b, Grid& grid) noexcept {
                 State_ = EParserState::CsiParam;
             } else if (raw >= 0x3C && raw <= 0x3F) {
                 // Private intro byte ('?', '>', '<', '=').
-                PrivateMode_ = true;
+                PrivateMarker_ = raw;
                 AddParam(raw);
                 State_ = EParserState::CsiParam;
             } else if (raw >= 0x20 && raw <= 0x2F) {
@@ -392,7 +392,7 @@ void VtParser::TransitionTo(EParserState next, Grid& /*grid*/) noexcept {
         case EParserState::Ground:
             ClearParams();
             IntermediateCount_ = 0;
-            PrivateMode_ = false;
+            PrivateMarker_ = 0;
             BypassBytes_ = 0;
             InOsc_ = false;
             break;
@@ -400,7 +400,7 @@ void VtParser::TransitionTo(EParserState next, Grid& /*grid*/) noexcept {
         case EParserState::DcsEntry:
             ClearParams();
             IntermediateCount_ = 0;
-            PrivateMode_ = false;
+            PrivateMarker_ = 0;
             break;
         default:
             break;
@@ -565,15 +565,16 @@ void VtParser::DispatchCsi(char32_t final, Grid& grid) noexcept {
         return idx < nparams ? params[idx] : 0;
     };
 
-    // Private-mode CSI ('?' or '>').
-    if (PrivateMode_) {
-        if (static_cast<std::uint8_t>(final) == 'h') {
+    // Private-mode CSI ('?', '>', '<', '=').
+    if (PrivateMarker_ != 0) {
+        // DECSET/DECRST are only valid for '?' (0x3F) private marker.
+        if (PrivateMarker_ == '?' && static_cast<std::uint8_t>(final) == 'h') {
             // DECSET
             for (std::size_t i = 0; i < nparams; ++i)
                 grid.SetMode(params[i], true);
             return;
         }
-        if (static_cast<std::uint8_t>(final) == 'l') {
+        if (PrivateMarker_ == '?' && static_cast<std::uint8_t>(final) == 'l') {
             // DECRST
             for (std::size_t i = 0; i < nparams; ++i)
                 grid.SetMode(params[i], false);
@@ -682,8 +683,12 @@ void VtParser::DispatchCsi(char32_t final, Grid& grid) noexcept {
 
         // Scroll region.
         case 'r':  // DECSTBM – set top and bottom margins
-            grid.SetScrollRegion(p(0, 1),
-                                 p(1, static_cast<std::uint16_t>(grid.Rows())));
+            if (IntermediateCount_ == 0 && PrivateMarker_ == 0) {
+                grid.SetScrollRegion(
+                    p(0, 1), p(1, static_cast<std::uint16_t>(grid.Rows())));
+            } else {
+                ++UnknownSeqCount_;
+            }
             break;
 
         // Tab stops.

@@ -164,7 +164,8 @@ private:
     std::uint8_t Intermediates_[MAX_INTERMEDIATES]{};
     std::size_t IntermediateCount_{0};
 
-    bool PrivateMode_{false};  ///< DEC private sequence (? or >)
+    std::uint8_t PrivateMarker_{
+        0};  ///< DEC private marker byte (0x3C–0x3F), 0 = none
 
     // Bypass state
     bool InOsc_{false};  ///< true = OSC (accepts BEL terminator)

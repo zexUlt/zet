@@ -96,10 +96,30 @@ def merge(ranges: list[tuple[int, int]]) -> list[tuple[int, int]]:
 
 
 def emit_table(name: str, ranges: list[tuple[int, int]]) -> Iterator[str]:
-    yield f"static constexpr Range k{name}[] = {{"
+    yield f"static constexpr Range {name}[] = {{"
     for lo, hi in ranges:
         yield f"    {{0x{lo:04X}, 0x{hi:04X}}},"
     yield "};"
+
+
+def subtract_ranges(a: list[tuple[int, int]],
+                    b: list[tuple[int, int]]) -> list[tuple[int, int]]:
+    """Remove all code points in b from a."""
+    result: list[tuple[int, int]] = []
+    bi = 0
+    for lo, hi in a:
+        while bi < len(b) and b[bi][1] < lo:
+            bi += 1
+        cur = lo
+        i = bi
+        while i < len(b) and b[i][0] <= hi:
+            if cur < b[i][0]:
+                result.append((cur, b[i][0] - 1))
+            cur = b[i][1] + 1
+            i += 1
+        if cur <= hi:
+            result.append((cur, hi))
+    return result
 
 
 def main() -> None:
@@ -107,23 +127,20 @@ def main() -> None:
 
     eaw_lines = fetch(EAW_URL)
     dcp_lines = fetch(DCP_URL)
+    dc_lines = fetch(DC_URL)
 
-    # Wide: W or F (Fullwidth), excluding private-use sentinel if any
+    # Wide: W or F (Fullwidth)
     wide = parse_ranges(eaw_lines, lambda f: f.split()[0] in ("W", "F"))
 
-    # Zero-width: combining marks (Mn, Me) and format chars (Cf)
-    # DerivedCoreProperties has Default_Ignorable_Code_Point
-    zero_width = parse_ranges(dcp_lines,
-                               lambda f: "Default_Ignorable_Code_Point" in f)
-
-    # Add combining marks from DerivedGeneralCategory (Mn, Me)
-    # Actually we get them via a different file; approximate here with
-    # DerivedCoreProperties Default_Ignorable already covers soft hyphen/
-    # BOM/variation selectors. For Mn/Me we need DerivedGeneralCategory.
-    dc_lines = fetch(DC_URL)
+    # Zero-width: Default_Ignorable_Code_Point + combining marks (Mn, Me).
+    # Subtract EAW Wide characters so that Hangul Fillers (U+115F, U+1160)
+    # and other W-class Mn/Me characters are classified as Wide (width 2),
+    # not Zero-width (width 0).
+    default_ignorable = parse_ranges(
+        dcp_lines, lambda f: "Default_Ignorable_Code_Point" in f)
     mn_me = parse_ranges(dc_lines, lambda f: f.split(";")[0].strip() in ("Mn", "Me"))
-    # Merge
-    zero_width = merge(sorted(zero_width + mn_me))
+    zero_width_raw = merge(sorted(default_ignorable + mn_me))
+    zero_width = subtract_ranges(zero_width_raw, wide)
 
     # Write output
     lines = [
@@ -133,13 +150,23 @@ def main() -> None:
         "",
         "#include \"zet/grid/unicode.hpp\"",
         "",
+        "#include <cstddef>",
+        "",
         "namespace zet::grid {",
         "",
-        "struct Range { char32_t Lo; char32_t Hi; };",
+        "struct Range {",
+        "    char32_t Lo;",
+        "    char32_t Hi;",
+        "};",
         "",
-        *emit_table("Wide", wide),
+        "// East Asian Width W (Wide) and F (Fullwidth) — width 2.",
+        "// Source: EastAsianWidth.txt, Unicode 16.0.0.",
+        *emit_table("WIDE", wide),
         "",
-        *emit_table("ZeroWidth", zero_width),
+        "// Zero-width: combining marks (Mn, Me), Default_Ignorable, etc.",
+        "// EAW Wide characters are excluded so Hangul Fillers stay width 2.",
+        "// Source: DerivedCoreProperties.txt + DerivedGeneralCategory.txt.",
+        *emit_table("ZERO_WIDTH", zero_width),
         "",
         "// Binary search over a sorted range table.",
         "static bool InRanges(const Range* table, std::size_t n,",
@@ -160,10 +187,10 @@ def main() -> None:
         "    // C1 controls (8-bit, rare in UTF-8 terminals)",
         "    if (cp >= 0x80 && cp < 0xA0) return -1;",
         "    // Zero-width (combining marks, default-ignorable, etc.)",
-        "    if (InRanges(kZeroWidth, sizeof(kZeroWidth)/sizeof(*kZeroWidth), cp))",
+        "    if (InRanges(ZERO_WIDTH, sizeof(ZERO_WIDTH)/sizeof(*ZERO_WIDTH), cp))",
         "        return 0;",
         "    // Wide / Fullwidth",
-        "    if (InRanges(kWide, sizeof(kWide)/sizeof(*kWide), cp))",
+        "    if (InRanges(WIDE, sizeof(WIDE)/sizeof(*WIDE), cp))",
         "        return 2;",
         "    return 1;",
         "}",

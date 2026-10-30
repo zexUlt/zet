@@ -1975,12 +1975,9 @@ TEST_CASE("Wide char at last column without AWM is dropped") {
 // PutChar with combining mark when PendingWrap is set
 // ---------------------------------------------------------------------------
 
-TEST_CASE(
-    "Combining mark with PendingWrap attaches to last char on previous row") {
-    // A 1-column grid: after writing a char, CursorCol_==0 and
-    // PendingWrap==true. The next char writes to the next row; if instead we
-    // send a combining mark it should attach to the char at the end of the
-    // previous row.
+TEST_CASE("Combining mark with PendingWrap is dropped; base codepoint stays") {
+    // GRAPHEME_MAX_CODEPOINTS=1: combining marks are always dropped, even when
+    // PendingWrap is set.  'A' at (0,0) must remain unchanged.
     Grid* g = MakeGrid(1, 5);
     VtParser p;
     Feed(p, *g,
@@ -1990,11 +1987,10 @@ TEST_CASE(
     CHECK(g->CursorRow() == 1);
     CHECK(g->CursorCol() == 0);
     // U+0301 combining acute accent (UTF-8: 0xCC 0x81, width=0).
-    // PendingWrap=true, CursorCol_=0, CursorRow_=1>0 → attaches to (0, 0) =
-    // 'A'.
+    // Must be silently dropped; base 'A' at (0,0) is unchanged.
     const std::uint8_t acute[] = {0xCC, 0x81};
     p.Feed(reinterpret_cast<const std::byte*>(acute), 2, *g);
-    CHECK(CP(*g, 0, 0) == 0x0301);
+    CHECK(CP(*g, 0, 0) == U'A');  // base preserved, not overwritten by mark
     delete g;
 }
 
@@ -2591,5 +2587,197 @@ TEST_CASE("Resize shrink cols with scrollback rewires history cells") {
     bool ok = g->Resize(10, 5);
     CHECK(ok);
     CHECK(g->Cols() == 10);
+    delete g;
+}
+
+TEST_CASE("Combining mark keeps base codepoint (GRAPHEME_MAX_CODEPOINTS=1)") {
+    auto res = Grid::Create(10, 5, 0);
+    REQUIRE(res.has_value());
+    Grid* g = res.value();
+    VtParser p;
+    // Feed 'e' (U+0065) followed by combining acute accent (U+0301)
+    // UTF-8 for U+0301 is 0xCC 0x81
+    const std::byte seq[] = {
+        std::byte{'e'},
+        std::byte{0xCC},
+        std::byte{0x81},  // U+0301 COMBINING ACUTE ACCENT
+    };
+    p.Feed(seq, sizeof(seq), *g);
+    // Cell at (0,0) must hold 'e', not the combining mark 0x0301
+    CHECK(g->CellAt(0, 0).Codepoint == U'e');
+    CHECK(g->CursorCol() == 1);  // cursor advanced past 'e' only
+    delete g;
+}
+
+TEST_CASE("Combining mark at column 0 with no base is silently discarded") {
+    auto res = Grid::Create(10, 5, 0);
+    REQUIRE(res.has_value());
+    Grid* g = res.value();
+    VtParser p;
+    // U+0301 at column 0 — no base, must not crash or modify any cell
+    const std::byte seq[] = {std::byte{0xCC}, std::byte{0x81}};
+    p.Feed(seq, sizeof(seq), *g);
+    CHECK(g->CellAt(0, 0).Codepoint == 0);
+    CHECK(g->CursorCol() == 0);
+    delete g;
+}
+
+TEST_CASE("combining mark at PendingWrap boundary is discarded") {
+    Grid* g = MakeGrid(4, 4, 0);
+    VtParser p;
+    // Fill all 4 columns so PendingWrap_ becomes true after writing col 3
+    Feed(p, *g, "abcd");
+    CHECK(g->PendingWrap());
+    // Send a combining mark (U+0301, UTF-8: 0xCC 0x81)
+    // Must not wrap or corrupt any cell; PendingWrap_ stays unchanged (early
+    // return)
+    const std::byte mark[] = {std::byte{0xCC}, std::byte{0x81}};
+    p.Feed(mark, sizeof(mark), *g);
+    CHECK(g->CellAt(0, 3).Codepoint == U'd');
+    CHECK(g->CursorRow() == 0);  // no wrap happened
+    delete g;
+}
+
+// ---------------------------------------------------------------------------
+// CSI private marker tracking
+// ---------------------------------------------------------------------------
+
+TEST_CASE("CSI dollar r does not set scroll region") {
+    Grid* g = MakeGrid(80, 24, 0);
+    VtParser p;
+    // Set a known scroll region first (DECSTBM: top=5, bot=20, 1-based)
+    Feed(p, *g, "\x1b[5;20r");
+    CHECK(g->ScrollTop() == 4);
+    CHECK(g->ScrollBot() == 19);
+    // CSI $ r (with intermediate '$') must NOT change scroll region
+    Feed(p, *g, "\x1b[$r");
+    CHECK(g->ScrollTop() == 4);
+    CHECK(g->ScrollBot() == 19);
+    delete g;
+}
+
+TEST_CASE("CSI > 7 l does not reset DECAWM") {
+    Grid* g = MakeGrid(80, 24, 0);
+    VtParser p;
+    // DECAWM is on by default
+    CHECK(g->ModeSet(EMode::Awm));
+    // CSI > 7 l (private marker '>', not '?') must not change DECAWM
+    Feed(p, *g, "\x1b[>7l");
+    CHECK(g->ModeSet(EMode::Awm));
+    delete g;
+}
+
+// ---------------------------------------------------------------------------
+// Tab stops after Resize grows columns
+// ---------------------------------------------------------------------------
+
+TEST_CASE("tab stops are correct after Resize grows columns") {
+    Grid* g = MakeGrid(10, 24, 0);
+    VtParser p;
+    // Grow to 40 columns; new tab stops should be at multiples of 8 in [10,40)
+    // The first new stop should be at 16 (next multiple of 8 >= 10)
+    bool ok = g->Resize(40, 24);
+    CHECK(ok);
+    // Move cursor to col 9 (0-based) then tab → should land at 16
+    Feed(p, *g,
+         "\x1b[1;10H");  // cursor to row 1, col 10 (1-based) = col 9 (0-based)
+    CHECK(g->CursorCol() == 9);
+    Feed(p, *g, "\t");
+    CHECK(g->CursorCol() == 16);
+    delete g;
+}
+
+// ---------------------------------------------------------------------------
+// CUU/CUD scroll region margins
+// ---------------------------------------------------------------------------
+
+TEST_CASE("CUU stops at scroll top when cursor inside region (DECOM off)") {
+    Grid* g = MakeGrid(80, 24, 0);
+    VtParser p;
+    // Set scroll region rows 5-20 (1-based) = 0-based 4-19
+    Feed(p, *g, "\x1b[5;20r");
+    CHECK(!g->ModeSet(EMode::Decom));
+    // Move cursor to row 10 (0-based): CUP row=11, col=1
+    Feed(p, *g, "\x1b[11;1H");
+    CHECK(g->CursorRow() == 10);
+    // CUU 100: should stop at ScrollTop_ = 4, not 0
+    Feed(p, *g, "\x1b[100A");
+    CHECK(g->CursorRow() == 4);
+    delete g;
+}
+
+TEST_CASE("CUD stops at scroll bottom when cursor inside region (DECOM off)") {
+    Grid* g = MakeGrid(80, 24, 0);
+    VtParser p;
+    Feed(p, *g, "\x1b[5;20r");
+    Feed(p, *g, "\x1b[11;1H");
+    // CUD 100: should stop at ScrollBot_ = 19
+    Feed(p, *g, "\x1b[100B");
+    CHECK(g->CursorRow() == 19);
+    delete g;
+}
+
+// ---------------------------------------------------------------------------
+// DCH on wide char continuation cell
+// ---------------------------------------------------------------------------
+
+TEST_CASE("DCH on wide char continuation cell blanks both halves") {
+    Grid* g = MakeGrid(10, 4, 0);
+    VtParser p;
+    // Write wide char U+4E2D (CJK, width=2) at col 0 — occupies cols 0 and 1
+    const std::byte wide[] = {
+        std::byte{0xE4},
+        std::byte{0xB8},
+        std::byte{0xAD},  // U+4E2D in UTF-8
+    };
+    p.Feed(wide, sizeof(wide), *g);
+    CHECK(g->CellAt(0, 0).Width == 2);
+    CHECK(g->CellAt(0, 1).Width == 0);  // continuation
+    // Move cursor to continuation cell (col 1) and delete 1 char
+    Feed(p, *g, "\x1b[1;2H");  // col 2 (1-based) = col 1 (0-based)
+    Feed(p, *g, "\x1b[1P");    // DCH 1
+    // Both cells should now be blank (codepoint 0)
+    CHECK(g->CellAt(0, 0).Codepoint == 0);
+    CHECK(g->CellAt(0, 1).Codepoint == 0);
+    delete g;
+}
+
+// ---------------------------------------------------------------------------
+// Scrollback allocation bound (MAX_SCROLLBACK_BYTES)
+// ---------------------------------------------------------------------------
+
+TEST_CASE("Scrollback allocation respects MAX_SCROLLBACK_BYTES limit") {
+    // MAX_SCROLLBACK_BYTES = 128 MiB; each Cell = 16 bytes.
+    // 128*1024*1024 / 16 = 8388608 cells. With cols=4096, limit ~2048 lines.
+    // Request scrollbackLimit that would exceed 128 MiB: 4096 cols * 3000 lines
+    // = 192 MiB.
+    auto res = Grid::Create(4096, 4, 3000);
+    // Should fail due to budget exceeded
+    CHECK(!res.has_value());
+}
+
+TEST_CASE("LF scroll via pointer rotation preserves row content order") {
+    auto res = Grid::Create(10, 4, 0);
+    REQUIRE(res.has_value());
+    Grid* g = res.value();
+    VtParser p;
+    // Write content to all rows
+    Feed(p, *g, "AAAA\r\n");
+    Feed(p, *g, "BBBB\r\n");
+    Feed(p, *g, "CCCC\r\n");
+    Feed(p, *g, "DDDD");
+    // Row 0: AAAA, row 1: BBBB, row 2: CCCC, row 3: DDDD
+    CHECK(g->CellAt(0, 0).Codepoint == U'A');
+    CHECK(g->CellAt(1, 0).Codepoint == U'B');
+    CHECK(g->CellAt(2, 0).Codepoint == U'C');
+    CHECK(g->CellAt(3, 0).Codepoint == U'D');
+    // Feed a newline at row 3 to trigger scroll (no scrollback)
+    Feed(p, *g, "\n");
+    // After scroll: AAAA gone, BBBB at row 0, CCCC at row 1, DDDD at row 2, row
+    // 3 blank
+    CHECK(g->CellAt(0, 0).Codepoint == U'B');
+    CHECK(g->CellAt(1, 0).Codepoint == U'C');
+    CHECK(g->CellAt(2, 0).Codepoint == U'D');
+    CHECK(g->CellAt(3, 0).Codepoint == 0);
     delete g;
 }

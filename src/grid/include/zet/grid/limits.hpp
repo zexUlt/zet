@@ -36,4 +36,8 @@ inline constexpr std::size_t BYPASS_LIMIT_BYTES = 1U * 1024U * 1024U;
 /// Tab stop interval (default every 8 columns).
 inline constexpr std::uint16_t DEFAULT_TAB_INTERVAL = 8;
 
+/// Maximum total scrollback cell memory (bytes).
+/// Guards against pathological scrollbackLimit × cols × sizeof(Cell) products.
+inline constexpr std::size_t MAX_SCROLLBACK_BYTES = 128UL * 1024 * 1024;
+
 }  // namespace zet::grid
