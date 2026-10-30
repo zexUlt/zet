@@ -159,6 +159,7 @@ protected:
     Timestamp Started_;
     std::optional<Channel> Channel_;
     std::optional<SessionError> Failed_;
+    std::uint16_t NegotiatedVersion_{wire::PROTOCOL_VERSION_MIN};
 };
 
 /// The agent's end.

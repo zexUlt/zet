@@ -78,6 +78,10 @@ ProtoResult<EMessageType> ParseMessageType(ByteReader& reader) noexcept {
         case EMessageType::Ping:
         case EMessageType::Pong:
         case EMessageType::SessionEnd:
+        case EMessageType::GridBegin:
+        case EMessageType::GridChunk:
+        case EMessageType::GridEnd:
+        case EMessageType::GridApplied:
         case EMessageType::MuxRegister:
         case EMessageType::MuxRegistered:
         case EMessageType::MuxRefused:
@@ -286,21 +290,40 @@ ProtoResult<void> WriteAuthOk(ByteWriter& writer,
     return writer.WriteU64BE(message.ServerReceiveOffset);
 }
 
-ProtoResult<ResumeMessage> ParseResume(ByteReader& reader) noexcept {
+ProtoResult<ResumeMessage> ParseResume(ByteReader& reader,
+                                       std::uint16_t version) noexcept {
+    ResumeMessage message{};
+    // ver=2 prepends stream_gen:u32be before c_recv_offset (§5, ADR-035).
+    if (version >= PROTOCOL_VERSION_GRID) {
+        auto gen = reader.ReadU32BE();
+        if (!gen) {
+            return std::unexpected(gen.error());
+        }
+        message.StreamGen = *gen;
+    }
     auto offset = reader.ReadU64BE();
     if (!offset) {
         return std::unexpected(offset.error());
     }
+    message.ClientReceiveOffset = *offset;
     if (auto rest = RequireExhausted(reader); !rest) {
         return std::unexpected(rest.error());
     }
-    return ResumeMessage{.ClientReceiveOffset = *offset};
+    return message;
 }
 
-ProtoResult<void> WriteResume(ByteWriter& writer,
-                              const ResumeMessage& message) noexcept {
+ProtoResult<void> WriteResume(ByteWriter& writer, const ResumeMessage& message,
+                              std::uint16_t version) noexcept {
+    if (version < PROTOCOL_VERSION_GRID && message.StreamGen != 0) {
+        return std::unexpected(EProtoError::MalformedField);
+    }
     if (auto type = WriteMessageType(writer, EMessageType::Resume); !type) {
         return type;
+    }
+    if (version >= PROTOCOL_VERSION_GRID) {
+        if (auto gen = writer.WriteU32BE(message.StreamGen); !gen) {
+            return gen;
+        }
     }
     return writer.WriteU64BE(message.ClientReceiveOffset);
 }
@@ -700,10 +723,16 @@ ProtoResult<void> WritePong(ByteWriter& writer,
 
 namespace {
 
+/// True for every kind value recognised at or below `version`.
+///
+/// kind=2 (Overflow) is a v2 addition; it is rejected by ParseSessionEnd at
+/// version < PROTOCOL_VERSION_GRID rather than here, so that the error message
+/// is MalformedField rather than an unrelated predicate failure.
 [[nodiscard]] bool IsSessionEndKind(std::uint8_t kind) noexcept {
     switch (static_cast<ESessionEndKind>(kind)) {
         case ESessionEndKind::Exited:
         case ESessionEndKind::Signaled:
+        case ESessionEndKind::Overflow:
             return true;
     }
     return false;
@@ -711,7 +740,8 @@ namespace {
 
 }  // namespace
 
-ProtoResult<SessionEndMessage> ParseSessionEnd(ByteReader& reader) noexcept {
+ProtoResult<SessionEndMessage> ParseSessionEnd(ByteReader& reader,
+                                               std::uint16_t version) noexcept {
     auto kind = reader.ReadU8();
     if (!kind) {
         return std::unexpected(kind.error());
@@ -723,6 +753,16 @@ ProtoResult<SessionEndMessage> ParseSessionEnd(ByteReader& reader) noexcept {
     if (!IsSessionEndKind(*kind)) {
         return std::unexpected(EProtoError::MalformedField);
     }
+    // Overflow (kind=2) is ver=2 only; v1 rejects it as the design requires.
+    if (static_cast<ESessionEndKind>(*kind) == ESessionEndKind::Overflow) {
+        if (version < PROTOCOL_VERSION_GRID) {
+            return std::unexpected(EProtoError::MalformedField);
+        }
+        // The value field is reserved for Overflow and must be zero.
+        if (*value != 0) {
+            return std::unexpected(EProtoError::MalformedField);
+        }
+    }
     if (auto rest = RequireExhausted(reader); !rest) {
         return std::unexpected(rest.error());
     }
@@ -731,15 +771,23 @@ ProtoResult<SessionEndMessage> ParseSessionEnd(ByteReader& reader) noexcept {
 }
 
 ProtoResult<void> WriteSessionEnd(ByteWriter& writer,
-                                  const SessionEndMessage& message) noexcept {
-    if (!IsSessionEndKind(static_cast<std::uint8_t>(message.Kind))) {
+                                  const SessionEndMessage& message,
+                                  std::uint16_t version) noexcept {
+    const auto rawKind = static_cast<std::uint8_t>(message.Kind);
+    if (!IsSessionEndKind(rawKind)) {
+        return std::unexpected(EProtoError::MalformedField);
+    }
+    if (message.Kind == ESessionEndKind::Overflow &&
+        version < PROTOCOL_VERSION_GRID) {
+        return std::unexpected(EProtoError::MalformedField);
+    }
+    if (message.Kind == ESessionEndKind::Overflow && message.Value != 0) {
         return std::unexpected(EProtoError::MalformedField);
     }
     if (auto type = WriteMessageType(writer, EMessageType::SessionEnd); !type) {
         return type;
     }
-    if (auto kind = writer.WriteU8(static_cast<std::uint8_t>(message.Kind));
-        !kind) {
+    if (auto kind = writer.WriteU8(rawKind); !kind) {
         return kind;
     }
     return writer.WriteU8(message.Value);
@@ -909,6 +957,193 @@ ProtoResult<HelloPeek> PeekHello(ByteSpan buffer) noexcept {
         return std::unexpected(id.error());
     }
     return peek;
+}
+
+/// Bit mask of flag bits that are defined; all others are reserved.
+namespace {
+constexpr std::uint8_t GRID_BEGIN_FLAG_DEFINED_MASK = 0x01;
+}  // namespace
+
+ProtoResult<GridBeginMessage> ParseGridBegin(ByteReader& reader) noexcept {
+    auto flags = reader.ReadU8();
+    if (!flags) {
+        return std::unexpected(flags.error());
+    }
+    // Reserved flag bits must be zero (§7 violation table).
+    if ((*flags & ~GRID_BEGIN_FLAG_DEFINED_MASK) != 0) {
+        return std::unexpected(EProtoError::MalformedField);
+    }
+    auto gen = reader.ReadU32BE();
+    if (!gen) {
+        return std::unexpected(gen.error());
+    }
+    auto scrollback = reader.ReadU32BE();
+    if (!scrollback) {
+        return std::unexpected(scrollback.error());
+    }
+    auto total = reader.ReadU32BE();
+    if (!total) {
+        return std::unexpected(total.error());
+    }
+    // An empty snapshot is meaningless and indistinguishable from a missing
+    // GridEnd; reject it so callers never see TotalLen == 0.
+    if (*total == 0 || *total > SNAPSHOT_MAX_BYTES) {
+        return std::unexpected(EProtoError::LengthLimitExceeded);
+    }
+    // ScrollbackLen is the portion of TotalLen that is scrollback; it cannot
+    // exceed TotalLen itself (§7 violation table).
+    if (*scrollback > *total) {
+        return std::unexpected(EProtoError::LengthLimitExceeded);
+    }
+    if (auto rest = RequireExhausted(reader); !rest) {
+        return std::unexpected(rest.error());
+    }
+    return GridBeginMessage{.Flags = *flags,
+                            .StreamGen = *gen,
+                            .ScrollbackLen = *scrollback,
+                            .TotalLen = *total};
+}
+
+ProtoResult<void> WriteGridBegin(ByteWriter& writer,
+                                 const GridBeginMessage& message) noexcept {
+    if ((message.Flags & ~GRID_BEGIN_FLAG_DEFINED_MASK) != 0) {
+        return std::unexpected(EProtoError::MalformedField);
+    }
+    if (message.TotalLen == 0 || message.TotalLen > SNAPSHOT_MAX_BYTES) {
+        return std::unexpected(EProtoError::LengthLimitExceeded);
+    }
+    if (message.ScrollbackLen > message.TotalLen) {
+        return std::unexpected(EProtoError::LengthLimitExceeded);
+    }
+    if (auto type = WriteMessageType(writer, EMessageType::GridBegin); !type) {
+        return type;
+    }
+    if (auto f = writer.WriteU8(message.Flags); !f) {
+        return f;
+    }
+    if (auto g = writer.WriteU32BE(message.StreamGen); !g) {
+        return g;
+    }
+    if (auto s = writer.WriteU32BE(message.ScrollbackLen); !s) {
+        return s;
+    }
+    return writer.WriteU32BE(message.TotalLen);
+}
+
+ProtoResult<GridChunkMessage> ParseGridChunk(ByteReader& reader) noexcept {
+    auto offset = reader.ReadU32BE();
+    if (!offset) {
+        return std::unexpected(offset.error());
+    }
+    // The rest of the reader is the payload. Empty data is rejected (§7).
+    const auto data = reader.Rest();
+    if (data.empty()) {
+        return std::unexpected(EProtoError::MalformedField);
+    }
+    if (data.size() > GRID_CHUNK_MAX_DATA) {
+        return std::unexpected(EProtoError::LengthLimitExceeded);
+    }
+    // Consume the data bytes so the reader is exhausted.
+    if (auto skipped = reader.Skip(data.size()); !skipped) {
+        return std::unexpected(skipped.error());
+    }
+    return GridChunkMessage{.ChunkOffset = *offset, .Data = data};
+}
+
+ProtoResult<void> WriteGridChunk(ByteWriter& writer,
+                                 const GridChunkMessage& message) noexcept {
+    if (message.Data.empty()) {
+        return std::unexpected(EProtoError::MalformedField);
+    }
+    if (message.Data.size() > GRID_CHUNK_MAX_DATA) {
+        return std::unexpected(EProtoError::LengthLimitExceeded);
+    }
+    if (auto type = WriteMessageType(writer, EMessageType::GridChunk); !type) {
+        return type;
+    }
+    if (auto o = writer.WriteU32BE(message.ChunkOffset); !o) {
+        return o;
+    }
+    return writer.WriteBytes(message.Data);
+}
+
+ProtoResult<GridEndMessage> ParseGridEnd(ByteReader& reader) noexcept {
+    if (auto rest = RequireExhausted(reader); !rest) {
+        return std::unexpected(rest.error());
+    }
+    return GridEndMessage{};
+}
+
+ProtoResult<void> WriteGridEnd(ByteWriter& writer,
+                               const GridEndMessage& /*message*/) noexcept {
+    return WriteMessageType(writer, EMessageType::GridEnd);
+}
+
+ProtoResult<GridAppliedMessage> ParseGridApplied(ByteReader& reader) noexcept {
+    auto gen = reader.ReadU32BE();
+    if (!gen) {
+        return std::unexpected(gen.error());
+    }
+    if (auto rest = RequireExhausted(reader); !rest) {
+        return std::unexpected(rest.error());
+    }
+    return GridAppliedMessage{.StreamGen = *gen};
+}
+
+ProtoResult<void> WriteGridApplied(ByteWriter& writer,
+                                   const GridAppliedMessage& message) noexcept {
+    if (auto type = WriteMessageType(writer, EMessageType::GridApplied);
+        !type) {
+        return type;
+    }
+    return writer.WriteU32BE(message.StreamGen);
+}
+
+ProtoResult<std::size_t> AppendGridCapableTlv(MutableByteSpan out) noexcept {
+    // Layout: type(u16be) + length(u16be) + value(u16be) = 6 bytes.
+    constexpr std::size_t tlvSize = 3 * sizeof(std::uint16_t);
+    if (out.size() < tlvSize) {
+        return std::unexpected(EProtoError::BufferTooSmall);
+    }
+    ByteWriter writer{out.first(tlvSize)};
+    std::ignore = writer.WriteU16BE(TLV_GRID_CAPABLE);
+    std::ignore = writer.WriteU16BE(sizeof(std::uint16_t));
+    std::ignore = writer.WriteU16BE(1);
+    return tlvSize;
+}
+
+ProtoResult<bool> HasGridCapableTlv(ByteSpan tlvs) noexcept {
+    ByteReader reader{tlvs};
+    while (!reader.Exhausted()) {
+        auto type = reader.ReadU16BE();
+        if (!type) {
+            return std::unexpected(type.error());
+        }
+        auto length = reader.ReadU16BE();
+        if (!length) {
+            return std::unexpected(length.error());
+        }
+        auto value = reader.ReadBytes(*length);
+        if (!value) {
+            return std::unexpected(value.error());
+        }
+        if (*type == TLV_GRID_CAPABLE) {
+            // Must be exactly a u16be with value 1; anything else is malformed.
+            if (*length != sizeof(std::uint16_t)) {
+                return std::unexpected(EProtoError::MalformedField);
+            }
+            ByteReader vr{*value};
+            auto v = vr.ReadU16BE();
+            if (!v) {
+                return std::unexpected(v.error());
+            }
+            if (*v != 1) {
+                return std::unexpected(EProtoError::MalformedField);
+            }
+            return true;
+        }
+    }
+    return false;
 }
 
 }  // namespace zet::wire

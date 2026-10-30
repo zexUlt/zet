@@ -318,9 +318,9 @@ body, запечатанный режим — всё, начиная с Resume:
 | `0x12` | `Resize` | клиент | запечатанный | `rows:u16`, `cols:u16`, `xpixel:u16`, `ypixel:u16` |
 | `0x13` | `Ping` | оба | запечатанный | `token:u64be` |
 | `0x14` | `Pong` | оба | запечатанный | `token:u64be` из `Ping` |
-| `0x15` | `SessionEnd` | агент | запечатанный | `kind:u8` (0 — exit, 1 — сигнал, 2 — overflow при ver=1 без `GRID_CAPABLE`), `value:u8` |
+| `0x15` | `SessionEnd` | агент | запечатанный | `kind:u8` (0 — exit, 1 — сигнал, 2 — overflow, только ver=2, `value` зарезервирован = 0), `value:u8` |
 | `0x16` | `GridBegin` | агент | запечатанный | `flags:u8`, `stream_gen:u32be`, `scrollback_len:u32be`, `total_len:u32be` (только ver=2) |
-| `0x17` | `GridChunk` | агент | запечатанный | `chunk_offset:u32be`, `data:bytes`; max `len(data)` ≤ `MAX_FRAME − 4 − 16` |
+| `0x17` | `GridChunk` | агент | запечатанный | `chunk_offset:u32be`, `data:bytes`; max `len(data)` ≤ `MAX_FRAME − TAG_SIZE − 1 − 4` |
 | `0x18` | `GridEnd` | агент | запечатанный | (нет полей); AEAD каждого кадра + `total_len` гарантируют целостность (только ver=2) |
 | `0x19` | `GridApplied` | клиент | запечатанный | `stream_gen:u32be` — шлётся сразу после атомарного применения снимка; агент игнорирует все output ACK до его прихода (только ver=2) |
 | `0x1A`…`0x1F` | | | запечатанный | зарезервировано под сообщения сессии |
@@ -349,11 +349,12 @@ body, запечатанный режим — всё, начиная с Resume:
   | `GridEnd` при `received_bytes ≠ total_len` | `CloseConnection` |
   | `GridChunk` с пустыми данными | `CloseConnection` |
   | `total_len > SNAPSHOT_MAX_BYTES` | `CloseConnection` |
+  | `scrollback_len > total_len` | `CloseConnection` |
   | `Data` от агента между `GridBegin` и `GridEnd` | `CloseConnection` |
   | `stream_gen ≤ current_session_gen` (откат поколения) | `CloseConnection` |
   | `stream_gen > session_gen` в `Resume` | `CloseConnection` |
 
-**Версионирование M6.** `Resume`, `GridBegin`/`GridChunk`/`GridEnd`/`GridApplied`, `GRID_CAPABLE` применяются только при согласованной версии `ver = 2`. `PROTOCOL_VERSION_MIN = 1`, `PROTOCOL_VERSION_MAX = 2`. При ver=1 overflow даёт `SessionEnd(kind=2)` и сессия умирает как до M6. При ver=2 и клиенте без `GRID_CAPABLE` то же: TLV некритичен, но если агент видит ver=2 без него — overflow = Reap. `GRID_CAPABLE` принимается во внимание **только после успешной аутентификации** (после `AuthOk`); в `Hello` он некритичен и читается без доверия до завершения хендшейка. Флаг хранится per session (не per connection) и устанавливается один раз при первом подключении.
+**Версионирование M6.** `Resume`, `GridBegin`/`GridChunk`/`GridEnd`/`GridApplied`, `GRID_CAPABLE` применяются только при согласованной версии `ver = 2`. `PROTOCOL_VERSION_MIN = 1`, `PROTOCOL_VERSION_MAX = 1` (потолок рукопожатия по умолчанию), `PROTOCOL_VERSION_GRID = 2` (константа, которую сессионный слой передаёт, когда готов к ver=2). При ver=1 overflow всё равно приводит к завершению сессии — агент закрывает соединение (`CloseConnection`), но `SessionEnd(kind=2)` не пишется: вид 2 валиден только при ver=2. При ver=2 и клиенте без `GRID_CAPABLE` то же: TLV некритичен, но если агент видит ver=2 без него — overflow = Reap. `GRID_CAPABLE` принимается во внимание **только после успешной аутентификации** (после `AuthOk`); в `Hello` он некритичен и читается без доверия до завершения хендшейка. Флаг хранится per session (не per connection) и устанавливается один раз при первом подключении.
 
 **TLV-реестр `Hello`:**
 
@@ -436,7 +437,7 @@ K_master --"zet-sess"--> { R, K_auth, K_conn_seed[0] }
 
 - **Кумулятивные ACK.** Получатель сообщает `recv_offset` пиггибэком в заголовке plaintext каждого кадра данных плюс отдельным `Ack` при простое дольше 200 мс. Отправитель усекает буфер по подтверждённому смещению. В установившемся режиме буфер — порядка BDP, а не 64 МБ константой, как у ET (`src/base/BackedWriter.hpp:32`).
 - **Backpressure вместо потери данных.** Достигли `RESEND_BUFFER_MAX` (4 МиБ по умолчанию) — снимаем `EPOLLIN` с master pty, шелл блокируется на записи. Это естественное давление вверх по течению. ET вместо этого при живом сокете выбрасывает старое из буфера (`src/base/BackedWriter.cpp:37-40`), молча делая будущее восстановление невозможным: `recover` затем кидает «Client is too far behind server» (`:113`).
-- **В отключённом состоянии** буферизуем до `DISCONNECT_BUFFER_MAX` (16 МиБ). После заполнения агент выставляет флаг `ring_overflowed = true` на сессии, продолжает читать из pty и обновлять `zet_grid`, но ring больше не принимает байты. `ring_overflowed` сбрасывается только при установке нового поколения (начале пути B). До M6 или при ver=1 без `GRID_CAPABLE` переполнение даёт `SessionEnd(kind=2)`; с M6 при ver=2 + `GRID_CAPABLE` сессия остаётся живой — при реконнекте выбирается путь B. Молчаливая порча потока запрещена.
+- **В отключённом состоянии** буферизуем до `DISCONNECT_BUFFER_MAX` (16 МиБ). После заполнения агент выставляет флаг `ring_overflowed = true` на сессии, продолжает читать из pty и обновлять `zet_grid`, но ring больше не принимает байты. `ring_overflowed` сбрасывается только при установке нового поколения (начале пути B). При ver=1 overflow = тихий реап: агент закрывает соединение (`CloseConnection`), `SessionEnd(kind=2)` не отправляется (вид 2 валиден только при ver=2). При ver=2 без `GRID_CAPABLE` — `SessionEnd(kind=2)`, сессия умирает. При ver=2 + `GRID_CAPABLE` сессия остаётся живой — при реконнекте выбирается путь B. Молчаливая порча потока запрещена.
 
   **Состояния StreamState.** До M6 сессия в отключённом состоянии могла быть `Reap` (истёк orphan-таймаут) или `Backpressure` (ring наполнен, pty заблокирован). M6 добавляет третье состояние: **`Resync`** — ring переполнен (`ring_overflowed = true`), pty продолжает читать, grid обновляется, но replay невозможен; при следующем реконнекте агент обязан выбрать путь B вне зависимости от стоимости. `SendBuffer` в состоянии `Resync` не принимает новых байт (invariant: `ring_overflowed ⇒ AcceptsWrites = false`). `ReceiveCursor` продолжает работать — input-поток (client→agent) не прерывается.
 
@@ -463,7 +464,7 @@ K_master --"zet-sess"--> { R, K_auth, K_conn_seed[0] }
 
   **ExtCell reclamation.** `EXT_CELLS_PER_SESSION` — жёсткий лимит side-table. При его исчерпании новые `ExtCell` не выделяются, ячейка сохраняется в деградированном виде (256-цвет или без цвета). Для корректной работы 400×300 truecolor (120 000 ячеек, большинство с `ExtCell`) таблица должна позволять столько записей без отказа; при шаге 2 лестницы деградации `ExtCell`-записи освобождаются и таблица очищается. Явная рекламация (free list по индексу): при стирании ячейки с `flags = EXT` её `ExtCell`-слот возвращается в free list; новая `ExtCell` берётся из free list или с конца массива.
 
-  **Capability negotiation.** Клиент анонсирует поддержку GridSnapshot некритичным TLV `GRID_CAPABLE (0x0003, u16be = 1)` в `Hello` при ver_max ≥ 2. Флаг учитывается только после аутентификации и хранится per session. Без него при overflow при ver=2 — `SessionEnd(kind=2)`, сессия умирает, как до M6.
+  **Capability negotiation.** Клиент анонсирует поддержку GridSnapshot некритичным TLV `GRID_CAPABLE (0x0003, u16be = 1)` в `Hello` при ver_max ≥ 2. Флаг учитывается только после аутентификации и хранится per session. Без него при overflow при ver=2 — `SessionEnd(kind=2)`, сессия умирает. (При ver=1 overflow = тихий реап без SessionEnd(kind=2); см. §9 «Версионирование M6».)
 - **Что вообще возобновляемо.** Только каналы данных. Управляющие сообщения (`Resize`, `Ping`/`Pong`, `Ack`) живут в области видимости соединения и обязаны быть идемпотентными; клиент заново шлёт текущий размер окна после каждого реконнекта. Правило кодирования: *должно пережить реконнект — идёт в поток данных; иначе обязано быть идемпотентным*.
 - **Orphan timeout с первого дня**: `--orphan-timeout`, по умолчанию 30 минут, `0` — вечно. По срабатыванию SIGHUP шеллу, реап pty, освобождение буферов и fd, запись в лог. У ET это TODO с закомментированным `// run=false;` (`src/terminal/TerminalServer.cpp:415-421`), из-за чего сессия без клиента живёт вечно.
 - **Живость соединения.** Обрыв, при котором пакеты пропадают без RST, сокет не замечает: TCP ретранслирует четверть часа. Поэтому канал сам шлёт `Ping`, если `KEEPALIVE_INTERVAL` (5 с) ничего не отправлял, и закрывает соединение с `PeerSilent` (`CloseConnection`), если `PEER_SILENCE_TIMEOUT` (15 с) не открылся ни один кадр пира — `Data`, `Ack` или `Pong`, всё равно. Пятнадцать секунд — три интервала: одна потерянная `Ping` соединение не рвёт, а пользователь с закрытой крышкой видит реконнект, а не зависание. ET сдаётся через десять секунд, два своих пятисекундных keepalive (`src/terminal/TerminalClient.cpp:687-697`), и на мобильной сети с паузами по 5–10 секунд это даёт ложные обрывы; ложный обрыв у нас стоит переподключения, но не байта. Оба таймера входят в `NextDeadline`, тиков нет; оба задаются в `SessionLimits::Liveness`, и интеграционный тест укорачивает их до секунд. Кадр, не прошедший AEAD, живостью не считается.
@@ -505,7 +506,7 @@ attrs  : u8    // Bold | Dim | Italic | Underline | Blink | Reverse | Invis | St
 | `SCROLLBACK_LIMIT` | 1000 | Настраивается `--scrollback N` |
 | `GROUND_WAIT_TIMEOUT` | 5 с / 1 МБ | Force-reset к Ground, `grid_possibly_diverged = true` |
 | `RESIZE_WAIT_TIMEOUT` | 2 с | Если `Resize` не пришёл — использовать `last_known_size` |
-| `PROTOCOL_VERSION_MIN` | 1 | ver=1: нет Grid, overflow = SessionEnd(kind=2) |
+| `PROTOCOL_VERSION_MIN` | 1 | ver=1: нет Grid, overflow = тихий реап (CloseConnection без SessionEnd(kind=2)) |
 | `PROTOCOL_VERSION_MAX` | 2 | ver=2: Resume + stream_gen, GridBegin/Chunk/End/Applied, GRID_CAPABLE |
 
 **Хранение (nm-gate совместимость).** `zet_grid` не использует `std::vector` для основных структур данных: рост вектора тянет `__throw_length_error`, а nm-гейт запрещает `__cxa_throw` в `zet_grid`. Ячейки экрана и кольцевой буфер истории — **фиксированные арены**, выделяемые через `new(std::nothrow)` при создании Grid с максимальным размером; `ExtCell` side-table — плоский массив с счётчиком, не `std::vector`. Все аллокации возвращают `expected<…, GridError>` при сбое; нет `abort`, нет `terminate`.
@@ -984,7 +985,7 @@ Workflow собирает статические musl-бинари для `x86_6
 
 **Тест клиента без GRID_CAPABLE при ver=2.** `test_m6_no_grid_capable_overflow`: при overflow при ver=2 без `GRID_CAPABLE` — `SessionEnd(kind=2)`.
 
-**Тест v1↔v2 совместимости.** `test_m6_v1_compat`: клиент с ver_max=1 подключается к агенту с ver_max=2; overflow → `SessionEnd(kind=2)`; никаких GridBegin/Chunk/End.
+**Тест v1↔v2 совместимости.** `test_m6_v1_compat`: клиент с ver_max=1 подключается к агенту с ver_max=2; overflow → тихий реап (CloseConnection без SessionEnd(kind=2)); никаких GridBegin/Chunk/End.
 
 **Тест 400×300 truecolor.** `test_m6_400x300`: 400×300, truecolor в каждой ячейке; 120 000 `ExtCell` > лимита 65 536 → деградация до 256-цвет без краша; снимок строится; лестница деградации укладывается в cap.
 
@@ -1073,7 +1074,7 @@ Workflow собирает статические musl-бинари для `x86_6
 | 032 | `DISCONNECT_BUFFER_MAX` остаётся 16 МиБ; решение финальное |
 | 033 | Снимок вписывается в `SNAPSHOT_MAX_BYTES` за счёт лестницы деградации: (1) урезать историю по счётчику строк → (2) 256-цвет → (3) без цвета → (4) обрезать строки экрана **сверху** (нижние сохраняются); шаг 4 всегда гарантирует победу; append-mode в локальный tty без очистки; duplicate-lines caveat задокументирован |
 | 034 | Экономное кодирование снимка: SGR только при смене атрибутов, хвостовые пустые ячейки обрезаются, перемещение курсора минимально. Без сжатия до данных soak (§18) |
-| 035 | `PROTOCOL_VERSION_MAX` поднят до 2 (`MIN` остаётся 1): `Resume` получает `stream_gen`, добавлены GridBegin/Chunk/End/Applied, `GRID_CAPABLE` TLV. При ver=1 overflow = `SessionEnd(kind=2)`. `GRID_CAPABLE` учитывается только при ver=2 и после аутентификации. `StreamState.Resync` — новое детачд-состояние при `ring_overflowed=true` |
+| 035 | `PROTOCOL_VERSION_MAX` поднят до 2 (`MIN` остаётся 1): `Resume` получает `stream_gen`, добавлены GridBegin/Chunk/End/Applied, `GRID_CAPABLE` TLV. При ver=1 overflow = тихий реап (CloseConnection без SessionEnd(kind=2); вид 2 валиден только при ver=2). `GRID_CAPABLE` учитывается только при ver=2 и после аутентификации. `StreamState.Resync` — новое детачд-состояние при `ring_overflowed=true`. **Примечание реализации:** trunk держит `PROTOCOL_VERSION_MAX = 1` до тех пор, пока сессионный слой (PR сессий) не реализует поколения; константа `PROTOCOL_VERSION_GRID = 2` уже определена и передаётся в рукопожатие только когда сессионный слой готов принять ver=2. |
 
 Записи, у которых разбор не влезает в строку таблицы, развёрнуты ниже.
 

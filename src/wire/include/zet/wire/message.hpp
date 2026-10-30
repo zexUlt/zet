@@ -48,6 +48,14 @@ enum class EMessageType : std::uint8_t {
     Pong = 0x14,
     SessionEnd = 0x15,
 
+    // Grid snapshot messages (ver=2 only, §7). Accepted by ParseMessageType;
+    // the session state machine enforces the version constraint and the
+    // sequencing rules in the violation table.
+    GridBegin = 0x16,
+    GridChunk = 0x17,
+    GridEnd = 0x18,
+    GridApplied = 0x19,
+
     // The local socket between zet-muxd and the agents (§6): cleartext, and on
     // /run/zet/mux.sock only. On TCP the handshake and the channel refuse
     // them like the bootstrap's.
@@ -65,6 +73,13 @@ enum class EMessageType : std::uint8_t {
 inline constexpr std::size_t MAX_DATA_PAYLOAD = MAX_FRAME - crypto::TAG_SIZE -
                                                 sizeof(std::uint8_t) -
                                                 2 * sizeof(std::uint64_t);
+
+/// Derived the same way as MAX_DATA_PAYLOAD: MAX_FRAME minus the AEAD tag,
+/// the type byte (1), and the stream-generation prefix (4). Twelve bytes
+/// wider than MAX_DATA_PAYLOAD because the Grid chunk header is shorter
+/// (no ack or offset fields).
+inline constexpr std::size_t GRID_CHUNK_MAX_DATA =
+    MAX_FRAME - crypto::TAG_SIZE - sizeof(std::uint8_t) - sizeof(std::uint32_t);
 
 /// "ZET1", the four bytes after the type byte of every Hello there will ever
 /// be.
@@ -140,7 +155,18 @@ struct AuthOkMessage {
     std::uint64_t ServerReceiveOffset{0};
 };
 
+/// Resume is version-dependent (§5, ADR-035).
+///
+/// ver=1: { c_recv_offset:u64be }
+/// ver=2: { stream_gen:u32be, c_recv_offset:u64be }
+///
+/// ParseResume and WriteResume take the negotiated version and encode/decode
+/// accordingly. StreamGen carries meaning only in the v2 encoding; it is
+/// always present in the struct so callers do not need two code paths.
 struct ResumeMessage {
+    /// The output epoch the client already holds. Ver=2 only on the wire;
+    /// zero means "first session, no prior snapshot".
+    std::uint32_t StreamGen{0};
     std::uint64_t ClientReceiveOffset{0};
 };
 
@@ -259,12 +285,16 @@ struct PongMessage {
     std::uint64_t Token{0};
 };
 
-/// How the shell on the agent ended.
+/// How the shell on the agent ended, or why the session cannot continue.
 enum class ESessionEndKind : std::uint8_t {
     /// Value is the exit code.
     Exited = 0,
     /// Value is the number of the signal that ended it.
     Signaled = 1,
+    /// Replay buffer overflowed and the client does not have GRID_CAPABLE
+    /// (ver=2 only, §7). Value is reserved and must be 0. ParseSessionEnd
+    /// rejects this kind when the negotiated version is 1.
+    Overflow = 2,
 };
 
 /// The agent's shell is gone and every byte it wrote has been acknowledged
@@ -276,6 +306,55 @@ struct SessionEndMessage {
 
     [[nodiscard]] friend bool operator==(
         const SessionEndMessage&, const SessionEndMessage&) noexcept = default;
+};
+
+/// Announces an incoming Grid snapshot (ver=2 only, §7).
+///
+/// `flags` bit 0: client must enter alt-screen before rendering the snapshot.
+/// Bits 1–7 are reserved; ParseGridBegin returns MalformedField if any are set.
+struct GridBeginMessage {
+    std::uint8_t Flags{0};
+    /// The new output epoch. Must be strictly greater than the session's
+    /// current epoch; the session state machine enforces this.
+    std::uint32_t StreamGen{0};
+    /// How many bytes of the snapshot payload belong to scrollback history
+    /// (the first ScrollbackLen bytes of the reassembled buffer).
+    std::uint32_t ScrollbackLen{0};
+    /// Total byte count of all GridChunk payloads that follow. Must be
+    /// non-zero and must not exceed SNAPSHOT_MAX_BYTES.
+    std::uint32_t TotalLen{0};
+
+    [[nodiscard]] friend bool operator==(
+        const GridBeginMessage&, const GridBeginMessage&) noexcept = default;
+};
+
+/// One fragment of the snapshot (ver=2 only, §7).
+///
+/// Data is a non-owning view into the buffer the message was parsed from; it
+/// does not outlive it and must not be empty.
+struct GridChunkMessage {
+    /// Byte offset of Data within the reassembled snapshot. The session state
+    /// machine checks that it equals the sum of all prior chunk lengths.
+    std::uint32_t ChunkOffset{0};
+    ByteSpan Data{};
+};
+
+/// Marks the end of the snapshot sequence (ver=2 only, §7). No fields; the
+/// session state machine verifies that received_bytes == total_len before
+/// letting the client apply the snapshot.
+struct GridEndMessage {
+    [[nodiscard]] friend bool operator==(
+        const GridEndMessage&, const GridEndMessage&) noexcept = default;
+};
+
+/// Acknowledgement from the client that it applied the snapshot (ver=2 only,
+/// §7). Signals the agent that output from the new epoch may begin.
+struct GridAppliedMessage {
+    std::uint32_t StreamGen{0};
+
+    [[nodiscard]] friend bool operator==(const GridAppliedMessage&,
+                                         const GridAppliedMessage&) noexcept =
+        default;
 };
 
 /// Reads the byte every frame body opens with.
@@ -314,10 +393,14 @@ struct SessionEndMessage {
 [[nodiscard]] ProtoResult<void> WriteAuthOk(
     ByteWriter& writer, const AuthOkMessage& message) noexcept;
 
+/// Version-dependent: ver=1 reads only c_recv_offset; ver=2 reads stream_gen
+/// then c_recv_offset (§5, ADR-035). Pass the negotiated version from the
+/// handshake; passing PROTOCOL_VERSION_MIN gives the pre-M6 encoding.
 [[nodiscard]] ProtoResult<ResumeMessage> ParseResume(
-    ByteReader& reader) noexcept;
-[[nodiscard]] ProtoResult<void> WriteResume(
-    ByteWriter& writer, const ResumeMessage& message) noexcept;
+    ByteReader& reader, std::uint16_t version) noexcept;
+[[nodiscard]] ProtoResult<void> WriteResume(ByteWriter& writer,
+                                            const ResumeMessage& message,
+                                            std::uint16_t version) noexcept;
 
 [[nodiscard]] ProtoResult<BootstrapOfferMessage> ParseBootstrapOffer(
     ByteReader& reader) noexcept;
@@ -438,9 +521,50 @@ struct HelloPeek {
 /// handshake would.
 [[nodiscard]] ProtoResult<HelloPeek> PeekHello(ByteSpan buffer) noexcept;
 
+/// Version-dependent: ESessionEndKind::Overflow (kind=2) is accepted only at
+/// ver=2; at ver=1 it is MalformedField (§7). Pass the negotiated version from
+/// the handshake; passing PROTOCOL_VERSION_MIN keeps pre-M6 behaviour.
 [[nodiscard]] ProtoResult<SessionEndMessage> ParseSessionEnd(
-    ByteReader& reader) noexcept;
+    ByteReader& reader, std::uint16_t version) noexcept;
 [[nodiscard]] ProtoResult<void> WriteSessionEnd(
-    ByteWriter& writer, const SessionEndMessage& message) noexcept;
+    ByteWriter& writer, const SessionEndMessage& message,
+    std::uint16_t version) noexcept;
+
+/// Grid snapshot messages (ver=2 only, §7).
+///
+/// The session state machine is responsible for the sequencing rules in the
+/// violation table (GridChunk without GridBegin, second GridBegin before
+/// GridEnd, stream_gen ≤ current epoch, etc.). The parse functions here
+/// enforce only what is intrinsic to one message in isolation.
+
+[[nodiscard]] ProtoResult<GridBeginMessage> ParseGridBegin(
+    ByteReader& reader) noexcept;
+[[nodiscard]] ProtoResult<void> WriteGridBegin(
+    ByteWriter& writer, const GridBeginMessage& message) noexcept;
+
+/// Data is a view into the buffer the message was parsed from; it does not
+/// outlive it.
+[[nodiscard]] ProtoResult<GridChunkMessage> ParseGridChunk(
+    ByteReader& reader) noexcept;
+[[nodiscard]] ProtoResult<void> WriteGridChunk(
+    ByteWriter& writer, const GridChunkMessage& message) noexcept;
+
+[[nodiscard]] ProtoResult<GridEndMessage> ParseGridEnd(
+    ByteReader& reader) noexcept;
+[[nodiscard]] ProtoResult<void> WriteGridEnd(
+    ByteWriter& writer, const GridEndMessage& message) noexcept;
+
+[[nodiscard]] ProtoResult<GridAppliedMessage> ParseGridApplied(
+    ByteReader& reader) noexcept;
+[[nodiscard]] ProtoResult<void> WriteGridApplied(
+    ByteWriter& writer, const GridAppliedMessage& message) noexcept;
+
+/// Appends a GRID_CAPABLE TLV (type 0x0003, length 2, value 1) to `out`.
+[[nodiscard]] ProtoResult<std::size_t> AppendGridCapableTlv(
+    MutableByteSpan out) noexcept;
+
+/// Returns true if the TLV list in `tlvs` contains a valid GRID_CAPABLE TLV.
+/// A GRID_CAPABLE TLV must have length 2 and value 1; any other is malformed.
+[[nodiscard]] ProtoResult<bool> HasGridCapableTlv(ByteSpan tlvs) noexcept;
 
 }  // namespace zet::wire
