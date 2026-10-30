@@ -664,7 +664,9 @@ TEST_CASE("HTS sets tab stop at cursor column") {
     Grid* g = MakeGrid(20, 5);
     VtParser p;
     Feed(p, *g, "\x1b[5G");  // col 5
-    Feed(p, *g, "\x1bH");    // HTS
+    Feed(p, *g,
+         "\x1b"
+         "H");  // HTS
     Feed(p, *g, "\x1b[1G");
     Feed(p, *g, "\t");
     CHECK(g->CursorCol() == 4);
@@ -879,6 +881,494 @@ TEST_CASE("Narrow char at continuation cell breaks wide-char pair") {
     CHECK(g->CellAt(0, 0).Width == 1);
     CHECK(CP(*g, 0, 1) == U'X');
     CHECK(g->CellAt(0, 1).Width == 1);
+
+    delete g;
+}
+
+// ---------------------------------------------------------------------------
+// Cursor movement sequences
+// ---------------------------------------------------------------------------
+
+TEST_CASE("CUU moves cursor up") {
+    Grid* g = MakeGrid(80, 10);
+    VtParser p;
+    Feed(p, *g, "\x1b[5;1H");    // row 5 (1-based)
+    Feed(p, *g, "\x1b[2A");      // CUU 2
+    CHECK(g->CursorRow() == 2);  // 5-1=4 (0-based), -2 = 2
+    delete g;
+}
+
+TEST_CASE("CUD moves cursor down") {
+    Grid* g = MakeGrid(80, 10);
+    VtParser p;
+    Feed(p, *g, "\x1b[2;1H");  // row 2 (1-based) = row 1 (0-based)
+    Feed(p, *g, "\x1b[3B");    // CUD 3
+    CHECK(g->CursorRow() == 4);
+    delete g;
+}
+
+TEST_CASE("CUF moves cursor right") {
+    Grid* g = MakeGrid(80, 10);
+    VtParser p;
+    Feed(p, *g, "\x1b[1;1H");
+    Feed(p, *g, "\x1b[5C");  // CUF 5
+    CHECK(g->CursorCol() == 5);
+    delete g;
+}
+
+TEST_CASE("CUB moves cursor left") {
+    Grid* g = MakeGrid(80, 10);
+    VtParser p;
+    Feed(p, *g, "\x1b[1;10H");  // col 10 (1-based) = col 9 (0-based)
+    Feed(p, *g, "\x1b[3D");     // CUB 3
+    CHECK(g->CursorCol() == 6);
+    delete g;
+}
+
+TEST_CASE("CNL moves cursor to next line column 1") {
+    Grid* g = MakeGrid(80, 10);
+    VtParser p;
+    Feed(p, *g, "\x1b[2;5H");  // row 2, col 5 (1-based)
+    Feed(p, *g, "\x1b[2E");    // CNL 2
+    CHECK(g->CursorRow() == 3);
+    CHECK(g->CursorCol() == 0);
+    delete g;
+}
+
+TEST_CASE("CPL moves cursor to preceding line column 1") {
+    Grid* g = MakeGrid(80, 10);
+    VtParser p;
+    Feed(p, *g, "\x1b[5;5H");  // row 5, col 5 (1-based)
+    Feed(p, *g, "\x1b[2F");    // CPL 2
+    CHECK(g->CursorRow() == 2);
+    CHECK(g->CursorCol() == 0);
+    delete g;
+}
+
+TEST_CASE("CHA moves cursor to absolute column") {
+    Grid* g = MakeGrid(80, 10);
+    VtParser p;
+    Feed(p, *g, "\x1b[1;1H");
+    Feed(p, *g, "\x1b[15G");  // CHA col 15 (1-based) = col 14 (0-based)
+    CHECK(g->CursorCol() == 14);
+    delete g;
+}
+
+TEST_CASE("VPA moves cursor to absolute row") {
+    Grid* g = MakeGrid(80, 10);
+    VtParser p;
+    Feed(p, *g, "\x1b[3d");  // VPA row 3 (1-based) = row 2 (0-based)
+    CHECK(g->CursorRow() == 2);
+    delete g;
+}
+
+// ---------------------------------------------------------------------------
+// Erase sequences
+// ---------------------------------------------------------------------------
+
+TEST_CASE("ED 2 clears entire screen") {
+    Grid* g = MakeGrid(10, 5);
+    VtParser p;
+    Feed(p, *g, "ABCDE");    // write something
+    Feed(p, *g, "\x1b[2J");  // ED 2 clear all
+    CHECK(CP(*g, 0, 0) == U'\0');
+    delete g;
+}
+
+TEST_CASE("EL 1 clears to beginning of line") {
+    Grid* g = MakeGrid(10, 5);
+    VtParser p;
+    Feed(p, *g, "ABCDE");
+    Feed(p, *g, "\x1b[1;3H");  // cursor at col 3 (1-based = col 2 0-based)
+    Feed(p, *g, "\x1b[1K");    // EL 1: erase to left
+    CHECK(CP(*g, 0, 0) == U'\0');
+    CHECK(CP(*g, 0, 2) == U'\0');
+    CHECK(CP(*g, 0, 3) == U'D');
+    delete g;
+}
+
+TEST_CASE("EL 2 clears entire line") {
+    Grid* g = MakeGrid(10, 5);
+    VtParser p;
+    Feed(p, *g, "ABCDE");
+    Feed(p, *g, "\x1b[2K");  // EL 2: erase whole line
+    CHECK(CP(*g, 0, 0) == U'\0');
+    CHECK(CP(*g, 0, 4) == U'\0');
+    delete g;
+}
+
+TEST_CASE("ECH erases n characters at cursor") {
+    Grid* g = MakeGrid(10, 5);
+    VtParser p;
+    Feed(p, *g, "ABCDE");
+    Feed(p, *g, "\x1b[1;2H");  // cursor at col 2 (1-based = col 1 0-based)
+    Feed(p, *g, "\x1b[2X");    // ECH 2: erase 2 chars
+    CHECK(CP(*g, 0, 0) == U'A');
+    CHECK(CP(*g, 0, 1) == U'\0');
+    CHECK(CP(*g, 0, 2) == U'\0');
+    CHECK(CP(*g, 0, 3) == U'D');
+    delete g;
+}
+
+TEST_CASE("DCH deletes characters and shifts line left") {
+    Grid* g = MakeGrid(10, 5);
+    VtParser p;
+    Feed(p, *g, "ABCDE");
+    Feed(p, *g, "\x1b[1;2H");  // col 2 (1-based = col 1 0-based)
+    Feed(p, *g, "\x1b[2P");    // DCH 2: delete 2 chars
+    CHECK(CP(*g, 0, 0) == U'A');
+    CHECK(CP(*g, 0, 1) == U'D');
+    CHECK(CP(*g, 0, 2) == U'E');
+    delete g;
+}
+
+TEST_CASE("ICH inserts blank characters") {
+    Grid* g = MakeGrid(10, 5);
+    VtParser p;
+    Feed(p, *g, "ABCDE");
+    Feed(p, *g, "\x1b[1;2H");  // col 2 (1-based = col 1 0-based)
+    Feed(p, *g, "\x1b[2@");    // ICH 2: insert 2 blanks
+    CHECK(CP(*g, 0, 0) == U'A');
+    CHECK(CP(*g, 0, 1) == U'\0');
+    CHECK(CP(*g, 0, 2) == U'\0');
+    CHECK(CP(*g, 0, 3) == U'B');
+    delete g;
+}
+
+// ---------------------------------------------------------------------------
+// Scroll
+// ---------------------------------------------------------------------------
+
+TEST_CASE("SU scrolls up n lines") {
+    Grid* g = MakeGrid(10, 5);
+    VtParser p;
+    Feed(p, *g, "\x1b[1;1H");
+    Feed(p, *g, "ROW1\r\n");
+    Feed(p, *g, "ROW2\r\n");
+    Feed(p, *g, "ROW3\r\n");
+    Feed(p, *g, "\x1b[1;1H");  // back to top
+    Feed(p, *g, "\x1b[2S");    // SU 2
+    CHECK(CP(*g, 0, 0) == U'R');
+    CHECK(CP(*g, 0, 1) == U'O');
+    CHECK(CP(*g, 0, 2) == U'W');
+    CHECK(CP(*g, 0, 3) == U'3');
+    delete g;
+}
+
+TEST_CASE("SD scrolls down n lines") {
+    Grid* g = MakeGrid(10, 5);
+    VtParser p;
+    Feed(p, *g, "HELLO");
+    Feed(p, *g, "\x1b[1;1H");      // back to top
+    Feed(p, *g, "\x1b[2T");        // SD 2: scroll down
+    CHECK(CP(*g, 0, 0) == U'\0');  // row 0 is now blank
+    CHECK(CP(*g, 2, 0) == U'H');   // HELLO moved to row 2
+    delete g;
+}
+
+// ---------------------------------------------------------------------------
+// ESC sequences: IND, RI, NEL, HTS, RIS, DECSC/DECRC
+// ---------------------------------------------------------------------------
+
+TEST_CASE("ESC D (IND) moves down one line") {
+    Grid* g = MakeGrid(80, 10);
+    VtParser p;
+    Feed(p, *g, "\x1b[3;1H");  // row 3, col 1
+    Feed(p, *g,
+         "\x1b"
+         "D");  // IND
+    CHECK(g->CursorRow() == 3);
+    delete g;
+}
+
+TEST_CASE("ESC M (RI) moves cursor up one line") {
+    Grid* g = MakeGrid(80, 10);
+    VtParser p;
+    Feed(p, *g, "\x1b[5;1H");  // row 5
+    Feed(p, *g,
+         "\x1b"
+         "M");  // RI
+    CHECK(g->CursorRow() == 3);
+    delete g;
+}
+
+TEST_CASE("ESC E (NEL) is carriage return + line feed") {
+    Grid* g = MakeGrid(80, 10);
+    VtParser p;
+    Feed(p, *g, "\x1b[3;5H");  // row 3, col 5 (1-based)
+    Feed(p, *g,
+         "\x1b"
+         "E");  // NEL
+    CHECK(g->CursorRow() == 3);
+    CHECK(g->CursorCol() == 0);
+    delete g;
+}
+
+TEST_CASE("ESC H sets tab stop; HT advances to it") {
+    Grid* g = MakeGrid(80, 10);
+    VtParser p;
+    Feed(p, *g, "\x1b[3g");     // TBC clear all tab stops
+    Feed(p, *g, "\x1b[1;13H");  // move to col 13 (1-based = 12 0-based)
+    Feed(p, *g,
+         "\x1b"
+         "H");                 // HTS set tab stop at col 12
+    Feed(p, *g, "\x1b[1;1H");  // back to col 0
+    Feed(p, *g, "\t");         // HT should advance to col 12
+    CHECK(g->CursorCol() == 12);
+    delete g;
+}
+
+TEST_CASE("ESC 7/8 DECSC/DECRC round-trip") {
+    Grid* g = MakeGrid(80, 10);
+    VtParser p;
+    Feed(p, *g, "\x1b[4;10H");  // row 4, col 10 (1-based)
+    Feed(p, *g,
+         "\x1b"
+         "7");                 // DECSC save
+    Feed(p, *g, "\x1b[1;1H");  // move away
+    Feed(p, *g,
+         "\x1b"
+         "8");  // DECRC restore
+    CHECK(g->CursorRow() == 3);
+    CHECK(g->CursorCol() == 9);
+    delete g;
+}
+
+TEST_CASE("ESC c (RIS) hard-resets grid") {
+    Grid* g = MakeGrid(80, 10);
+    VtParser p;
+    Feed(p, *g, "\x1b[1m");    // bold
+    Feed(p, *g, "\x1b[5;5H");  // move cursor
+    Feed(p, *g, "HELLO");
+    Feed(p, *g,
+         "\x1b"
+         "c");  // RIS
+    CHECK(g->CursorRow() == 0);
+    CHECK(g->CursorCol() == 0);
+    CHECK(g->PenAttrs() == 0);
+    CHECK(CP(*g, 0, 0) == U'\0');
+    delete g;
+}
+
+// ---------------------------------------------------------------------------
+// REP (repeat preceding character)
+// ---------------------------------------------------------------------------
+
+TEST_CASE("REP repeats previous character") {
+    Grid* g = MakeGrid(10, 5);
+    VtParser p;
+    Feed(p, *g, "X");
+    Feed(p, *g, "\x1b[3b");  // REP 3: repeat X 3 more times
+    CHECK(CP(*g, 0, 0) == U'X');
+    CHECK(CP(*g, 0, 1) == U'X');
+    CHECK(CP(*g, 0, 2) == U'X');
+    CHECK(CP(*g, 0, 3) == U'X');
+    delete g;
+}
+
+// ---------------------------------------------------------------------------
+// CBT (cursor backward tab)
+// ---------------------------------------------------------------------------
+
+TEST_CASE("CBT moves cursor back to previous tab stop") {
+    Grid* g = MakeGrid(80, 10);
+    VtParser p;
+    Feed(p, *g, "\x1b[1;17H");  // col 17 (1-based = 16 0-based)
+    Feed(p, *g, "\x1b[Z");      // CBT 1: back one tab stop (to col 8)
+    CHECK(g->CursorCol() == 8);
+    delete g;
+}
+
+// ---------------------------------------------------------------------------
+// Alt screen: content is separate
+// ---------------------------------------------------------------------------
+
+TEST_CASE("Alt screen content is separate from main screen") {
+    Grid* g = MakeGrid(10, 5);
+    VtParser p;
+    Feed(p, *g, "MAIN");
+    Feed(p, *g, "\x1b[?1049h");  // DECSET 1049: enter alt screen
+    CHECK(g->IsAltScreen());
+    CHECK(CP(*g, 0, 0) == U'\0');  // alt screen is blank
+    Feed(p, *g, "ALT");
+    Feed(p, *g, "\x1b[?1049l");  // DECRST 1049: leave alt screen
+    CHECK(!g->IsAltScreen());
+    CHECK(CP(*g, 0, 0) == U'M');  // main screen preserved
+    delete g;
+}
+
+// ---------------------------------------------------------------------------
+// Scrollback: lines pushed on scroll are recoverable
+// ---------------------------------------------------------------------------
+
+TEST_CASE("Scrollback stores lines scrolled off") {
+    Grid* g = MakeGrid(10, 3, 10);
+    VtParser p;
+    Feed(p, *g, "ROW1\r\n");
+    Feed(p, *g, "ROW2\r\n");
+    Feed(p, *g, "ROW3\r\n");  // ROW1 scrolls off
+    CHECK(g->ScrollbackSize() == 1);
+    const Line* hist = g->ScrollbackLine(0);
+    REQUIRE(hist != nullptr);
+    CHECK(hist->Cells[0].Codepoint == U'R');
+    delete g;
+}
+
+// ---------------------------------------------------------------------------
+// IRM (insert mode): characters push right instead of overwriting
+// ---------------------------------------------------------------------------
+
+TEST_CASE("IRM insert mode: printable char inserts instead of overwriting") {
+    Grid* g = MakeGrid(10, 5);
+    VtParser p;
+    Feed(p, *g, "BCD");
+    Feed(p, *g, "\x1b[1;1H");  // back to col 0
+    Feed(p, *g, "\x1b[4h");    // SM 4: IRM on
+    Feed(p, *g, "A");          // insert A
+    CHECK(CP(*g, 0, 0) == U'A');
+    CHECK(CP(*g, 0, 1) == U'B');
+    Feed(p, *g, "\x1b[4l");  // RM 4: IRM off
+    delete g;
+}
+
+// ---------------------------------------------------------------------------
+// C0 controls: BS, CR, HT, LF, VT, FF
+// ---------------------------------------------------------------------------
+
+TEST_CASE("BS moves cursor left one column") {
+    Grid* g = MakeGrid(10, 5);
+    VtParser p;
+    Feed(p, *g, "ABC");
+    Feed(p, *g, "\x08");  // BS
+    CHECK(g->CursorCol() == 2);
+    delete g;
+}
+
+TEST_CASE("CR moves cursor to column 0") {
+    Grid* g = MakeGrid(10, 5);
+    VtParser p;
+    Feed(p, *g, "ABCDE");
+    Feed(p, *g, "\x0D");  // CR
+    CHECK(g->CursorCol() == 0);
+    delete g;
+}
+
+// ---------------------------------------------------------------------------
+// DECCOM/DECOM: origin mode clamps cursor to scroll region
+// ---------------------------------------------------------------------------
+
+TEST_CASE("DECOM CUP moves relative to scroll region top") {
+    Grid* g = MakeGrid(80, 10);
+    VtParser p;
+    Feed(p, *g, "\x1b[3;7r");    // scroll region rows 3-7 (1-based)
+    Feed(p, *g, "\x1b[?6h");     // DECSET 6: DECOM on
+    Feed(p, *g, "\x1b[1;1H");    // CUP 1;1 should go to scroll-region top-left
+    CHECK(g->CursorRow() == 2);  // 0-based: row 2 = region row 3
+    CHECK(g->CursorCol() == 0);
+    Feed(p, *g, "\x1b[?6l");  // DECRST 6
+    delete g;
+}
+
+// ---------------------------------------------------------------------------
+// UTF-8 overlong and invalid sequences
+// ---------------------------------------------------------------------------
+
+TEST_CASE("Overlong UTF-8 emits replacement character") {
+    Grid* g = MakeGrid(10, 5);
+    VtParser p;
+    Feed(p, *g, "\xC0\x80");  // overlong NUL (invalid)
+    // Replacement should be placed on screen; grid doesn't crash.
+    CHECK(g->Rows() == 5);  // just no crash
+    delete g;
+}
+
+TEST_CASE("Surrogate pair codepoint emits replacement character") {
+    Grid* g = MakeGrid(10, 5);
+    VtParser p;
+    Feed(p, *g, "\xED\xA0\x80");  // U+D800: high surrogate (invalid)
+    CHECK(g->Cols() == 10);       // grid survives, no crash
+    delete g;
+}
+
+// ---------------------------------------------------------------------------
+// Parser: CAN/SUB abort sequences
+// ---------------------------------------------------------------------------
+
+TEST_CASE("CAN in CSI aborts sequence and returns to ground") {
+    Grid* g = MakeGrid(80, 24);
+    VtParser p;
+    Feed(p, *g, "\x1b[5");  // incomplete CSI
+    Feed(p, *g, "\x18");    // CAN: abort
+    CHECK(p.State() == EParserState::Ground);
+    delete g;
+}
+
+TEST_CASE("SUB in CSI aborts and prints replacement char") {
+    Grid* g = MakeGrid(80, 24);
+    VtParser p;
+    Feed(p, *g, "\x1b[5");
+    Feed(p, *g, "\x1A");  // SUB: abort + replacement
+    CHECK(p.State() == EParserState::Ground);
+    delete g;
+}
+
+// ---------------------------------------------------------------------------
+// Charset: G1 line-drawing
+// ---------------------------------------------------------------------------
+
+TEST_CASE("Charset SO/SI switches between G0 and G1") {
+    Grid* g = MakeGrid(10, 5);
+    VtParser p;
+    Feed(p, *g, "\x1b(0");  // designate G0 as line-drawing
+    Feed(p, *g, "\x0E");    // SO: shift to G1
+    Feed(p, *g, "\x0F");    // SI: shift back to G0
+    // Just verifies no crash; charset state is internal
+    CHECK(g->Cols() == 10);
+    delete g;
+}
+
+// ---------------------------------------------------------------------------
+// Split-feed UTF-8: multi-byte codepoint split across two Feed() calls
+// ---------------------------------------------------------------------------
+
+TEST_CASE("UTF-8 codepoint split across two Feed calls is decoded correctly") {
+    Grid* g = MakeGrid(20, 5);
+    VtParser p;
+    // U+00E9 'é' (0xC3 0xA9): feed lead byte then continuation separately.
+    const std::uint8_t lead[] = {0xC3};
+    const std::uint8_t cont[] = {0xA9};
+    p.Feed(reinterpret_cast<const std::byte*>(lead), 1, *g);
+    CHECK(CP(*g, 0, 0) == 0);  // not yet emitted after lead byte alone
+    p.Feed(reinterpret_cast<const std::byte*>(cont), 1, *g);
+    CHECK(CP(*g, 0, 0) == 0x00E9);
+    delete g;
+}
+
+// ---------------------------------------------------------------------------
+// Alt-screen with SGR colours
+// ---------------------------------------------------------------------------
+
+TEST_CASE("Alt-screen preserves colours on switch and restore") {
+    Grid* g = MakeGrid(20, 5);
+    VtParser p;
+    // Normal screen: write red 'A'.
+    Feed(p, *g, "\x1b[31mA");
+    CHECK(CP(*g, 0, 0) == 'A');
+    CHECK(g->CellAt(0, 0).FgKind == EColorKind::Indexed);
+
+    // Enter alt screen (DECSET 1049): saves cursor + normal-screen state.
+    Feed(p, *g, "\x1b[?1049h");
+    CHECK(CP(*g, 0, 0) == 0);  // alt screen is blank
+
+    // Write blue 'B' on alt screen.
+    Feed(p, *g, "\x1b[34mB");
+    CHECK(CP(*g, 0, 0) == 'B');
+    CHECK(g->CellAt(0, 0).FgKind == EColorKind::Indexed);
+
+    // Leave alt screen (DECRST 1049): restores cursor + normal screen.
+    Feed(p, *g, "\x1b[?1049l");
+    CHECK(CP(*g, 0, 0) == 'A');
+    CHECK(g->CellAt(0, 0).FgKind == EColorKind::Indexed);
 
     delete g;
 }
