@@ -52,6 +52,14 @@ public:
         return RecvOffset_;
     }
 
+    /// Reset the cursor to `offset`. Used when path B (§9 ADR-030) opens a
+    /// new output generation on the agent and the client applies the grid
+    /// snapshot: the agent's output restarts at 0, so the client's receive
+    /// cursor must also reset. The cursor is monotonic within a generation;
+    /// Reset is the only exception, and it is always followed by a new
+    /// GridApplied that tells the agent the client is ready.
+    void Reset(std::uint64_t offset = 0) noexcept { RecvOffset_ = offset; }
+
 private:
     std::uint64_t RecvOffset_{0};
 };

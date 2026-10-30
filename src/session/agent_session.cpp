@@ -138,6 +138,42 @@ std::optional<wire::SessionEndMessage> SessionHandle::EndedWith()
     return Session_->End_;
 }
 
+void SessionHandle::SetGridInfo(std::uint16_t ver, bool gridCapable) noexcept {
+    Session_->LastNegotiatedVer_ = ver;
+    Session_->GridCapable_ = gridCapable;
+    Session_->Streams_.SetOverflowMode(ver, gridCapable);
+}
+
+void SessionHandle::NewGeneration() noexcept {
+    Session_->Streams_.NewGeneration();
+}
+
+std::uint32_t SessionHandle::SessionGen() const noexcept {
+    return Session_->Streams_.SessionGen();
+}
+
+bool SessionHandle::RingOverflowed() const noexcept {
+    return Session_->Streams_.RingOverflowed();
+}
+
+SessionResult<void> SessionHandle::AttachPathB() noexcept {
+    auto generation = Session_->Streams_.AttachPathB();
+    if (!generation) {
+        return std::unexpected(generation.error());
+    }
+    Generation_ = *generation;
+    return {};
+}
+
+void SessionHandle::ReportResize(wire::ResizeMessage size) noexcept {
+    Session_->LastKnownSize_ = size;
+}
+
+std::optional<wire::ResizeMessage> SessionHandle::LastKnownSize()
+    const noexcept {
+    return Session_->LastKnownSize_;
+}
+
 ResumeAttempt::ResumeAttempt(AgentSession* session, crypto::Key auth,
                              crypto::Key seed,
                              std::optional<crypto::Key> previousSeed,

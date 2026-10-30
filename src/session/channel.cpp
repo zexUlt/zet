@@ -98,6 +98,12 @@ ChannelResult<IncomingEvent> Channel::Receive(
 
     switch (type) {
         case wire::EMessageType::Data: {
+            // Client side: Data from the agent while grid reception is in
+            // progress is a protocol violation. §9 violation table.
+            if (Role_ == ERole::Client && GridReceiving_.has_value()) {
+                return std::unexpected(
+                    SessionError{EProtoError::UnexpectedMessage});
+            }
             const auto msg = wire::ParseData(reader);
             if (!msg) {
                 return std::unexpected(SessionError{msg.error()});
@@ -106,8 +112,14 @@ ChannelResult<IncomingEvent> Channel::Receive(
             // means the peer's state is inconsistent, and we should not
             // advance our receive cursor on data from a peer we can no longer
             // trust. CloseConnection per error.hpp / DispositionOf. §9.
-            if (const auto ackRes = SendBuf_.Acknowledge(msg->Ack); !ackRes) {
-                return std::unexpected(SessionError{ackRes.error()});
+            //
+            // Agent side: ignore output ACKs while GridApplied is pending:
+            // these are stale ACKs from the old generation (ring was cleared).
+            if (!GridAwaitingApplied_) {
+                if (const auto ackRes = SendBuf_.Acknowledge(msg->Ack);
+                    !ackRes) {
+                    return std::unexpected(SessionError{ackRes.error()});
+                }
             }
             // A resend may straddle recv_offset: the cursor hands back only
             // the new tail, which starts here and not at msg->Offset.
@@ -132,8 +144,12 @@ ChannelResult<IncomingEvent> Channel::Receive(
             if (!msg) {
                 return std::unexpected(SessionError{msg.error()});
             }
-            if (const auto ackRes = SendBuf_.Acknowledge(msg->Ack); !ackRes) {
-                return std::unexpected(SessionError{ackRes.error()});
+            // Agent side: ignore stale output ACKs while awaiting GridApplied.
+            if (!GridAwaitingApplied_) {
+                if (const auto ackRes = SendBuf_.Acknowledge(msg->Ack);
+                    !ackRes) {
+                    return std::unexpected(SessionError{ackRes.error()});
+                }
             }
             return DeliveredNothing{};
         }
@@ -180,6 +196,135 @@ ChannelResult<IncomingEvent> Channel::Receive(
             return DeliveredSessionEnd{*msg};
         }
 
+            // ── M6 grid messages (§9 ADR-030)
+            // ─────────────────────────────────
+
+        case wire::EMessageType::GridBegin: {
+            // Client side only; agent should never receive this direction.
+            if (Role_ != ERole::Client) {
+                break;
+            }
+            const auto msg = wire::ParseGridBegin(reader);
+            if (!msg) {
+                return std::unexpected(SessionError{msg.error()});
+            }
+            // Violation: second GridBegin before GridEnd.
+            if (GridReceiving_.has_value()) {
+                return std::unexpected(
+                    SessionError{EProtoError::UnexpectedMessage});
+            }
+            // Violation: total_len > SNAPSHOT_MAX_BYTES.
+            if (msg->TotalLen > wire::SNAPSHOT_MAX_BYTES) {
+                return std::unexpected(
+                    SessionError{EProtoError::UnexpectedMessage});
+            }
+            // Violation: scrollback_len > total_len.
+            if (msg->ScrollbackLen > msg->TotalLen) {
+                return std::unexpected(
+                    SessionError{EProtoError::UnexpectedMessage});
+            }
+            // Violation: stream_gen ≤ current agent stream gen (generation
+            // rollback). §9 violation table.
+            if (msg->StreamGen <= AgentStreamGen_) {
+                return std::unexpected(
+                    SessionError{EProtoError::UnexpectedMessage});
+            }
+            GridReceiving_.emplace();
+            GridReceiving_->StreamGen = msg->StreamGen;
+            GridReceiving_->TotalLen = msg->TotalLen;
+            GridReceiving_->ScrollbackLen = msg->ScrollbackLen;
+            GridReceiving_->Flags = msg->Flags;
+            GridReceiving_->BytesReceived = 0;
+            GridReceiving_->Buffer.resize(msg->TotalLen);
+            return DeliveredNothing{};
+        }
+
+        case wire::EMessageType::GridChunk: {
+            if (Role_ != ERole::Client) {
+                break;
+            }
+            const auto msg = wire::ParseGridChunk(reader);
+            if (!msg) {
+                return std::unexpected(SessionError{msg.error()});
+            }
+            // Violation: GridChunk without preceding GridBegin.
+            if (!GridReceiving_.has_value()) {
+                return std::unexpected(
+                    SessionError{EProtoError::UnexpectedMessage});
+            }
+            // Violation: empty chunk data.
+            if (msg->Data.empty()) {
+                return std::unexpected(
+                    SessionError{EProtoError::UnexpectedMessage});
+            }
+            // Violation: chunk_offset does not match running total.
+            if (msg->ChunkOffset != GridReceiving_->BytesReceived) {
+                return std::unexpected(
+                    SessionError{EProtoError::UnexpectedMessage});
+            }
+            // Violation: chunk would exceed total_len.
+            const std::uint32_t remaining =
+                GridReceiving_->TotalLen - GridReceiving_->BytesReceived;
+            if (msg->Data.size() > remaining) {
+                return std::unexpected(
+                    SessionError{EProtoError::UnexpectedMessage});
+            }
+            std::ranges::copy(
+                msg->Data,
+                GridReceiving_->Buffer.begin() +
+                    static_cast<std::ptrdiff_t>(GridReceiving_->BytesReceived));
+            GridReceiving_->BytesReceived +=
+                static_cast<std::uint32_t>(msg->Data.size());
+            return DeliveredNothing{};
+        }
+
+        case wire::EMessageType::GridEnd: {
+            if (Role_ != ERole::Client) {
+                break;
+            }
+            // Violation: GridEnd without GridBegin.
+            if (!GridReceiving_.has_value()) {
+                return std::unexpected(
+                    SessionError{EProtoError::UnexpectedMessage});
+            }
+            // Violation: received_bytes ≠ total_len.
+            if (GridReceiving_->BytesReceived != GridReceiving_->TotalLen) {
+                return std::unexpected(
+                    SessionError{EProtoError::UnexpectedMessage});
+            }
+            // Snapshot validated. Apply atomically: reset input cursor to 0
+            // so Resume carries c_recv_offset = 0 in the new generation. §9.
+            RecvCursor_.Reset(0);
+            LastAckedOffset_ = 0;
+            AckPendingSince_.reset();
+            // Move the completed buffer into GridSnapshotBuf_ so the returned
+            // ByteSpan remains valid until the next Receive/Poll. §9.
+            GridReception rec = std::move(*GridReceiving_);
+            GridReceiving_.reset();
+            GridSnapshotBuf_ = std::move(rec.Buffer);
+            AgentStreamGen_ = rec.StreamGen;
+            return DeliveredGridSnapshot{
+                .Bytes = ByteSpan{GridSnapshotBuf_},
+                .StreamGen = rec.StreamGen,
+                .ScrollbackLen = rec.ScrollbackLen,
+                .Flags = rec.Flags,
+            };
+        }
+
+        case wire::EMessageType::GridApplied: {
+            // Agent side only.
+            if (Role_ != ERole::Agent) {
+                break;
+            }
+            const auto msg = wire::ParseGridApplied(reader);
+            if (!msg) {
+                return std::unexpected(SessionError{msg.error()});
+            }
+            // Clear the grid-in-flight window.
+            GridAwaitingApplied_ = false;
+            return DeliveredGridApplied{.StreamGen = msg->StreamGen};
+        }
+
         // Resume is the one sealed message that is not the channel's: the
         // connection opens it before a Channel exists. The rest are handshake
         // messages, which belong to cleartext frames.
@@ -194,13 +339,6 @@ ChannelResult<IncomingEvent> Channel::Receive(
         case wire::EMessageType::MuxRegistered:
         case wire::EMessageType::MuxRefused:
         case wire::EMessageType::MuxHandoff:
-        // TODO(m6-grid): Grid messages are wired but the session state machine
-        // has no handlers yet. They fall through to UnexpectedMessage until a
-        // follow-up PR adds the grid snapshot state machine.
-        case wire::EMessageType::GridBegin:
-        case wire::EMessageType::GridChunk:
-        case wire::EMessageType::GridEnd:
-        case wire::EMessageType::GridApplied:
             break;
     }
 
@@ -271,10 +409,103 @@ ChannelResult<std::size_t> Channel::PollOnce(Timestamp now, MutableByteSpan out,
         }
     }
 
-    // Priority 2: Data from the send cursor. A Data frame always carries the
+    // Priority 2: (Client) GridApplied — sent before Data so the agent can
+    // unblock its output ring as quickly as possible. §9 ADR-030.
+    if (Role_ == ERole::Client && PendingGridApplied_.has_value()) {
+        // type(1) + stream_gen(4) = 5 bytes.
+        std::array<std::byte, 1 + sizeof(std::uint32_t)> plain{};
+        ByteWriter writer{MutableByteSpan{plain}};
+        if (wire::WriteGridApplied(
+                writer,
+                wire::GridAppliedMessage{.StreamGen = *PendingGridApplied_})) {
+            const auto n = SealInto(out, ByteSpan{plain}.first(writer.Size()));
+            if (!n) {
+                return std::unexpected(n.error());
+            }
+            PendingGridApplied_.reset();
+            return *n;
+        }
+    }
+
+    // Priority 2: (Agent) Grid snapshot emission — GridBegin → GridChunk* →
+    // GridEnd. Sent before Data so the client can apply the new output
+    // generation before more data arrives. §9 ADR-030.
+    if (Role_ == ERole::Agent && GridEmitting_.has_value()) {
+        GridEmission& ge = *GridEmitting_;
+        if (!ge.BeginSent) {
+            // type(1) + flags(1) + stream_gen(4) + scrollback_len(4) +
+            // total_len(4) = 14 bytes.
+            std::array<std::byte, 14> plain{};
+            ByteWriter writer{MutableByteSpan{plain}};
+            if (wire::WriteGridBegin(
+                    writer,
+                    wire::GridBeginMessage{.Flags = ge.Flags,
+                                           .StreamGen = ge.StreamGen,
+                                           .ScrollbackLen = ge.ScrollbackLen,
+                                           .TotalLen = ge.TotalLen})) {
+                const auto n =
+                    SealInto(out, ByteSpan{plain}.first(writer.Size()));
+                if (!n) {
+                    return std::unexpected(n.error());
+                }
+                ge.BeginSent = true;
+                return *n;
+            }
+        }
+        if (ge.BeginSent && ge.BytesSent < ge.TotalLen && !ge.EndSent) {
+            // Stage the GridChunk plaintext in scratch.
+            // plain = type(1) + offset(4) + data(N); max size =
+            // POLL_SCRATCH_SIZE.
+            static constexpr std::size_t CHUNK_HDR = 1 + sizeof(std::uint32_t);
+            if (scratch.size() < CHUNK_HDR + 1) {
+                return std::unexpected(
+                    SessionError{EProtoError::BufferTooSmall});
+            }
+            const std::size_t maxData =
+                std::min(wire::GRID_CHUNK_MAX_DATA, scratch.size() - CHUNK_HDR);
+            const std::size_t remaining = ge.TotalLen - ge.BytesSent;
+            const std::size_t chunkSize = std::min(maxData, remaining);
+            ByteWriter writer{scratch.first(CHUNK_HDR + chunkSize)};
+            const auto enc = wire::WriteGridChunk(
+                writer, wire::GridChunkMessage{.ChunkOffset = ge.BytesSent,
+                                               .Data = ge.Snapshot.subspan(
+                                                   ge.BytesSent, chunkSize)});
+            if (!enc) {
+                return std::unexpected(SessionError{enc.error()});
+            }
+            const auto n =
+                SealInto(out, ByteSpan{scratch}.first(writer.Size()));
+            if (!n) {
+                return std::unexpected(n.error());
+            }
+            ge.BytesSent += static_cast<std::uint32_t>(chunkSize);
+            return *n;
+        }
+        if (ge.BeginSent && ge.BytesSent == ge.TotalLen && !ge.EndSent) {
+            // GridEnd: type(1) = 1 byte.
+            std::array<std::byte, 1> plain{};
+            ByteWriter writer{MutableByteSpan{plain}};
+            if (wire::WriteGridEnd(writer, wire::GridEndMessage{})) {
+                const auto n =
+                    SealInto(out, ByteSpan{plain}.first(writer.Size()));
+                if (!n) {
+                    return std::unexpected(n.error());
+                }
+                ge.EndSent = true;
+                GridEmitting_.reset();
+                GridAwaitingApplied_ = true;
+                return *n;
+            }
+        }
+    }
+
+    // Priority 3: Data from the send cursor. A Data frame always carries the
     // current receive offset as a piggybacked Ack, so sending Data also
     // acknowledges the peer's stream. §9.
-    if (SendBuf_.Unsent() > 0) {
+    //
+    // Agent: suppressed during grid emission window (GridBegin sent but
+    // GridApplied not yet received). §9 ADR-030.
+    if (SendBuf_.Unsent() > 0 && !(Role_ == ERole::Agent && GridInFlight())) {
         // §1: no allocation in the protocol core — scratch is the caller's
         // buffer. Plaintext layout: type(1) | ack:u64be(8) | offset:u64be(8)
         // | payload(N). We write the 17-byte header into scratch[0..17) with
@@ -455,6 +686,34 @@ ChannelResult<std::size_t> Channel::SealInto(MutableByteSpan out,
         return std::unexpected(SessionError{result.error()});
     }
     return *result;
+}
+
+void Channel::StartGrid(ByteSpan snapshot, std::uint8_t flags,
+                        std::uint32_t streamGen,
+                        std::uint32_t scrollbackLen) noexcept {
+    if (Role_ != ERole::Agent) {
+        return;
+    }
+    if (GridEmitting_.has_value() || GridAwaitingApplied_) {
+        // Emission already in progress — caller error, ignore.
+        return;
+    }
+    GridEmitting_.emplace();
+    GridEmitting_->Snapshot = snapshot;
+    GridEmitting_->StreamGen = streamGen;
+    GridEmitting_->TotalLen = static_cast<std::uint32_t>(snapshot.size());
+    GridEmitting_->ScrollbackLen = scrollbackLen;
+    GridEmitting_->Flags = flags;
+    GridEmitting_->BytesSent = 0;
+    GridEmitting_->BeginSent = false;
+    GridEmitting_->EndSent = false;
+}
+
+void Channel::QueueGridApplied(std::uint32_t streamGen) noexcept {
+    if (Role_ != ERole::Client) {
+        return;
+    }
+    PendingGridApplied_ = streamGen;
 }
 
 }  // namespace zet::session

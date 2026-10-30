@@ -64,6 +64,27 @@ inline constexpr Duration KEEPALIVE_INTERVAL = std::chrono::seconds{5};
 /// false cut costs a reconnect, never a byte.
 inline constexpr Duration PEER_SILENCE_TIMEOUT = std::chrono::seconds{15};
 
+/// Path B (§9 ADR-030): how long to wait for the client's first Resize after
+/// Resume before using the last known terminal size for the grid snapshot.
+inline constexpr Duration RESIZE_WAIT_TIMEOUT = std::chrono::seconds{2};
+
+/// Path B cost estimate: approximate scrollback contribution in bytes. §9.
+inline constexpr std::uint32_t SNAPSHOT_SCROLLBACK_BYTES = 512U * 1024U;
+
+/// Path B cost estimate: approximate bytes per terminal cell (truecolor SGR +
+/// codepoint + reset). §9.
+inline constexpr std::uint32_t SNAPSHOT_BYTES_PER_CELL = 35U;
+
+/// Estimate the grid snapshot size to decide path A vs B. §9.
+///
+/// Only for the cost comparison; SNAPSHOT_MAX_BYTES in wire/limits.hpp is the
+/// hard cap. A zero-size terminal returns SNAPSHOT_SCROLLBACK_BYTES, which is
+/// cheaper than always forcing path B.
+[[nodiscard]] inline std::uint32_t SnapshotEstimateBytes(
+    std::uint32_t rows, std::uint32_t cols) noexcept {
+    return rows * cols * SNAPSHOT_BYTES_PER_CELL + SNAPSHOT_SCROLLBACK_BYTES;
+}
+
 /// The two liveness timers of one connection. Zero switches either off,
 /// which only tests and fuzzers want.
 struct LivenessLimits {

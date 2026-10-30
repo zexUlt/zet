@@ -30,7 +30,7 @@ inline constexpr std::uint32_t MAX_HANDSHAKE_FRAME = 4U * 1024U;
 /// ADR-035). PROTOCOL_VERSION_MAX is the default ceiling advertised in Hello;
 /// pass PROTOCOL_VERSION_GRID explicitly to opt into grid-capable negotiation.
 inline constexpr std::uint16_t PROTOCOL_VERSION_MIN = 1;
-inline constexpr std::uint16_t PROTOCOL_VERSION_MAX = 1;
+inline constexpr std::uint16_t PROTOCOL_VERSION_MAX = 2;
 inline constexpr std::uint16_t PROTOCOL_VERSION_GRID = 2;
 
 /// Options one handshake message may carry. The registry is a table in §7 that

@@ -104,11 +104,37 @@ public:
     /// Bytes appended but not yet sent through SendNext (== End - SendNext).
     [[nodiscard]] std::size_t Unsent() const noexcept;
 
+    // ── M6: output stream generations (§9 ADR-030) ─────────────────────────
+
+    /// Mark the ring as overflowed in Resync detach mode. Called by
+    /// StreamState once the ring fills in a GRID_CAPABLE (ver=2) session.
+    /// Invariant: ring_overflowed ⇒ AcceptsWrites = false.
+    void SetRingOverflowed() noexcept { RingOverflowed_ = true; }
+
+    /// True when the ring overflowed in Resync mode; path B is mandatory on
+    /// the next reconnect. Cleared by NewGeneration().
+    [[nodiscard]] bool RingOverflowed() const noexcept {
+        return RingOverflowed_;
+    }
+
+    /// The current output generation. Zero for a fresh session; incremented
+    /// by NewGeneration() on every path B transition.
+    [[nodiscard]] std::uint32_t SessionGen() const noexcept {
+        return SessionGen_;
+    }
+
+    /// Open a new output generation. Increments SessionGen, resets Base, End
+    /// and SendNext to 0, and clears RingOverflowed. Called when path B is
+    /// chosen; input offsets are unaffected.
+    void NewGeneration() noexcept;
+
 private:
     MutableByteSpan Storage_;
     std::uint64_t Base_{0};
     std::uint64_t End_{0};
     std::uint64_t SendNext_{0};
+    bool RingOverflowed_{false};
+    std::uint32_t SessionGen_{0};
 };
 
 }  // namespace zet::session

@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <optional>
 #include <variant>
+#include <vector>
 
 #include "zet/core/bytes.hpp"
 #include "zet/core/time.hpp"
@@ -12,6 +13,7 @@
 #include "zet/session/receive_cursor.hpp"
 #include "zet/session/send_buffer.hpp"
 #include "zet/wire/key_schedule.hpp"
+#include "zet/wire/limits.hpp"
 #include "zet/wire/message.hpp"
 #include "zet/wire/sealed_frame.hpp"
 
@@ -52,8 +54,31 @@ struct DeliveredSessionEnd {
 
 struct DeliveredNothing {};
 
-using IncomingEvent = std::variant<DeliveredData, DeliveredResize,
-                                   DeliveredSessionEnd, DeliveredNothing>;
+/// A complete grid snapshot has been received and validated. Client only.
+///
+/// `Bytes` points into the Channel's internal accumulation buffer and is
+/// valid until the next Receive or Poll call. The caller must apply the
+/// snapshot atomically and then call QueueGridApplied() before returning.
+/// The Channel resets RecvCursor to 0 before delivering this event. §9.
+struct DeliveredGridSnapshot {
+    /// The raw snapshot bytes (scrollback prefix + screen).
+    ByteSpan Bytes;
+    std::uint32_t StreamGen{0};
+    std::uint32_t ScrollbackLen{0};
+    std::uint8_t Flags{0};
+};
+
+/// The client applied the grid snapshot. Agent only.
+///
+/// On receipt, the agent exits the GridAwaitApplied window and begins
+/// sending Data from offset 0 of the new generation. §9.
+struct DeliveredGridApplied {
+    std::uint32_t StreamGen{0};
+};
+
+using IncomingEvent =
+    std::variant<DeliveredData, DeliveredResize, DeliveredSessionEnd,
+                 DeliveredGridSnapshot, DeliveredGridApplied, DeliveredNothing>;
 
 /// The sealed, post-authentication traffic of one connection, symmetric for
 /// client and agent. §9.
@@ -215,6 +240,38 @@ public:
         return UnknownTypeCount_;
     }
 
+    // ── M6: grid snapshot exchange (§9 ADR-030). ───────────────────────────
+
+    /// Agent side: begin emitting a grid snapshot in the current output
+    /// generation. `snapshot` is borrowed; the caller must keep it alive
+    /// until `GridEmissionDone()` returns true. `streamGen` is the new
+    /// session_gen from NewGeneration(); `scrollbackLen` and `flags` come
+    /// from the grid serializer. §9.
+    ///
+    /// No-op if not the agent role or if a grid emission is already in
+    /// progress. Poll will send GridBegin → GridChunk* → GridEnd on
+    /// subsequent calls.
+    void StartGrid(ByteSpan snapshot, std::uint8_t flags,
+                   std::uint32_t streamGen,
+                   std::uint32_t scrollbackLen) noexcept;
+
+    /// True once GridEnd has been sent and the channel is waiting for
+    /// GridApplied from the client.
+    [[nodiscard]] bool GridEmissionDone() const noexcept {
+        return GridAwaitingApplied_;
+    }
+
+    /// True while a grid snapshot is in progress (GridBegin sent but
+    /// GridApplied not yet received). Data is suppressed in this window.
+    [[nodiscard]] bool GridInFlight() const noexcept {
+        return GridEmitting_.has_value() || GridAwaitingApplied_;
+    }
+
+    /// Client side: queue a GridApplied to be sent on the next Poll, after
+    /// the caller has applied the snapshot delivered as DeliveredGridSnapshot.
+    /// `streamGen` is the StreamGen from the snapshot event.
+    void QueueGridApplied(std::uint32_t streamGen) noexcept;
+
 private:
     /// Poll without the liveness bookkeeping around it.
     [[nodiscard]] ChannelResult<std::size_t> PollOnce(
@@ -277,6 +334,43 @@ private:
     /// has gone.
     std::optional<wire::SessionEndMessage> PendingEnd_;
     bool EndSent_{false};
+
+    // ── M6 grid state (§9 ADR-030) ─────────────────────────────────────────
+
+    // ── Agent side (emitting GridBegin → GridChunk* → GridEnd):
+    struct GridEmission {
+        ByteSpan Snapshot;  ///< Borrowed; caller keeps alive.
+        std::uint32_t StreamGen{0};
+        std::uint32_t TotalLen{0};
+        std::uint32_t ScrollbackLen{0};
+        std::uint8_t Flags{0};
+        std::uint32_t BytesSent{0};  ///< Cumulative bytes sent via GridChunk.
+        bool BeginSent{false};
+        bool EndSent{false};
+    };
+    std::optional<GridEmission> GridEmitting_;
+    /// True after GridEnd is sent; cleared when GridApplied is received.
+    bool GridAwaitingApplied_{false};
+
+    // ── Client side (receiving GridBegin → GridChunk* → GridEnd):
+    struct GridReception {
+        std::uint32_t StreamGen{0};
+        std::uint32_t TotalLen{0};
+        std::uint32_t ScrollbackLen{0};
+        std::uint8_t Flags{0};
+        std::uint32_t BytesReceived{0};
+        std::vector<std::byte> Buffer;  ///< Accumulated chunk bytes.
+    };
+    std::optional<GridReception> GridReceiving_;
+    /// The last successfully applied stream generation (validated GridEnd).
+    std::uint32_t AgentStreamGen_{0};
+
+    /// GridApplied to send on the next Poll, set by QueueGridApplied. §9.
+    std::optional<std::uint32_t> PendingGridApplied_;
+
+    /// Completed snapshot buffer, kept alive until the next Receive/Poll so
+    /// that the DeliveredGridSnapshot.Bytes span remains valid. §9.
+    std::vector<std::byte> GridSnapshotBuf_;
 };
 
 }  // namespace zet::session

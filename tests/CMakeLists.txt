@@ -31,6 +31,8 @@ add_executable(zet_tests
     session/receive_cursor_test.cpp
     session/reconnect_property_test.cpp
     session/channel_test.cpp
+    session/grid_violation_test.cpp
+    session/grid_path_property_test.cpp
     wire/armor_test.cpp
     wire/probe_test.cpp
     wire/frame_test.cpp

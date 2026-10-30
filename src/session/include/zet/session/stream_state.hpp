@@ -43,9 +43,15 @@ enum class ESessionState : std::uint8_t {
 /// nobody is there, and §9 has the session end with a reason rather than drop
 /// a byte. On the client the writer is a person at a keyboard, and the answer
 /// to "too much typed while offline" is to stop reading the keyboard.
+///
+/// M6 adds Resync (ADR-035): for a ver=2 + GRID_CAPABLE session the ring
+/// fills and ring_overflowed is set; the pty continues feeding the grid
+/// state machine, but the ring accepts no new bytes. On the next reconnect
+/// the agent must choose path B regardless of replay cost.
 enum class EDetachedOverflow : std::uint8_t {
     Reap,
     Backpressure,
+    Resync,
 };
 
 /// Streams and life cycle, shared by AgentSession and ClientSession.
@@ -101,6 +107,35 @@ public:
     [[nodiscard]] std::uint64_t ReceiveOffset() const noexcept {
         return Input_.RecvOffset();
     }
+
+    // ── M6: path B helpers (§9 ADR-030). ────────────────────────────────────
+
+    /// Update the overflow behavior after a successfully authenticated
+    /// connection. Called from SessionHandle::SetGridInfo once the negotiated
+    /// version and GRID_CAPABLE TLV are known (trusted only post-auth).
+    ///
+    /// ver=2 + gridCapable → Resync mode; anything else keeps Reap.
+    void SetOverflowMode(std::uint16_t negotiatedVer,
+                         bool gridCapable) noexcept;
+
+    /// True when the ring overflowed in Resync mode. Path B is mandatory on
+    /// the next reconnect.
+    [[nodiscard]] bool RingOverflowed() const noexcept {
+        return Output_.RingOverflowed();
+    }
+
+    /// Current output generation. Incremented by NewGeneration().
+    [[nodiscard]] std::uint32_t SessionGen() const noexcept {
+        return Output_.SessionGen();
+    }
+
+    /// Open a new output generation. Delegates to SendBuffer::NewGeneration().
+    void NewGeneration() noexcept { Output_.NewGeneration(); }
+
+    /// Attach for path B: like Attach(), but skips ResetSendNext, because the
+    /// caller will follow immediately with NewGeneration() which clears the
+    /// ring. Returns the connection generation on success.
+    [[nodiscard]] SessionResult<std::uint64_t> AttachPathB() noexcept;
 
     // ── Behind a handle only.
 

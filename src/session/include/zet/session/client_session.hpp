@@ -90,6 +90,13 @@ public:
         return End_;
     }
 
+    /// The last output generation the client has applied (via GridApplied).
+    /// Sent in Resume at ver=2 as stream_gen so the agent knows whether path
+    /// B is needed. §9 ADR-030.
+    [[nodiscard]] std::uint32_t StreamGen() const noexcept {
+        return StreamGen_;
+    }
+
 private:
     friend class ClientSessionHandle;
     friend class ClientResumeAttempt;
@@ -100,6 +107,8 @@ private:
     wire::NonceMemory Seen_;
     StreamState Streams_;
     std::optional<wire::SessionEndMessage> End_;
+    /// See StreamGen(). Zero until the first GridApplied is sent.
+    std::uint32_t StreamGen_{0};
 };
 
 /// Proof that the handshake succeeded with an agent that knows K_auth, and the
@@ -146,6 +155,10 @@ public:
     /// Records the agent's SessionEnd. The first one decides: the agent sends
     /// the same message on every connection.
     void RecordEnd(wire::SessionEndMessage end) noexcept;
+
+    /// Update StreamGen after the client applies a grid snapshot and sends
+    /// GridApplied. The session then sends stream_gen in the next Resume. §9.
+    void SetStreamGen(std::uint32_t gen) noexcept;
 
 private:
     friend class ClientResumeAttempt;

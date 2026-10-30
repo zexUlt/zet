@@ -118,6 +118,17 @@ private:
     wire::NonceMemory Seen_;
     StreamState Streams_;
     std::optional<wire::SessionEndMessage> End_;
+
+    // ── M6 per-session grid state (§9 ADR-035) ─────────────────────────────
+    /// Last negotiated version, updated on every authenticated connection.
+    std::uint16_t LastNegotiatedVer_{wire::PROTOCOL_VERSION_MIN};
+    /// Whether the client in the last authenticated connection sent
+    /// GRID_CAPABLE in Hello (trusted only post-auth). Determines overflow
+    /// mode.
+    bool GridCapable_{false};
+    /// Last known terminal size, updated when a Resize is received while Live.
+    /// Used for the path A/B cost comparison on the next reconnect.
+    std::optional<wire::ResizeMessage> LastKnownSize_;
 };
 
 /// A session as seen before its peer has proved anything.
@@ -194,6 +205,37 @@ public:
     /// See AgentSession::End: what this connection is to send once the
     /// stream is acknowledged, if the shell is gone.
     [[nodiscard]] std::optional<wire::SessionEndMessage> EndedWith()
+        const noexcept;
+
+    // ── M6: grid helpers. Called by AgentConnection after auth. ────────────
+
+    /// Record the negotiated version and GRID_CAPABLE TLV from this
+    /// connection's Hello (trusted only after authentication). Updates the
+    /// session's overflow mode: ver=2 + gridCapable → Resync; otherwise
+    /// keeps Reap. Called once per authenticated connection.
+    void SetGridInfo(std::uint16_t ver, bool gridCapable) noexcept;
+
+    /// Open a new output generation (path B). Delegates to
+    /// StreamState::NewGeneration via the send buffer.
+    void NewGeneration() noexcept;
+
+    /// Current output generation. Used to validate Resume stream_gen and to
+    /// fill GridBegin.
+    [[nodiscard]] std::uint32_t SessionGen() const noexcept;
+
+    /// True when path B is mandatory (ring overflowed in Resync mode).
+    [[nodiscard]] bool RingOverflowed() const noexcept;
+
+    /// Attach for path B, skipping ResetSendNext. The caller must follow
+    /// immediately with NewGeneration() to clear the ring.
+    [[nodiscard]] SessionResult<void> AttachPathB() noexcept;
+
+    /// Report the terminal size from a received Resize. Stored per session
+    /// so the next PumpResume can use it for the path A/B cost comparison.
+    void ReportResize(wire::ResizeMessage size) noexcept;
+
+    /// Last known terminal size, or nullopt if no Resize has been received.
+    [[nodiscard]] std::optional<wire::ResizeMessage> LastKnownSize()
         const noexcept;
 
 private:

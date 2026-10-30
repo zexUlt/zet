@@ -91,6 +91,10 @@ void ClientSessionHandle::RecordEnd(wire::SessionEndMessage end) noexcept {
     }
 }
 
+void ClientSessionHandle::SetStreamGen(std::uint32_t gen) noexcept {
+    Session_->StreamGen_ = gen;
+}
+
 ClientResumeAttempt::ClientResumeAttempt(
     ClientSession& session, wire::HandshakeNonce clientNonce) noexcept
     : Session_(&session),
