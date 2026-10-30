@@ -972,3 +972,241 @@ TEST_CASE_FIXTURE(
 }
 
 }  // namespace
+
+// ── Item 10 property tests ─────────────────────────────────────────────────
+//
+// 1. v1/v2 peer compatibility: a v1 client against a v2-capable agent
+//    (and vice versa) negotiates ver=1 and uses Reap overflow mode.
+// 2. Path B cut-at-AwaitSnapshot: if the connection drops while the agent
+//    awaits a snapshot (before SupplySnapshot is called), the next connection
+//    must also trigger path B (RingOverflowed stays set until NewGeneration).
+
+// ── v1 client / v2-capable agent → ver=1, no Resync ──────────────────────
+
+TEST_CASE_FIXTURE(
+    SodiumFixture,
+    "v1 client against v2-capable agent negotiates ver=1 and uses Reap mode") {
+    const SessionLimits limits = TinyLimits();
+    std::vector<std::byte> agentStorage(limits.DisconnectMax + 256);
+    std::vector<std::byte> clientStorage(limits.ResendMax + 256);
+    // Agent allows ver=2; client caps at ver=1 (ceiling=PROTOCOL_VERSION_MIN).
+    AgentSession agent{DeriveSessionSecrets(MakeKey(11)),
+                       SessionStreams{.Storage = MutableByteSpan{agentStorage},
+                                      .Now = START,
+                                      .Limits = limits}};
+    ClientSession client{
+        DeriveSessionSecrets(MakeKey(11)),
+        SessionStreams{.Storage = MutableByteSpan{clientStorage},
+                       .Now = START,
+                       .Limits = limits}};
+    Space sp;
+    std::uint64_t nonces = 0;
+
+    // First connection: v1 ceiling, no GRID_CAPABLE.
+    AgentConnection ac{MutableByteSpan{sp.AgentFrames}, START,
+                       wire::PROTOCOL_VERSION_GRID};
+    ClientConnection cc{client,
+                        MakeNonce(++nonces),
+                        MutableByteSpan{sp.ClientFrames},
+                        START,
+                        /*gridCapable=*/false,
+                        wire::PROTOCOL_VERSION_MIN};  // v1 ceiling
+    REQUIRE(DriveToLive(ac, cc, agent, sp, START, nonces));
+
+    // Agent must be in Reap overflow mode (not Resync): overflow kills session.
+    // Fill the ring past DisconnectMax → session reaped (Reap mode kills it).
+    ac.Close(START);
+    const std::vector<std::byte> chunk(limits.DisconnectMax / 4 + 1,
+                                       std::byte{0x77});
+    bool reaped = false;
+    for (int i = 0; i < 8; ++i) {
+        auto r = agent.Write(ByteSpan{chunk});
+        if (!r) {
+            reaped = true;
+            break;
+        }
+    }
+    if (!reaped) {
+        reaped = (agent.State() == ESessionState::Reaped);
+    }
+    // Reap mode: session is dead, not in Resync.
+    CHECK(reaped);
+    CHECK(agent.State() == ESessionState::Reaped);
+}
+
+// ── v2 client (gridCapable) against v1-only agent → ver=1, Reap mode ─────
+
+TEST_CASE_FIXTURE(
+    SodiumFixture,
+    "v2 gridCapable client against v1-only agent negotiates ver=1 and keeps "
+    "Reap mode") {
+    const SessionLimits limits = TinyLimits();
+    std::vector<std::byte> agentStorage(limits.DisconnectMax + 256);
+    std::vector<std::byte> clientStorage(limits.ResendMax + 256);
+    // Agent caps at ver=1; client wants ver=2 and advertises GRID_CAPABLE.
+    AgentSession agent{DeriveSessionSecrets(MakeKey(12)),
+                       SessionStreams{.Storage = MutableByteSpan{agentStorage},
+                                      .Now = START,
+                                      .Limits = limits}};
+    ClientSession client{
+        DeriveSessionSecrets(MakeKey(12)),
+        SessionStreams{.Storage = MutableByteSpan{clientStorage},
+                       .Now = START,
+                       .Limits = limits}};
+    Space sp;
+    std::uint64_t nonces = 0;
+
+    // Agent ceiling=1; client ceiling=GRID with gridCapable=true.
+    AgentConnection ac{MutableByteSpan{sp.AgentFrames}, START,
+                       wire::PROTOCOL_VERSION_MIN};  // v1 agent ceiling
+    ClientConnection cc{client,
+                        MakeNonce(++nonces),
+                        MutableByteSpan{sp.ClientFrames},
+                        START,
+                        /*gridCapable=*/true,
+                        wire::PROTOCOL_VERSION_GRID,  // client wants ver=2
+                        MutableByteSpan{sp.SnapshotBuf}};
+    REQUIRE(DriveToLive(ac, cc, agent, sp, START, nonces));
+
+    // ver=1 negotiated → agent stays in Reap mode → overflow kills session.
+    ac.Close(START);
+    const std::vector<std::byte> chunk(limits.DisconnectMax / 4 + 1,
+                                       std::byte{0x88});
+    bool reaped = false;
+    for (int i = 0; i < 8; ++i) {
+        auto r = agent.Write(ByteSpan{chunk});
+        if (!r) {
+            reaped = true;
+            break;
+        }
+    }
+    if (!reaped) {
+        reaped = (agent.State() == ESessionState::Reaped);
+    }
+    CHECK(reaped);
+    // Session is dead (Reap mode), not alive in Resync waiting for path B.
+    CHECK(agent.State() == ESessionState::Reaped);
+}
+
+// ── Path B: connection cut during AwaitSnapshot → next connection is also
+// path B (RingOverflowed survives until NewGeneration) ─────────────────────
+
+TEST_CASE_FIXTURE(
+    SodiumFixture,
+    "path B: connection cut during AwaitSnapshot forces path B on reconnect") {
+    const SessionLimits limits = TinyLimits();
+    std::vector<std::byte> agentStorage(limits.DisconnectMax + 256);
+    std::vector<std::byte> clientStorage(limits.ResendMax + 256);
+    AgentSession agent{DeriveSessionSecrets(MakeKey(13)),
+                       SessionStreams{.Storage = MutableByteSpan{agentStorage},
+                                      .Now = START,
+                                      .Limits = limits}};
+    ClientSession client{
+        DeriveSessionSecrets(MakeKey(13)),
+        SessionStreams{.Storage = MutableByteSpan{clientStorage},
+                       .Now = START,
+                       .Limits = limits}};
+    Space sp;
+    std::uint64_t nonces = 0;
+
+    // First connection: enable Resync mode.
+    {
+        AgentConnection ac0{MutableByteSpan{sp.AgentFrames}, START,
+                            wire::PROTOCOL_VERSION_GRID};
+        ClientConnection cc0{client,
+                             MakeNonce(++nonces),
+                             MutableByteSpan{sp.ClientFrames},
+                             START,
+                             /*gridCapable=*/true,
+                             wire::PROTOCOL_VERSION_GRID,
+                             MutableByteSpan{sp.SnapshotBuf}};
+        REQUIRE(DriveToLive(ac0, cc0, agent, sp, START, nonces));
+        ac0.Close(START);
+    }
+
+    // Overflow the ring → agent enters Resync (session stays Detached, alive).
+    const std::vector<std::byte> chunk(limits.DisconnectMax / 4 + 1,
+                                       std::byte{0xAA});
+    for (int i = 0; i < 8; ++i) {
+        std::ignore = agent.Write(ByteSpan{chunk});
+    }
+    // Resync: session is alive but the ring is full.
+    REQUIRE(agent.State() == ESessionState::Detached);
+
+    // Second connection: drive to AwaitSnapshot, then cut WITHOUT calling
+    // SupplySnapshot.  The agent emits NeedsSnapshot but never gets a snapshot.
+    {
+        AgentConnection ac1{MutableByteSpan{sp.AgentFrames}, START,
+                            wire::PROTOCOL_VERSION_GRID};
+        ClientConnection cc1{client,
+                             MakeNonce(++nonces),
+                             MutableByteSpan{sp.ClientFrames},
+                             START,
+                             /*gridCapable=*/true,
+                             wire::PROTOCOL_VERSION_GRID,
+                             MutableByteSpan{sp.SnapshotBuf}};
+        REQUIRE(DriveToLive(ac1, cc1, agent, sp, START, nonces));
+
+        bool gotNeedsSnapshot = false;
+        for (int i = 0; i < 200 && !gotNeedsSnapshot; ++i) {
+            auto ea = PumpAgent(ac1, sp, START);
+            if (!ea) {
+                break;
+            }
+            if (std::holds_alternative<NeedsSnapshot>(*ea)) {
+                gotNeedsSnapshot = true;
+                // Do NOT call SupplySnapshot: simulate a cut mid-snapshot.
+            } else if (const auto* sf = std::get_if<SendFrame>(&*ea)) {
+                std::ignore = Feed(cc1, sp, sf->Written);
+            }
+            auto ec = PumpClient(cc1, sp, START);
+            if (!ec) {
+                break;
+            }
+            if (const auto* sf = std::get_if<SendFrame>(&*ec)) {
+                std::ignore = Feed(ac1, sp, sf->Written);
+            }
+        }
+        REQUIRE(gotNeedsSnapshot);
+        // Cut the connection without supplying the snapshot.
+        ac1.Close(START);
+    }
+    // Session is still Detached (alive) — RingOverflowed persists because
+    // NewGeneration was never called (no SupplySnapshot).
+    REQUIRE(agent.State() == ESessionState::Detached);
+
+    // Third connection: path B must be mandatory again — NeedsSnapshot fired.
+    AgentConnection ac2{MutableByteSpan{sp.AgentFrames}, START,
+                        wire::PROTOCOL_VERSION_GRID};
+    ClientConnection cc2{client,
+                         MakeNonce(++nonces),
+                         MutableByteSpan{sp.ClientFrames},
+                         START,
+                         /*gridCapable=*/true,
+                         wire::PROTOCOL_VERSION_GRID,
+                         MutableByteSpan{sp.SnapshotBuf}};
+    REQUIRE(DriveToLive(ac2, cc2, agent, sp, START, nonces));
+
+    bool gotNeedsSnapshot2 = false;
+    for (int i = 0; i < 200 && !gotNeedsSnapshot2; ++i) {
+        auto ea = PumpAgent(ac2, sp, START);
+        if (!ea) {
+            break;
+        }
+        if (std::holds_alternative<NeedsSnapshot>(*ea)) {
+            gotNeedsSnapshot2 = true;
+        } else if (const auto* sf = std::get_if<SendFrame>(&*ea)) {
+            std::ignore = Feed(cc2, sp, sf->Written);
+        }
+        auto ec = PumpClient(cc2, sp, START);
+        if (!ec) {
+            break;
+        }
+        if (const auto* sf = std::get_if<SendFrame>(&*ec)) {
+            std::ignore = Feed(ac2, sp, sf->Written);
+        }
+    }
+    CHECK(gotNeedsSnapshot2);
+    ac2.Close(START);
+    cc2.Close(START);
+}
