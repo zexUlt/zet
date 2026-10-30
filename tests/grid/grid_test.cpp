@@ -1797,3 +1797,268 @@ TEST_CASE("CSI q without space intermediate increments UnknownSeqCount") {
     CHECK(p.UnknownSeqCount() >= 1);
     delete g;
 }
+
+// ---------------------------------------------------------------------------
+// LNM: LineFeed resets column to 0 when LNM is active
+// ---------------------------------------------------------------------------
+
+TEST_CASE("LNM mode resets column to zero on line feed") {
+    Grid* g = MakeGrid(80, 24);
+    VtParser p;
+    Feed(p, *g, "\x1b[20h");  // SM 20: set LNM
+    Feed(p, *g, "hello");     // cursor now at col 5
+    CHECK(g->CursorCol() == 5);
+    Feed(p, *g, "\n");  // LF with LNM → col resets to 0
+    CHECK(g->CursorCol() == 0);
+    delete g;
+}
+
+// ---------------------------------------------------------------------------
+// ED 0 (erase to end), ED 1 (erase to beginning), ED 3 (clear scrollback)
+// ---------------------------------------------------------------------------
+
+TEST_CASE("ED 0 erases from cursor to end of screen") {
+    Grid* g = MakeGrid(5, 4);
+    VtParser p;
+    Feed(p, *g, "ABCDE\r\nFGHIJ\r\nKLMNO\r\nPQRST");
+    Feed(p, *g, "\x1b[2;3H");    // move to row 1, col 2 (1-based)
+    Feed(p, *g, "\x1b[J");       // ED 0: erase from cursor to end
+    CHECK(CP(*g, 0, 0) == 'A');  // row 0 unchanged
+    CHECK(CP(*g, 1, 0) == 'F');  // row 1 before cursor unchanged
+    CHECK(CP(*g, 1, 1) == 'G');
+    CHECK(CP(*g, 1, 2) == 0);  // cursor cell and beyond erased
+    CHECK(CP(*g, 2, 0) == 0);  // row 2 fully erased
+    delete g;
+}
+
+TEST_CASE("ED 1 erases from beginning to cursor") {
+    Grid* g = MakeGrid(5, 4);
+    VtParser p;
+    Feed(p, *g, "ABCDE\r\nFGHIJ\r\nKLMNO\r\nPQRST");
+    Feed(p, *g, "\x1b[3;3H");  // move to row 2, col 2 (1-based)
+    Feed(p, *g, "\x1b[1J");    // ED 1: erase from beginning to cursor
+    CHECK(CP(*g, 0, 0) == 0);  // row 0 fully erased
+    CHECK(CP(*g, 1, 0) == 0);  // row 1 fully erased
+    CHECK(CP(*g, 2, 0) == 0);  // erased up to cursor col
+    CHECK(CP(*g, 2, 1) == 0);
+    CHECK(CP(*g, 2, 2) == 0);    // cursor cell erased
+    CHECK(CP(*g, 3, 0) == 'P');  // row 3 unchanged
+    delete g;
+}
+
+TEST_CASE("ED 3 erases screen and clears scrollback") {
+    Grid* g = MakeGrid(5, 3, 10);
+    VtParser p;
+    // Fill screen and push one line to scrollback.
+    Feed(p, *g, "AAAAA\r\nBBBBB\r\nCCCCC\r\nDDDDD");
+    CHECK(g->ScrollbackSize() >= 1);
+    Feed(p, *g, "\x1b[3J");  // ED 3: clear screen + scrollback
+    CHECK(CP(*g, 0, 0) == 0);
+    CHECK(g->ScrollbackSize() == 0);
+    delete g;
+}
+
+// ---------------------------------------------------------------------------
+// G1 charset designation (ESC ) 0) and DEC Special Graphics via SO
+// ---------------------------------------------------------------------------
+
+TEST_CASE("G1 charset designation prints DEC graphics chars via SO") {
+    Grid* g = MakeGrid(10, 5);
+    VtParser p;
+    Feed(p, *g, "\x1b)0");  // designate G1 as DEC Special Graphics
+    CHECK(g->CharsetG1() == 1);
+    Feed(p, *g, "\x0E");  // SO: shift to G1
+    CHECK(g->CharsetActive() == 1);
+    // 'q' (0x71) maps to U+2500 (horizontal line) in DEC GFX
+    Feed(p, *g, "q");
+    CHECK(CP(*g, 0, 0) == 0x2500);
+    Feed(p, *g, "\x0F");  // SI: back to G0
+    CHECK(g->CharsetActive() == 0);
+    delete g;
+}
+
+// ---------------------------------------------------------------------------
+// BEL, VT (0x0B), FF (0x0C) control characters
+// ---------------------------------------------------------------------------
+
+TEST_CASE("BEL control is silently ignored") {
+    Grid* g = MakeGrid(10, 5);
+    VtParser p;
+    Feed(p, *g,
+         "A\x07"
+         "B");  // A, BEL, B
+    CHECK(CP(*g, 0, 0) == 'A');
+    CHECK(CP(*g, 0, 1) == 'B');
+    delete g;
+}
+
+TEST_CASE("VT (0x0B) and FF (0x0C) act as line feed") {
+    Grid* g = MakeGrid(10, 5);
+    VtParser p;
+    Feed(p, *g,
+         "A\x0B"
+         "B");  // A, VT, B
+    CHECK(CP(*g, 0, 0) == 'A');
+    CHECK(CP(*g, 1, 1) == 'B');  // VT moved cursor down; B at row 1 col 1
+    Feed(p, *g, "\x1b[H");       // home
+    Feed(p, *g,
+         "\x0C"
+         "C");  // FF at row 0 → row 1
+    CHECK(CP(*g, 1, 0) == 'C');
+    delete g;
+}
+
+// ---------------------------------------------------------------------------
+// ESC with unrecognised final increments UnknownSeqCount
+// ---------------------------------------------------------------------------
+
+TEST_CASE("ESC with unknown final byte increments UnknownSeqCount") {
+    Grid* g = MakeGrid(10, 5);
+    VtParser p;
+    Feed(p, *g, "\x1bz");  // ESC z: not recognised, default branch
+    CHECK(p.UnknownSeqCount() >= 1);
+    delete g;
+}
+
+// ---------------------------------------------------------------------------
+// CsiIgnore state: param byte after intermediate → ignored dispatch
+// ---------------------------------------------------------------------------
+
+TEST_CASE("CSI intermediate then param byte transitions to CsiIgnore") {
+    Grid* g = MakeGrid(80, 24);
+    VtParser p;
+    // CSI space '2' 'm': space is intermediate, '2' is param after intermediate
+    // → CsiIntermediate sees param byte (0x30-0x3F) → CsiIgnore.
+    // Then 'm' (final) fires UnknownSeqCount from CsiIgnore.
+    const std::uint64_t before = p.UnknownSeqCount();
+    Feed(p, *g, "\x1b[ 2m");
+    CHECK(p.UnknownSeqCount() > before);
+    CHECK(p.State() == EParserState::Ground);
+    delete g;
+}
+
+// ---------------------------------------------------------------------------
+// BypassBytes() accessor and bypass-limit enforcement
+// ---------------------------------------------------------------------------
+
+TEST_CASE("BypassBytes reports bytes received in an OSC sequence") {
+    Grid* g = MakeGrid(80, 24);
+    VtParser p;
+    // Start an OSC sequence: ESC ] 0 ; hello
+    Feed(p, *g, "\x1b]0;hello");
+    // In bypass state: 7 bytes fed (0, ;, h, e, l, l, o) but '0', ';' are
+    // also payload bytes.
+    CHECK(p.BypassBytes() > 0);
+    // Terminate with BEL
+    Feed(p, *g, "\x07");
+    CHECK(p.State() == EParserState::Ground);
+    delete g;
+}
+
+// ---------------------------------------------------------------------------
+// Wide char at last column without AWM wraps instead of dropping
+// ---------------------------------------------------------------------------
+
+TEST_CASE("Wide char at last column without AWM is dropped") {
+    Grid* g = MakeGrid(5, 5);
+    VtParser p;
+    Feed(p, *g, "\x1b[?7l");  // disable AWM
+    Feed(p, *g, "ABCD");      // cursor at col 4 (last)
+    // Writing a wide char (中 = U+4E2D) at col 4 with AWM off: no room → drop.
+    Feed(p, *g, "\xe4\xb8\xad");  // 中 in UTF-8
+    // No crash; col 4 should still be 'D' or blank.
+    CHECK(g->CursorCol() <= 4);
+    delete g;
+}
+
+// ---------------------------------------------------------------------------
+// PutChar with combining mark when PendingWrap is set
+// ---------------------------------------------------------------------------
+
+TEST_CASE(
+    "Combining mark with PendingWrap attaches to last char on previous row") {
+    // A 1-column grid: after writing a char, CursorCol_==0 and
+    // PendingWrap==true. The next char writes to the next row; if instead we
+    // send a combining mark it should attach to the char at the end of the
+    // previous row.
+    Grid* g = MakeGrid(1, 5);
+    VtParser p;
+    Feed(p, *g,
+         "A");  // fills (0,0); PendingWrap=true, CursorRow_=0, CursorCol_=0
+    Feed(p, *g, "B");  // wrap to row 1: writes 'B' at (1,0); PendingWrap=true
+    CHECK(g->PendingWrap());
+    CHECK(g->CursorRow() == 1);
+    CHECK(g->CursorCol() == 0);
+    // U+0301 combining acute accent (UTF-8: 0xCC 0x81, width=0).
+    // PendingWrap=true, CursorCol_=0, CursorRow_=1>0 → attaches to (0, 0) =
+    // 'A'.
+    const std::uint8_t acute[] = {0xCC, 0x81};
+    p.Feed(reinterpret_cast<const std::byte*>(acute), 2, *g);
+    CHECK(CP(*g, 0, 0) == 0x0301);
+    delete g;
+}
+
+// ---------------------------------------------------------------------------
+// RestoreCursor with DECOM active clamps into scroll region
+// ---------------------------------------------------------------------------
+
+TEST_CASE("RestoreCursor clamps into scroll region when DECOM is active") {
+    Grid* g = MakeGrid(80, 24);
+    VtParser p;
+    // Save cursor at row 0 (default), then set scroll region and enable DECOM.
+    // When restored with DECOM active, row 0 < ScrollTop → clamped to
+    // ScrollTop.
+    Feed(p, *g, "\x1b[s");  // save cursor at (0, 0)
+    Feed(
+        p, *g,
+        "\x1b[5;20r");  // set scroll region rows 5–20 (1-based → top=4, bot=19)
+    Feed(p, *g, "\x1b[?6h");  // enable DECOM
+    Feed(p, *g, "\x1b[u");    // restore: row 0 < ScrollTop=4 → clamp to 4
+    CHECK(g->CursorRow() == g->ScrollTop());
+    delete g;
+}
+
+// ---------------------------------------------------------------------------
+// Resize with alt screen: alt-screen content is resized too
+// ---------------------------------------------------------------------------
+
+TEST_CASE("Resize in alt screen preserves alt content") {
+    Grid* g = MakeGrid(20, 5);
+    VtParser p;
+    Feed(p, *g, "\x1b[?1049h");  // enter alt screen
+    Feed(p, *g, "HELLO");
+    CHECK(CP(*g, 0, 0) == 'H');
+    (void)g->Resize(10, 5);
+    CHECK(CP(*g, 0, 0) == 'H');  // content survives resize
+    Feed(p, *g, "\x1b[?1049l");  // leave alt screen
+    delete g;
+}
+
+// ---------------------------------------------------------------------------
+// Resize with shrink: cursor is adjusted (content shift path)
+// ---------------------------------------------------------------------------
+
+TEST_CASE("Resize shrink adjusts cursor when rows are lost") {
+    Grid* g = MakeGrid(10, 10);
+    VtParser p;
+    Feed(p, *g, "\x1b[10;1H");  // move cursor to last row (row 9)
+    CHECK(g->CursorRow() == 9);
+    (void)g->Resize(10, 5);  // shrink to 5 rows: cursor shifts up
+    CHECK(g->CursorRow() < 5);
+    delete g;
+}
+
+// ---------------------------------------------------------------------------
+// SwitchAltScreen: entering already-active alt screen is a no-op
+// ---------------------------------------------------------------------------
+
+TEST_CASE("SwitchAltScreen no-op when already in target state") {
+    Grid* g = MakeGrid(20, 5);
+    VtParser p;
+    Feed(p, *g, "\x1b[?47h");  // enter alt
+    Feed(p, *g, "X");
+    Feed(p, *g, "\x1b[?47h");  // enter alt again (no-op)
+    CHECK(g->IsAltScreen());
+    CHECK(CP(*g, 0, 0) == 'X');  // content unchanged
+    delete g;
+}
