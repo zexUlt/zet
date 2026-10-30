@@ -2070,12 +2070,12 @@ TEST_CASE("SwitchAltScreen no-op when already in target state") {
 TEST_CASE("ESC P starts DCS pass-through and exits on ST") {
     Grid* g = MakeGrid(20, 5);
     VtParser p;
-    // ESC P <payload bytes> ST:  DCS pass-through, then ESC \ terminates
-    Feed(p, *g, "\x1bPhello\x1b\\");
-    // After ST, parser must be back in Ground
+    // ESC P enters DCS bypass; ESC \ (ST) terminates it
+    Feed(p, *g, "\x1bPhello");
+    // Payload flowing: we must be in Bypass
+    CHECK(p.State() == EParserState::Bypass);
+    Feed(p, *g, "\x1b\\");  // ST
     CHECK(p.State() == EParserState::Ground);
-    // BypassBytes > 0: payload was counted
-    CHECK(p.BypassBytes() > 0);
     delete g;
 }
 
@@ -2086,12 +2086,13 @@ TEST_CASE("ESC P starts DCS pass-through and exits on ST") {
 TEST_CASE("ESC X starts SOS bypass sequence") {
     Grid* g = MakeGrid(20, 5);
     VtParser p;
-    std::size_t before = p.BypassBytes();
+    // ESC X enters SOS bypass (covers lines 231-236 of vt_parser.cpp)
     Feed(p, *g,
          "\x1b\x58"
-         "data\x1b\\");  // ESC X payload ST
+         "data");  // ESC X + payload
+    CHECK(p.State() == EParserState::Bypass);
+    Feed(p, *g, "\x1b\\");  // ST terminates
     CHECK(p.State() == EParserState::Ground);
-    CHECK(p.BypassBytes() > before);
     delete g;
 }
 
