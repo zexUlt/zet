@@ -13,21 +13,15 @@
 namespace zet::session {
 namespace {
 
-/// Resume as it is sealed under ver=1: type byte + c_recv_offset.
-///
-/// The session layer keeps speaking ver=1 on the wire until a follow-up PR
-/// threads the negotiated version through HandshakeResult into Connection and
-/// Channel. At that point RESUME_PLAINTEXT_SIZE becomes version-dependent
-/// (ver=2 adds stream_gen:u32be = 4 more bytes) and this constant is removed.
-constexpr std::size_t RESUME_PLAINTEXT_SIZE =
-    sizeof(wire::EMessageType) + sizeof(std::uint64_t);
+/// Maximum Resume plaintext: type byte + c_recv_offset(u64) + stream_gen(u32).
+/// v1 uses only the first 9 bytes; v2 uses all 13.
+constexpr std::size_t RESUME_PLAINTEXT_MAX =
+    sizeof(wire::EMessageType) + sizeof(std::uint64_t) + sizeof(std::uint32_t);
 
-// Guard against accidentally widening the write buffer without updating
-// ParseResume call sites. The struct grew a StreamGen field in M6; the v1
-// encoding still uses only ClientReceiveOffset.
-static_assert(RESUME_PLAINTEXT_SIZE ==
+static_assert(RESUME_PLAINTEXT_MAX ==
               sizeof(wire::EMessageType) +
-                  sizeof(wire::ResumeMessage::ClientReceiveOffset));
+                  sizeof(wire::ResumeMessage::ClientReceiveOffset) +
+                  sizeof(wire::ResumeMessage::StreamGen));
 
 /// What every cleartext frame must say in its epoch byte (§7).
 constexpr std::uint8_t CLEARTEXT_EPOCH = 0;
@@ -269,6 +263,7 @@ ConnectionResult AgentConnection::PumpHandshake(MutableByteSpan out) noexcept {
         // The peer holds K_auth. It has earned frames of full size, and the
         // keys of both seeds §8 may have it on.
         Frames_.RaiseLimit(wire::MAX_FRAME);
+        NegotiatedVersion_ = resumed->Result.Version;
         Current_.emplace(
             MakeDirectionFrames(resumed->Result.Keys, ERole::Agent));
         if (resumed->Result.FallbackKeys) {
@@ -316,9 +311,7 @@ ConnectionResult AgentConnection::PumpResume(Timestamp now, MutableByteSpan out,
     if (!type || *type != wire::EMessageType::Resume) {
         return Refuse(SessionError{EProtoError::UnexpectedMessage});
     }
-    // TODO(m6-session): pass the negotiated version once HandshakeResult
-    // carries it. Until then, always decode the v1 encoding.
-    const auto resume = wire::ParseResume(reader, wire::PROTOCOL_VERSION_MIN);
+    const auto resume = wire::ParseResume(reader, NegotiatedVersion_);
     if (!resume) {
         return Refuse(SessionError{resume.error()});
     }
@@ -336,7 +329,7 @@ ConnectionResult AgentConnection::PumpResume(Timestamp now, MutableByteSpan out,
     Current_.reset();
     Fallback_.reset();
     Channel_.emplace(std::move(chosen), Handle_->Output(), Handle_->Input(),
-                     now, Handle_->Liveness());
+                     now, Handle_->Liveness(), NegotiatedVersion_);
     Stage_ = EStage::Live;
     QueueEnd();
     // Straight on: the resend is waiting, and an Idle here would tell the
@@ -462,17 +455,19 @@ ConnectionResult ClientConnection::SendResume(Timestamp now,
         return Refuse(SessionError{attached.error()});
     }
     Frames_.RaiseLimit(wire::MAX_FRAME);
+    NegotiatedVersion_ = resumed->Result.Version;
 
     DirectionFrames frames =
         MakeDirectionFrames(resumed->Result.Keys, ERole::Client);
-    // The array is exactly as wide as Resume, so the write cannot fail.
-    std::array<std::byte, RESUME_PLAINTEXT_SIZE> plain{};
+    // The array is wide enough for the largest Resume (v2), so no write fails.
+    std::array<std::byte, RESUME_PLAINTEXT_MAX> plain{};
     ByteWriter writer{MutableByteSpan{plain}};
     const wire::ResumeMessage resume{.ClientReceiveOffset =
                                          Session_.ReceiveOffset()};
-    // TODO(m6-session): pass the negotiated version once HandshakeResult
-    // carries it. Until then, always encode the v1 format.
-    std::ignore = wire::WriteResume(writer, resume, wire::PROTOCOL_VERSION_MIN);
+    const auto written = wire::WriteResume(writer, resume, NegotiatedVersion_);
+    if (!written) {
+        return Refuse(SessionError{written.error()});
+    }
     // Sealed with the sealer the Channel then takes over, so its first frame
     // goes out under the next nonce rather than this one again.
     const auto sealed = frames.Sealer.Seal(out, writer.Written());
@@ -480,7 +475,7 @@ ConnectionResult ClientConnection::SendResume(Timestamp now,
         return Refuse(SessionError{sealed.error()});
     }
     Channel_.emplace(std::move(frames), Handle_->Output(), Handle_->Input(),
-                     now, Handle_->Liveness());
+                     now, Handle_->Liveness(), NegotiatedVersion_);
     if (PendingResize_) {
         Channel_->QueueResize(*PendingResize_);
         PendingResize_.reset();

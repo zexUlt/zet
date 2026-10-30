@@ -121,10 +121,12 @@ public:
     /// `sendBuf` and `recvCursor` are borrowed; they must outlive this object.
     /// `now` anchors the epoch timer for time-triggered rekey (§8).
     /// `liveness` sets the keepalive and peer-silence timers; both run from
-    /// `now`.
+    /// `now`. `version` is the negotiated protocol version; it gates ver=2-only
+    /// messages such as SessionEnd Overflow.
     Channel(DirectionFrames frames, SendBuffer& sendBuf,
             ReceiveCursor& recvCursor, Timestamp now,
-            LivenessLimits liveness = {}) noexcept;
+            LivenessLimits liveness = {},
+            std::uint16_t version = wire::PROTOCOL_VERSION_MIN) noexcept;
 
     /// Builds a Channel straight from connection keys, counters at zero.
     ///
@@ -137,7 +139,8 @@ public:
             ReceiveCursor& recvCursor, Timestamp now,
             std::uint64_t frameLimit = wire::MAX_FRAMES_PER_EPOCH,
             std::uint64_t byteLimit = wire::MAX_BYTES_PER_EPOCH,
-            LivenessLimits liveness = {}) noexcept;
+            LivenessLimits liveness = {},
+            std::uint16_t version = wire::PROTOCOL_VERSION_MIN) noexcept;
 
     Channel(const Channel&) = delete;
     Channel& operator=(const Channel&) = delete;
@@ -238,6 +241,7 @@ private:
     wire::FrameOpener Opener_;
     ERole Role_;
     LivenessLimits Liveness_;
+    std::uint16_t Version_{wire::PROTOCOL_VERSION_MIN};
 
     SendBuffer& SendBuf_;
     ReceiveCursor& RecvCursor_;

@@ -47,11 +47,12 @@ DirectionFrames MakeDirectionFrames(const wire::ConnectionKeys& keys,
 
 Channel::Channel(DirectionFrames frames, SendBuffer& sendBuf,
                  ReceiveCursor& recvCursor, Timestamp now,
-                 LivenessLimits liveness) noexcept
+                 LivenessLimits liveness, std::uint16_t version) noexcept
     : Sealer_{std::move(frames.Sealer)},
       Opener_{std::move(frames.Opener)},
       Role_{frames.Role},
       Liveness_{liveness},
+      Version_{version},
       SendBuf_{sendBuf},
       RecvCursor_{recvCursor},
       EpochStart_{now},
@@ -62,9 +63,9 @@ Channel::Channel(DirectionFrames frames, SendBuffer& sendBuf,
 Channel::Channel(const wire::ConnectionKeys& keys, ERole role,
                  SendBuffer& sendBuf, ReceiveCursor& recvCursor, Timestamp now,
                  std::uint64_t frameLimit, std::uint64_t byteLimit,
-                 LivenessLimits liveness) noexcept
+                 LivenessLimits liveness, std::uint16_t version) noexcept
     : Channel(MakeDirectionFrames(keys, role, frameLimit, byteLimit), sendBuf,
-              recvCursor, now, liveness) {}
+              recvCursor, now, liveness, version) {}
 
 ChannelResult<IncomingEvent> Channel::Receive(
     Timestamp now, const wire::FrameView& frame,
@@ -172,11 +173,7 @@ ChannelResult<IncomingEvent> Channel::Receive(
             if (Role_ != ERole::Client) {
                 break;
             }
-            // TODO(m6-session): pass the negotiated version once it is
-            // threaded through to Channel. v1 for now preserves existing
-            // behaviour (Overflow kind=2 is rejected as MalformedField).
-            const auto msg =
-                wire::ParseSessionEnd(reader, wire::PROTOCOL_VERSION_MIN);
+            const auto msg = wire::ParseSessionEnd(reader, Version_);
             if (!msg) {
                 return std::unexpected(SessionError{msg.error()});
             }
@@ -328,10 +325,7 @@ ChannelResult<std::size_t> Channel::PollOnce(Timestamp now, MutableByteSpan out,
     if (PendingEnd_ && !EndSent_ && SendBuf_.Size() == 0) {
         // type(1) + kind(1) + value(1).
         const auto n = SealControl<3>(out, [this](ByteWriter& writer) {
-            // TODO(m6-session): pass the negotiated version once threaded
-            // through to Channel. v1 for now keeps pre-M6 behaviour.
-            return wire::WriteSessionEnd(writer, *PendingEnd_,
-                                         wire::PROTOCOL_VERSION_MIN);
+            return wire::WriteSessionEnd(writer, *PendingEnd_, Version_);
         });
         if (!n) {
             return std::unexpected(n.error());
