@@ -1579,11 +1579,6 @@ TEST_CASE("GridBegin rejects scrollback_len greater than total_len") {
 TEST_CASE("GRID_CHUNK_MAX_DATA is the largest payload GridChunk accepts") {
     // A payload of exactly GRID_CHUNK_MAX_DATA must succeed; one byte more
     // must be rejected by both WriteGridChunk and ParseGridChunk.
-    const GridChunkMessage at_limit{
-        .ChunkOffset = 0,
-        .Data = ByteSpan{}.first(0),  // placeholder; resized below
-    };
-
     std::vector<std::byte> payload_max(GRID_CHUNK_MAX_DATA, std::byte{0xAB});
     std::vector<std::byte> payload_over(GRID_CHUNK_MAX_DATA + 1,
                                         std::byte{0xAB});
