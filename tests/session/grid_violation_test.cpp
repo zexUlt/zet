@@ -211,6 +211,16 @@ std::vector<std::byte> DataRaw(std::uint32_t length) {
     return plain;
 }
 
+/// Build a Data plaintext with a specific piggybacked ack value.
+std::vector<std::byte> DataWithAck(std::uint64_t ack, std::uint32_t length) {
+    std::vector<std::byte> plain(1 + 8 + 8 + length, std::byte{0xBB});
+    ByteWriter w{MutableByteSpan{plain}};
+    REQUIRE(w.WriteU8(static_cast<std::uint8_t>(EMessageType::Data)));
+    REQUIRE(w.WriteU64BE(ack));  // piggybacked ack
+    REQUIRE(w.WriteU64BE(0));    // payload offset
+    return plain;
+}
+
 /// Deliver a complete, valid grid snapshot to `rig.Client` for `totalLen`
 /// bytes, using `streamGen`.  The snapshot content is all-zero bytes.
 /// Returns true and leaves the client ready to send GridApplied.
@@ -448,4 +458,33 @@ TEST_CASE_FIXTURE(
     const auto ev = rig.InjectToClient(ByteSpan{plain});
     REQUIRE_FALSE(ev.has_value());
     CHECK(ev.error().Disposition() == EDisposition::CloseConnection);
+}
+
+// ── Stale-ack guard: acks received during emission are ignored ─────────────
+//
+// After SupplySnapshot resets the ring (NewGeneration), the agent's SendBuf
+// starts at offset 0.  Any Data/Ack from the client that arrives before
+// GridEnd carries a piggybacked ack for the OLD generation; applying it
+// against the new (smaller) End would fire AckBeyondSent.  StartGrid must
+// set GridAwaitingApplied so that acks are silently dropped from the moment
+// the ring is cleared, not only after GridEnd is sent.
+
+TEST_CASE_FIXTURE(
+    SodiumFixture,
+    "stale output-ack during snapshot emission does not AckBeyondSent") {
+    ViolationRig rig;
+
+    // Simulate the state after NewGeneration(): SendBuf is empty (Base=End=0).
+    // Call StartGrid to begin emission — this is what SupplySnapshot does.
+    const std::vector<std::byte> snap(32, std::byte{0xCC});
+    rig.Agent.StartGrid(ByteSpan{snap}, 0, 1, 0);
+
+    // The client now sends a Data frame with piggybacked ack=50.  This is a
+    // stale ack from the previous generation: the new SendBuf has End=0, so
+    // Acknowledge(50) would fire AckBeyondSent without the fix.
+    const auto plain = DataWithAck(50, 4);
+    const auto ev = rig.InjectToAgent(ByteSpan{plain});
+
+    // Must succeed: the stale ack is silently ignored, keyboard is delivered.
+    REQUIRE(ev.has_value());
 }

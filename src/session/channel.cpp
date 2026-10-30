@@ -702,6 +702,10 @@ void Channel::StartGrid(ByteSpan snapshot, std::uint8_t flags,
         return;
     }
     GridEmitting_.emplace();
+    // Guard acks from the start of emission, not just after GridEnd is sent.
+    // NewGeneration() has already cleared SendBuf (End=0); any piggybacked ack
+    // from the old generation would fire AckBeyondSent.  §9 ADR-030.
+    GridAwaitingApplied_ = true;
     GridEmitting_->Snapshot = snapshot;
     GridEmitting_->StreamGen = streamGen;
     GridEmitting_->TotalLen = static_cast<std::uint32_t>(snapshot.size());
