@@ -59,13 +59,9 @@ bool Grid::Allocate(std::uint16_t cols, std::uint16_t rows,
         }
     }
 
-    ExtColors_ = new (std::nothrow) ExtColor[MAX_EXT_CELLS]{};
-    ExtFreeList_ = new (std::nothrow) std::uint16_t[MAX_EXT_CELLS]{};
-    if (!ExtColors_ || !ExtFreeList_) return false;
-
     // Default tab stops every DEFAULT_TAB_INTERVAL columns.
     for (std::uint16_t c = 0; c < cols; c += DEFAULT_TAB_INTERVAL)
-        TabStops_.set(c);
+        TabStops_[c / 64] |= (std::uint64_t{1} << (c % 64));
 
     // Default modes.
     Modes_ = ModeFlag(EMode::Awm) | ModeFlag(EMode::Dectcem);
@@ -74,47 +70,12 @@ bool Grid::Allocate(std::uint16_t cols, std::uint16_t rows,
 }
 
 Grid::~Grid() {
-    // Free ext refs in all cells before destroying arenas.
-    // (Not strictly necessary since we own the pool, but keeps accounting
-    // clean.)
     delete[] MainCells_;
     delete[] AltCells_;
     delete[] MainLines_;
     delete[] AltLines_;
     delete[] HistoryCells_;
     delete[] HistoryLines_;
-    delete[] ExtColors_;
-    delete[] ExtFreeList_;
-}
-
-// ---------------------------------------------------------------------------
-// ExtColor pool
-// ---------------------------------------------------------------------------
-
-std::uint16_t Grid::AllocExt(std::uint8_t r, std::uint8_t g,
-                             std::uint8_t b) noexcept {
-    std::uint16_t idx;
-    if (ExtFreeTop_ > 0) {
-        idx = ExtFreeList_[--ExtFreeTop_];
-    } else if (ExtBump_ < MAX_EXT_CELLS) {
-        idx = static_cast<std::uint16_t>(ExtBump_++);
-    } else {
-        return MAX_EXT_CELLS;  // pool exhausted → degrade
-    }
-    ExtColors_[idx] = {r, g, b};
-    ++ExtCount_;
-    return idx;
-}
-
-void Grid::FreeExt(std::uint16_t idx) noexcept {
-    if (idx >= MAX_EXT_CELLS) return;
-    if (ExtCount_ > 0) --ExtCount_;
-    if (ExtFreeTop_ < MAX_EXT_CELLS) ExtFreeList_[ExtFreeTop_++] = idx;
-}
-
-ExtColor Grid::GetExt(std::uint16_t idx) const noexcept {
-    if (idx >= MAX_EXT_CELLS) return {};
-    return ExtColors_[idx];
 }
 
 // ---------------------------------------------------------------------------
@@ -146,52 +107,26 @@ const Line* Grid::ScrollbackLine(std::uint32_t idx) const noexcept {
 }
 
 void Grid::BlankCell(Cell& cell) noexcept {
-    EraseExtRefs(cell);
     cell = Cell{};
     // A blank cell inherits the current pen bg (for ED/EL erase-to-BG).
     cell.BgKind = PenBgKind_;
-    cell.BgIdx = PenBgIdx_;
-    if (PenBgKind_ == EColorKind::TrueColor) {
-        const std::uint16_t ext =
-            AllocExt(ExtColors_[PenBgExtIdx_].R, ExtColors_[PenBgExtIdx_].G,
-                     ExtColors_[PenBgExtIdx_].B);
-        cell.BgExtIdx = ext;
-        cell.BgKind = (ext != MAX_EXT_CELLS) ? EColorKind::TrueColor
-                                             : EColorKind::Default;
-    }
+    cell.Bg[0] = PenBg_[0];
+    cell.Bg[1] = PenBg_[1];
+    cell.Bg[2] = PenBg_[2];
 }
 
 void Grid::PenToCell(Cell& cell) noexcept {
-    EraseExtRefs(cell);
     cell.Attrs = PenAttrs_;
+    cell.AttrEx = PenAttrEx_;
+    cell.UlIdx = PenUlIdx_;
     cell.FgKind = PenFgKind_;
     cell.BgKind = PenBgKind_;
-    cell.FgIdx = PenFgIdx_;
-    cell.BgIdx = PenBgIdx_;
-    if (PenFgKind_ == EColorKind::TrueColor) {
-        const std::uint16_t ext =
-            AllocExt(ExtColors_[PenFgExtIdx_].R, ExtColors_[PenFgExtIdx_].G,
-                     ExtColors_[PenFgExtIdx_].B);
-        cell.FgExtIdx = ext;
-        cell.FgKind = (ext != MAX_EXT_CELLS) ? EColorKind::TrueColor
-                                             : EColorKind::Indexed;
-        if (ext == MAX_EXT_CELLS) cell.FgIdx = 7;  // degrade to white
-    }
-    if (PenBgKind_ == EColorKind::TrueColor) {
-        const std::uint16_t ext =
-            AllocExt(ExtColors_[PenBgExtIdx_].R, ExtColors_[PenBgExtIdx_].G,
-                     ExtColors_[PenBgExtIdx_].B);
-        cell.BgExtIdx = ext;
-        cell.BgKind = (ext != MAX_EXT_CELLS) ? EColorKind::TrueColor
-                                             : EColorKind::Default;
-    }
-}
-
-void Grid::EraseExtRefs(Cell& cell) noexcept {
-    if (cell.FgKind == EColorKind::TrueColor) FreeExt(cell.FgExtIdx);
-    if (cell.BgKind == EColorKind::TrueColor) FreeExt(cell.BgExtIdx);
-    cell.FgKind = EColorKind::Default;
-    cell.BgKind = EColorKind::Default;
+    cell.Fg[0] = PenFg_[0];
+    cell.Fg[1] = PenFg_[1];
+    cell.Fg[2] = PenFg_[2];
+    cell.Bg[0] = PenBg_[0];
+    cell.Bg[1] = PenBg_[1];
+    cell.Bg[2] = PenBg_[2];
 }
 
 void Grid::ClearLine(Line& line) noexcept {
@@ -227,19 +162,16 @@ void Grid::UpdateCellsUsed(Line& line) noexcept {
 
 void Grid::PushScrollback(std::uint16_t row) noexcept {
     if (!HistoryLines_ || ScrollbackLimit_ == 0) return;
-    // Destination ring slot.
     const std::uint32_t slot =
         (HistoryStart_ + HistorySize_) % ScrollbackLimit_;
     Line& dest = HistoryLines_[slot];
     const Line& src = MainLines_[row];
-    // Copy cells.
     CopyCells(dest.Cells, src.Cells, Cols_);
     dest.CellsUsed = src.CellsUsed;
 
     if (HistorySize_ < ScrollbackLimit_) {
         ++HistorySize_;
     } else {
-        // Ring is full: advance start (oldest entry replaced).
         HistoryStart_ = (HistoryStart_ + 1) % ScrollbackLimit_;
     }
 }
@@ -248,28 +180,22 @@ void Grid::PushScrollback(std::uint16_t row) noexcept {
 // Scroll region helpers
 // ---------------------------------------------------------------------------
 
-void Grid::ScrollRegionUp(std::uint16_t n) noexcept {
-    // Scroll up n lines within [ScrollTop_, ScrollBot_]: top n lines are
-    // pushed into scrollback (only when ScrollTop_ == 0), remaining lines
-    // shift up, bottom n lines cleared.
+void Grid::ScrollRegionUp(std::uint16_t n, bool push) noexcept {
     if (n == 0) return;
     const std::uint16_t regionHeight =
         static_cast<std::uint16_t>(ScrollBot_ - ScrollTop_ + 1);
     if (n > regionHeight) n = regionHeight;
 
-    // Push displaced lines to scrollback if scroll region spans the top.
-    if (ScrollTop_ == 0 && !IsAltScreen()) {
+    if (push && ScrollTop_ == 0 && !IsAltScreen()) {
         for (std::uint16_t i = 0; i < n; ++i) PushScrollback(i);
     }
 
-    // Shift lines up.
     for (std::uint16_t r = ScrollTop_; r + n <= ScrollBot_; ++r) {
         Line& dst = ActiveLine(r);
         const Line& src = ActiveLine(static_cast<std::uint16_t>(r + n));
         CopyCells(dst.Cells, src.Cells, Cols_);
         dst.CellsUsed = src.CellsUsed;
     }
-    // Clear bottom n lines.
     for (std::uint16_t r = static_cast<std::uint16_t>(ScrollBot_ - n + 1);
          r <= ScrollBot_; ++r)
         ClearLine(ActiveLine(r));
@@ -281,14 +207,12 @@ void Grid::ScrollRegionDown(std::uint16_t n) noexcept {
         static_cast<std::uint16_t>(ScrollBot_ - ScrollTop_ + 1);
     if (n > regionHeight) n = regionHeight;
 
-    // Shift lines down.
     for (std::uint16_t r = ScrollBot_; r >= ScrollTop_ + n; --r) {
         Line& dst = ActiveLine(r);
         const Line& src = ActiveLine(static_cast<std::uint16_t>(r - n));
         CopyCells(dst.Cells, src.Cells, Cols_);
         dst.CellsUsed = src.CellsUsed;
     }
-    // Clear top n lines.
     for (std::uint16_t r = ScrollTop_; r < ScrollTop_ + n; ++r)
         ClearLine(ActiveLine(r));
 }
@@ -298,7 +222,21 @@ void Grid::ScrollRegionDown(std::uint16_t n) noexcept {
 // ---------------------------------------------------------------------------
 
 void Grid::PutChar(char32_t cp, int width) noexcept {
-    // Handle pending wrap (auto-wrap mode).
+    // Zero-width combining mark: per design.md §9 GRAPHEME_MAX_CODEPOINTS = 1.
+    // Overwrite the previous cell's codepoint; discard if there is none.
+    if (width == 0) {
+        if (CursorCol_ > 0) {
+            Cell& prev =
+                CellAt(CursorRow_, static_cast<std::uint16_t>(CursorCol_ - 1));
+            if (prev.Codepoint != 0) prev.Codepoint = cp;
+        } else if (PendingWrap_ && CursorRow_ > 0) {
+            Cell& prev = CellAt(static_cast<std::uint16_t>(CursorRow_ - 1),
+                                static_cast<std::uint16_t>(Cols_ - 1));
+            if (prev.Codepoint != 0) prev.Codepoint = cp;
+        }
+        return;
+    }
+
     if (PendingWrap_ && ModeSet(EMode::Awm)) {
         ActiveLine(CursorRow_).CellsUsed = Cols_;
         CursorCol_ = 0;
@@ -306,20 +244,17 @@ void Grid::PutChar(char32_t cp, int width) noexcept {
     }
     PendingWrap_ = false;
 
-    // Insert mode: shift cells right.
     if (ModeSet(EMode::Irm)) {
         InsertChars(static_cast<std::uint16_t>(width));
     }
 
-    // Wide char: check if we'd bleed off the right edge.
     if (width == 2 && CursorCol_ + 1 >= Cols_) {
-        // No room for a wide char: wrap first if AWM, else clamp.
         if (ModeSet(EMode::Awm)) {
             ActiveLine(CursorRow_).CellsUsed = Cols_;
             CursorCol_ = 0;
             LineFeed();
         } else {
-            return;  // can't fit
+            return;
         }
     }
 
@@ -329,15 +264,12 @@ void Grid::PutChar(char32_t cp, int width) noexcept {
     cell.Width = static_cast<std::uint8_t>(width);
 
     if (width == 2 && CursorCol_ + 1 < Cols_) {
-        // Continuation cell.
         Cell& cont =
             CellAt(CursorRow_, static_cast<std::uint16_t>(CursorCol_ + 1));
-        EraseExtRefs(cont);
         cont = Cell{};
         cont.Width = 0;
     }
 
-    // Update CellsUsed.
     const std::uint16_t used = static_cast<std::uint16_t>(CursorCol_ + width);
     if (used > ActiveLine(CursorRow_).CellsUsed)
         ActiveLine(CursorRow_).CellsUsed = (used <= Cols_ ? used : Cols_);
@@ -347,7 +279,6 @@ void Grid::PutChar(char32_t cp, int width) noexcept {
 
     const std::uint16_t advance = static_cast<std::uint16_t>(width);
     if (CursorCol_ + advance >= Cols_) {
-        // Reached the right margin.
         CursorCol_ = static_cast<std::uint16_t>(Cols_ - 1);
         PendingWrap_ = true;
     } else {
@@ -397,7 +328,7 @@ void Grid::HorizontalTab() noexcept {
     PendingWrap_ = false;
     for (std::uint16_t c = static_cast<std::uint16_t>(CursorCol_ + 1);
          c < Cols_; ++c) {
-        if (TabStops_.test(c)) {
+        if ((TabStops_[c / 64] >> (c % 64)) & 1) {
             CursorCol_ = c;
             return;
         }
@@ -485,25 +416,38 @@ void Grid::SaveCursor() noexcept {
     sc.Row = CursorRow_;
     sc.Col = CursorCol_;
     sc.Attrs = PenAttrs_;
+    sc.AttrEx = PenAttrEx_;
+    sc.UlIdx = PenUlIdx_;
     sc.FgKind = PenFgKind_;
     sc.BgKind = PenBgKind_;
-    sc.FgIdx = PenFgIdx_;
-    sc.BgIdx = PenBgIdx_;
-    sc.FgExtIdx = PenFgExtIdx_;
-    sc.BgExtIdx = PenBgExtIdx_;
+    sc.Fg[0] = PenFg_[0];
+    sc.Fg[1] = PenFg_[1];
+    sc.Fg[2] = PenFg_[2];
+    sc.Bg[0] = PenBg_[0];
+    sc.Bg[1] = PenBg_[1];
+    sc.Bg[2] = PenBg_[2];
 }
 
 void Grid::RestoreCursor() noexcept {
     const SavedCursor& sc = IsAltScreen() ? SavedCursorAlt_ : SavedCursorMain_;
     CursorRow_ = ClampRow(sc.Row);
     CursorCol_ = ClampCol(sc.Col);
+    // Under DECOM clamp into the scroll region.
+    if (ModeSet(EMode::Decom)) {
+        if (CursorRow_ < ScrollTop_) CursorRow_ = ScrollTop_;
+        if (CursorRow_ > ScrollBot_) CursorRow_ = ScrollBot_;
+    }
     PenAttrs_ = sc.Attrs;
+    PenAttrEx_ = sc.AttrEx;
+    PenUlIdx_ = sc.UlIdx;
     PenFgKind_ = sc.FgKind;
     PenBgKind_ = sc.BgKind;
-    PenFgIdx_ = sc.FgIdx;
-    PenBgIdx_ = sc.BgIdx;
-    PenFgExtIdx_ = sc.FgExtIdx;
-    PenBgExtIdx_ = sc.BgExtIdx;
+    PenFg_[0] = sc.Fg[0];
+    PenFg_[1] = sc.Fg[1];
+    PenFg_[2] = sc.Fg[2];
+    PenBg_[0] = sc.Bg[0];
+    PenBg_[1] = sc.Bg[1];
+    PenBg_[2] = sc.Bg[2];
     PendingWrap_ = false;
 }
 
@@ -512,20 +456,21 @@ void Grid::RestoreCursor() noexcept {
 // ---------------------------------------------------------------------------
 
 void Grid::EraseInDisplay(std::uint8_t param) noexcept {
+    PendingWrap_ = false;
     switch (param) {
-        case 0:  // Erase from cursor to end of screen.
+        case 0:
             EraseInLine(0);
             for (std::uint16_t r = static_cast<std::uint16_t>(CursorRow_ + 1);
                  r < Rows_; ++r)
                 ClearLine(ActiveLine(r));
             break;
-        case 1:  // Erase from start of screen to cursor.
+        case 1:
             for (std::uint16_t r = 0; r < CursorRow_; ++r)
                 ClearLine(ActiveLine(r));
             EraseInLine(1);
             break;
-        case 2:  // Erase whole screen.
-        case 3:  // Erase whole screen + scrollback (param=3).
+        case 2:
+        case 3:
             for (std::uint16_t r = 0; r < Rows_; ++r) ClearLine(ActiveLine(r));
             if (param == 3 && !IsAltScreen()) {
                 HistoryStart_ = 0;
@@ -538,19 +483,20 @@ void Grid::EraseInDisplay(std::uint8_t param) noexcept {
 }
 
 void Grid::EraseInLine(std::uint8_t param) noexcept {
+    PendingWrap_ = false;
     Line& line = ActiveLine(CursorRow_);
     switch (param) {
-        case 0:  // Erase from cursor to end of line.
+        case 0:
             for (std::uint16_t c = CursorCol_; c < Cols_; ++c)
                 BlankCell(line.Cells[c]);
             UpdateCellsUsed(line);
             break;
-        case 1:  // Erase from start of line to cursor.
+        case 1:
             for (std::uint16_t c = 0; c <= CursorCol_ && c < Cols_; ++c)
                 BlankCell(line.Cells[c]);
             UpdateCellsUsed(line);
             break;
-        case 2:  // Erase whole line.
+        case 2:
             ClearLine(line);
             break;
         default:
@@ -559,6 +505,7 @@ void Grid::EraseInLine(std::uint8_t param) noexcept {
 }
 
 void Grid::EraseChars(std::uint16_t n) noexcept {
+    PendingWrap_ = false;
     if (n == 0) n = 1;
     Line& line = ActiveLine(CursorRow_);
     const std::uint16_t end = (CursorCol_ + n < Cols_)
@@ -569,6 +516,7 @@ void Grid::EraseChars(std::uint16_t n) noexcept {
 }
 
 void Grid::DeleteChars(std::uint16_t n) noexcept {
+    PendingWrap_ = false;
     if (n == 0) n = 1;
     Line& line = ActiveLine(CursorRow_);
     const std::uint16_t avail = static_cast<std::uint16_t>(Cols_ - CursorCol_);
@@ -580,6 +528,7 @@ void Grid::DeleteChars(std::uint16_t n) noexcept {
 }
 
 void Grid::InsertChars(std::uint16_t n) noexcept {
+    PendingWrap_ = false;
     if (n == 0) n = 1;
     Line& line = ActiveLine(CursorRow_);
     const std::uint16_t avail = static_cast<std::uint16_t>(Cols_ - CursorCol_);
@@ -591,10 +540,10 @@ void Grid::InsertChars(std::uint16_t n) noexcept {
 }
 
 void Grid::InsertLines(std::uint16_t n) noexcept {
-    if (!ModeSet(EMode::Decom)) {
-        if (CursorRow_ < ScrollTop_ || CursorRow_ > ScrollBot_) return;
-    }
-    // Temporarily adjust scroll region bottom to ScrollBot_.
+    // IL is only valid when the cursor is within the scroll region,
+    // regardless of DECOM mode.
+    if (CursorRow_ < ScrollTop_ || CursorRow_ > ScrollBot_) return;
+    PendingWrap_ = false;
     const std::uint16_t savedTop = ScrollTop_;
     ScrollTop_ = CursorRow_;
     ScrollRegionDown(n);
@@ -603,12 +552,14 @@ void Grid::InsertLines(std::uint16_t n) noexcept {
 }
 
 void Grid::DeleteLines(std::uint16_t n) noexcept {
-    if (!ModeSet(EMode::Decom)) {
-        if (CursorRow_ < ScrollTop_ || CursorRow_ > ScrollBot_) return;
-    }
+    // DL is only valid when the cursor is within the scroll region,
+    // regardless of DECOM mode.
+    if (CursorRow_ < ScrollTop_ || CursorRow_ > ScrollBot_) return;
+    PendingWrap_ = false;
     const std::uint16_t savedTop = ScrollTop_;
     ScrollTop_ = CursorRow_;
-    ScrollRegionUp(n);
+    // DL must never push lines to scrollback (only LineFeed/Index do that).
+    ScrollRegionUp(n, /*push=*/false);
     ScrollTop_ = savedTop;
     CursorCol_ = 0;
 }
@@ -633,10 +584,9 @@ void Grid::SetScrollRegion(std::uint16_t top1, std::uint16_t bot1) noexcept {
                                  : static_cast<std::uint16_t>(Rows_ - 1);
     if (t >= Rows_) t = 0;
     if (b >= Rows_) b = static_cast<std::uint16_t>(Rows_ - 1);
-    if (t >= b) return;  // invalid
+    if (t >= b) return;
     ScrollTop_ = t;
     ScrollBot_ = b;
-    // DECSTBM moves cursor to home.
     CursorRow_ = ModeSet(EMode::Decom) ? ScrollTop_ : 0;
     CursorCol_ = 0;
     PendingWrap_ = false;
@@ -662,7 +612,6 @@ void Grid::SetMode(std::uint16_t param, bool value) noexcept {
             break;
         case 6:
             apply(EMode::Decom);
-            // Move cursor to home when DECOM changes.
             CursorRow_ = value ? ScrollTop_ : 0;
             CursorCol_ = 0;
             PendingWrap_ = false;
@@ -719,14 +668,18 @@ void Grid::SetMode(std::uint16_t param, bool value) noexcept {
 // ---------------------------------------------------------------------------
 
 void Grid::ApplySgr(const std::uint16_t* params, std::size_t count) noexcept {
-    if (count == 0) {  // SGR 0 = reset all
+    auto resetPen = [&]() noexcept {
         PenAttrs_ = 0;
+        PenAttrEx_ = 0;
+        PenUlIdx_ = 0;
         PenFgKind_ = EColorKind::Default;
         PenBgKind_ = EColorKind::Default;
-        PenFgIdx_ = 0;
-        PenBgIdx_ = 0;
-        PenFgExtIdx_ = 0;
-        PenBgExtIdx_ = 0;
+        PenFg_[0] = PenFg_[1] = PenFg_[2] = 0;
+        PenBg_[0] = PenBg_[1] = PenBg_[2] = 0;
+    };
+
+    if (count == 0) {
+        resetPen();
         return;
     }
 
@@ -734,57 +687,54 @@ void Grid::ApplySgr(const std::uint16_t* params, std::size_t count) noexcept {
         const std::uint16_t p = params[i];
         switch (p) {
             case 0:
-                PenAttrs_ = 0;
-                PenFgKind_ = EColorKind::Default;
-                PenBgKind_ = EColorKind::Default;
+                resetPen();
                 break;
             case 1:
-                PenAttrs_ |= kAttrBold;
+                PenAttrs_ |= Bold;
                 break;
             case 2:
-                PenAttrs_ |= kAttrDim;
+                PenAttrs_ |= Dim;
                 break;
             case 3:
-                PenAttrs_ |= kAttrItalic;
+                PenAttrs_ |= Italic;
                 break;
             case 4:
-                PenAttrs_ |= kAttrUnderline;
+                PenAttrs_ |= Underline;
                 break;
             case 5:
-                PenAttrs_ |= kAttrBlink;
+                PenAttrs_ |= Blink;
                 break;
             case 7:
-                PenAttrs_ |= kAttrReverse;
+                PenAttrs_ |= Inverse;
                 break;
             case 8:
-                PenAttrs_ |= kAttrInvisible;
+                PenAttrs_ |= Invisible;
                 break;
             case 9:
-                PenAttrs_ |= kAttrStrikethrough;
+                PenAttrs_ |= StrikeThrough;
                 break;
             case 22:
-                PenAttrs_ &= static_cast<std::uint8_t>(~(kAttrBold | kAttrDim));
+                PenAttrs_ &= static_cast<std::uint8_t>(~(Bold | Dim));
                 break;
             case 23:
-                PenAttrs_ &= static_cast<std::uint8_t>(~kAttrItalic);
+                PenAttrs_ &= static_cast<std::uint8_t>(~Italic);
                 break;
             case 24:
-                PenAttrs_ &= static_cast<std::uint8_t>(~kAttrUnderline);
+                PenAttrs_ &= static_cast<std::uint8_t>(~Underline);
                 break;
             case 25:
-                PenAttrs_ &= static_cast<std::uint8_t>(~kAttrBlink);
+                PenAttrs_ &= static_cast<std::uint8_t>(~Blink);
                 break;
             case 27:
-                PenAttrs_ &= static_cast<std::uint8_t>(~kAttrReverse);
+                PenAttrs_ &= static_cast<std::uint8_t>(~Inverse);
                 break;
             case 28:
-                PenAttrs_ &= static_cast<std::uint8_t>(~kAttrInvisible);
+                PenAttrs_ &= static_cast<std::uint8_t>(~Invisible);
                 break;
             case 29:
-                PenAttrs_ &= static_cast<std::uint8_t>(~kAttrStrikethrough);
+                PenAttrs_ &= static_cast<std::uint8_t>(~StrikeThrough);
                 break;
 
-            // Standard 8 fg colors (30–37).
             case 30:
             case 31:
             case 32:
@@ -794,37 +744,29 @@ void Grid::ApplySgr(const std::uint16_t* params, std::size_t count) noexcept {
             case 36:
             case 37:
                 PenFgKind_ = EColorKind::Indexed;
-                PenFgIdx_ = static_cast<std::uint8_t>(p - 30);
+                PenFg_[0] = static_cast<std::uint8_t>(p - 30);
+                PenFg_[1] = PenFg_[2] = 0;
                 break;
-            case 38: {  // Extended fg color.
+            case 38: {
                 if (i + 2 < count && params[i + 1] == 5) {
-                    // 256-color: 38;5;n
                     PenFgKind_ = EColorKind::Indexed;
-                    PenFgIdx_ = static_cast<std::uint8_t>(params[i + 2]);
+                    PenFg_[0] = static_cast<std::uint8_t>(params[i + 2]);
+                    PenFg_[1] = PenFg_[2] = 0;
                     i += 2;
                 } else if (i + 4 < count && params[i + 1] == 2) {
-                    // Truecolor: 38;2;r;g;b
-                    const std::uint16_t ext = AllocExt(
-                        static_cast<std::uint8_t>(params[i + 2] & 0xFF),
-                        static_cast<std::uint8_t>(params[i + 3] & 0xFF),
-                        static_cast<std::uint8_t>(params[i + 4] & 0xFF));
-                    if (ext != MAX_EXT_CELLS) {
-                        PenFgKind_ = EColorKind::TrueColor;
-                        PenFgExtIdx_ = ext;
-                    } else {
-                        // Degrade: pick index 7 (white).
-                        PenFgKind_ = EColorKind::Indexed;
-                        PenFgIdx_ = 7;
-                    }
+                    PenFgKind_ = EColorKind::TrueColor;
+                    PenFg_[0] = static_cast<std::uint8_t>(params[i + 2] & 0xFF);
+                    PenFg_[1] = static_cast<std::uint8_t>(params[i + 3] & 0xFF);
+                    PenFg_[2] = static_cast<std::uint8_t>(params[i + 4] & 0xFF);
                     i += 4;
                 }
                 break;
             }
-            case 39:  // Default fg.
+            case 39:
                 PenFgKind_ = EColorKind::Default;
+                PenFg_[0] = PenFg_[1] = PenFg_[2] = 0;
                 break;
 
-            // Standard 8 bg colors (40–47).
             case 40:
             case 41:
             case 42:
@@ -834,33 +776,29 @@ void Grid::ApplySgr(const std::uint16_t* params, std::size_t count) noexcept {
             case 46:
             case 47:
                 PenBgKind_ = EColorKind::Indexed;
-                PenBgIdx_ = static_cast<std::uint8_t>(p - 40);
+                PenBg_[0] = static_cast<std::uint8_t>(p - 40);
+                PenBg_[1] = PenBg_[2] = 0;
                 break;
-            case 48: {  // Extended bg color.
+            case 48: {
                 if (i + 2 < count && params[i + 1] == 5) {
                     PenBgKind_ = EColorKind::Indexed;
-                    PenBgIdx_ = static_cast<std::uint8_t>(params[i + 2]);
+                    PenBg_[0] = static_cast<std::uint8_t>(params[i + 2]);
+                    PenBg_[1] = PenBg_[2] = 0;
                     i += 2;
                 } else if (i + 4 < count && params[i + 1] == 2) {
-                    const std::uint16_t ext = AllocExt(
-                        static_cast<std::uint8_t>(params[i + 2] & 0xFF),
-                        static_cast<std::uint8_t>(params[i + 3] & 0xFF),
-                        static_cast<std::uint8_t>(params[i + 4] & 0xFF));
-                    if (ext != MAX_EXT_CELLS) {
-                        PenBgKind_ = EColorKind::TrueColor;
-                        PenBgExtIdx_ = ext;
-                    } else {
-                        PenBgKind_ = EColorKind::Default;
-                    }
+                    PenBgKind_ = EColorKind::TrueColor;
+                    PenBg_[0] = static_cast<std::uint8_t>(params[i + 2] & 0xFF);
+                    PenBg_[1] = static_cast<std::uint8_t>(params[i + 3] & 0xFF);
+                    PenBg_[2] = static_cast<std::uint8_t>(params[i + 4] & 0xFF);
                     i += 4;
                 }
                 break;
             }
-            case 49:  // Default bg.
+            case 49:
                 PenBgKind_ = EColorKind::Default;
+                PenBg_[0] = PenBg_[1] = PenBg_[2] = 0;
                 break;
 
-            // Bright fg (90–97).
             case 90:
             case 91:
             case 92:
@@ -870,9 +808,9 @@ void Grid::ApplySgr(const std::uint16_t* params, std::size_t count) noexcept {
             case 96:
             case 97:
                 PenFgKind_ = EColorKind::Indexed;
-                PenFgIdx_ = static_cast<std::uint8_t>(p - 90 + 8);
+                PenFg_[0] = static_cast<std::uint8_t>(p - 90 + 8);
+                PenFg_[1] = PenFg_[2] = 0;
                 break;
-            // Bright bg (100–107).
             case 100:
             case 101:
             case 102:
@@ -882,7 +820,8 @@ void Grid::ApplySgr(const std::uint16_t* params, std::size_t count) noexcept {
             case 106:
             case 107:
                 PenBgKind_ = EColorKind::Indexed;
-                PenBgIdx_ = static_cast<std::uint8_t>(p - 100 + 8);
+                PenBg_[0] = static_cast<std::uint8_t>(p - 100 + 8);
+                PenBg_[1] = PenBg_[2] = 0;
                 break;
 
             default:
@@ -897,12 +836,13 @@ void Grid::ApplySgr(const std::uint16_t* params, std::size_t count) noexcept {
 // ---------------------------------------------------------------------------
 
 void Grid::Reset(bool hard) noexcept {
-    // Soft reset (DECSTR) resets a subset of state.
     PenAttrs_ = 0;
+    PenAttrEx_ = 0;
+    PenUlIdx_ = 0;
     PenFgKind_ = EColorKind::Default;
     PenBgKind_ = EColorKind::Default;
-    PenFgIdx_ = 0;
-    PenBgIdx_ = 0;
+    PenFg_[0] = PenFg_[1] = PenFg_[2] = 0;
+    PenBg_[0] = PenBg_[1] = PenBg_[2] = 0;
     ScrollTop_ = 0;
     ScrollBot_ = static_cast<std::uint16_t>(Rows_ - 1);
     CursorRow_ = 0;
@@ -911,21 +851,18 @@ void Grid::Reset(bool hard) noexcept {
     CharsetActive_ = 0;
     CharsetG0_ = 0;
     CharsetG1_ = 0;
-
-    // Restore default modes.
     Modes_ = ModeFlag(EMode::Awm) | ModeFlag(EMode::Dectcem);
 
     if (hard) {
-        // Full reset: clear screens, reset tab stops, scrollback.
         for (std::uint16_t r = 0; r < Rows_; ++r) {
             ClearLine(MainLines_[r]);
             ClearLine(AltLines_[r]);
         }
         HistoryStart_ = 0;
         HistorySize_ = 0;
-        TabStops_.reset();
+        memset(TabStops_, 0, sizeof(TabStops_));
         for (std::uint16_t c = 0; c < Cols_; c += DEFAULT_TAB_INTERVAL)
-            TabStops_.set(c);
+            TabStops_[c / 64] |= (std::uint64_t{1} << (c % 64));
         SavedCursorMain_ = {};
         SavedCursorAlt_ = {};
         CursorStyle_ = 0;
@@ -939,21 +876,23 @@ void Grid::Reset(bool hard) noexcept {
 void Grid::SetCursorStyle(std::uint8_t style) noexcept { CursorStyle_ = style; }
 
 void Grid::SetTabStop() noexcept {
-    if (CursorCol_ < Cols_) TabStops_.set(CursorCol_);
+    if (CursorCol_ < Cols_)
+        TabStops_[CursorCol_ / 64] |= (std::uint64_t{1} << (CursorCol_ % 64));
 }
 
 void Grid::ClearTabStop(std::uint8_t param) noexcept {
     if (param == 0) {
-        if (CursorCol_ < Cols_) TabStops_.reset(CursorCol_);
+        if (CursorCol_ < Cols_)
+            TabStops_[CursorCol_ / 64] &=
+                ~(std::uint64_t{1} << (CursorCol_ % 64));
     } else if (param == 3) {
-        TabStops_.reset();
+        memset(TabStops_, 0, sizeof(TabStops_));
     }
 }
 
 void Grid::ShiftCharset(bool out) noexcept { CharsetActive_ = out ? 1 : 0; }
 
 void Grid::DesignateCharset(std::uint8_t g, std::uint8_t designator) noexcept {
-    // B = ASCII/Latin, 0 = DEC Special Graphics, A = UK, U = null mapping
     const std::uint8_t mapped = (designator == '0') ? 1 : 0;
     if (g == 0)
         CharsetG0_ = mapped;
@@ -966,7 +905,6 @@ void Grid::SwitchAltScreen(bool enter) noexcept {
     if (enter == already) return;
 
     if (enter) {
-        // Save main cursor state, clear alt screen.
         SaveCursor();
         Modes_ |= ModeFlag(EMode::AltScreen);
         for (std::uint16_t r = 0; r < Rows_; ++r) ClearLine(AltLines_[r]);
@@ -974,7 +912,6 @@ void Grid::SwitchAltScreen(bool enter) noexcept {
         CursorCol_ = 0;
         PendingWrap_ = false;
     } else {
-        // Restore main cursor state.
         Modes_ &= ~ModeFlag(EMode::AltScreen);
         RestoreCursor();
     }
@@ -988,45 +925,32 @@ void Grid::Resize(std::uint16_t newCols, std::uint16_t newRows) noexcept {
 
     if (newCols == Cols_ && newRows == Rows_) return;
 
-    // Clamp cursor to new bounds.
     if (CursorRow_ >= newRows)
         CursorRow_ = static_cast<std::uint16_t>(newRows - 1);
     if (CursorCol_ >= newCols)
         CursorCol_ = static_cast<std::uint16_t>(newCols - 1);
     PendingWrap_ = false;
 
-    // Truncate lines to new column count (design.md §9: no reflow).
     const std::uint16_t clampCols = newCols < Cols_ ? newCols : Cols_;
-    auto truncateBuffer = [&](Line* lines, std::uint16_t rows) noexcept {
-        for (std::uint16_t r = 0; r < rows; ++r) {
-            Line& line = lines[r];
-            if (newCols < Cols_) {
-                // Free any truecolor refs in truncated cells.
-                for (std::uint16_t c = newCols; c < Cols_; ++c)
-                    EraseExtRefs(line.Cells[c]);
-            }
-            if (line.CellsUsed > clampCols) line.CellsUsed = clampCols;
-        }
-    };
     const std::uint16_t oldRows = Rows_;
-    truncateBuffer(MainLines_, oldRows);
-    truncateBuffer(AltLines_, oldRows);
+    auto truncateCellsUsed = [&](Line* lines, std::uint16_t rows) noexcept {
+        for (std::uint16_t r = 0; r < rows; ++r)
+            if (lines[r].CellsUsed > clampCols) lines[r].CellsUsed = clampCols;
+    };
+    truncateCellsUsed(MainLines_, oldRows);
+    truncateCellsUsed(AltLines_, oldRows);
 
-    // Resize arenas (allocate new, copy, delete old).
     const std::size_t newScreen = static_cast<std::size_t>(newCols) * newRows;
-
     Cell* newMain = new (std::nothrow) Cell[newScreen]{};
     Cell* newAlt = new (std::nothrow) Cell[newScreen]{};
     Line* newMainLines = new (std::nothrow) Line[newRows]{};
     Line* newAltLines = new (std::nothrow) Line[newRows]{};
 
     if (!newMain || !newAlt || !newMainLines || !newAltLines) {
-        // Allocation failed: keep original arenas, update dims as much as safe.
         delete[] newMain;
         delete[] newAlt;
         delete[] newMainLines;
         delete[] newAltLines;
-        // Still clamp cursor.
         Cols_ = (newCols < Cols_) ? newCols : Cols_;
         Rows_ = (newRows < Rows_) ? newRows : Rows_;
         ScrollTop_ = 0;
@@ -1034,56 +958,48 @@ void Grid::Resize(std::uint16_t newCols, std::uint16_t newRows) noexcept {
         return;
     }
 
-    // Wire up new line arrays.
     for (std::uint16_t r = 0; r < newRows; ++r) {
         newMainLines[r].Cells = newMain + static_cast<std::size_t>(r) * newCols;
         newAltLines[r].Cells = newAlt + static_cast<std::size_t>(r) * newCols;
     }
 
-    // Copy existing cells (up to min(rows), min(cols)).
     const std::uint16_t copyRows = newRows < oldRows ? newRows : oldRows;
     for (std::uint16_t r = 0; r < copyRows; ++r) {
-        const std::uint16_t copyCols = clampCols;
-        CopyCells(newMainLines[r].Cells, MainLines_[r].Cells, copyCols);
-        CopyCells(newAltLines[r].Cells, AltLines_[r].Cells, copyCols);
-        newMainLines[r].CellsUsed = MainLines_[r].CellsUsed;
-        newAltLines[r].CellsUsed = AltLines_[r].CellsUsed;
-        if (clampCols > newCols)
-            newMainLines[r].CellsUsed = (newMainLines[r].CellsUsed < newCols)
-                                            ? newMainLines[r].CellsUsed
-                                            : newCols;
+        CopyCells(newMainLines[r].Cells, MainLines_[r].Cells, clampCols);
+        CopyCells(newAltLines[r].Cells, AltLines_[r].Cells, clampCols);
+        newMainLines[r].CellsUsed = MainLines_[r].CellsUsed < newCols
+                                        ? MainLines_[r].CellsUsed
+                                        : newCols;
+        newAltLines[r].CellsUsed =
+            AltLines_[r].CellsUsed < newCols ? AltLines_[r].CellsUsed : newCols;
     }
 
-    // Replace arenas.
     delete[] MainCells_;
     delete[] AltCells_;
     delete[] MainLines_;
     delete[] AltLines_;
-
     MainCells_ = newMain;
     AltCells_ = newAlt;
     MainLines_ = newMainLines;
     AltLines_ = newAltLines;
 
-    // Resize scrollback ring if cols changed.
     if (newCols != Cols_ && HistoryLines_) {
         const std::size_t newHistCells =
             static_cast<std::size_t>(ScrollbackLimit_) * newCols;
         Cell* newHistCellsArena = new (std::nothrow) Cell[newHistCells]{};
         Line* newHistLines = new (std::nothrow) Line[ScrollbackLimit_]{};
         if (newHistCellsArena && newHistLines) {
+            // Wire all Cells pointers before the copy loop (clang-analyzer).
             for (std::uint32_t r = 0; r < ScrollbackLimit_; ++r) {
                 newHistLines[r].Cells =
                     newHistCellsArena + static_cast<std::size_t>(r) * newCols;
             }
-            // Copy history, truncating to newCols.
-            const std::uint16_t histCopy = clampCols;
             for (std::uint32_t i = 0; i < HistorySize_; ++i) {
                 const std::uint32_t src =
                     (HistoryStart_ + i) % ScrollbackLimit_;
                 const std::uint32_t dst = i % ScrollbackLimit_;
                 CopyCells(newHistLines[dst].Cells, HistoryLines_[src].Cells,
-                          histCopy);
+                          clampCols);
                 newHistLines[dst].CellsUsed =
                     HistoryLines_[src].CellsUsed < newCols
                         ? HistoryLines_[src].CellsUsed
@@ -1100,12 +1016,16 @@ void Grid::Resize(std::uint16_t newCols, std::uint16_t newRows) noexcept {
         }
     }
 
+    if (newCols > Cols_) {
+        for (std::uint16_t c = Cols_; c < newCols; c += DEFAULT_TAB_INTERVAL)
+            TabStops_[c / 64] |= (std::uint64_t{1} << (c % 64));
+    }
+
     Cols_ = newCols;
     Rows_ = newRows;
     ScrollTop_ = 0;
     ScrollBot_ = static_cast<std::uint16_t>(newRows - 1);
 
-    // Clamp saved cursors.
     auto clampSC = [&](SavedCursor& sc) noexcept {
         if (sc.Row >= newRows) sc.Row = static_cast<std::uint16_t>(newRows - 1);
         if (sc.Col >= newCols) sc.Col = static_cast<std::uint16_t>(newCols - 1);
