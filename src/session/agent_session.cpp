@@ -145,12 +145,20 @@ std::optional<wire::SessionEndMessage> SessionHandle::EndedWith()
 }
 
 void SessionHandle::SetGridInfo(std::uint16_t ver, bool gridCapable) noexcept {
+    // Called right after ConfirmResume, before Attach — IsCurrent() is not yet
+    // meaningful here.  The caller (AgentConnection) ensures this is only
+    // called once per authenticated connection; no guard needed.
     Session_->LastNegotiatedVer_ = ver;
     Session_->GridCapable_ = gridCapable;
     Session_->Streams_.SetOverflowMode(ver, gridCapable);
 }
 
 void SessionHandle::NewGeneration() noexcept {
+    // Guard against a superseded SupplySnapshot call: advancing the ring
+    // generation on a stale handle would corrupt the stream state.
+    if (!IsCurrent()) {
+        return;
+    }
     Session_->Streams_.NewGeneration();
 }
 
@@ -172,6 +180,11 @@ SessionResult<void> SessionHandle::AttachPathB() noexcept {
 }
 
 void SessionHandle::ReportResize(wire::ResizeMessage size) noexcept {
+    // Stale resize reports from a superseded connection must not overwrite the
+    // size that the newer connection's client reported.
+    if (!IsCurrent()) {
+        return;
+    }
     Session_->LastKnownSize_ = size;
 }
 

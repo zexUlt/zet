@@ -496,6 +496,11 @@ void AgentConnection::SupplySnapshot([[maybe_unused]] Timestamp now,
     if (Stage_ != EStage::AwaitSnapshot || !Channel_ || !Handle_) {
         return;
     }
+    // A superseded connection must not call NewGeneration (which advances the
+    // ring) on behalf of a session whose newer owner did not ask for it.
+    if (!Handle_->IsCurrent()) {
+        return;
+    }
     // Clear the ring and open a new output generation, then queue the snapshot
     // for emission. Everything sent after this point is in the new generation.
     Handle_->NewGeneration();
