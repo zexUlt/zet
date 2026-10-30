@@ -215,7 +215,7 @@ jobs:
           # is left to the macos job: Linux has no sys/event.h.
           tools/in_alpine.sh '
             cmake --preset musl-dev >/dev/null &&
-            files=$(find src tests -name "*.cpp" ! -name "*_kqueue.cpp" | sort)
+            files=$(find src tests -name "*.cpp" ! -name "*_kqueue.cpp" ! -name "*_macos.cpp" | sort)
             [ -n "$files" ] || { echo "no sources"; exit 0; }
             clang-tidy -p build/musl-dev --warnings-as-errors="*" $files
           '
@@ -527,7 +527,8 @@ jobs:
           # Homebrew's clang does not know Apple's SDK by itself.
           "$(brew --prefix llvm)/bin/clang-tidy" -p build/dev --warnings-as-errors="*" \
             --extra-arg="-isysroot$(xcrun --show-sdk-path)" \
-            src/io/poller_kqueue.cpp
+            src/io/poller_kqueue.cpp \
+            src/io/self_path_macos.cpp
 
   # The release agent on aarch64: the same musl-dev test run and size gate as
   # the x86_64 jobs, natively on GitHub's free ARM runner, no qemu. Alpine
@@ -616,5 +617,5 @@ jobs:
         if: env.NEEDED == 'true'
         run: |
           tools/integration.sh musl-dev \
-            -k "fresh_host_delivers_agent_and_session_connects or second_connect_does_not_retransmit" \
+            -k "fresh_host_delivers_agent_and_session_connects or second_connect_does_not_retransmit or beside_binary_lookup_delivers_without_env" \
             -rs

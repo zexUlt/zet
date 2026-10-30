@@ -1,5 +1,7 @@
 #pragma once
 
+#include <string>
+
 #include "zet/io/errno.hpp"
 
 namespace zet::io {

@@ -12,6 +12,7 @@ Scenarios:
   - Noisy .bashrc does not confuse the probe exchange.
   - Remote argv passed through ssh is exactly the delivery command.
   - Beside-binary lookup: bin/zet + libexec/zet structure, no ZET_AGENT_DIR.
+  - No libexec beside the binary: error names both directories tried.
   - ZET_AGENT_DIR wins over the beside-binary directory.
 """
 
@@ -853,6 +854,10 @@ def test_beside_binary_lookup_delivers_without_env(
     <prefix>/libexec/zet/zet-agent-<arch>.  ZET_AGENT_DIR is explicitly
     unset.  The client must find the agents by walking up from its own
     location and deliver successfully.
+
+    Proof that the beside-binary path was taken, not the compile-time default:
+    the integration container does not have /usr/local/libexec/zet, so a
+    successful delivery can only have used the beside-binary directory.
     """
     prefix = tmp_path / "prefix"
     bin_dir = prefix / "bin"
@@ -869,6 +874,15 @@ def test_beside_binary_lookup_delivers_without_env(
     agent_copy = libexec_dir / f"zet-agent-{UNAME_ARCH}"
     shutil.copyfile(binaries.agent, agent_copy)
     agent_copy.chmod(0o755)
+
+    # Pre-condition: the compile-time default must be absent so the test proves
+    # the beside-binary path was used.
+    default_agent = Path("/usr/local/libexec/zet") / f"zet-agent-{UNAME_ARCH}"
+    if default_agent.exists():
+        pytest.skip(
+            f"compile-time default {default_agent} exists; "
+            "cannot prove beside-binary path was used"
+        )
 
     # Build the env WITHOUT ZET_AGENT_DIR.
     env = dict(os.environ)
@@ -942,3 +956,51 @@ def test_zet_agent_dir_wins_over_beside_binary(
         assert terminal.finish().status == 0
     finally:
         terminal.kill()
+
+def test_no_libexec_beside_binary_error_names_both_dirs(
+    binaries, ssh_host: SshHost, clean_home, tmp_path
+):
+    """No libexec/zet beside the binary and no ZET_AGENT_DIR: error names both.
+
+    Installs the client as <prefix>/bin/zet without creating
+    <prefix>/libexec/zet.  ZET_AGENT_DIR is unset.  The client must exit
+    non-zero and the error must name both the beside-binary directory it tried
+    and the compile-time default it also tried (ZET_DEFAULT_AGENT_DIR).
+    """
+    prefix = tmp_path / "no-libexec-prefix"
+    bin_dir = prefix / "bin"
+    bin_dir.mkdir(parents=True, mode=0o755)
+    # libexec/zet is intentionally absent.
+
+    client_copy = bin_dir / "zet"
+    shutil.copyfile(binaries.client, client_copy)
+    client_copy.chmod(0o755)
+
+    env = dict(os.environ)
+    env.update(SANITIZER_OPTIONS)
+    env.pop("ZET_AGENT_DIR", None)
+    env["TERM"] = "xterm"
+
+    agent_env = _agent_env()
+    settings = " ".join(f"{k}={v}" for k, v in agent_env.items())
+    argv = [
+        str(client_copy),
+        "--ssh-arg", "-F", "--ssh-arg", str(ssh_host.config),
+        "--ssh-arg", f"-oSetEnv={settings}",
+        ssh_host.alias,
+    ]
+    result = subprocess.run(
+        argv, env=env, stdin=subprocess.DEVNULL,
+        capture_output=True, timeout=STEP_TIMEOUT_SECONDS,
+    )
+    assert result.returncode != 0, "expected non-zero exit when no agents available"
+    combined = result.stdout + result.stderr
+    # Error must name the beside-binary directory the client computed.
+    beside_dir = str(prefix / "libexec" / "zet")
+    assert beside_dir.encode() in combined, (
+        f"expected beside-binary dir {beside_dir!r} in error, got: {combined!r}"
+    )
+    # Error must also tell the user how to fix it.
+    assert b"ZET_AGENT_DIR" in combined or b"--agent" in combined, (
+        f"expected ZET_AGENT_DIR or --agent in error, got: {combined!r}"
+    )

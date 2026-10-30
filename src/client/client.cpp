@@ -413,6 +413,23 @@ std::string DeliveryCommand() {
     return true;
 }
 
+/// Returns true when the agent binary for `arch` is simply absent from
+/// `agentDir` (open fails with ENOENT).  Returns false when the file exists
+/// (regardless of readability or size) or when any other error is reported.
+/// Used to decide whether to fall through to the compile-time default: a
+/// missing binary warrants a fallback, an existing but unloadable one does not.
+static bool AgentMissing(std::string_view agentDir,
+                         std::string_view arch) noexcept {
+    std::string path;
+    path.reserve(agentDir.size() + 12 + arch.size());
+    path.append(agentDir);
+    path += '/';
+    path.append("zet-agent-");
+    path.append(arch);
+    struct ::stat st{};
+    return ::stat(path.c_str(), &st) != 0 && errno == ENOENT;
+}
+
 /// Runs the probe exchange with the installer and delivers the agent binary
 /// if needed (design.md §4, "Доставка агента (M5.5)").  Returns any bytes
 /// that followed the last installer line — they belong to the bootstrap
@@ -512,18 +529,35 @@ std::optional<std::vector<std::byte>> DeliverAgent(
     }
 
     // Try directories in order: agentDir first, then fallbackAgentDir.
-    // Accumulate the dirs tried so the error message is informative.
+    //
+    // When agentDir is the beside-binary directory, a missing binary is a
+    // normal case — the tarball may have been installed without agents, and
+    // the compile-time default may have them.  An existing but unloadable
+    // binary (empty, corrupt, unreadable) is a local misconfiguration: report
+    // it rather than silently falling through to a possibly-different version.
     std::string loadReason;
     auto binary = LoadAgentBinary(agentDir, arch, &loadReason);
     if (binary.empty() && fallbackAgentDir) {
-        std::string fallbackReason;
-        auto fallbackBinary =
-            LoadAgentBinary(*fallbackAgentDir, arch, &fallbackReason);
-        if (!fallbackBinary.empty()) {
-            binary = std::move(fallbackBinary);
-            loadReason.clear();
-        } else if (!fallbackReason.empty() && loadReason.empty()) {
-            loadReason = fallbackReason;
+        if (AgentMissing(agentDir, arch)) {
+            // Binary absent in the beside-binary directory — try the default.
+            std::string fallbackReason;
+            auto fallbackBinary =
+                LoadAgentBinary(*fallbackAgentDir, arch, &fallbackReason);
+            if (!fallbackBinary.empty()) {
+                binary = std::move(fallbackBinary);
+                loadReason.clear();
+            } else if (!fallbackReason.empty() && loadReason.empty()) {
+                loadReason = fallbackReason;
+            }
+        } else {
+            // Binary exists beside the binary but could not be loaded.  Do
+            // not silently fall through to a possibly-different version.
+            if (loadReason.empty()) {
+                loadReason = "agent binary for " + arch + " in " +
+                             std::string{agentDir} +
+                             " exists but could not be read";
+            }
+            fallbackAgentDir = std::nullopt;  // suppress from the error line
         }
     }
     if (binary.empty()) {
@@ -1328,13 +1362,26 @@ int Main(std::span<char*> args) noexcept {
             agentDir = agentDirBuf;
         } else {
             // Beside-binary lookup: find the executable's own directory and
-            // go up one level then into libexec/zet.
+            // go up one level then into libexec/zet.  SelfPath() returns a
+            // canonical absolute path (no symlinks, no ..), so we strip two
+            // trailing components to get the prefix directory rather than
+            // appending "/.." and leaving a non-canonical path in error output.
             if (auto selfPath = io::SelfPath()) {
                 const std::string& exe = *selfPath;
+                // exe = /prefix/bin/zet  →  exeDir = /prefix/bin
                 const auto slash = exe.rfind('/');
-                if (slash != std::string::npos) {
-                    agentDirBuf = exe.substr(0, slash) + "/../libexec/zet";
-                    agentDir = agentDirBuf;
+                if (slash != std::string::npos && slash > 0) {
+                    const std::string exeDir = exe.substr(0, slash);
+                    // exeDir = /prefix/bin  →  prefixSlash = position of
+                    // /prefix
+                    const auto prefixSlash = exeDir.rfind('/');
+                    if (prefixSlash != std::string::npos) {
+                        const std::string prefix =
+                            (prefixSlash == 0) ? std::string{"/"}
+                                               : exeDir.substr(0, prefixSlash);
+                        agentDirBuf = prefix + "/libexec/zet";
+                        agentDir = agentDirBuf;
+                    }
                 }
             }
             // Always keep the compile-time default as a fallback.  If
