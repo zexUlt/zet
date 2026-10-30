@@ -34,6 +34,7 @@
 #include "zet/io/fd.hpp"
 #include "zet/io/poller.hpp"
 #include "zet/io/pty.hpp"
+#include "zet/io/self_path.hpp"
 #include "zet/io/tcp.hpp"
 #include "zet/io/terminal.hpp"
 #include "zet/session/bootstrap.hpp"
@@ -417,9 +418,14 @@ std::string DeliveryCommand() {
 /// that followed the last installer line — they belong to the bootstrap
 /// armor and must be fed to BootstrapClient next. Returns std::nullopt on
 /// any error; the caller must SIGTERM and reap the process.
-std::optional<std::vector<std::byte>> DeliverAgent(Process& process,
-                                                   std::string_view agentDir,
-                                                   Timestamp until) noexcept {
+///
+/// agentDir is the primary directory to search.  If the agent is not found
+/// there and fallbackAgentDir is given, it is tried next before failing.
+/// The final error message lists all directories that were tried.
+std::optional<std::vector<std::byte>> DeliverAgent(
+    Process& process, std::string_view agentDir,
+    std::optional<std::string_view> fallbackAgentDir,
+    Timestamp until) noexcept {
     wire::ProbeScanner scanner;
     std::array<std::byte, 4096> buf{};
     /// Bytes the scanner did not consume yet — carried to the next stage.
@@ -505,16 +511,34 @@ std::optional<std::vector<std::byte>> DeliverAgent(Process& process,
         return std::nullopt;
     }
 
+    // Try directories in order: agentDir first, then fallbackAgentDir.
+    // Accumulate the dirs tried so the error message is informative.
     std::string loadReason;
-    const auto binary = LoadAgentBinary(agentDir, arch, &loadReason);
+    auto binary = LoadAgentBinary(agentDir, arch, &loadReason);
+    if (binary.empty() && fallbackAgentDir) {
+        std::string fallbackReason;
+        auto fallbackBinary =
+            LoadAgentBinary(*fallbackAgentDir, arch, &fallbackReason);
+        if (!fallbackBinary.empty()) {
+            binary = std::move(fallbackBinary);
+            loadReason.clear();
+        } else if (!fallbackReason.empty() && loadReason.empty()) {
+            loadReason = fallbackReason;
+        }
+    }
     if (binary.empty()) {
         if (!loadReason.empty()) {
             SayError("deliver",
                      loadReason + " (set ZET_AGENT_DIR or use --agent PATH)");
         } else {
-            SayError("deliver", "no agent binary for " + arch + " in " +
-                                    std::string{agentDir} +
-                                    " (set ZET_AGENT_DIR or use --agent PATH)");
+            std::string tried = "no agent binary for " + arch + " (tried " +
+                                std::string{agentDir};
+            if (fallbackAgentDir) {
+                tried += ", ";
+                tried += *fallbackAgentDir;
+            }
+            tried += "); set ZET_AGENT_DIR or use --agent PATH";
+            SayError("deliver", tried);
         }
         return std::nullopt;
     }
@@ -610,7 +634,8 @@ std::optional<std::vector<std::byte>> DeliverAgent(Process& process,
 /// '<installer>'` (delivery, M5.5).  `agentDir` is set for delivery mode;
 /// nullopt means the caller gave --agent PATH and wants the old direct path.
 std::optional<session::BootstrapResult> Bootstrap(
-    const Options& options, std::optional<std::string_view> agentDir) {
+    const Options& options, std::optional<std::string_view> agentDir,
+    std::optional<std::string_view> agentFallbackDir = std::nullopt) {
     session::BootstrapClient bootstrap{RandomKey(),
                                        RandomNonce<wire::BootstrapNonce>(),
                                        ForwardedEnvironment()};
@@ -636,7 +661,8 @@ std::optional<session::BootstrapResult> Bootstrap(
     std::vector<std::byte> leftovers;
     if (agentDir) {
         const Timestamp authUntil = io::MonotonicNow() + BOOTSTRAP_TIMEOUT;
-        auto maybe = DeliverAgent(*process, *agentDir, authUntil);
+        auto maybe =
+            DeliverAgent(*process, *agentDir, agentFallbackDir, authUntil);
         if (!maybe) {
             process->In.Reset();
             static_cast<void>(Reap(process->Pid, false));
@@ -1282,19 +1308,49 @@ int Main(std::span<char*> args) noexcept {
     }
     static_cast<void>(::signal(SIGPIPE, SIG_IGN));
 
-    // Delivery mode unless --agent was given explicitly.  ZET_AGENT_DIR
-    // overrides the compile-time default from deliver.hpp.  An empty
-    // ZET_AGENT_DIR is treated the same as unset: use the compiled-in default.
+    // Delivery mode unless --agent was given explicitly.
+    // Agent binary lookup order (design.md §4, "Откуда клиент берёт агентов"):
+    //   1. ZET_AGENT_DIR if set and non-empty — used as the sole directory.
+    //   2. <directory of running executable>/../libexec/zet — beside-binary.
+    //   3. Compile-time default ZET_DEFAULT_AGENT_DIR from deliver.hpp.
+    // When ZET_AGENT_DIR is not set, (2) is tried first and (3) is the
+    // fallback: a tarball unpacked under any prefix works without any env var.
+    // An empty ZET_AGENT_DIR is treated the same as unset.
     std::optional<std::string_view> agentDir;
     std::string agentDirBuf;
+    std::optional<std::string_view> agentFallbackDir;
+    std::string agentFallbackDirBuf;
     if (!options->AgentExplicit) {
         const char* env = ::getenv("ZET_AGENT_DIR");
-        agentDirBuf =
-            (env != nullptr && env[0] != '\0') ? env : ZET_DEFAULT_AGENT_DIR;
-        agentDir = agentDirBuf;
+        if (env != nullptr && env[0] != '\0') {
+            // Explicit override — no fallback.
+            agentDirBuf = env;
+            agentDir = agentDirBuf;
+        } else {
+            // Beside-binary lookup: find the executable's own directory and
+            // go up one level then into libexec/zet.
+            if (auto selfPath = io::SelfPath()) {
+                const std::string& exe = *selfPath;
+                const auto slash = exe.rfind('/');
+                if (slash != std::string::npos) {
+                    agentDirBuf = exe.substr(0, slash) + "/../libexec/zet";
+                    agentDir = agentDirBuf;
+                }
+            }
+            // Always keep the compile-time default as a fallback.  If
+            // SelfPath() failed or returned a path without a slash, promote
+            // the fallback to primary so delivery still works.
+            agentFallbackDirBuf = ZET_DEFAULT_AGENT_DIR;
+            if (agentDir) {
+                agentFallbackDir = agentFallbackDirBuf;
+            } else {
+                agentDirBuf = agentFallbackDirBuf;
+                agentDir = agentDirBuf;
+            }
+        }
     }
 
-    auto bootstrapped = Bootstrap(*options, agentDir);
+    auto bootstrapped = Bootstrap(*options, agentDir, agentFallbackDir);
     if (!bootstrapped) {
         return FAILURE_STATUS;
     }

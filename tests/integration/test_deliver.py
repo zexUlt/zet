@@ -11,6 +11,8 @@ Scenarios:
   - noexec cache dir → clear error, nothing copied.
   - Noisy .bashrc does not confuse the probe exchange.
   - Remote argv passed through ssh is exactly the delivery command.
+  - Beside-binary lookup: bin/zet + libexec/zet structure, no ZET_AGENT_DIR.
+  - ZET_AGENT_DIR wins over the beside-binary directory.
 """
 
 from __future__ import annotations
@@ -840,3 +842,103 @@ def test_agent_dir_missing_arch_gives_clear_error(
     assert b"ZET_AGENT_DIR" in combined or b"--agent" in combined, (
         f"expected ZET_AGENT_DIR or --agent in error output, got: {combined!r}"
     )
+
+
+def test_beside_binary_lookup_delivers_without_env(
+    binaries, ssh_host: SshHost, clean_home, tmp_path
+):
+    """Beside-binary lookup: agents in <prefix>/libexec/zet, no ZET_AGENT_DIR.
+
+    Installs the client as <prefix>/bin/zet and agents under
+    <prefix>/libexec/zet/zet-agent-<arch>.  ZET_AGENT_DIR is explicitly
+    unset.  The client must find the agents by walking up from its own
+    location and deliver successfully.
+    """
+    prefix = tmp_path / "prefix"
+    bin_dir = prefix / "bin"
+    libexec_dir = prefix / "libexec" / "zet"
+    bin_dir.mkdir(parents=True, mode=0o755)
+    libexec_dir.mkdir(parents=True, mode=0o755)
+
+    # Install the client as bin/zet.
+    client_copy = bin_dir / "zet"
+    shutil.copyfile(binaries.client, client_copy)
+    client_copy.chmod(0o755)
+
+    # Install the agent binary for the local arch (== the container's arch).
+    agent_copy = libexec_dir / f"zet-agent-{UNAME_ARCH}"
+    shutil.copyfile(binaries.agent, agent_copy)
+    agent_copy.chmod(0o755)
+
+    # Build the env WITHOUT ZET_AGENT_DIR.
+    env = dict(os.environ)
+    env.update(SANITIZER_OPTIONS)
+    env.pop("ZET_AGENT_DIR", None)
+    env["ZET_KEEPALIVE_INTERVAL"] = "300"
+    env["ZET_PEER_SILENCE_TIMEOUT"] = "2000"
+    env["ZET_RECONNECT_MAX"] = "500"
+    env["TERM"] = "xterm"
+
+    agent_env = _agent_env()
+    settings = " ".join(f"{k}={v}" for k, v in agent_env.items())
+    argv = [
+        str(client_copy),
+        "--ssh-arg", "-F", "--ssh-arg", str(ssh_host.config),
+        "--ssh-arg", f"-oSetEnv={settings}",
+        ssh_host.alias,
+    ]
+    terminal = PtyProcess(argv, env=env)
+    try:
+        terminal.expect(PROMPT)
+        terminal.send(b"echo beside-ok\r")
+        terminal.expect(b"beside-ok")
+        terminal.send(b"exit 0\r")
+        assert terminal.finish().status == 0
+    finally:
+        terminal.kill()
+
+
+def test_zet_agent_dir_wins_over_beside_binary(
+    binaries, ssh_host: SshHost, clean_home, tmp_path
+):
+    """ZET_AGENT_DIR takes priority over the beside-binary directory.
+
+    Installs the client as <prefix>/bin/zet with a *wrong* (empty) agent in
+    <prefix>/libexec/zet and a correct agent pointed to by ZET_AGENT_DIR.
+    Delivery must succeed using the ZET_AGENT_DIR agent, not the beside-binary
+    one.
+    """
+    prefix = tmp_path / "prefix"
+    bin_dir = prefix / "bin"
+    libexec_dir = prefix / "libexec" / "zet"
+    bin_dir.mkdir(parents=True, mode=0o755)
+    libexec_dir.mkdir(parents=True, mode=0o755)
+
+    # Install the client as bin/zet.
+    client_copy = bin_dir / "zet"
+    shutil.copyfile(binaries.client, client_copy)
+    client_copy.chmod(0o755)
+
+    # Plant an intentionally broken zero-byte agent beside the binary so that
+    # a fallback to the beside-binary directory would fail.
+    broken = libexec_dir / f"zet-agent-{UNAME_ARCH}"
+    broken.write_bytes(b"")
+    broken.chmod(0o755)
+
+    # Put the real agent in a separate ZET_AGENT_DIR.
+    real_agent_dir = _agent_dir(tmp_path, UNAME_ARCH, binaries.agent)
+
+    # ZET_AGENT_DIR must win; env includes it explicitly.
+    env = _env(real_agent_dir)
+
+    agent_env = _agent_env()
+    argv = _delivery_argv(client_copy, real_agent_dir, ssh_host, agent_env)
+    terminal = PtyProcess(argv, env=env)
+    try:
+        terminal.expect(PROMPT)
+        terminal.send(b"echo env-wins-ok\r")
+        terminal.expect(b"env-wins-ok")
+        terminal.send(b"exit 0\r")
+        assert terminal.finish().status == 0
+    finally:
+        terminal.kill()
