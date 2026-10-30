@@ -129,6 +129,12 @@ ConnectionResult ConnectionBase::PumpLive(Timestamp now, MutableByteSpan out,
             return Resized{.Size = resize->Resize};
         }
         if (const auto* end = std::get_if<DeliveredSessionEnd>(&*event)) {
+            // kind=2 (Overflow) is a distinct event: the infrastructure
+            // killed the session, not the shell.  Callers must handle it
+            // separately so they can display a targeted message (§7).
+            if (end->End.Kind == wire::ESessionEndKind::Overflow) {
+                return SessionOverflowed{};
+            }
             return Ended{.End = end->End};
         }
         if (const auto* snap = std::get_if<DeliveredGridSnapshot>(&*event)) {
@@ -593,6 +599,13 @@ ConnectionResult ClientConnection::Pump(Timestamp now, MutableByteSpan out,
                 if (event) {
                     if (const auto* ended = std::get_if<Ended>(&*event)) {
                         Handle_->RecordEnd(ended->End);
+                    } else if (std::holds_alternative<SessionOverflowed>(
+                                   *event)) {
+                        // The channel sent kind=2; record it so EndedWith()
+                        // returns it and the caller does not reconnect.
+                        Handle_->RecordEnd(
+                            {.Kind = wire::ESessionEndKind::Overflow,
+                             .Value = 0});
                     }
                 }
                 return event;

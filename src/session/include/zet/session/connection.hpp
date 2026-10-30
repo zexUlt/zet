@@ -78,6 +78,12 @@ struct Ended {
     wire::SessionEndMessage End;
 };
 
+/// The agent's ring overflowed while the client did not have GRID_CAPABLE
+/// (ver=2 only, §7). Client only. The session is dead; the caller does not
+/// reconnect. Distinct from Ended so callers can display a targeted message
+/// rather than mapping it to a signal-exit code.
+struct SessionOverflowed {};
+
 /// Nothing to do until more bytes arrive or NextDeadline passes.
 struct Idle {};
 
@@ -98,8 +104,9 @@ struct ApplySnapshot {
     std::uint8_t Flags{0};
 };
 
-using ConnectionEvent = std::variant<NeedsSession, SendFrame, Deliver, Resized,
-                                     Ended, Idle, NeedsSnapshot, ApplySnapshot>;
+using ConnectionEvent =
+    std::variant<NeedsSession, SendFrame, Deliver, Resized, Ended, Idle,
+                 NeedsSnapshot, ApplySnapshot, SessionOverflowed>;
 
 using ConnectionResult = ChannelResult<ConnectionEvent>;
 
