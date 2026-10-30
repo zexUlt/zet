@@ -45,10 +45,10 @@ def _require_when_build_dir(thing: str, available: bool) -> None:
         pytest.fail(f"{thing} is required when ZET_BUILD_DIR is set but was not found")
 
 
-skip_no_pyte = pytest.mark.skipif(not PYTE_AVAILABLE,
+skip_no_pyte = pytest.mark.skipif(not PYTE_AVAILABLE and not BUILD_DIR,
                                    reason="pyte not installed")
 skip_no_dump = pytest.mark.skipif(
-    not GRID_DUMP or not Path(GRID_DUMP).exists(),
+    (not GRID_DUMP or not Path(GRID_DUMP).exists()) and not BUILD_DIR,
     reason="zet-grid-dump helper not built / ZET_GRID_DUMP not set")
 
 # ---------------------------------------------------------------------------

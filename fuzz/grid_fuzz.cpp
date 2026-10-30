@@ -1,13 +1,14 @@
 // Fuzz target for VtParser + Grid (design.md §16).
 //
 // Invariants checked after every feed:
-//   1. cursor within bounds (with pending_wrap: col may equal cols–1 with flag)
+//   1. cursor within bounds (col may equal cols–1 when PendingWrap is set)
 //   2. scroll region sane: top <= bot, both < rows
-//   3. saved cursor coords within bounds (checked via SaveCursor/RestoreCursor
-//      round-trip; fuzz does not expose them directly, so we probe via Resize)
+//   3. saved cursor within bounds (probed via SaveCursor/RestoreCursor)
 //   4. parser always in a valid EParserState (enum range 0..Bypass)
-//   5. scrollback within limit
+//   5. scrollback within limit; scrollback-0 grid never has history
 //   6. wide-char pairing: a width==2 cell is followed by width==0 or EOL
+//   7. pending-wrap relation: PendingWrap only when col == cols–1
+//   8. byte-at-a-time produces identical screen to bulk feed
 //
 // Resize is interleaved to exercise the resize path under parser state.
 
@@ -20,6 +21,46 @@
 #include "zet/grid/vt_parser.hpp"
 
 using namespace zet::grid;
+
+static void CheckInvariants(const Grid& g, const VtParser& p) noexcept {
+    const std::uint16_t cols = g.Cols();
+    const std::uint16_t rows = g.Rows();
+
+    // 1. Cursor within bounds.
+    if (g.CursorRow() >= rows) __builtin_trap();
+    if (g.CursorCol() >= cols) __builtin_trap();
+
+    // 7. PendingWrap only valid when cursor is at the last column.
+    if (g.PendingWrap() &&
+        g.CursorCol() != static_cast<std::uint16_t>(cols - 1))
+        __builtin_trap();
+
+    // 2. Scroll region sane.
+    if (g.ScrollTop() >= rows) __builtin_trap();
+    if (g.ScrollBot() >= rows) __builtin_trap();
+    if (g.ScrollTop() > g.ScrollBot()) __builtin_trap();
+
+    // 4. Parser in a valid state.
+    const auto state = static_cast<std::uint8_t>(p.State());
+    if (state > static_cast<std::uint8_t>(EParserState::Bypass))
+        __builtin_trap();
+
+    // 5. Scrollback within limit; scrollback-0 never has entries.
+    if (g.ScrollbackSize() > g.ScrollbackLimit()) __builtin_trap();
+    if (g.ScrollbackLimit() == 0 && g.ScrollbackSize() != 0) __builtin_trap();
+
+    // 6. Wide-char pairing invariant.
+    for (std::uint16_t r = 0; r < rows; ++r) {
+        for (std::uint16_t c = 0; c + 1 < cols; ++c) {
+            const Cell& cell = g.CellAt(r, c);
+            if (cell.Width == 2) {
+                const Cell& next =
+                    g.CellAt(r, static_cast<std::uint16_t>(c + 1));
+                if (next.Width != 0) __builtin_trap();
+            }
+        }
+    }
+}
 
 // libFuzzer entry point.
 extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data,
@@ -40,6 +81,19 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data,
     if (!res.has_value()) return 0;
     Grid* g = res.value();
 
+    // A 1×1 grid must also survive the same input.
+    {
+        auto r1 = Grid::Create(1, 1, 0);
+        if (r1.has_value()) {
+            VtParser p1;
+            const std::byte* bytes =
+                reinterpret_cast<const std::byte*>(data + 4);
+            p1.Feed(bytes, size - 4, *r1.value());
+            CheckInvariants(*r1.value(), p1);
+            delete r1.value();
+        }
+    }
+
     VtParser p;
 
     // Set a bypass callback to prove it does not crash on any bypass event.
@@ -50,6 +104,30 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data,
 
     const std::byte* bytes = reinterpret_cast<const std::byte*>(data + 4);
     const std::size_t len = size - 4;
+
+    // 8. Byte-at-a-time must produce the same screen as bulk feed.
+    //    Use scrollback 0 to keep it cheap.
+    {
+        Grid* gByte = Grid::Create(cols0, rows0, 0).value_or(nullptr);
+        Grid* gBulk = Grid::Create(cols0, rows0, 0).value_or(nullptr);
+        if (gByte && gBulk) {
+            VtParser pByte, pBulk;
+            for (std::size_t i = 0; i < len; ++i)
+                pByte.Feed(bytes + i, 1, *gByte);
+            pBulk.Feed(bytes, len, *gBulk);
+
+            for (std::uint16_t r = 0; r < rows0; ++r) {
+                for (std::uint16_t c = 0; c < cols0; ++c) {
+                    const Cell& a = gByte->CellAt(r, c);
+                    const Cell& b = gBulk->CellAt(r, c);
+                    if (a.Codepoint != b.Codepoint || a.Width != b.Width)
+                        __builtin_trap();
+                }
+            }
+        }
+        delete gByte;
+        delete gBulk;
+    }
 
     // Split the input roughly in half: feed the first half, resize, feed the
     // rest.  Also do a second resize to exercise the multi-resize path.
@@ -64,44 +142,7 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data,
 
     p.Feed(bytes + half, len - half, *g);
 
-    // -----------------------------------------------------------------------
-    // Invariant checks
-    // -----------------------------------------------------------------------
-
-    const std::uint16_t cols = g->Cols();
-    const std::uint16_t rows = g->Rows();
-
-    // 1. Cursor within bounds.
-    if (g->CursorRow() >= rows) __builtin_trap();
-    if (g->CursorCol() >= cols) __builtin_trap();
-
-    // 2. Scroll region sane.
-    if (g->ScrollTop() >= rows) __builtin_trap();
-    if (g->ScrollBot() >= rows) __builtin_trap();
-    if (g->ScrollTop() > g->ScrollBot()) __builtin_trap();
-
-    // 3. Parser in a valid state.
-    const auto state = static_cast<std::uint8_t>(p.State());
-    if (state > static_cast<std::uint8_t>(EParserState::Bypass))
-        __builtin_trap();
-
-    // 4. Scrollback within limit.
-    if (g->ScrollbackSize() > g->ScrollbackLimit()) __builtin_trap();
-
-    // 5. Wide-char pairing invariant: a cell with Width==2 must be followed
-    //    by a cell with Width==0 (continuation) unless it is the last column.
-    if (!g->IsAltScreen()) {
-        for (std::uint16_t r = 0; r < rows; ++r) {
-            for (std::uint16_t c = 0; c + 1 < cols; ++c) {
-                const Cell& cell = g->CellAt(r, c);
-                if (cell.Width == 2) {
-                    const Cell& next =
-                        g->CellAt(r, static_cast<std::uint16_t>(c + 1));
-                    if (next.Width != 0) __builtin_trap();
-                }
-            }
-        }
-    }
+    CheckInvariants(*g, p);
 
     delete g;
     return 0;

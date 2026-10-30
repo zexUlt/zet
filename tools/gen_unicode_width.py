@@ -21,6 +21,7 @@ Refs:
     https://unicode.org/reports/tr44/       Unicode Character Database
 """
 
+import hashlib
 import sys
 import urllib.request
 from typing import Iterator
@@ -31,13 +32,35 @@ EAW_URL = BASE_URL + "EastAsianWidth.txt"
 DCP_URL = BASE_URL + "DerivedCoreProperties.txt"
 DC_URL  = BASE_URL + "extracted/DerivedGeneralCategory.txt"
 
+# SHA-256 hashes pinned for Unicode 16.0.0 (computed from the canonical
+# unicode.org files; re-verify if UNICODE_VERSION is bumped).
+HASHES: dict[str, str] = {
+    EAW_URL: "43adc76c0686a42cb370764eb8cfe2b2"
+             "a45b10b855e5572a2db4a0eecce15d5b",
+    DCP_URL: "39d35161f2954497f69e08bdb9e70149"
+             "3f476a3d30222de20028feda36c1dabd",
+    DC_URL:  "7676ab755a41ef82108460238569e60a"
+             "d65c191ddafe61b36c6765ec1353f293",
+}
+
 OUTPUT = "src/grid/unicode_tables.cpp"
 
 
 def fetch(url: str) -> list[str]:
     print(f"  fetching {url}", file=sys.stderr)
     with urllib.request.urlopen(url, timeout=30) as resp:
-        return resp.read().decode("utf-8").splitlines()
+        data = resp.read()
+    digest = hashlib.sha256(data).hexdigest()
+    expected = HASHES.get(url)
+    if expected and digest != expected:
+        raise ValueError(
+            f"SHA-256 mismatch for {url}\n"
+            f"  got:      {digest}\n"
+            f"  expected: {expected}\n"
+            "Update HASHES in gen_unicode_width.py if you intentionally "
+            "updated the Unicode version."
+        )
+    return data.decode("utf-8").splitlines()
 
 
 def parse_ranges(lines: list[str], filter_fn) -> list[tuple[int, int]]:
