@@ -74,6 +74,12 @@ inline constexpr std::size_t MAX_DATA_PAYLOAD = MAX_FRAME - crypto::TAG_SIZE -
                                                 sizeof(std::uint8_t) -
                                                 2 * sizeof(std::uint64_t);
 
+/// Largest payload in a GridChunk body: MAX_FRAME minus the AEAD tag, the
+/// type byte (1), and the chunk_offset field (4). One byte shorter than
+/// MAX_DATA_PAYLOAD because of the stream-gen field.
+inline constexpr std::size_t GRID_CHUNK_MAX_DATA =
+    MAX_FRAME - crypto::TAG_SIZE - sizeof(std::uint8_t) - sizeof(std::uint32_t);
+
 /// "ZET1", the four bytes after the type byte of every Hello there will ever
 /// be.
 inline constexpr std::array<std::byte, 4> HELLO_MAGIC{
@@ -551,5 +557,13 @@ struct HelloPeek {
     ByteReader& reader) noexcept;
 [[nodiscard]] ProtoResult<void> WriteGridApplied(
     ByteWriter& writer, const GridAppliedMessage& message) noexcept;
+
+/// Appends a GRID_CAPABLE TLV (type 0x0003, length 2, value 1) to `out`.
+[[nodiscard]] ProtoResult<std::size_t> AppendGridCapableTlv(
+    MutableByteSpan out) noexcept;
+
+/// Returns true if the TLV list in `tlvs` contains a valid GRID_CAPABLE TLV.
+/// A GRID_CAPABLE TLV must have length 2 and value 1; any other is malformed.
+[[nodiscard]] ProtoResult<bool> HasGridCapableTlv(ByteSpan tlvs) noexcept;
 
 }  // namespace zet::wire
