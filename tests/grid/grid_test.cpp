@@ -2595,13 +2595,9 @@ TEST_CASE("Combining mark keeps base codepoint (GRAPHEME_MAX_CODEPOINTS=1)") {
     REQUIRE(res.has_value());
     Grid* g = res.value();
     VtParser p;
-    // Feed 'e' (U+0065) followed by combining acute accent (U+0301)
-    // UTF-8 for U+0301 is 0xCC 0x81
-    const std::byte seq[] = {
-        std::byte{'e'},
-        std::byte{0xCC},
-        std::byte{0x81},  // U+0301 COMBINING ACUTE ACCENT
-    };
+    // Feed 'e' (U+0065) followed by combining acute accent (U+0301, UTF-8: CC
+    // 81)
+    const std::byte seq[] = {std::byte{'e'}, std::byte{0xCC}, std::byte{0x81}};
     p.Feed(seq, sizeof(seq), *g);
     // Cell at (0,0) must hold 'e', not the combining mark 0x0301
     CHECK(g->CellAt(0, 0).Codepoint == U'e');
@@ -2725,11 +2721,9 @@ TEST_CASE("DCH on wide char continuation cell blanks both halves") {
     Grid* g = MakeGrid(10, 4, 0);
     VtParser p;
     // Write wide char U+4E2D (CJK, width=2) at col 0 — occupies cols 0 and 1
-    const std::byte wide[] = {
-        std::byte{0xE4},
-        std::byte{0xB8},
-        std::byte{0xAD},  // U+4E2D in UTF-8
-    };
+    // UTF-8: E4 B8 AD
+    const std::byte wide[] = {std::byte{0xE4}, std::byte{0xB8},
+                              std::byte{0xAD}};
     p.Feed(wide, sizeof(wide), *g);
     CHECK(g->CellAt(0, 0).Width == 2);
     CHECK(g->CellAt(0, 1).Width == 0);  // continuation
