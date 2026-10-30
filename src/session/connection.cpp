@@ -378,6 +378,13 @@ ConnectionResult AgentConnection::PumpResume(Timestamp now, MutableByteSpan out,
         return Refuse(SessionError{confirmed.error()});
     }
 
+    // Violation: client claims a generation the agent has never sent.  This
+    // cannot happen in honest operation; close the connection rather than
+    // silently accepting a corrupt or misbehaving peer.  §9 violation table.
+    if (resume->StreamGen > Handle_->SessionGen()) {
+        return Refuse(SessionError{EProtoError::MalformedField});
+    }
+
     // Path A/B decision (§9 ADR-030). Feasibility comes first, then cost.
     //   ring_overflowed: the ring filled in Resync mode; path B is mandatory.
     //   stream_gen < session_gen: the client applied a generation the agent has

@@ -823,4 +823,152 @@ TEST_CASE_FIXTURE(SodiumFixture,
     CHECK(gotLive);
 }
 
+// ── Item 7: Resume stream_gen > session_gen is a protocol violation
+// ───────────
+//
+// If the client claims an output generation the agent has never emitted, the
+// connection must be closed.  Without the check, PumpResume silently falls
+// through the A/B decision with stream_gen accepted as-is.
+//
+// Scenario: complete path B with agent A (session_gen → 1, client stream_gen →
+// 1), then reconnect to a FRESH agent A2 (same key, session_gen = 0).  The
+// ConnectionSeed is fixed, so the handshake authenticates; the Resume carries
+// stream_gen=1 > session_gen=0 — which is impossible in honest operation.
+
+TEST_CASE_FIXTURE(
+    SodiumFixture,
+    "Resume stream_gen ahead of session_gen is a protocol violation "
+    "(CloseConnection)") {
+    const SessionLimits limits = TinyLimits();
+    std::vector<std::byte> agentStorage(limits.DisconnectMax + 256);
+    std::vector<std::byte> clientStorage(limits.ResendMax + 256);
+    AgentSession agent{DeriveSessionSecrets(MakeKey(10)),
+                       SessionStreams{.Storage = MutableByteSpan{agentStorage},
+                                      .Now = START,
+                                      .Limits = limits}};
+    ClientSession client{
+        DeriveSessionSecrets(MakeKey(10)),
+        SessionStreams{.Storage = MutableByteSpan{clientStorage},
+                       .Now = START,
+                       .Limits = limits}};
+    Space sp;
+    std::uint64_t nonces = 0;
+
+    // ── Step 1: enable Resync mode via a gridCapable=true connection
+    // ──────────
+    {
+        AgentConnection ac0{MutableByteSpan{sp.AgentFrames}, START,
+                            wire::PROTOCOL_VERSION_GRID};
+        ClientConnection cc0{client,
+                             MakeNonce(++nonces),
+                             MutableByteSpan{sp.ClientFrames},
+                             START,
+                             /*gridCapable=*/true,
+                             wire::PROTOCOL_VERSION_GRID,
+                             MutableByteSpan{sp.SnapshotBuf}};
+        REQUIRE(DriveToLive(ac0, cc0, agent, sp, START, nonces));
+        ac0.Close(START);
+    }
+
+    // ── Step 2: overflow the ring and drive path B to completion ─────────────
+    const std::vector<std::byte> chunk(limits.DisconnectMax / 4 + 1,
+                                       std::byte{0x11});
+    for (int i = 0; i < 8; ++i) {
+        std::ignore = agent.Write(ByteSpan{chunk});
+    }
+    {
+        AgentConnection ac{MutableByteSpan{sp.AgentFrames}, START,
+                           wire::PROTOCOL_VERSION_GRID};
+        ClientConnection cc{client,
+                            MakeNonce(++nonces),
+                            MutableByteSpan{sp.ClientFrames},
+                            START,
+                            /*gridCapable=*/true,
+                            wire::PROTOCOL_VERSION_GRID,
+                            MutableByteSpan{sp.SnapshotBuf}};
+        REQUIRE(DriveToLive(ac, cc, agent, sp, START, nonces));
+
+        const std::vector<std::byte> snap(16, std::byte{0x22});
+        bool applied = false;
+        for (int i = 0; i < 400 && !applied; ++i) {
+            auto ea = PumpAgent(ac, sp, START);
+            REQUIRE(ea.has_value());
+            if (std::holds_alternative<NeedsSnapshot>(*ea)) {
+                ac.SupplySnapshot(START, ByteSpan{snap}, 0, 0);
+            } else if (const auto* sf = std::get_if<SendFrame>(&*ea)) {
+                REQUIRE(Feed(cc, sp, sf->Written));
+            }
+            auto ec = PumpClient(cc, sp, START);
+            REQUIRE(ec.has_value());
+            if (std::holds_alternative<ApplySnapshot>(*ec)) {
+                applied = true;
+            } else if (const auto* sf = std::get_if<SendFrame>(&*ec)) {
+                REQUIRE(Feed(ac, sp, sf->Written));
+            }
+        }
+        REQUIRE(applied);
+        ac.Close(START);
+    }
+    // client.StreamGen() == 1, agent.SessionGen() == 1.
+    REQUIRE(client.StreamGen() == 1);
+
+    // ── Step 3: fresh agent with the same key, session_gen = 0 ───────────────
+    // ConnectionSeed is fixed (derived once from the key), so the fresh agent
+    // authenticates the same client regardless of how many connections have
+    // been made.
+    std::vector<std::byte> freshStorage(limits.DisconnectMax + 256);
+    AgentSession freshAgent{
+        DeriveSessionSecrets(MakeKey(10)),
+        SessionStreams{.Storage = MutableByteSpan{freshStorage},
+                       .Now = START,
+                       .Limits = limits}};
+
+    AgentConnection ac2{MutableByteSpan{sp.AgentFrames}, START,
+                        wire::PROTOCOL_VERSION_GRID};
+    ClientConnection cc2{client,
+                         MakeNonce(++nonces),
+                         MutableByteSpan{sp.ClientFrames},
+                         START,
+                         /*gridCapable=*/true,
+                         wire::PROTOCOL_VERSION_GRID,
+                         MutableByteSpan{sp.SnapshotBuf}};
+
+    // Drive until the fresh agent either closes the connection (fix: violation
+    // detected) or goes Live (bug: stream_gen silently accepted).
+    bool gotCloseConnection = false;
+    bool gotLive = false;
+    for (int i = 0; i < 200; ++i) {
+        auto ea = ac2.Pump(START, MutableByteSpan{sp.Out},
+                           MutableByteSpan{sp.Scratch});
+        if (!ea) {
+            if (ea.error().Disposition() == EDisposition::CloseConnection) {
+                gotCloseConnection = true;
+            }
+            break;
+        }
+        if (const auto* ns = std::get_if<NeedsSession>(&*ea)) {
+            REQUIRE(ns->Id == freshAgent.Ref().Id());
+            ac2.Route(freshAgent.Ref(), MakeNonce(++nonces));
+        } else if (const auto* sf = std::get_if<SendFrame>(&*ea)) {
+            REQUIRE(Feed(cc2, sp, sf->Written));
+        }
+        if (ac2.IsLive()) {
+            gotLive = true;
+            break;
+        }
+
+        auto ec = cc2.Pump(START, MutableByteSpan{sp.Out},
+                           MutableByteSpan{sp.Scratch});
+        if (!ec) {
+            break;
+        }
+        if (const auto* sf = std::get_if<SendFrame>(&*ec)) {
+            REQUIRE(Feed(ac2, sp, sf->Written));
+        }
+    }
+    // With fix: violation detected → CloseConnection; session must not go Live.
+    CHECK(gotCloseConnection);
+    CHECK_FALSE(gotLive);
+}
+
 }  // namespace
