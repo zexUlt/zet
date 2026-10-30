@@ -134,11 +134,11 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data,
     const std::size_t half = len / 2;
     p.Feed(bytes, half, *g);
 
-    g->Resize(cols1, rows1);
+    (void)g->Resize(cols1, rows1);
 
     // Second resize: swap cols/rows to exercise shrink and grow together.
-    g->Resize(rows1 < MAX_COLS ? rows1 : MAX_COLS,
-              cols1 < MAX_ROWS ? cols1 : MAX_ROWS);
+    (void)g->Resize(rows1 < MAX_COLS ? rows1 : MAX_COLS,
+                    cols1 < MAX_ROWS ? cols1 : MAX_ROWS);
 
     p.Feed(bytes + half, len - half, *g);
 
