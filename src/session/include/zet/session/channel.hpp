@@ -124,9 +124,8 @@ public:
     /// `now`. `version` is the negotiated protocol version; it gates ver=2-only
     /// messages such as SessionEnd Overflow.
     Channel(DirectionFrames frames, SendBuffer& sendBuf,
-            ReceiveCursor& recvCursor, Timestamp now,
-            LivenessLimits liveness = {},
-            std::uint16_t version = wire::PROTOCOL_VERSION_MIN) noexcept;
+            ReceiveCursor& recvCursor, Timestamp now, LivenessLimits liveness,
+            std::uint16_t version) noexcept;
 
     /// Builds a Channel straight from connection keys, counters at zero.
     ///

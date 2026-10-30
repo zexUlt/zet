@@ -98,7 +98,8 @@ struct ChannelPair {
     explicit ChannelPair(Timestamp start = Timestamp{},
                          std::uint64_t frameLimit = MAX_FRAMES_PER_EPOCH,
                          std::uint64_t byteLimit = MAX_BYTES_PER_EPOCH,
-                         LivenessLimits liveness = LIVENESS_OFF)
+                         LivenessLimits liveness = LIVENESS_OFF,
+                         std::uint16_t version = wire::PROTOCOL_VERSION_MIN)
         : Keys{DeriveConnectionKeys(
               DeriveSessionSecrets(MakeMaster(1)).ConnectionSeed, MakeNonce(1),
               MakeNonce(2))},
@@ -108,10 +109,10 @@ struct ChannelPair {
           AgentSendBuf{MutableByteSpan{AgentSendStore}, 0},
           ClientRecv{0},
           AgentRecv{0},
-          Client{Keys,  ERole::Client, ClientSendBuf, ClientRecv,
-                 start, frameLimit,    byteLimit,     liveness},
-          Agent{Keys,  ERole::Agent, AgentSendBuf, AgentRecv,
-                start, frameLimit,   byteLimit,    liveness} {}
+          Client{Keys,       ERole::Client, ClientSendBuf, ClientRecv, start,
+                 frameLimit, byteLimit,     liveness,      version},
+          Agent{Keys,       ERole::Agent, AgentSendBuf, AgentRecv, start,
+                frameLimit, byteLimit,    liveness,     version} {}
 
     ConnectionKeys Keys;
 
@@ -942,10 +943,15 @@ TEST_CASE_FIXTURE(SodiumFixture,
     SendBuffer agentOut{MutableByteSpan{agentStore}};
     ReceiveCursor clientIn;
     ReceiveCursor agentIn;
-    Channel client{std::move(clientFrames), clientOut, clientIn, Timestamp{},
-                   LIVENESS_OFF};
-    Channel agent{std::move(agentFrames), agentOut, agentIn, Timestamp{},
-                  LIVENESS_OFF};
+    Channel client{std::move(clientFrames),
+                   clientOut,
+                   clientIn,
+                   Timestamp{},
+                   LIVENESS_OFF,
+                   wire::PROTOCOL_VERSION_MIN};
+    Channel agent{
+        std::move(agentFrames),    agentOut, agentIn, Timestamp{}, LIVENESS_OFF,
+        wire::PROTOCOL_VERSION_MIN};
 
     const auto typed = MakeBytes(5, 0x30);
     REQUIRE(clientOut.Append(ByteSpan{typed}) == typed.size());
@@ -1213,4 +1219,44 @@ TEST_CASE_FIXTURE(SodiumFixture,
     const auto ev = InjectToClient(pair, ByteSpan{plain});
     REQUIRE_FALSE(ev.has_value());
     CHECK(ev.error().Proto() == EProtoError::MalformedField);
+}
+
+// ── Protocol v2: Channel with PROTOCOL_VERSION_GRID
+// ───────────────────────────
+
+TEST_CASE_FIXTURE(
+    SodiumFixture,
+    "Channel v2: Resume and SessionEnd with PROTOCOL_VERSION_GRID") {
+    // v2 Resume round-trip: StreamGen field is present on the wire.
+    const wire::ResumeMessage resumeMsg{.StreamGen = 0x0000'0005,
+                                        .ClientReceiveOffset = 42};
+    std::vector<std::byte> resumeBytes(wire::MAX_FRAME);
+    {
+        ByteWriter writer{MutableByteSpan{resumeBytes}};
+        REQUIRE(
+            wire::WriteResume(writer, resumeMsg, wire::PROTOCOL_VERSION_GRID));
+        resumeBytes.resize(writer.Size());
+    }
+    {
+        // Skip the type byte that WriteResume prepends.
+        ByteReader reader{ByteSpan{resumeBytes}.subspan(1)};
+        const auto parsed =
+            wire::ParseResume(reader, wire::PROTOCOL_VERSION_GRID);
+        REQUIRE(parsed.has_value());
+        CHECK(parsed->StreamGen == resumeMsg.StreamGen);
+        CHECK(parsed->ClientReceiveOffset == resumeMsg.ClientReceiveOffset);
+    }
+
+    // v2 SessionEnd Overflow is delivered by a v2 Channel.
+    ChannelPair pair{Timestamp{}, MAX_FRAMES_PER_EPOCH, MAX_BYTES_PER_EPOCH,
+                     LIVENESS_OFF, wire::PROTOCOL_VERSION_GRID};
+
+    const wire::SessionEndMessage overflow{
+        .Kind = wire::ESessionEndKind::Overflow, .Value = 0};
+    pair.Agent.QueueSessionEnd(overflow);
+
+    const auto ev = Carry(pair, pair.Agent, pair.Client, Timestamp{});
+    REQUIRE(ev.has_value());
+    REQUIRE(std::holds_alternative<DeliveredSessionEnd>(*ev));
+    CHECK(std::get<DeliveredSessionEnd>(*ev).End == overflow);
 }

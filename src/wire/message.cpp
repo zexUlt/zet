@@ -314,6 +314,9 @@ ProtoResult<ResumeMessage> ParseResume(ByteReader& reader,
 
 ProtoResult<void> WriteResume(ByteWriter& writer, const ResumeMessage& message,
                               std::uint16_t version) noexcept {
+    if (version < PROTOCOL_VERSION_GRID && message.StreamGen != 0) {
+        return std::unexpected(EProtoError::MalformedField);
+    }
     if (auto type = WriteMessageType(writer, EMessageType::Resume); !type) {
         return type;
     }
@@ -776,6 +779,9 @@ ProtoResult<void> WriteSessionEnd(ByteWriter& writer,
     }
     if (message.Kind == ESessionEndKind::Overflow &&
         version < PROTOCOL_VERSION_GRID) {
+        return std::unexpected(EProtoError::MalformedField);
+    }
+    if (message.Kind == ESessionEndKind::Overflow && message.Value != 0) {
         return std::unexpected(EProtoError::MalformedField);
     }
     if (auto type = WriteMessageType(writer, EMessageType::SessionEnd); !type) {

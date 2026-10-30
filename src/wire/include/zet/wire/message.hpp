@@ -74,9 +74,10 @@ inline constexpr std::size_t MAX_DATA_PAYLOAD = MAX_FRAME - crypto::TAG_SIZE -
                                                 sizeof(std::uint8_t) -
                                                 2 * sizeof(std::uint64_t);
 
-/// Largest payload in a GridChunk body: MAX_FRAME minus the AEAD tag, the
-/// type byte (1), and the chunk_offset field (4). One byte shorter than
-/// MAX_DATA_PAYLOAD because of the stream-gen field.
+/// Derived the same way as MAX_DATA_PAYLOAD: MAX_FRAME minus the AEAD tag,
+/// the type byte (1), and the stream-generation prefix (4). Twelve bytes
+/// wider than MAX_DATA_PAYLOAD because the Grid chunk header is shorter
+/// (no ack or offset fields).
 inline constexpr std::size_t GRID_CHUNK_MAX_DATA =
     MAX_FRAME - crypto::TAG_SIZE - sizeof(std::uint8_t) - sizeof(std::uint32_t);
 

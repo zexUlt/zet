@@ -1611,3 +1611,24 @@ TEST_CASE("GRID_CHUNK_MAX_DATA is the largest payload GridChunk accepts") {
         CHECK(parsed.error() == EProtoError::LengthLimitExceeded);
     }
 }
+
+// ─── Write-side validation
+// ────────────────────────────────────────────────────
+
+TEST_CASE("WriteResume: v1 with non-zero StreamGen is malformed") {
+    const ResumeMessage msg{.StreamGen = 7, .ClientReceiveOffset = 0};
+    std::vector<std::byte> out(MAX_FRAME);
+    ByteWriter writer{MutableByteSpan{out}};
+    const auto written = WriteResume(writer, msg, PROTOCOL_VERSION_MIN);
+    REQUIRE_FALSE(written.has_value());
+    CHECK(written.error() == EProtoError::MalformedField);
+}
+
+TEST_CASE("WriteSessionEnd: Overflow with non-zero value is malformed") {
+    const SessionEndMessage msg{.Kind = ESessionEndKind::Overflow, .Value = 1};
+    std::vector<std::byte> out(MAX_FRAME);
+    ByteWriter writer{MutableByteSpan{out}};
+    const auto written = WriteSessionEnd(writer, msg, PROTOCOL_VERSION_GRID);
+    REQUIRE_FALSE(written.has_value());
+    CHECK(written.error() == EProtoError::MalformedField);
+}

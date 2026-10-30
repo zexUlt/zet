@@ -753,3 +753,75 @@ TEST_CASE_FIXTURE(SodiumFixture,
     CHECK(Bytes(one.FromClient->Keys.ClientToServer) !=
           Bytes(other.FromClient->Keys.ClientToServer));
 }
+
+// ─── Configurable ceiling tests
+// ───────────────────────────────────────────────
+
+/// Run a full handshake with the given client and server ceilings, returning
+/// the negotiated version from the client's result or 0 on failure.
+static std::uint16_t RunWithCeilings(std::uint16_t clientCeiling,
+                                     std::uint16_t serverCeiling) {
+    Harness peers;
+    std::vector<std::byte> scratch(SCRATCH);
+
+    ClientHandshake client{
+        peers.Id,          Clone(peers.ClientAuth), Clone(peers.ClientSeed),
+        peers.ClientNonce, peers.ClientSeen,        clientCeiling};
+    ServerHandshake server{Clone(peers.ServerAuth),
+                           Clone(peers.ServerSeed),
+                           peers.ServerNonce,
+                           SERVER_OFFSET,
+                           peers.ServerSeen,
+                           std::nullopt,
+                           serverCeiling};
+
+    const auto hello = client.Start(MutableByteSpan{scratch});
+    if (!hello) {
+        return 0;
+    }
+    const auto helloBytes = Taken(scratch, *hello);
+
+    const auto challenge =
+        server.Handle(ByteSpan{helloBytes}, MutableByteSpan{scratch});
+    if (!challenge) {
+        return 0;
+    }
+    const auto challengeBytes = Taken(scratch, challenge->Written);
+
+    const auto auth =
+        client.Handle(ByteSpan{challengeBytes}, MutableByteSpan{scratch});
+    if (!auth) {
+        return 0;
+    }
+    const auto authBytes = Taken(scratch, auth->Written);
+
+    const auto authOk =
+        server.Handle(ByteSpan{authBytes}, MutableByteSpan{scratch});
+    if (!authOk) {
+        return 0;
+    }
+    const auto authOkBytes = Taken(scratch, authOk->Written);
+
+    const auto done =
+        client.Handle(ByteSpan{authOkBytes}, MutableByteSpan{scratch});
+    if (!done || !done->Complete) {
+        return 0;
+    }
+
+    const auto result = client.TakeResult();
+    return result ? result->Version : 0;
+}
+
+TEST_CASE_FIXTURE(SodiumFixture,
+                  "ceiling=1 client and ceiling=2 server negotiate version 1") {
+    const auto version =
+        RunWithCeilings(PROTOCOL_VERSION_MIN, PROTOCOL_VERSION_GRID);
+    CHECK(version == PROTOCOL_VERSION_MIN);
+}
+
+TEST_CASE_FIXTURE(SodiumFixture,
+                  "ceiling=2 client and ceiling=2 server negotiate version 2") {
+    const auto version =
+        RunWithCeilings(PROTOCOL_VERSION_GRID, PROTOCOL_VERSION_GRID);
+    CHECK(version == PROTOCOL_VERSION_GRID);
+}
