@@ -31,11 +31,13 @@ constexpr std::uint8_t CLEARTEXT_EPOCH = 0;
 // ── ConnectionBase ─────────────────────────────────────────────────────
 
 ConnectionBase::ConnectionBase(MutableByteSpan frameStorage, Timestamp now,
-                               std::uint16_t ceiling) noexcept
+                               std::uint16_t ceiling,
+                               MutableByteSpan snapshotBuf) noexcept
     // Until the peer has proved itself it has not earned more than
     // MAX_HANDSHAKE_FRAME of our memory (§7); the limit widens once it has.
     : Frames_(frameStorage, wire::MAX_HANDSHAKE_FRAME),
       Started_(now),
+      SnapshotBuf_(snapshotBuf),
       Ceiling_(ceiling) {}
 
 ChannelResult<void> ConnectionBase::OnBytes(ByteSpan chunk) noexcept {
@@ -413,7 +415,8 @@ ConnectionResult AgentConnection::PumpResume(Timestamp now, MutableByteSpan out,
             return Refuse(SessionError{attached.error()});
         }
         Channel_.emplace(std::move(chosen), Handle_->Output(), Handle_->Input(),
-                         now, Handle_->Liveness(), NegotiatedVersion_);
+                         now, Handle_->Liveness(), NegotiatedVersion_,
+                         SnapshotBuf_);
         Stage_ = EStage::AwaitSnapshot;
         const auto size = Handle_->LastKnownSize();
         return NeedsSnapshot{
@@ -428,7 +431,8 @@ ConnectionResult AgentConnection::PumpResume(Timestamp now, MutableByteSpan out,
         return Refuse(SessionError{attached.error()});
     }
     Channel_.emplace(std::move(chosen), Handle_->Output(), Handle_->Input(),
-                     now, Handle_->Liveness(), NegotiatedVersion_);
+                     now, Handle_->Liveness(), NegotiatedVersion_,
+                     SnapshotBuf_);
     Stage_ = EStage::Live;
     QueueEnd();
     // Straight on: the resend is waiting, and an Idle here would tell the
@@ -510,9 +514,9 @@ void AgentConnection::Close(Timestamp now) noexcept {
 ClientConnection::ClientConnection(ClientSession& session,
                                    wire::HandshakeNonce clientNonce,
                                    MutableByteSpan frameStorage, Timestamp now,
-                                   bool gridCapable,
-                                   std::uint16_t ceiling) noexcept
-    : ConnectionBase(frameStorage, now, ceiling),
+                                   bool gridCapable, std::uint16_t ceiling,
+                                   MutableByteSpan snapshotBuf) noexcept
+    : ConnectionBase(frameStorage, now, ceiling, snapshotBuf),
       Session_(session),
       Attempt_(session, clientNonce, gridCapable, ceiling) {}
 
@@ -641,7 +645,8 @@ ConnectionResult ClientConnection::SendResume(Timestamp now,
         return Refuse(SessionError{sealed.error()});
     }
     Channel_.emplace(std::move(frames), Handle_->Output(), Handle_->Input(),
-                     now, Handle_->Liveness(), NegotiatedVersion_);
+                     now, Handle_->Liveness(), NegotiatedVersion_,
+                     SnapshotBuf_);
     if (PendingResize_) {
         Channel_->QueueResize(*PendingResize_);
         PendingResize_.reset();

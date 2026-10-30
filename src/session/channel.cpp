@@ -47,7 +47,8 @@ DirectionFrames MakeDirectionFrames(const wire::ConnectionKeys& keys,
 
 Channel::Channel(DirectionFrames frames, SendBuffer& sendBuf,
                  ReceiveCursor& recvCursor, Timestamp now,
-                 LivenessLimits liveness, std::uint16_t version) noexcept
+                 LivenessLimits liveness, std::uint16_t version,
+                 MutableByteSpan snapshotBuf) noexcept
     : SendBuf_{sendBuf},
       RecvCursor_{recvCursor},
       EpochStart_{now},
@@ -55,6 +56,7 @@ Channel::Channel(DirectionFrames frames, SendBuffer& sendBuf,
       LastHeard_{now},
       LastSent_{now},
       Liveness_{liveness},
+      SnapshotBuf_{snapshotBuf},
       Sealer_{std::move(frames.Sealer)},
       Opener_{std::move(frames.Opener)},
       Version_{version},
@@ -63,9 +65,10 @@ Channel::Channel(DirectionFrames frames, SendBuffer& sendBuf,
 Channel::Channel(const wire::ConnectionKeys& keys, ERole role,
                  SendBuffer& sendBuf, ReceiveCursor& recvCursor, Timestamp now,
                  std::uint64_t frameLimit, std::uint64_t byteLimit,
-                 LivenessLimits liveness, std::uint16_t version) noexcept
+                 LivenessLimits liveness, std::uint16_t version,
+                 MutableByteSpan snapshotBuf) noexcept
     : Channel(MakeDirectionFrames(keys, role, frameLimit, byteLimit), sendBuf,
-              recvCursor, now, liveness, version) {}
+              recvCursor, now, liveness, version, snapshotBuf) {}
 
 ChannelResult<IncomingEvent> Channel::Receive(
     Timestamp now, const wire::FrameView& frame,
@@ -213,8 +216,11 @@ ChannelResult<IncomingEvent> Channel::Receive(
                 return std::unexpected(
                     SessionError{EProtoError::UnexpectedMessage});
             }
-            // Violation: total_len > SNAPSHOT_MAX_BYTES.
-            if (msg->TotalLen > wire::SNAPSHOT_MAX_BYTES) {
+            // Violation: total_len > SNAPSHOT_MAX_BYTES or exceeds the
+            // caller-provided buffer. §1: no allocation in the core; the
+            // caller supplies SnapshotBuf_ sized to wire::SNAPSHOT_MAX_BYTES.
+            if (msg->TotalLen > wire::SNAPSHOT_MAX_BYTES ||
+                msg->TotalLen > SnapshotBuf_.size()) {
                 return std::unexpected(
                     SessionError{EProtoError::UnexpectedMessage});
             }
@@ -235,7 +241,6 @@ ChannelResult<IncomingEvent> Channel::Receive(
             GridReceiving_->ScrollbackLen = msg->ScrollbackLen;
             GridReceiving_->Flags = msg->Flags;
             GridReceiving_->BytesReceived = 0;
-            GridReceiving_->Buffer.resize(msg->TotalLen);
             return DeliveredNothing{};
         }
 
@@ -270,9 +275,7 @@ ChannelResult<IncomingEvent> Channel::Receive(
                     SessionError{EProtoError::UnexpectedMessage});
             }
             std::ranges::copy(
-                msg->Data,
-                GridReceiving_->Buffer.begin() +
-                    static_cast<std::ptrdiff_t>(GridReceiving_->BytesReceived));
+                msg->Data, SnapshotBuf_.data() + GridReceiving_->BytesReceived);
             GridReceiving_->BytesReceived +=
                 static_cast<std::uint32_t>(msg->Data.size());
             return DeliveredNothing{};
@@ -297,14 +300,14 @@ ChannelResult<IncomingEvent> Channel::Receive(
             RecvCursor_.Reset(0);
             LastAckedOffset_ = 0;
             AckPendingSince_.reset();
-            // Move the completed buffer into GridSnapshotBuf_ so the returned
-            // ByteSpan remains valid until the next Receive/Poll. §9.
+            // SnapshotBuf_ already holds the received bytes; just record the
+            // stream generation and return a span into it. The span is valid
+            // until the next GridBegin (§1: buffer is caller-owned). §9.
             GridReception rec = std::move(*GridReceiving_);
             GridReceiving_.reset();
-            GridSnapshotBuf_ = std::move(rec.Buffer);
             AgentStreamGen_ = rec.StreamGen;
             return DeliveredGridSnapshot{
-                .Bytes = ByteSpan{GridSnapshotBuf_},
+                .Bytes = ByteSpan{SnapshotBuf_.first(rec.TotalLen)},
                 .StreamGen = rec.StreamGen,
                 .ScrollbackLen = rec.ScrollbackLen,
                 .Flags = rec.Flags,

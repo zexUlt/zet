@@ -4,7 +4,6 @@
 #include <cstdint>
 #include <optional>
 #include <variant>
-#include <vector>
 
 #include "zet/core/bytes.hpp"
 #include "zet/core/time.hpp"
@@ -148,9 +147,13 @@ public:
     /// `liveness` sets the keepalive and peer-silence timers; both run from
     /// `now`. `version` is the negotiated protocol version; it gates ver=2-only
     /// messages such as SessionEnd Overflow.
+    /// `snapshotBuf` is the caller-supplied storage for incoming grid snapshots
+    /// (§1 forbids allocation in the core; the connection layer provides the
+    /// buffer). Must be at least wire::SNAPSHOT_MAX_BYTES for client-role
+    /// channels; agent-role channels never receive snapshots and may pass {}.
     Channel(DirectionFrames frames, SendBuffer& sendBuf,
             ReceiveCursor& recvCursor, Timestamp now, LivenessLimits liveness,
-            std::uint16_t version) noexcept;
+            std::uint16_t version, MutableByteSpan snapshotBuf = {}) noexcept;
 
     /// Builds a Channel straight from connection keys, counters at zero.
     ///
@@ -164,7 +167,8 @@ public:
             std::uint64_t frameLimit = wire::MAX_FRAMES_PER_EPOCH,
             std::uint64_t byteLimit = wire::MAX_BYTES_PER_EPOCH,
             LivenessLimits liveness = {},
-            std::uint16_t version = wire::PROTOCOL_VERSION_MIN) noexcept;
+            std::uint16_t version = wire::PROTOCOL_VERSION_MIN,
+            MutableByteSpan snapshotBuf = {}) noexcept;
 
     Channel(const Channel&) = delete;
     Channel& operator=(const Channel&) = delete;
@@ -322,9 +326,9 @@ private:
     /// Ping replaces an unanswered one, per §9.
     std::optional<wire::PongMessage> PendingPong_;
 
-    /// Completed snapshot buffer, kept alive until the next Receive/Poll so
-    /// that the DeliveredGridSnapshot.Bytes span remains valid. §9.
-    std::vector<std::byte> GridSnapshotBuf_;
+    /// Caller-supplied storage for incoming grid snapshots. Borrowed; must
+    /// outlive this Channel. Agent-role channels pass {} (never receive). §1.
+    MutableByteSpan SnapshotBuf_;
 
     // ── M6 grid state (§9 ADR-030) ─────────────────────────────────────────
 
@@ -348,7 +352,8 @@ private:
         std::uint32_t ScrollbackLen{0};
         std::uint8_t Flags{0};
         std::uint32_t BytesReceived{0};
-        std::vector<std::byte> Buffer;  ///< Accumulated chunk bytes.
+        // Bytes are written directly into SnapshotBuf_; no per-reception
+        // buffer.
     };
     std::optional<GridReception> GridReceiving_;
 
