@@ -59,6 +59,7 @@ struct ViolationRig {
           AgentSendBuf{MutableByteSpan{AgentSendStore}, 0},
           ClientRecv{0},
           AgentRecv{0},
+          ClientSnapshotStore(wire::SNAPSHOT_MAX_BYTES, std::byte{}),
           Client{Keys,
                  ERole::Client,
                  ClientSendBuf,
@@ -67,7 +68,8 @@ struct ViolationRig {
                  MAX_FRAMES_PER_EPOCH,
                  MAX_BYTES_PER_EPOCH,
                  {},
-                 2},
+                 2,
+                 MutableByteSpan{ClientSnapshotStore}},
           Agent{Keys,
                 ERole::Agent,
                 AgentSendBuf,
@@ -126,6 +128,7 @@ struct ViolationRig {
     SendBuffer AgentSendBuf;
     ReceiveCursor ClientRecv;
     ReceiveCursor AgentRecv;
+    std::vector<std::byte> ClientSnapshotStore;
 
     Channel Client;
     Channel Agent;

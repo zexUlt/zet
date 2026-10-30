@@ -89,6 +89,7 @@ struct Space {
     std::array<std::byte, CONNECTION_FRAME_STORAGE> ClientFrames{};
     std::array<std::byte, CONNECTION_OUT_SIZE> Out{};
     std::array<std::byte, CONNECTION_SCRATCH_SIZE> Scratch{};
+    std::vector<std::byte> SnapshotBuf{wire::SNAPSHOT_MAX_BYTES, std::byte{}};
 };
 
 /// Deliver `out[0..written)` bytes to `conn`.
@@ -224,7 +225,8 @@ TEST_CASE_FIXTURE(
                             MutableByteSpan{sp.ClientFrames},
                             START,
                             /*gridCapable=*/true,
-                            wire::PROTOCOL_VERSION_GRID};
+                            wire::PROTOCOL_VERSION_GRID,
+                            MutableByteSpan{sp.SnapshotBuf}};
         REQUIRE(DriveToLive(ac, cc, agent, sp, START, nonces));
         ac.Close(START);  // disconnect
     }
@@ -245,7 +247,8 @@ TEST_CASE_FIXTURE(
                          MutableByteSpan{sp.ClientFrames},
                          START,
                          /*gridCapable=*/true,
-                         wire::PROTOCOL_VERSION_GRID};
+                         wire::PROTOCOL_VERSION_GRID,
+                         MutableByteSpan{sp.SnapshotBuf}};
     REQUIRE(DriveToLive(ac2, cc2, agent, sp, START, nonces));
 
     // Drive until NeedsSnapshot appears from the agent.
@@ -323,7 +326,8 @@ TEST_CASE_FIXTURE(SodiumFixture,
                             MutableByteSpan{sp.ClientFrames},
                             START,
                             /*gridCapable=*/true,
-                            wire::PROTOCOL_VERSION_GRID};
+                            wire::PROTOCOL_VERSION_GRID,
+                            MutableByteSpan{sp.SnapshotBuf}};
         if (!DriveToLive(ac, cc, agent, sp, START, nonces)) {
             return false;
         }
@@ -369,7 +373,8 @@ TEST_CASE_FIXTURE(SodiumFixture,
                              MutableByteSpan{sp.ClientFrames},
                              START,
                              /*gridCapable=*/true,
-                             wire::PROTOCOL_VERSION_GRID};
+                             wire::PROTOCOL_VERSION_GRID,
+                             MutableByteSpan{sp.SnapshotBuf}};
         REQUIRE(DriveToLive(ac0, cc0, agent, sp, START, nonces));
         ac0.Close(START);
     }
@@ -393,7 +398,8 @@ TEST_CASE_FIXTURE(SodiumFixture,
                          MutableByteSpan{sp.ClientFrames},
                          START,
                          /*gridCapable=*/true,
-                         wire::PROTOCOL_VERSION_GRID};
+                         wire::PROTOCOL_VERSION_GRID,
+                         MutableByteSpan{sp.SnapshotBuf}};
 
     // freshClient sends stream_gen=0; agent's session_gen=1 → mandatory path B.
     bool gotNeedsSnapshot = false;
@@ -453,7 +459,8 @@ TEST_CASE_FIXTURE(SodiumFixture,
                              MutableByteSpan{sp.ClientFrames},
                              START,
                              /*gridCapable=*/true,
-                             wire::PROTOCOL_VERSION_GRID};
+                             wire::PROTOCOL_VERSION_GRID,
+                             MutableByteSpan{sp.SnapshotBuf}};
         REQUIRE(DriveToLive(ac0, cc0, agent, sp, START, nonces));
         ac0.Close(START);
     }
@@ -473,7 +480,8 @@ TEST_CASE_FIXTURE(SodiumFixture,
                         MutableByteSpan{sp.ClientFrames},
                         START,
                         /*gridCapable=*/true,
-                        wire::PROTOCOL_VERSION_GRID};
+                        wire::PROTOCOL_VERSION_GRID,
+                        MutableByteSpan{sp.SnapshotBuf}};
     REQUIRE(DriveToLive(ac, cc, agent, sp, START, nonces));
 
     // Client queues a Resize.
@@ -595,7 +603,8 @@ TEST_CASE_FIXTURE(SodiumFixture,
                              MutableByteSpan{sp.ClientFrames},
                              START,
                              /*gridCapable=*/true,
-                             wire::PROTOCOL_VERSION_GRID};
+                             wire::PROTOCOL_VERSION_GRID,
+                             MutableByteSpan{sp.SnapshotBuf}};
         REQUIRE(DriveToLive(ac0, cc0, agent, sp, START, nonces));
         ac0.Close(START);
     }
@@ -614,7 +623,8 @@ TEST_CASE_FIXTURE(SodiumFixture,
                         MutableByteSpan{sp.ClientFrames},
                         START,
                         /*gridCapable=*/true,
-                        wire::PROTOCOL_VERSION_GRID};
+                        wire::PROTOCOL_VERSION_GRID,
+                        MutableByteSpan{sp.SnapshotBuf}};
     REQUIRE(DriveToLive(ac, cc, agent, sp, START, nonces));
 
     // Drive path B to completion.
