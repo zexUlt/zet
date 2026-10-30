@@ -182,8 +182,11 @@ struct ClientResumed {
 /// session it wants and there is no routing step between them.
 class ClientResumeAttempt {
 public:
+    /// `gridCapable` causes GRID_CAPABLE to be included in the Hello TLV,
+    /// signalling that this client can receive grid snapshots. §7 ADR-035.
     ClientResumeAttempt(ClientSession& session,
-                        wire::HandshakeNonce clientNonce) noexcept;
+                        wire::HandshakeNonce clientNonce,
+                        bool gridCapable = false) noexcept;
 
     ClientResumeAttempt(const ClientResumeAttempt&) = delete;
     ClientResumeAttempt& operator=(const ClientResumeAttempt&) = delete;

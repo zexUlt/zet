@@ -95,11 +95,13 @@ void ClientSessionHandle::SetStreamGen(std::uint32_t gen) noexcept {
     Session_->StreamGen_ = gen;
 }
 
-ClientResumeAttempt::ClientResumeAttempt(
-    ClientSession& session, wire::HandshakeNonce clientNonce) noexcept
+ClientResumeAttempt::ClientResumeAttempt(ClientSession& session,
+                                         wire::HandshakeNonce clientNonce,
+                                         bool gridCapable) noexcept
     : Session_(&session),
       Shake_(session.Id_, Clone(session.Auth_), Clone(session.Seed_),
-             clientNonce, session.Seen_) {}
+             clientNonce, session.Seen_, wire::PROTOCOL_VERSION_MAX,
+             gridCapable) {}
 
 wire::PreAuthResult<std::size_t> ClientResumeAttempt::Start(
     MutableByteSpan out) noexcept {

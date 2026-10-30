@@ -339,13 +339,6 @@ ChannelResult<IncomingEvent> Channel::Receive(
         case wire::EMessageType::MuxRegistered:
         case wire::EMessageType::MuxRefused:
         case wire::EMessageType::MuxHandoff:
-        // TODO(m6-grid): Grid messages are wired but the session state machine
-        // has no handlers yet. They fall through to UnexpectedMessage until a
-        // follow-up PR adds the grid snapshot state machine.
-        case wire::EMessageType::GridBegin:
-        case wire::EMessageType::GridChunk:
-        case wire::EMessageType::GridEnd:
-        case wire::EMessageType::GridApplied:
             break;
     }
 

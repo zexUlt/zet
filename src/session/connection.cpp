@@ -97,10 +97,11 @@ MutableByteSpan ConnectionBase::HandshakeBody(MutableByteSpan out) noexcept {
                                      wire::MAX_HANDSHAKE_FRAME));
 }
 
-template <typename TOnOpened>
+template <typename TOnOpened, typename TOnGridSnap>
 ConnectionResult ConnectionBase::PumpLive(Timestamp now, MutableByteSpan out,
                                           MutableByteSpan scratch,
-                                          TOnOpened&& onOpened) noexcept {
+                                          TOnOpened&& onOpened,
+                                          TOnGridSnap&& onGridSnap) noexcept {
     // Incoming first: it can carry an ack that frees room for what we send.
     // A frame that delivered nothing — a bare Ack, a duplicate, a Ping — is
     // not an event of its own, so look further in the same call.
@@ -126,6 +127,16 @@ ConnectionResult ConnectionBase::PumpLive(Timestamp now, MutableByteSpan out,
         if (const auto* end = std::get_if<DeliveredSessionEnd>(&*event)) {
             return Ended{.End = end->End};
         }
+        if (const auto* snap = std::get_if<DeliveredGridSnapshot>(&*event)) {
+            // Agent side: DeliveredGridSnapshot should never arrive; the
+            // channel already closed the connection on that violation.
+            // Client side: caller queues GridApplied and returns ApplySnapshot.
+            if (auto r = std::forward<TOnGridSnap>(onGridSnap)(*snap)) {
+                return std::move(*r);
+            }
+        }
+        // DeliveredNothing, DeliveredGridApplied → loop; channel already
+        // cleared GridAwaitingApplied_ on the agent side.
     }
 
     auto written = Channel_->Poll(now, out, scratch);
@@ -182,14 +193,35 @@ ConnectionResult AgentConnection::Pump(Timestamp now, MutableByteSpan out,
             return PumpHandshake(out);
         case EStage::AwaitResume:
             return PumpResume(now, out, scratch);
-        case EStage::Live:
+        case EStage::AwaitSnapshot:
+            if (!Handle_->IsCurrent()) {
+                return Refuse(ESessionError::Superseded);
+            }
+            return PumpAwaitSnapshot(now, out, scratch);
+        case EStage::Live: {
             // A newer connection authenticated and took the streams; this one
             // must stop touching them before it sends a byte.
             if (!Handle_->IsCurrent()) {
                 return Refuse(ESessionError::Superseded);
             }
             QueueEnd();
-            return PumpLive(now, out, scratch, [] {});
+            auto result = PumpLive(
+                now, out, scratch, [] {},
+                [](const DeliveredGridSnapshot&)
+                    -> std::optional<ConnectionResult> {
+                    // Agent never legitimately receives a GridSnapshot; channel
+                    // already enforces this. Nothing to do here.
+                    return std::nullopt;
+                });
+            // Keep LastKnownSize_ in the session up to date for the next
+            // reconnect's path A/B cost comparison.
+            if (result) {
+                if (const auto* resized = std::get_if<Resized>(&*result)) {
+                    Handle_->ReportResize(resized->Size);
+                }
+            }
+            return result;
+        }
     }
     return Idle{};
 }
@@ -228,6 +260,26 @@ ConnectionResult AgentConnection::PumpHello() noexcept {
     std::ranges::copy(frame.Body, kept.begin());
     HelloSize_ = frame.Body.size();
     HelloId_ = *id;
+
+    // Extract GRID_CAPABLE TLV pre-auth; trusted only after SetGridInfo
+    // confirms the handshake (§7, TLV registry). Re-parse the stored Hello
+    // so we don't rely on frame.Body staying valid across Pumps.
+    {
+        ByteReader helloReader{ByteSpan{Hello_}.first(HelloSize_)};
+        std::ignore = wire::ParseMessageType(helloReader);  // skip type byte
+        if (auto hello = wire::ParseHello(helloReader); hello) {
+            for (const auto& opt : hello->Options.Options()) {
+                if (opt.Type == wire::TLV_GRID_CAPABLE &&
+                    opt.Value.size() == 2) {
+                    ByteReader vr{opt.Value};
+                    if (auto v = vr.ReadU16BE(); v && *v == 1) {
+                        HelloGridCapable_ = true;
+                    }
+                }
+            }
+        }
+    }
+
     Stage_ = EStage::AwaitRoute;
     return NeedsSession{.Id = HelloId_};
 }
@@ -271,6 +323,8 @@ ConnectionResult AgentConnection::PumpHandshake(MutableByteSpan out) noexcept {
                                                   ERole::Agent));
         }
         Handle_.emplace(std::move(resumed->Handle));
+        // Now trusted: the client proved K_auth, so the TLV it claimed is real.
+        Handle_->SetGridInfo(NegotiatedVersion_, HelloGridCapable_);
         Attempt_.reset();
         Stage_ = EStage::AwaitResume;
     }
@@ -318,23 +372,116 @@ ConnectionResult AgentConnection::PumpResume(Timestamp now, MutableByteSpan out,
     if (auto confirmed = Handle_->ConfirmResume(used); !confirmed) {
         return Refuse(SessionError{confirmed.error()});
     }
-    if (auto attached = Handle_->Attach(resume->ClientReceiveOffset);
-        !attached) {
-        return Refuse(SessionError{attached.error()});
+
+    // Path A/B decision (§9 ADR-030). Feasibility comes first, then cost.
+    //   ring_overflowed: the ring filled in Resync mode; path B is mandatory.
+    //   stream_gen < session_gen: the client applied a generation the agent has
+    //     already superseded; the client must catch up via a new snapshot.
+    const bool mandatoryB =
+        Handle_->RingOverflowed() || resume->StreamGen < Handle_->SessionGen();
+
+    bool usePathB = mandatoryB;
+    if (!usePathB) {
+        // Cost check: prefer path B when the replay is more expensive than
+        // building a snapshot. The estimate is coarse (bytes per cell) but
+        // always well under SNAPSHOT_MAX_BYTES, so it is a safe sentinel.
+        const std::uint64_t replayCost =
+            Handle_->Output().End() > resume->ClientReceiveOffset
+                ? Handle_->Output().End() - resume->ClientReceiveOffset
+                : std::uint64_t{0};
+        if (const auto size = Handle_->LastKnownSize(); size.has_value()) {
+            const auto estimate = SnapshotEstimateBytes(size->Rows, size->Cols);
+            usePathB = (replayCost > estimate);
+        }
     }
 
+    // Move the chosen direction frames now, before either attach path.
     DirectionFrames chosen = used == EResumeKeys::Current
                                  ? std::move(*Current_)
                                  : std::move(*Fallback_);
     Current_.reset();
     Fallback_.reset();
+
+    if (usePathB) {
+        // Path B: open a new output generation. NewGeneration() (called inside
+        // SupplySnapshot) will clear the ring; for now we just become live so
+        // incoming frames are accepted during the snapshot-build window.
+        if (auto attached = Handle_->AttachPathB(); !attached) {
+            return Refuse(SessionError{attached.error()});
+        }
+        Channel_.emplace(std::move(chosen), Handle_->Output(), Handle_->Input(),
+                         now, Handle_->Liveness(), NegotiatedVersion_);
+        Stage_ = EStage::AwaitSnapshot;
+        const auto size = Handle_->LastKnownSize();
+        return NeedsSnapshot{
+            .Rows = size ? size->Rows : std::uint16_t{0},
+            .Cols = size ? size->Cols : std::uint16_t{0},
+        };
+    }
+
+    // Path A: byte-identical replay from what the client reports receiving.
+    if (auto attached = Handle_->Attach(resume->ClientReceiveOffset);
+        !attached) {
+        return Refuse(SessionError{attached.error()});
+    }
     Channel_.emplace(std::move(chosen), Handle_->Output(), Handle_->Input(),
                      now, Handle_->Liveness(), NegotiatedVersion_);
     Stage_ = EStage::Live;
     QueueEnd();
     // Straight on: the resend is waiting, and an Idle here would tell the
     // caller there is nothing to do until the client speaks again.
-    return PumpLive(now, out, scratch, [] {});
+    return PumpLive(
+        now, out, scratch, [] {},
+        [](const DeliveredGridSnapshot&) -> std::optional<ConnectionResult> {
+            return std::nullopt;
+        });
+}
+
+ConnectionResult AgentConnection::PumpAwaitSnapshot(
+    Timestamp now, MutableByteSpan out, MutableByteSpan scratch) noexcept {
+    // Process one incoming frame (Resize, keyboard Data, Ping/Pong, Ack), but
+    // do not poll — no output goes out until SupplySnapshot clears the ring
+    // and starts the grid emission. §9 ADR-030.
+    auto next = Frames_.Next();
+    if (!next) {
+        return std::unexpected(Fail(SessionError{next.error()}));
+    }
+    if (*next) {
+        auto event = Channel_->Receive(now, **next, scratch);
+        if (!event) {
+            return std::unexpected(Fail(event.error()));
+        }
+        if (const auto* data = std::get_if<DeliveredData>(&*event)) {
+            return Deliver{.Bytes = data->Bytes};
+        }
+        if (const auto* resize = std::get_if<DeliveredResize>(&*event)) {
+            Handle_->ReportResize(resize->Resize);
+            return Resized{.Size = resize->Resize};
+        }
+        // DeliveredSessionEnd, DeliveredNothing, DeliveredGridApplied → fall
+        // through; none of these change the snapshot wait.
+    }
+    (void)out;
+    const auto size = Handle_->LastKnownSize();
+    return NeedsSnapshot{
+        .Rows = size ? size->Rows : std::uint16_t{0},
+        .Cols = size ? size->Cols : std::uint16_t{0},
+    };
+}
+
+void AgentConnection::SupplySnapshot([[maybe_unused]] Timestamp now,
+                                     ByteSpan snapshot,
+                                     std::uint32_t scrollbackLen,
+                                     std::uint8_t flags) noexcept {
+    if (Stage_ != EStage::AwaitSnapshot || !Channel_ || !Handle_) {
+        return;
+    }
+    // Clear the ring and open a new output generation, then queue the snapshot
+    // for emission. Everything sent after this point is in the new generation.
+    Handle_->NewGeneration();
+    Channel_->StartGrid(snapshot, flags, Handle_->SessionGen(), scrollbackLen);
+    Stage_ = EStage::Live;
+    QueueEnd();
 }
 
 ConnectionResult AgentConnection::Refuse(SessionError error) noexcept {
@@ -359,11 +506,11 @@ void AgentConnection::Close(Timestamp now) noexcept {
 
 ClientConnection::ClientConnection(ClientSession& session,
                                    wire::HandshakeNonce clientNonce,
-                                   MutableByteSpan frameStorage,
-                                   Timestamp now) noexcept
+                                   MutableByteSpan frameStorage, Timestamp now,
+                                   bool gridCapable) noexcept
     : ConnectionBase(frameStorage, now),
       Session_(session),
-      Attempt_(session, clientNonce) {}
+      Attempt_(session, clientNonce, gridCapable) {}
 
 void ClientConnection::QueueResize(wire::ResizeMessage size) noexcept {
     if (Channel_) {
@@ -403,8 +550,20 @@ ConnectionResult ClientConnection::Pump(Timestamp now, MutableByteSpan out,
             // agent's opens, which proves the agent opened Resume and moved
             // first. ConfirmAgentFrame does it once per connection.
             {
-                auto event = PumpLive(now, out, scratch,
-                                      [this] { Handle_->ConfirmAgentFrame(); });
+                auto event = PumpLive(
+                    now, out, scratch, [this] { Handle_->ConfirmAgentFrame(); },
+                    [this](const DeliveredGridSnapshot& snap)
+                        -> std::optional<ConnectionResult> {
+                        // Queue GridApplied (next Poll sends it), update the
+                        // session's stream gen so the next Resume carries it.
+                        Channel_->QueueGridApplied(snap.StreamGen);
+                        Handle_->SetStreamGen(snap.StreamGen);
+                        return ApplySnapshot{
+                            .Bytes = snap.Bytes,
+                            .StreamGen = snap.StreamGen,
+                            .ScrollbackLen = snap.ScrollbackLen,
+                            .Flags = snap.Flags};
+                    });
                 if (event) {
                     if (const auto* ended = std::get_if<Ended>(&*event)) {
                         Handle_->RecordEnd(ended->End);
@@ -462,8 +621,11 @@ ConnectionResult ClientConnection::SendResume(Timestamp now,
     // The array is wide enough for the largest Resume (v2), so no write fails.
     std::array<std::byte, RESUME_PLAINTEXT_MAX> plain{};
     ByteWriter writer{MutableByteSpan{plain}};
-    const wire::ResumeMessage resume{.ClientReceiveOffset =
-                                         Session_.ReceiveOffset()};
+    // At ver=2, stream_gen tells the agent which output generation the client
+    // last applied so the agent can decide between path A and path B. §9.
+    const wire::ResumeMessage resume{
+        .StreamGen = Session_.StreamGen(),
+        .ClientReceiveOffset = Session_.ReceiveOffset()};
     const auto written = wire::WriteResume(writer, resume, NegotiatedVersion_);
     if (!written) {
         return Refuse(SessionError{written.error()});

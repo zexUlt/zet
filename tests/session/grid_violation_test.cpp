@@ -76,7 +76,11 @@ struct ViolationRig {
                 MAX_FRAMES_PER_EPOCH,
                 MAX_BYTES_PER_EPOCH,
                 {},
-                2} {}
+                2},
+          ClientInjector{CloneKey(Keys.ServerToClient),
+                         Keys.SaltServerToClient},
+          AgentInjector{CloneKey(Keys.ClientToServer),
+                        Keys.SaltClientToServer} {}
 
     static crypto::Key MakeKey(std::uint8_t seed) {
         crypto::KeyBytes b{};
@@ -95,18 +99,23 @@ struct ViolationRig {
         return n;
     }
 
+    static crypto::Key CloneKey(const crypto::Key& src) noexcept {
+        crypto::Key copy;
+        copy.Expose() = src.Expose();
+        return copy;
+    }
+
     /// Seal `plain` with the agent→client key and deliver it to the client.
+    /// Uses a persistent sealer so the nonce counter advances correctly across
+    /// multiple calls: a fresh sealer per call would reset to nonce 0 and
+    /// cause the channel's opener to fail on the second inject.
     ChannelResult<IncomingEvent> InjectToClient(ByteSpan plain) {
-        FrameSealer sealer{crypto::Key{Keys.ServerToClient.Expose()},
-                           Keys.SaltServerToClient};
-        return Inject(Client, sealer, plain, OpenScratch);
+        return Inject(Client, ClientInjector, plain, OpenScratch);
     }
 
     /// Seal `plain` with the client→agent key and deliver it to the agent.
     ChannelResult<IncomingEvent> InjectToAgent(ByteSpan plain) {
-        FrameSealer sealer{crypto::Key{Keys.ClientToServer.Expose()},
-                           Keys.SaltClientToServer};
-        return Inject(Agent, sealer, plain, OpenScratch);
+        return Inject(Agent, AgentInjector, plain, OpenScratch);
     }
 
     ConnectionKeys Keys;
@@ -120,6 +129,11 @@ struct ViolationRig {
 
     Channel Client;
     Channel Agent;
+
+    // Persistent sealers: nonce counter must stay alive across multiple
+    // injects so Channel::Opener sees a monotonically increasing counter.
+    FrameSealer ClientInjector;  // seals agent→client frames for Client
+    FrameSealer AgentInjector;   // seals client→agent frames for Agent
 
     std::vector<std::byte> OpenScratch{wire::MAX_FRAME, std::byte{}};
 

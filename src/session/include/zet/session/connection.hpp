@@ -81,8 +81,25 @@ struct Ended {
 /// Nothing to do until more bytes arrive or NextDeadline passes.
 struct Idle {};
 
-using ConnectionEvent =
-    std::variant<NeedsSession, SendFrame, Deliver, Resized, Ended, Idle>;
+/// The agent needs a grid snapshot to start path B on reconnect. Agent only.
+/// The caller builds a snapshot of size {Rows×Cols} and delivers it via
+/// SupplySnapshot before the next Pump. §9 ADR-030.
+struct NeedsSnapshot {
+    std::uint16_t Rows{0};
+    std::uint16_t Cols{0};
+};
+
+/// A complete grid snapshot has been received and is ready to apply. Client
+/// only. `Bytes` is valid until the next Pump call. §9 ADR-030.
+struct ApplySnapshot {
+    ByteSpan Bytes;
+    std::uint32_t StreamGen{0};
+    std::uint32_t ScrollbackLen{0};
+    std::uint8_t Flags{0};
+};
+
+using ConnectionEvent = std::variant<NeedsSession, SendFrame, Deliver, Resized,
+                                     Ended, Idle, NeedsSnapshot, ApplySnapshot>;
 
 using ConnectionResult = ChannelResult<ConnectionEvent>;
 
@@ -150,10 +167,11 @@ protected:
     /// opened, which is where the client confirms the seed. A connection that
     /// hears nothing for the session's PeerSilenceTimeout fails here with
     /// PeerSilent (§9).
-    template <typename TOnOpened>
+    template <typename TOnOpened, typename TOnGridSnap>
     [[nodiscard]] ConnectionResult PumpLive(Timestamp now, MutableByteSpan out,
                                             MutableByteSpan scratch,
-                                            TOnOpened&& onOpened) noexcept;
+                                            TOnOpened&& onOpened,
+                                            TOnGridSnap&& onGridSnap) noexcept;
 
     wire::FrameStream Frames_;
     Timestamp Started_;
@@ -198,12 +216,27 @@ public:
     /// the whole stream; a close of any other connection says nothing.
     [[nodiscard]] bool DeliveredEnd() const noexcept;
 
+    /// Delivers a grid snapshot after a NeedsSnapshot event. Starts the
+    /// GridBegin → GridChunk* → GridEnd sequence on the next Pump and
+    /// transitions to Live. `snapshot` is borrowed; the caller must keep it
+    /// alive until GridEmissionDone() returns true. §9 ADR-030.
+    ///
+    /// No-op if Stage is not AwaitSnapshot.
+    void SupplySnapshot(Timestamp now, ByteSpan snapshot,
+                        std::uint32_t scrollbackLen,
+                        std::uint8_t flags) noexcept;
+
 private:
     enum class EStage : std::uint8_t {
         AwaitHello,
         AwaitRoute,
         Handshake,
         AwaitResume,
+        /// Path B: waiting for the caller to build and supply a grid snapshot
+        /// via SupplySnapshot. Incoming frames (Resize, Data) are still
+        /// processed; outgoing polling is suspended until SupplySnapshot is
+        /// called. §9 ADR-030.
+        AwaitSnapshot,
         Live,
     };
 
@@ -212,6 +245,8 @@ private:
     [[nodiscard]] ConnectionResult PumpResume(Timestamp now,
                                               MutableByteSpan out,
                                               MutableByteSpan scratch) noexcept;
+    [[nodiscard]] ConnectionResult PumpAwaitSnapshot(
+        Timestamp now, MutableByteSpan out, MutableByteSpan scratch) noexcept;
     [[nodiscard]] ConnectionResult Refuse(SessionError error) noexcept;
     /// Hands the session's SessionEnd, if any, to the live channel.
     void QueueEnd() noexcept;
@@ -223,6 +258,9 @@ private:
     std::size_t HelloSize_{0};
     wire::SessionId HelloId_{};
     bool HelloAnswered_{false};
+    /// Whether the client's Hello carried a valid GRID_CAPABLE TLV. Read
+    /// pre-auth but trusted only after SetGridInfo is called post-auth. §7.
+    bool HelloGridCapable_{false};
     std::optional<ResumeAttempt> Attempt_;
     std::optional<SessionHandle> Handle_;
     std::optional<DirectionFrames> Current_;
@@ -233,8 +271,11 @@ private:
 class ClientConnection : public ConnectionBase {
 public:
     /// `frameStorage` must hold CONNECTION_FRAME_STORAGE bytes.
+    /// `gridCapable` includes GRID_CAPABLE in the Hello TLV so the agent can
+    /// serve grid snapshots on path B reconnect. §7 ADR-035.
     ClientConnection(ClientSession& session, wire::HandshakeNonce clientNonce,
-                     MutableByteSpan frameStorage, Timestamp now) noexcept;
+                     MutableByteSpan frameStorage, Timestamp now,
+                     bool gridCapable = false) noexcept;
 
     /// As AgentConnection::Pump. The first call writes Hello.
     [[nodiscard]] ConnectionResult Pump(Timestamp now, MutableByteSpan out,

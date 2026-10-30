@@ -138,14 +138,15 @@ PreAuthResult<SessionId> PeekHelloSessionId(ByteSpan body) noexcept {
 ClientHandshake::ClientHandshake(SessionId id, crypto::Key auth,
                                  crypto::Key connectionSeed,
                                  HandshakeNonce clientNonce,
-                                 const NonceMemory& seen,
-                                 std::uint16_t ceiling) noexcept
+                                 const NonceMemory& seen, std::uint16_t ceiling,
+                                 bool gridCapable) noexcept
     : Id_(id),
       Auth_(std::move(auth)),
       ConnectionSeed_(std::move(connectionSeed)),
       ClientNonce_(clientNonce),
       Seen_(seen),
-      Ceiling_(ceiling) {}
+      Ceiling_(ceiling),
+      GridCapable_(gridCapable) {}
 
 PreAuthResult<std::size_t> ClientHandshake::Start(
     MutableByteSpan out) noexcept {
@@ -173,6 +174,15 @@ PreAuthResult<std::size_t> ClientHandshake::StartStep(
     hello.VersionMax = Ceiling_;
     hello.Id = Id_;
     hello.ClientNonce = ClientNonce_;
+
+    // Advertise grid capability if requested. The TLV value is u16BE = 1
+    // per §7 TLV registry.
+    if (GridCapable_) {
+        static constexpr std::array<std::byte, 2> kGridCapableValue{
+            std::byte{0}, std::byte{1}};
+        std::ignore = hello.Options.Append(TlvOption{
+            .Type = TLV_GRID_CAPABLE, .Value = ByteSpan{kGridCapableValue}});
+    }
 
     ByteWriter writer{out};
     if (auto written = WriteHello(writer, hello); !written) {
