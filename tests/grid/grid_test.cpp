@@ -2454,3 +2454,142 @@ TEST_CASE("PushScrollback wraps oldest entry when scrollback is full") {
     CHECK(g->ScrollbackSize() == 2);
     delete g;
 }
+
+// ---------------------------------------------------------------------------
+// SGR 38:2:r:g:b (4-sub-param colon, no colorspace byte) sets truecolor fg
+// ---------------------------------------------------------------------------
+
+TEST_CASE("SGR 38:2:r:g:b colon-form without colorspace sets truecolor fg") {
+    Grid* g = MakeGrid(20, 5);
+    VtParser p;
+    // 38:2:r:g:b — 4 sub-params (no colorspace): hits nsub>=4 branch
+    Feed(p, *g, "\x1b[38:2:11:22:33m");
+    CHECK(g->PenFgKind() == EColorKind::TrueColor);
+    const std::uint8_t* fg = g->PenFg();
+    CHECK(fg[0] == 11);
+    CHECK(fg[1] == 22);
+    CHECK(fg[2] == 33);
+    delete g;
+}
+
+TEST_CASE("SGR 48:2:r:g:b colon-form without colorspace sets truecolor bg") {
+    Grid* g = MakeGrid(20, 5);
+    VtParser p;
+    // 48:2:r:g:b — 4 sub-params (no colorspace): hits nsub>=4 branch
+    Feed(p, *g, "\x1b[48:2:44:55:66m");
+    CHECK(g->PenBgKind() == EColorKind::TrueColor);
+    const std::uint8_t* bg = g->PenBg();
+    CHECK(bg[0] == 44);
+    CHECK(bg[1] == 55);
+    CHECK(bg[2] == 66);
+    delete g;
+}
+
+// ---------------------------------------------------------------------------
+// SGR 58:5:n colon-form stores indexed underline color
+// ---------------------------------------------------------------------------
+
+TEST_CASE("SGR 58:5:n colon-form sets underline color index") {
+    Grid* g = MakeGrid(20, 5);
+    VtParser p;
+    // 58:5:n colon form: nsub=2, params[i+1]==5 → PenUlIdx_=n
+    Feed(p, *g, "\x1b[58:5:42m");
+    CHECK(g->PenUlIdx() == 42);
+    delete g;
+}
+
+TEST_CASE("SGR 58;5;n semicolon-form sets underline color index") {
+    Grid* g = MakeGrid(20, 5);
+    VtParser p;
+    // 58;5;n semicolon form: i+2<count && params[i+1]==5 → PenUlIdx_=n
+    Feed(p, *g, "\x1b[58;5;77m");
+    CHECK(g->PenUlIdx() == 77);
+    delete g;
+}
+
+// ---------------------------------------------------------------------------
+// SGR 39/49/59 reset fg/bg/underline color to default
+// ---------------------------------------------------------------------------
+
+TEST_CASE("SGR 39 resets foreground color to default") {
+    Grid* g = MakeGrid(20, 5);
+    VtParser p;
+    Feed(p, *g, "\x1b[38;5;200m");  // set indexed fg
+    CHECK(g->PenFgKind() == EColorKind::Indexed);
+    Feed(p, *g, "\x1b[39m");  // SGR 39 = reset fg
+    CHECK(g->PenFgKind() == EColorKind::Default);
+    delete g;
+}
+
+TEST_CASE("SGR 49 resets background color to default") {
+    Grid* g = MakeGrid(20, 5);
+    VtParser p;
+    Feed(p, *g, "\x1b[48;5;100m");  // set indexed bg
+    CHECK(g->PenBgKind() == EColorKind::Indexed);
+    Feed(p, *g, "\x1b[49m");  // SGR 49 = reset bg
+    CHECK(g->PenBgKind() == EColorKind::Default);
+    delete g;
+}
+
+TEST_CASE("SGR 59 resets underline color index to 0") {
+    Grid* g = MakeGrid(20, 5);
+    VtParser p;
+    Feed(p, *g, "\x1b[58;5;77m");  // set underline idx
+    CHECK(g->PenUlIdx() == 77);
+    Feed(p, *g, "\x1b[59m");  // SGR 59 = reset ul color
+    CHECK(g->PenUlIdx() == 0);
+    delete g;
+}
+
+TEST_CASE("SGR 23 clears Italic attribute") {
+    Grid* g = MakeGrid(20, 5);
+    VtParser p;
+    Feed(p, *g, "\x1b[3m");                                  // SGR 3 = Italic
+    CHECK(g->PenAttrs() & static_cast<std::uint8_t>(0x04));  // Italic flag
+    Feed(p, *g, "\x1b[23m");  // SGR 23 = clear Italic
+    CHECK(!(g->PenAttrs() & static_cast<std::uint8_t>(0x04)));
+    delete g;
+}
+
+// ---------------------------------------------------------------------------
+// Resize with scrollback enabled + column change: covers history resize path
+// ---------------------------------------------------------------------------
+
+TEST_CASE("Resize with scrollback and col change rewires history cells") {
+    // Scrollback-enabled grid: resize cols triggers lines 1205-1241 in grid.cpp
+    auto res = Grid::Create(20, 5, 4);
+    REQUIRE(res.has_value());
+    Grid* g = res.value();
+    VtParser p;
+    // Write some content and push a line to scrollback
+    Feed(p, *g, "row0\r\n");
+    Feed(p, *g, "row1\r\n");
+    Feed(p, *g, "row2\r\n");
+    Feed(p, *g, "row3\r\n");
+    Feed(p, *g, "row4\r\n");  // scroll: "row0" enters scrollback
+    CHECK(g->ScrollbackSize() >= 1);
+    // Now resize with a column change — triggers history cell reallocation
+    bool ok = g->Resize(30, 5);
+    CHECK(ok);
+    CHECK(g->Cols() == 30);
+    CHECK(g->ScrollbackSize() >= 1);  // history preserved
+    delete g;
+}
+
+TEST_CASE("Resize shrink cols with scrollback rewires history cells") {
+    auto res = Grid::Create(20, 5, 4);
+    REQUIRE(res.has_value());
+    Grid* g = res.value();
+    VtParser p;
+    // Push lines to scrollback
+    Feed(p, *g, "AAAA\r\n");
+    Feed(p, *g, "BBBB\r\n");
+    Feed(p, *g, "CCCC\r\n");
+    Feed(p, *g, "DDDD\r\n");
+    Feed(p, *g, "EEEE\r\n");
+    // Shrink columns — triggers history resize code path
+    bool ok = g->Resize(10, 5);
+    CHECK(ok);
+    CHECK(g->Cols() == 10);
+    delete g;
+}
