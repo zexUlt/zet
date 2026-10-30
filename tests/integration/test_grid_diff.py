@@ -39,9 +39,15 @@ GRID_DUMP = (
     or (str(Path(BUILD_DIR) / "tests" / "zet_grid_dump") if BUILD_DIR else "")
 )
 
-skip_no_pyte     = pytest.mark.skipif(not PYTE_AVAILABLE,
-                                      reason="pyte not installed")
-skip_no_dump     = pytest.mark.skipif(
+def _require_when_build_dir(thing: str, available: bool) -> None:
+    """In the integration container (ZET_BUILD_DIR set) missing deps are hard."""
+    if not available and BUILD_DIR:
+        pytest.fail(f"{thing} is required when ZET_BUILD_DIR is set but was not found")
+
+
+skip_no_pyte = pytest.mark.skipif(not PYTE_AVAILABLE,
+                                   reason="pyte not installed")
+skip_no_dump = pytest.mark.skipif(
     not GRID_DUMP or not Path(GRID_DUMP).exists(),
     reason="zet-grid-dump helper not built / ZET_GRID_DUMP not set")
 
@@ -62,20 +68,22 @@ def _corpus_files() -> list[Path]:
 # pyte reference
 # ---------------------------------------------------------------------------
 
-def _render_pyte(data: bytes, cols: int, rows: int) -> list[str]:
-    """Return the visible screen as a list of stripped row strings."""
+def _render_pyte(data: bytes, cols: int, rows: int) -> tuple[list[str], int, int]:
+    """Return (rows, cursor_row, cursor_col) for the visible screen."""
     screen = pyte.Screen(cols, rows)
     stream = pyte.ByteStream(screen)
     stream.feed(data)
-    return [screen.display[r].rstrip() for r in range(rows)]
+    row_strs = [screen.display[r].rstrip() for r in range(rows)]
+    # pyte cursor is 0-based
+    return row_strs, screen.cursor.y, screen.cursor.x
 
 
 # ---------------------------------------------------------------------------
 # zet_grid reference (via zet_grid_dump helper)
 # ---------------------------------------------------------------------------
 
-def _render_zet(data: bytes, cols: int, rows: int) -> list[str]:
-    """Run zet-grid-dump and return the visible screen as a list of rows."""
+def _render_zet(data: bytes, cols: int, rows: int) -> tuple[list[str], int, int]:
+    """Run zet-grid-dump and return (rows, cursor_row, cursor_col)."""
     result = subprocess.run(
         [GRID_DUMP, "--cols", str(cols), "--rows", str(rows)],
         input=data,
@@ -86,7 +94,8 @@ def _render_zet(data: bytes, cols: int, rows: int) -> list[str]:
         f"zet-grid-dump failed: {result.stderr.decode(errors='replace')}"
     )
     payload = json.loads(result.stdout)
-    return [row.rstrip() for row in payload["rows"]]
+    row_strs = [row.rstrip() for row in payload["rows"]]
+    return row_strs, payload["cursor_row"], payload["cursor_col"]
 
 
 # ---------------------------------------------------------------------------
@@ -98,10 +107,16 @@ def _render_zet(data: bytes, cols: int, rows: int) -> list[str]:
 @skip_no_dump
 def test_grid_matches_pyte(capture: Path) -> None:
     """Screen content of zet_grid matches pyte for the capture."""
+    _require_when_build_dir("pyte", PYTE_AVAILABLE)
+    _require_when_build_dir("zet-grid-dump", bool(GRID_DUMP and Path(GRID_DUMP).exists()))
     COLS, ROWS = 80, 24
     data = capture.read_bytes()
-    zet_rows  = _render_zet(data, COLS, ROWS)
-    pyte_rows = _render_pyte(data, COLS, ROWS)
+    zet_rows,  zet_cur_row,  zet_cur_col  = _render_zet(data, COLS, ROWS)
+    pyte_rows, pyte_cur_row, pyte_cur_col = _render_pyte(data, COLS, ROWS)
+
+    assert len(zet_rows) == len(pyte_rows), (
+        f"Row count mismatch: zet={len(zet_rows)} pyte={len(pyte_rows)}"
+    )
 
     # Compare row by row so pytest shows which line differs.
     for r, (z, p_) in enumerate(zip(zet_rows, pyte_rows)):
@@ -109,13 +124,20 @@ def test_grid_matches_pyte(capture: Path) -> None:
             f"Row {r} mismatch:\n  zet:  {z!r}\n  pyte: {p_!r}"
         )
 
+    assert zet_cur_row == pyte_cur_row, (
+        f"Cursor row mismatch: zet={zet_cur_row} pyte={pyte_cur_row}"
+    )
+    assert zet_cur_col == pyte_cur_col, (
+        f"Cursor col mismatch: zet={zet_cur_col} pyte={pyte_cur_col}"
+    )
+
 
 @skip_no_pyte
 def test_pyte_hello_world() -> None:
     """Smoke test: pyte renders a simple stream (import health check)."""
     data = b"Hello, world!\r\n"
     COLS, ROWS = 40, 10
-    rows = _render_pyte(data, COLS, ROWS)
+    rows, _, _ = _render_pyte(data, COLS, ROWS)
     assert rows[0] == "Hello, world!"
 
 

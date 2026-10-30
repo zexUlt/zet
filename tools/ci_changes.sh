@@ -52,11 +52,12 @@ while IFS= read -r path; do
             need test integration coverage checks macos fuzz macos_e2e systemd ;;
 
         # The VT parser and terminal grid model: compiled everywhere.
+        # Integration also runs because test_grid_diff.py validates grid output.
         src/grid/*)
-            need test coverage checks macos fuzz ;;
+            need test integration coverage checks macos fuzz ;;
 
         tests/grid/*)
-            need test coverage checks macos ;;
+            need test integration coverage checks macos ;;
 
         # zet_io and the layer above it: what the client and the agent are
         # made of. Not the fuzzers', not the coverage gate's.

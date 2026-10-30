@@ -341,7 +341,7 @@ TEST_CASE("SGR 1 sets bold, SGR 0 clears") {
     Grid* g = MakeGrid(10, 5);
     VtParser p;
     Feed(p, *g, "\x1b[1m");  // bold
-    CHECK((g->PenAttrs() & kAttrBold) != 0);
+    CHECK((g->PenAttrs() & static_cast<uint8_t>(EAttr::Bold)) != 0);
     Feed(p, *g, "\x1b[0m");  // reset
     CHECK(g->PenAttrs() == 0);
     delete g;
@@ -356,15 +356,15 @@ TEST_CASE("SGR 31 sets indexed fg color") {
     delete g;
 }
 
-TEST_CASE("SGR 38;2 sets truecolor fg") {
+TEST_CASE("SGR 38;2 sets truecolor fg inline") {
     Grid* g = MakeGrid(10, 5);
     VtParser p;
     Feed(p, *g, "\x1b[38;2;255;128;0m");
     CHECK(g->PenFgKind() == EColorKind::TrueColor);
-    const ExtColor ec = g->GetExt(g->PenFgExtIdx());
-    CHECK(ec.R == 255);
-    CHECK(ec.G == 128);
-    CHECK(ec.B == 0);
+    // Inline RGB stored directly in the pen (no side-table, design.md §9).
+    CHECK(g->PenFg()[0] == 255);
+    CHECK(g->PenFg()[1] == 128);
+    CHECK(g->PenFg()[2] == 0);
     delete g;
 }
 
@@ -522,29 +522,23 @@ TEST_CASE("DL deletes lines and shifts remaining up") {
 }
 
 // ---------------------------------------------------------------------------
-// ExtColor pool cap
+// Truecolor (inline RGB, no side-table)
 // ---------------------------------------------------------------------------
 
-TEST_CASE("ExtColor pool exhaustion degrades without crash") {
-    // Create a small grid and fill enough truecolor cells to exhaust the pool.
-    // We exhaust by repeating SGR 38;2 + print many times.
+TEST_CASE("Many distinct truecolor SGRs do not crash") {
+    // With inline RGB there is no pool to exhaust.  Exercise many unique
+    // truecolor pens and cell writes to confirm stability.
     Grid* g = MakeGrid(80, 24, 0);
     VtParser p;
-    // Each unique truecolor entry uses 1 slot (we reuse pen extidx).
-    // Actually ApplySgr allocates into PenFgExtIdx_ each time, but the old one
-    // isn't freed until a cell is written. We'll write cells to populate them.
-    for (int i = 0; i < 70000; ++i) {
-        // Move cursor back to (0,0) every 80 chars.
+    for (int i = 0; i < 4096; ++i) {
         if (i % 80 == 0) Feed(p, *g, "\x1b[1;1H");
-        // Different colors to force new allocs.
-        const std::uint8_t r = static_cast<std::uint8_t>(i & 0xFF);
+        const std::uint8_t rv = static_cast<std::uint8_t>(i & 0xFF);
         const std::uint8_t gv = static_cast<std::uint8_t>((i >> 8) & 0xFF);
-        const std::uint8_t b = static_cast<std::uint8_t>((i >> 16) & 0xFF);
-        std::uint16_t params[] = {38, 2, r, gv, b};
+        const std::uint8_t bv = 0;
+        std::uint16_t params[] = {38, 2, rv, gv, bv};
         g->ApplySgr(params, 5);
         g->PutChar('X', 1);
     }
-    // Just assert we didn't abort — all handled by pool exhaustion degradation.
     CHECK(g->Cols() == 80);
     delete g;
 }
@@ -713,5 +707,34 @@ TEST_CASE("Truncated UTF-8 produces replacement character") {
     // The 'A' will restart the sequence; the 0xE4 alone is replacement.
     // (Exact output depends on implementation; just check no crash and Ground.)
     CHECK(p.State() == EParserState::Ground);
+    delete g;
+}
+
+// ---------------------------------------------------------------------------
+// IL/DL outside scroll region (heap overflow guard)
+// ---------------------------------------------------------------------------
+
+TEST_CASE("IL/DL outside scroll region does not crash") {
+    // Reproducer for the heap-overflow: cursor is outside [ScrollTop,ScrollBot]
+    // when DECOM is active and RestoreCursor clamps into the region.  IL or DL
+    // must return immediately in that situation without touching memory.
+    Grid* g = MakeGrid(80, 24, 1000);
+    VtParser p;
+    Feed(p, *g, "\x1b[20;1H");  // move cursor to row 20
+    Feed(p, *g,
+         "\x1b"
+         "7");                 // DECSC — save cursor
+    Feed(p, *g, "\x1b[2;4r");  // DECSTBM — scroll region rows 2–4
+    Feed(p, *g, "\x1b[?6h");   // DECSET ?6 — enable origin mode (DECOM)
+    Feed(p, *g,
+         "\x1b"
+         "8");  // DECRC — restore cursor (clamped into region)
+    // DL 100 with cursor outside [ScrollTop,ScrollBot] must not corrupt memory.
+    Feed(p, *g, "\x1b[100L");
+    // Grid must remain structurally valid.
+    CHECK(g->Rows() == 24);
+    CHECK(g->Cols() == 80);
+    CHECK(g->CursorRow() < g->Rows());
+    CHECK(g->CursorCol() < g->Cols());
     delete g;
 }

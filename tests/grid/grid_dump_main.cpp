@@ -17,7 +17,7 @@
 
 using namespace zet::grid;
 
-static void usage(const char* argv0) {
+static void Usage(const char* argv0) {
     std::fprintf(stderr, "Usage: %s --cols N --rows N\n", argv0);
 }
 
@@ -29,12 +29,12 @@ int main(int argc, char** argv) {
         else if (std::strcmp(argv[i], "--rows") == 0 && i + 1 < argc)
             rows = std::atoi(argv[++i]);
         else {
-            usage(argv[0]);
+            Usage(argv[0]);
             return 1;
         }
     }
     if (cols <= 0 || rows <= 0) {
-        usage(argv[0]);
+        Usage(argv[0]);
         return 1;
     }
 
@@ -58,7 +58,7 @@ int main(int argc, char** argv) {
 
     p.Feed(reinterpret_cast<const std::byte*>(buf.data()), buf.size(), *g);
 
-    // Emit JSON.
+    // Emit JSON: {"rows":[...], "cursor_row": N, "cursor_col": N}
     std::printf("{\"rows\":[");
     for (int r = 0; r < rows; ++r) {
         if (r > 0) std::printf(",");
@@ -95,7 +95,9 @@ int main(int argc, char** argv) {
         }
         std::printf("\"");
     }
-    std::printf("]}\n");
+    std::printf("],\"cursor_row\":%d,\"cursor_col\":%d}\n",
+                static_cast<int>(g->CursorRow()),
+                static_cast<int>(g->CursorCol()));
     delete g;
     return 0;
 }

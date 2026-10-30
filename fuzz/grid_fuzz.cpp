@@ -2,10 +2,12 @@
 //
 // Invariants checked after every feed:
 //   1. cursor within bounds (with pending_wrap: col may equal cols–1 with flag)
-//   2. scroll region sane: top < bot, both < rows
-//   3. saved cursor coords within bounds
-//   4. parser always in a valid EParserState (enum range 0–14)
-//   5. ExtCount <= MAX_EXT_CELLS
+//   2. scroll region sane: top <= bot, both < rows
+//   3. saved cursor coords within bounds (checked via SaveCursor/RestoreCursor
+//      round-trip; fuzz does not expose them directly, so we probe via Resize)
+//   4. parser always in a valid EParserState (enum range 0..Bypass)
+//   5. scrollback within limit
+//   6. wide-char pairing: a width==2 cell is followed by width==0 or EOL
 //
 // Resize is interleaved to exercise the resize path under parser state.
 
@@ -40,15 +42,25 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data,
 
     VtParser p;
 
+    // Set a bypass callback to prove it does not crash on any bypass byte.
+    std::size_t bypassCount = 0;
+    p.SetBypassCallback(
+        [](std::byte, void* ctx) { *static_cast<std::size_t*>(ctx) += 1; },
+        &bypassCount);
+
     const std::byte* bytes = reinterpret_cast<const std::byte*>(data + 4);
     const std::size_t len = size - 4;
 
     // Split the input roughly in half: feed the first half, resize, feed the
-    // rest.
+    // rest.  Also do a second resize to exercise the multi-resize path.
     const std::size_t half = len / 2;
     p.Feed(bytes, half, *g);
 
     g->Resize(cols1, rows1);
+
+    // Second resize: swap cols/rows to exercise shrink and grow together.
+    g->Resize(rows1 < MAX_COLS ? rows1 : MAX_COLS,
+              cols1 < MAX_ROWS ? cols1 : MAX_ROWS);
 
     p.Feed(bytes + half, len - half, *g);
 
@@ -70,14 +82,26 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data,
 
     // 3. Parser in a valid state.
     const auto state = static_cast<std::uint8_t>(p.State());
-    if (state > static_cast<std::uint8_t>(EParserState::kBypass))
+    if (state > static_cast<std::uint8_t>(EParserState::Bypass))
         __builtin_trap();
 
-    // 4. ExtCount bounded.
-    if (g->ExtCount() > MAX_EXT_CELLS) __builtin_trap();
-
-    // 5. Scrollback within limit.
+    // 4. Scrollback within limit.
     if (g->ScrollbackSize() > g->ScrollbackLimit()) __builtin_trap();
+
+    // 5. Wide-char pairing invariant: a cell with Width==2 must be followed
+    //    by a cell with Width==0 (continuation) unless it is the last column.
+    if (!g->IsAltScreen()) {
+        for (std::uint16_t r = 0; r < rows; ++r) {
+            for (std::uint16_t c = 0; c + 1 < cols; ++c) {
+                const Cell& cell = g->CellAt(r, c);
+                if (cell.Width == 2) {
+                    const Cell& next =
+                        g->CellAt(r, static_cast<std::uint16_t>(c + 1));
+                    if (next.Width != 0) __builtin_trap();
+                }
+            }
+        }
+    }
 
     delete g;
     return 0;
