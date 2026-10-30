@@ -414,8 +414,9 @@ std::string DeliveryCommand() {
 }
 
 /// Returns true when the agent binary for `arch` is simply absent from
-/// `agentDir` (open fails with ENOENT).  Returns false when the file exists
-/// (regardless of readability or size) or when any other error is reported.
+/// `agentDir` (stat fails with ENOENT or ENOTDIR).  Returns false when the
+/// file exists (regardless of readability or size) or when any other error is
+/// reported.
 /// Used to decide whether to fall through to the compile-time default: a
 /// missing binary warrants a fallback, an existing but unloadable one does not.
 static bool AgentMissing(std::string_view agentDir,

@@ -1048,6 +1048,11 @@ def test_libexec_is_a_file_counts_as_absent(
     assert beside_dir.encode() in combined, (
         f"expected beside-binary dir {beside_dir!r} in error, got: {combined!r}"
     )
+    # Absent, not "exists but unreadable": the fallback was tried too.
+    assert b"exists but could not be read" not in combined, combined
+    assert b"/usr/local/libexec/zet" in combined, (
+        f"expected compile-time default among tried dirs, got: {combined!r}"
+    )
     # Error must also tell the user how to fix it.
     assert b"ZET_AGENT_DIR" in combined or b"--agent" in combined, (
         f"expected ZET_AGENT_DIR or --agent in error, got: {combined!r}"
