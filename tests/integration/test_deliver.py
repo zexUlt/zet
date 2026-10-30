@@ -1004,3 +1004,56 @@ def test_no_libexec_beside_binary_error_names_both_dirs(
     assert b"ZET_AGENT_DIR" in combined or b"--agent" in combined, (
         f"expected ZET_AGENT_DIR or --agent in error, got: {combined!r}"
     )
+
+
+def test_libexec_is_a_file_counts_as_absent(
+    binaries, ssh_host: SshHost, clean_home, tmp_path
+):
+    """A file named libexec beside the binary is treated as absent (ENOTDIR).
+
+    Same expectations as the no-libexec case: fall through, exit non-zero
+    with the error naming the beside-binary directory.
+    """
+    prefix = tmp_path / "file-libexec-prefix"
+    bin_dir = prefix / "bin"
+    bin_dir.mkdir(parents=True, mode=0o755)
+    # libexec is a file, so stat() of libexec/zet/... gives ENOTDIR: absent.
+    (prefix / "libexec").write_text("not a directory")
+
+    client_copy = bin_dir / "zet"
+    shutil.copyfile(binaries.client, client_copy)
+    client_copy.chmod(0o755)
+
+    env = dict(os.environ)
+    env.update(SANITIZER_OPTIONS)
+    env.pop("ZET_AGENT_DIR", None)
+    env["TERM"] = "xterm"
+
+    agent_env = _agent_env()
+    settings = " ".join(f"{k}={v}" for k, v in agent_env.items())
+    argv = [
+        str(client_copy),
+        "--ssh-arg", "-F", "--ssh-arg", str(ssh_host.config),
+        "--ssh-arg", f"-oSetEnv={settings}",
+        ssh_host.alias,
+    ]
+    result = subprocess.run(
+        argv, env=env, stdin=subprocess.DEVNULL,
+        capture_output=True, timeout=STEP_TIMEOUT_SECONDS,
+    )
+    assert result.returncode != 0, "expected non-zero exit when no agents available"
+    combined = result.stdout + result.stderr
+    # Error must name the beside-binary directory the client computed.
+    beside_dir = str(prefix / "libexec" / "zet")
+    assert beside_dir.encode() in combined, (
+        f"expected beside-binary dir {beside_dir!r} in error, got: {combined!r}"
+    )
+    # Absent, not "exists but unreadable": the fallback was tried too.
+    assert b"exists but could not be read" not in combined, combined
+    assert b"/usr/local/libexec/zet" in combined, (
+        f"expected compile-time default among tried dirs, got: {combined!r}"
+    )
+    # Error must also tell the user how to fix it.
+    assert b"ZET_AGENT_DIR" in combined or b"--agent" in combined, (
+        f"expected ZET_AGENT_DIR or --agent in error, got: {combined!r}"
+    )
