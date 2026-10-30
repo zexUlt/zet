@@ -29,9 +29,19 @@ ProtoResult<void> WriteMessage(ByteWriter& writer,
                                const AuthOkMessage& message) {
     return WriteAuthOk(writer, message);
 }
+// The test helpers use the version as a tag so callers stay explicit.
+ProtoResult<void> WriteMessageV1(ByteWriter& writer,
+                                 const ResumeMessage& message) {
+    return WriteResume(writer, message, PROTOCOL_VERSION_MIN);
+}
+ProtoResult<void> WriteMessageV2(ByteWriter& writer,
+                                 const ResumeMessage& message) {
+    return WriteResume(writer, message, PROTOCOL_VERSION_MAX);
+}
+// Default overload used by Encode<>: v1 keeps pre-M6 behaviour.
 ProtoResult<void> WriteMessage(ByteWriter& writer,
                                const ResumeMessage& message) {
-    return WriteResume(writer, message);
+    return WriteResume(writer, message, PROTOCOL_VERSION_MIN);
 }
 ProtoResult<void> WriteMessage(ByteWriter& writer,
                                const BootstrapOfferMessage& message) {
@@ -59,7 +69,23 @@ ProtoResult<void> WriteMessage(ByteWriter& writer, const PongMessage& message) {
 }
 ProtoResult<void> WriteMessage(ByteWriter& writer,
                                const SessionEndMessage& message) {
-    return WriteSessionEnd(writer, message);
+    return WriteSessionEnd(writer, message, PROTOCOL_VERSION_MIN);
+}
+ProtoResult<void> WriteMessage(ByteWriter& writer,
+                               const GridBeginMessage& message) {
+    return WriteGridBegin(writer, message);
+}
+ProtoResult<void> WriteMessage(ByteWriter& writer,
+                               const GridChunkMessage& message) {
+    return WriteGridChunk(writer, message);
+}
+ProtoResult<void> WriteMessage(ByteWriter& writer,
+                               const GridEndMessage& message) {
+    return WriteGridEnd(writer, message);
+}
+ProtoResult<void> WriteMessage(ByteWriter& writer,
+                               const GridAppliedMessage& message) {
+    return WriteGridApplied(writer, message);
 }
 
 template <typename TMessage>
@@ -99,7 +125,7 @@ ProtoResult<void> ParseAny(ByteSpan bytes) {
         case EMessageType::AuthOk:
             return Discard(ParseAuthOk(reader));
         case EMessageType::Resume:
-            return Discard(ParseResume(reader));
+            return Discard(ParseResume(reader, PROTOCOL_VERSION_MIN));
         case EMessageType::BootstrapOffer:
             return Discard(ParseBootstrapOffer(reader));
         case EMessageType::BootstrapAccept:
@@ -115,7 +141,15 @@ ProtoResult<void> ParseAny(ByteSpan bytes) {
         case EMessageType::Pong:
             return Discard(ParsePong(reader));
         case EMessageType::SessionEnd:
-            return Discard(ParseSessionEnd(reader));
+            return Discard(ParseSessionEnd(reader, PROTOCOL_VERSION_MIN));
+        case EMessageType::GridBegin:
+            return Discard(ParseGridBegin(reader));
+        case EMessageType::GridChunk:
+            return Discard(ParseGridChunk(reader));
+        case EMessageType::GridEnd:
+            return Discard(ParseGridEnd(reader));
+        case EMessageType::GridApplied:
+            return Discard(ParseGridApplied(reader));
         case EMessageType::MuxRegister:
             return Discard(ParseMuxRegister(reader));
         case EMessageType::MuxRegistered:
@@ -166,8 +200,16 @@ AuthOkMessage MakeAuthOk() {
                          .ServerReceiveOffset = 0x0102'0304'0506'0708};
 }
 
+// v1 Resume (no StreamGen on the wire)
 ResumeMessage MakeResume() {
-    return ResumeMessage{.ClientReceiveOffset = 0xFFFF'FFFF'FFFF'FFFF};
+    return ResumeMessage{.StreamGen = 0,
+                         .ClientReceiveOffset = 0xFFFF'FFFF'FFFF'FFFF};
+}
+
+// v2 Resume (StreamGen precedes c_recv_offset on the wire)
+ResumeMessage MakeResumeV2() {
+    return ResumeMessage{.StreamGen = 0x0000'0007,
+                         .ClientReceiveOffset = 0xFFFF'FFFF'FFFF'FFFF};
 }
 
 /// What IsForwardedVariable admits, as design.md §4 lists it.
@@ -223,6 +265,34 @@ PongMessage MakePong() { return PongMessage{.Token = 0xDEAD'BEEF'0102'0304}; }
 
 SessionEndMessage MakeEnd() {
     return SessionEndMessage{.Kind = ESessionEndKind::Signaled, .Value = 15};
+}
+
+SessionEndMessage MakeOverflow() {
+    return SessionEndMessage{.Kind = ESessionEndKind::Overflow, .Value = 0};
+}
+
+// For GridChunk the payload is a ByteSpan: keep the storage alongside.
+// Usage:
+//   auto [storage, msg] = MakeGridChunkStorage();
+//   msg.Data = ByteSpan{storage};   // pointer still valid
+std::pair<std::array<std::byte, 4>, GridChunkMessage> MakeGridChunkStorage() {
+    std::array<std::byte, 4> data{std::byte{0xCA}, std::byte{0xFE},
+                                  std::byte{0xBA}, std::byte{0xBE}};
+    GridChunkMessage msg{.ChunkOffset = 0x0000'1234, .Data = {}};
+    return {data, msg};
+}
+
+GridBeginMessage MakeGridBegin() {
+    return GridBeginMessage{.Flags = 0x01,
+                            .StreamGen = 0x0000'0001,
+                            .ScrollbackLen = 1024,
+                            .TotalLen = 2048};
+}
+
+GridEndMessage MakeGridEnd() { return GridEndMessage{}; }
+
+GridAppliedMessage MakeGridApplied() {
+    return GridAppliedMessage{.StreamGen = 0x0000'0001};
 }
 
 void AppendOption(std::vector<std::byte>& out, std::uint16_t type,
@@ -314,7 +384,7 @@ TEST_CASE("a resume survives a round trip") {
 
     ByteReader reader{ByteSpan{bytes}};
     REQUIRE(ParseMessageType(reader) == EMessageType::Resume);
-    const auto parsed = ParseResume(reader);
+    const auto parsed = ParseResume(reader, PROTOCOL_VERSION_MIN);
     REQUIRE(parsed.has_value());
     CHECK(parsed->ClientReceiveOffset == resume.ClientReceiveOffset);
 }
@@ -350,11 +420,18 @@ TEST_CASE("cutting a message at any offset is truncation, never a parse") {
     // Data is excluded: its payload is variable length, so any prefix at or
     // beyond the header (type+ack+offset = 17 bytes) is either a valid shorter
     // Data or MalformedField (empty payload). It has its own test below.
+    // GridChunk is excluded like Data: its body is header+variable-tail, so a
+    // prefix that ends right after the header is MalformedField (empty
+    // payload), not Truncated. GridChunk has its own truncation test below.
     const std::vector<std::vector<std::byte>> messages{
-        Encode(MakeHello()),  Encode(MakeChallenge()), Encode(MakeAuth()),
-        Encode(MakeAuthOk()), Encode(MakeResume()),    Encode(MakeAck()),
-        Encode(MakeResize()), Encode(MakePing()),      Encode(MakePong()),
-        Encode(MakeOffer()),  Encode(MakeAccept()),    Encode(MakeEnd())};
+        Encode(MakeHello()),      Encode(MakeChallenge()),
+        Encode(MakeAuth()),       Encode(MakeAuthOk()),
+        Encode(MakeResume()),     Encode(MakeAck()),
+        Encode(MakeResize()),     Encode(MakePing()),
+        Encode(MakePong()),       Encode(MakeOffer()),
+        Encode(MakeAccept()),     Encode(MakeEnd()),
+        Encode(MakeGridBegin()),  Encode(MakeGridEnd()),
+        Encode(MakeGridApplied())};
 
     for (const auto& bytes : messages) {
         const std::size_t size = bytes.size();
@@ -408,6 +485,9 @@ TEST_CASE("a writer with too little room refuses instead of overflowing") {
     refusesUpTo(MakeOffer());
     refusesUpTo(MakeAccept());
     refusesUpTo(MakeEnd());
+    refusesUpTo(MakeGridBegin());
+    refusesUpTo(MakeGridEnd());
+    refusesUpTo(MakeGridApplied());
 }
 
 TEST_CASE("an unknown option that is not critical is carried past") {
@@ -520,7 +600,8 @@ TEST_CASE("bytes past the last field of a fixed message are malformed") {
          {Encode(MakeAuth()), Encode(MakeAuthOk()), Encode(MakeResume()),
           Encode(MakeAck()), Encode(MakeResize()), Encode(MakePing()),
           Encode(MakePong()), Encode(MakeOffer()), Encode(MakeAccept()),
-          Encode(MakeEnd())}) {
+          Encode(MakeEnd()), Encode(MakeGridBegin()), Encode(MakeGridEnd()),
+          Encode(MakeGridApplied())}) {
         bytes.push_back(std::byte{0x00});
         const auto parsed = ParseAny(ByteSpan{bytes});
         REQUIRE_FALSE(parsed.has_value());
@@ -530,10 +611,10 @@ TEST_CASE("bytes past the last field of a fixed message are malformed") {
 
 TEST_CASE("a type byte outside the registry is unknown") {
     // 0x00 is not assigned, 0x08 is the first free one of the bootstrap
-    // range (§7), 0x16 the first unassigned session type, 0xFF is past
-    // everything.
+    // range (§7), 0x1A the first unassigned session type after the Grid
+    // block (0x16–0x19), 0xFF is past everything.
     for (const std::uint8_t type :
-         std::array<std::uint8_t, 4>{0x00, 0x08, 0x16, 0xFF}) {
+         std::array<std::uint8_t, 4>{0x00, 0x08, 0x1A, 0xFF}) {
         CAPTURE(type);
         const std::vector<std::byte> bytes{std::byte{type}};
         ByteReader reader{ByteSpan{bytes}};
@@ -585,7 +666,7 @@ TEST_CASE("nothing a handshake message can say reaps the session") {
     }
 
     for (const std::uint8_t type :
-         std::array<std::uint8_t, 4>{0x00, 0x08, 0x16, 0xFF}) {
+         std::array<std::uint8_t, 4>{0x00, 0x08, 0x1A, 0xFF}) {
         corpus.push_back({std::byte{type}});
     }
 
@@ -897,7 +978,7 @@ TEST_CASE("a session end survives a round trip") {
 
         ByteReader reader{ByteSpan{bytes}};
         REQUIRE(ParseMessageType(reader) == EMessageType::SessionEnd);
-        const auto parsed = ParseSessionEnd(reader);
+        const auto parsed = ParseSessionEnd(reader, PROTOCOL_VERSION_MIN);
         REQUIRE(parsed.has_value());
         CHECK(*parsed == end);
     }
@@ -914,7 +995,8 @@ TEST_CASE("a session end of a kind nobody defined is refused both ways") {
     // enumeration, which is what the analyzer rightly flags a cast for.
     const SessionEndMessage odd{
         .Kind = std::bit_cast<ESessionEndKind>(std::uint8_t{7}), .Value = 0};
-    CHECK(WriteSessionEnd(writer, odd).error() == EProtoError::MalformedField);
+    CHECK(WriteSessionEnd(writer, odd, PROTOCOL_VERSION_MIN).error() ==
+          EProtoError::MalformedField);
     CHECK(writer.Size() == 0);
 }
 
@@ -1040,4 +1122,401 @@ TEST_CASE("cutting a data message before the payload header is truncation") {
         CHECK(parsed.error() == EProtoError::MalformedField);
     }
     CHECK(ParseAny(ByteSpan{full}).has_value());
+}
+
+TEST_CASE("cutting a GridChunk before the data is truncation") {
+    // type(1) + chunk_offset(4) = 5 bytes header; at exactly 5 bytes the data
+    // is absent, which is MalformedField. Beyond 5 bytes it is valid.
+    auto [storage, msg] = MakeGridChunkStorage();
+    msg.Data = ByteSpan{storage};
+    const auto full = Encode(msg);
+    REQUIRE(full.size() == 9);  // 1 + 4 + 4
+
+    for (std::size_t prefix = 0; prefix < 5; ++prefix) {
+        CAPTURE(prefix);
+        const auto parsed = ParseAny(ByteSpan{full}.first(prefix));
+        REQUIRE_FALSE(parsed.has_value());
+        CHECK(parsed.error() == EProtoError::Truncated);
+    }
+    {
+        const auto parsed = ParseAny(ByteSpan{full}.first(5));
+        REQUIRE_FALSE(parsed.has_value());
+        CHECK(parsed.error() == EProtoError::MalformedField);
+    }
+    CHECK(ParseAny(ByteSpan{full}).has_value());
+}
+
+// ─── Protocol v2: Resume ─────────────────────────────────────────────────────
+
+TEST_CASE("a v2 resume carries stream_gen before c_recv_offset on the wire") {
+    const auto msg = MakeResumeV2();
+    std::vector<std::byte> out(MAX_FRAME);
+    ByteWriter writer{MutableByteSpan{out}};
+    REQUIRE(WriteMessageV2(writer, msg).has_value());
+    out.resize(writer.Size());
+
+    // Type byte + stream_gen (4) + c_recv_offset (8) = 13 bytes.
+    REQUIRE(out.size() == 13);
+    CHECK(out[0] == std::byte{0x05});  // Resume type
+    // stream_gen = 0x00000007 big-endian
+    CHECK(out[1] == std::byte{0x00});
+    CHECK(out[2] == std::byte{0x00});
+    CHECK(out[3] == std::byte{0x00});
+    CHECK(out[4] == std::byte{0x07});
+    // c_recv_offset = 0xFFFFFFFFFFFFFFFF big-endian
+    for (std::size_t i = 5; i < 13; ++i) {
+        CHECK(out[i] == std::byte{0xFF});
+    }
+
+    ByteReader reader{ByteSpan{out}.subspan(1)};
+    const auto parsed = ParseResume(reader, PROTOCOL_VERSION_MAX);
+    REQUIRE(parsed.has_value());
+    CHECK(parsed->StreamGen == msg.StreamGen);
+    CHECK(parsed->ClientReceiveOffset == msg.ClientReceiveOffset);
+}
+
+TEST_CASE("a v1 resume is rejected by a v2 parser and vice versa") {
+    // v1 wire: type + c_recv_offset (8) = 9 bytes.
+    {
+        std::vector<std::byte> v1bytes(MAX_FRAME);
+        ByteWriter w{MutableByteSpan{v1bytes}};
+        REQUIRE(WriteMessageV1(w, MakeResume()).has_value());
+        v1bytes.resize(w.Size());
+        // Remove the type byte, feed body to a v2 parser.
+        ByteReader reader{ByteSpan{v1bytes}.subspan(1)};
+        // v2 tries to read stream_gen(4) + c_recv_offset(8) = 12 bytes;
+        // v1 body is only 8 bytes, so it truncates.
+        const auto parsed = ParseResume(reader, PROTOCOL_VERSION_MAX);
+        REQUIRE_FALSE(parsed.has_value());
+        CHECK(parsed.error() == EProtoError::Truncated);
+    }
+
+    // v2 wire: type + stream_gen(4) + c_recv_offset(8) = 13 bytes.
+    {
+        std::vector<std::byte> v2bytes(MAX_FRAME);
+        ByteWriter w{MutableByteSpan{v2bytes}};
+        REQUIRE(
+            WriteResume(w, MakeResumeV2(), PROTOCOL_VERSION_MAX).has_value());
+        v2bytes.resize(w.Size());
+        // Remove the type byte, feed body to a v1 parser.
+        ByteReader reader{ByteSpan{v2bytes}.subspan(1)};
+        // v1 reads c_recv_offset(8), then RequireExhausted finds 4 leftover
+        // bytes (the stream_gen that v1 never consumed).
+        const auto parsed = ParseResume(reader, PROTOCOL_VERSION_MIN);
+        REQUIRE_FALSE(parsed.has_value());
+        CHECK(parsed.error() == EProtoError::MalformedField);
+    }
+}
+
+// ─── Protocol v2: SessionEnd Overflow ────────────────────────────────────────
+
+TEST_CASE("SessionEnd Overflow is accepted at v2 and rejected at v1") {
+    const auto overflow = MakeOverflow();
+
+    // Write at v2 must succeed.
+    std::vector<std::byte> out(MAX_FRAME);
+    ByteWriter writer{MutableByteSpan{out}};
+    REQUIRE(
+        WriteSessionEnd(writer, overflow, PROTOCOL_VERSION_MAX).has_value());
+    out.resize(writer.Size());
+    REQUIRE(out.size() == 3);
+    CHECK(out[0] == std::byte{0x15});  // SessionEnd type
+    CHECK(out[1] == std::byte{0x02});  // kind = Overflow
+    CHECK(out[2] == std::byte{0x00});  // value
+
+    // Parse at v2 must round-trip.
+    {
+        ByteReader reader{ByteSpan{out}.subspan(1)};
+        const auto parsed = ParseSessionEnd(reader, PROTOCOL_VERSION_MAX);
+        REQUIRE(parsed.has_value());
+        CHECK(parsed->Kind == ESessionEndKind::Overflow);
+        CHECK(parsed->Value == 0);
+    }
+
+    // Parse at v1 must refuse.
+    {
+        ByteReader reader{ByteSpan{out}.subspan(1)};
+        const auto parsed = ParseSessionEnd(reader, PROTOCOL_VERSION_MIN);
+        REQUIRE_FALSE(parsed.has_value());
+        CHECK(parsed.error() == EProtoError::MalformedField);
+    }
+
+    // Write at v1 must refuse.
+    {
+        std::vector<std::byte> tmp(MAX_FRAME);
+        ByteWriter w{MutableByteSpan{tmp}};
+        const auto written = WriteSessionEnd(w, overflow, PROTOCOL_VERSION_MIN);
+        REQUIRE_FALSE(written.has_value());
+        CHECK(written.error() == EProtoError::MalformedField);
+    }
+}
+
+// ─── Grid messages ───────────────────────────────────────────────────────────
+
+TEST_CASE("a GridBegin survives a round trip") {
+    const auto begin = MakeGridBegin();
+    const auto bytes = Encode(begin);
+
+    ByteReader reader{ByteSpan{bytes}};
+    REQUIRE(ParseMessageType(reader) == EMessageType::GridBegin);
+    const auto parsed = ParseGridBegin(reader);
+    REQUIRE(parsed.has_value());
+    CHECK(parsed->Flags == begin.Flags);
+    CHECK(parsed->StreamGen == begin.StreamGen);
+    CHECK(parsed->ScrollbackLen == begin.ScrollbackLen);
+    CHECK(parsed->TotalLen == begin.TotalLen);
+    CHECK(reader.Exhausted());
+}
+
+TEST_CASE("GridBegin wire layout is pinned by explicit bytes") {
+    // flags=0x01 stream_gen=0x00000002 scrollback_len=0x00000100
+    // total_len=0x00000200
+    const GridBeginMessage msg{.Flags = 0x01,
+                               .StreamGen = 0x00000002,
+                               .ScrollbackLen = 0x0000'0100,
+                               .TotalLen = 0x0000'0200};
+    const auto bytes = Encode(msg);
+    const std::vector<std::byte> expected{
+        std::byte{0x16},  // type = GridBegin
+        std::byte{0x01},  // flags
+        std::byte{0x00}, std::byte{0x00},
+        std::byte{0x00}, std::byte{0x02},  // stream_gen
+        std::byte{0x00}, std::byte{0x00},
+        std::byte{0x01}, std::byte{0x00},  // scrollback_len
+        std::byte{0x00}, std::byte{0x00},
+        std::byte{0x02}, std::byte{0x00},  // total_len
+    };
+    CHECK(std::ranges::equal(bytes, expected));
+}
+
+TEST_CASE("GridBegin rejects reserved flag bits both ways") {
+    // Bit 0 = alt-screen (defined). Bits 1–7 are reserved.
+    for (std::uint8_t bit = 1; bit <= 7; ++bit) {
+        CAPTURE(bit);
+        const auto badFlags = static_cast<std::uint8_t>(1U << bit);
+
+        // Write side: refuses before producing any bytes.
+        {
+            auto begin = MakeGridBegin();
+            begin.Flags = badFlags;
+            std::vector<std::byte> out(MAX_FRAME);
+            ByteWriter w{MutableByteSpan{out}};
+            const auto written = WriteGridBegin(w, begin);
+            REQUIRE_FALSE(written.has_value());
+            CHECK(written.error() == EProtoError::MalformedField);
+            CHECK(w.Size() == 0);
+        }
+
+        // Parse side: hand-crafted bytes with the bad flag byte.
+        // type(1) already consumed; body = flags(1) + stream_gen(4) +
+        // scrollback_len(4) + total_len(4) with valid values except flags.
+        {
+            const std::vector<std::byte> body{
+                std::byte{badFlags},  // flags (reserved bit set)
+                std::byte{0},        std::byte{0},
+                std::byte{0},        std::byte{1},  // stream_gen
+                std::byte{0},        std::byte{0},
+                std::byte{0},        std::byte{0},  // scrollback_len
+                std::byte{0},        std::byte{0},
+                std::byte{0},        std::byte{1},  // total_len
+            };
+            ByteReader reader{ByteSpan{body}};
+            const auto parsed = ParseGridBegin(reader);
+            REQUIRE_FALSE(parsed.has_value());
+            CHECK(parsed.error() == EProtoError::MalformedField);
+        }
+    }
+}
+
+// Helper: a valid GridBegin body (13 bytes, no type prefix) with a
+// configurable total_len field.
+static std::vector<std::byte> GridBeginBody(std::uint32_t totalLen) {
+    std::vector<std::byte> body;
+    body.push_back(std::byte{0x01});  // flags = alt-screen
+    body.push_back(std::byte{0x00});
+    body.push_back(std::byte{0x00});
+    body.push_back(std::byte{0x00});
+    body.push_back(std::byte{0x01});  // stream_gen=1
+    body.push_back(std::byte{0x00});
+    body.push_back(std::byte{0x00});
+    body.push_back(std::byte{0x00});
+    body.push_back(std::byte{0x00});  // scrollback_len=0
+    body.push_back(std::byte{static_cast<std::uint8_t>(totalLen >> 24U)});
+    body.push_back(
+        std::byte{static_cast<std::uint8_t>((totalLen >> 16U) & 0xFF)});
+    body.push_back(
+        std::byte{static_cast<std::uint8_t>((totalLen >> 8U) & 0xFF)});
+    body.push_back(std::byte{static_cast<std::uint8_t>(totalLen & 0xFF)});
+    return body;
+}
+
+TEST_CASE("GridBegin rejects zero total_len both ways") {
+    // Write side.
+    {
+        GridBeginMessage begin = MakeGridBegin();
+        begin.TotalLen = 0;
+        std::vector<std::byte> out(MAX_FRAME);
+        ByteWriter writer{MutableByteSpan{out}};
+        const auto written = WriteGridBegin(writer, begin);
+        REQUIRE_FALSE(written.has_value());
+        CHECK(written.error() == EProtoError::LengthLimitExceeded);
+        CHECK(writer.Size() == 0);
+    }
+
+    // Parse side: hand-crafted body with total_len=0.
+    {
+        const auto body = GridBeginBody(0);
+        ByteReader reader{ByteSpan{body}};
+        const auto parsed = ParseGridBegin(reader);
+        REQUIRE_FALSE(parsed.has_value());
+        CHECK(parsed.error() == EProtoError::LengthLimitExceeded);
+    }
+}
+
+TEST_CASE("GridBegin rejects total_len above SNAPSHOT_MAX_BYTES both ways") {
+    // Write side.
+    {
+        GridBeginMessage begin = MakeGridBegin();
+        begin.TotalLen = SNAPSHOT_MAX_BYTES + 1;
+        std::vector<std::byte> out(MAX_FRAME);
+        ByteWriter writer{MutableByteSpan{out}};
+        const auto written = WriteGridBegin(writer, begin);
+        REQUIRE_FALSE(written.has_value());
+        CHECK(written.error() == EProtoError::LengthLimitExceeded);
+        CHECK(writer.Size() == 0);
+    }
+
+    // Parse side: hand-crafted body with total_len = SNAPSHOT_MAX_BYTES + 1.
+    {
+        const auto body = GridBeginBody(SNAPSHOT_MAX_BYTES + 1);
+        ByteReader reader{ByteSpan{body}};
+        const auto parsed = ParseGridBegin(reader);
+        REQUIRE_FALSE(parsed.has_value());
+        CHECK(parsed.error() == EProtoError::LengthLimitExceeded);
+    }
+}
+
+TEST_CASE("GridBegin accepts total_len exactly at SNAPSHOT_MAX_BYTES") {
+    const auto body = GridBeginBody(SNAPSHOT_MAX_BYTES);
+    ByteReader reader{ByteSpan{body}};
+    const auto parsed = ParseGridBegin(reader);
+    REQUIRE(parsed.has_value());
+    CHECK(parsed->TotalLen == SNAPSHOT_MAX_BYTES);
+}
+
+TEST_CASE("a GridChunk survives a round trip") {
+    auto [storage, msg] = MakeGridChunkStorage();
+    msg.Data = ByteSpan{storage};
+    const auto bytes = Encode(msg);
+
+    ByteReader reader{ByteSpan{bytes}};
+    REQUIRE(ParseMessageType(reader) == EMessageType::GridChunk);
+    const auto parsed = ParseGridChunk(reader);
+    REQUIRE(parsed.has_value());
+    CHECK(parsed->ChunkOffset == msg.ChunkOffset);
+    REQUIRE(parsed->Data.size() == storage.size());
+    CHECK(std::ranges::equal(parsed->Data, storage));
+    CHECK(reader.Exhausted());
+}
+
+TEST_CASE("GridChunk rejects empty data") {
+    GridChunkMessage msg{.ChunkOffset = 0, .Data = ByteSpan{}};
+    std::vector<std::byte> out(MAX_FRAME);
+    ByteWriter writer{MutableByteSpan{out}};
+    const auto written = WriteGridChunk(writer, msg);
+    REQUIRE_FALSE(written.has_value());
+    CHECK(written.error() == EProtoError::MalformedField);
+    CHECK(writer.Size() == 0);
+}
+
+TEST_CASE("GridChunk rejects data above GRID_CHUNK_MAX_DATA") {
+    // On the write side: oversized data is refused before any bytes are
+    // written.
+    const std::vector<std::byte> big(GRID_CHUNK_MAX_DATA + 1);
+    // Provide a large enough output buffer so the size check, not the buffer,
+    // triggers the failure.
+    std::vector<std::byte> out(MAX_FRAME + GRID_CHUNK_MAX_DATA + 1);
+    ByteWriter writer{MutableByteSpan{out}};
+    const auto written =
+        WriteGridChunk(writer, GridChunkMessage{.Data = ByteSpan{big}});
+    REQUIRE_FALSE(written.has_value());
+    CHECK(written.error() == EProtoError::LengthLimitExceeded);
+    CHECK(writer.Size() == 0);
+
+    // On the parse side: craft bytes with the oversized length field.
+    // type(1) + chunk_offset(4) + data.  Body reader starts after type byte.
+    std::vector<std::byte> raw;
+    // chunk_offset = 0, then GRID_CHUNK_MAX_DATA+1 zero bytes as payload.
+    raw.push_back(std::byte{0x17});  // type
+    raw.push_back(std::byte{0x00});
+    raw.push_back(std::byte{0x00});
+    raw.push_back(std::byte{0x00});
+    raw.push_back(std::byte{0x00});  // chunk_offset = 0
+    raw.resize(raw.size() + GRID_CHUNK_MAX_DATA + 1, std::byte{0x00});
+    ByteReader reader{ByteSpan{raw}.subspan(1)};
+    const auto parsed = ParseGridChunk(reader);
+    REQUIRE_FALSE(parsed.has_value());
+    CHECK(parsed.error() == EProtoError::LengthLimitExceeded);
+}
+
+TEST_CASE("a GridEnd survives a round trip") {
+    const auto end = MakeGridEnd();
+    const auto bytes = Encode(end);
+
+    // type byte only.
+    REQUIRE(bytes.size() == 1);
+    CHECK(bytes[0] == std::byte{0x18});
+
+    ByteReader reader{ByteSpan{bytes}};
+    REQUIRE(ParseMessageType(reader) == EMessageType::GridEnd);
+    const auto parsed = ParseGridEnd(reader);
+    REQUIRE(parsed.has_value());
+    CHECK(reader.Exhausted());
+}
+
+TEST_CASE("a GridApplied survives a round trip") {
+    const auto applied = MakeGridApplied();
+    const auto bytes = Encode(applied);
+
+    ByteReader reader{ByteSpan{bytes}};
+    REQUIRE(ParseMessageType(reader) == EMessageType::GridApplied);
+    const auto parsed = ParseGridApplied(reader);
+    REQUIRE(parsed.has_value());
+    CHECK(parsed->StreamGen == applied.StreamGen);
+    CHECK(reader.Exhausted());
+}
+
+TEST_CASE("GridApplied wire layout is pinned by explicit bytes") {
+    const GridAppliedMessage msg{.StreamGen = 0x0A0B'0C0D};
+    const auto bytes = Encode(msg);
+    const std::vector<std::byte> expected{
+        std::byte{0x19},  // type = GridApplied
+        std::byte{0x0A}, std::byte{0x0B},
+        std::byte{0x0C}, std::byte{0x0D},  // stream_gen
+    };
+    CHECK(std::ranges::equal(bytes, expected));
+}
+
+// ─── Protocol v2: GRID_CAPABLE TLV ───────────────────────────────────────────
+
+TEST_CASE("GRID_CAPABLE TLV type is 0x0003 and is non-critical") {
+    // §7 TLV registry: type=0x0003, non-critical (high bit clear).
+    CHECK(TLV_GRID_CAPABLE == 0x0003);
+    CHECK((TLV_GRID_CAPABLE & TLV_CRITICAL_BIT) == 0);
+}
+
+TEST_CASE("GRID_CAPABLE option survives a Hello round trip") {
+    auto hello = MakeHello();
+    REQUIRE(
+        hello.Options
+            .Append(TlvOption{.Type = TLV_GRID_CAPABLE, .Value = ByteSpan{}})
+            .has_value());
+    const auto bytes = Encode(hello);
+    ByteReader reader{ByteSpan{bytes}};
+    REQUIRE(ParseMessageType(reader) == EMessageType::Hello);
+    const auto parsed = ParseHello(reader);
+    REQUIRE(parsed.has_value());
+    REQUIRE(parsed->Options.Options().size() == 1);
+    CHECK(parsed->Options.Options().front().Type == TLV_GRID_CAPABLE);
+    CHECK_FALSE(parsed->Options.Options().front().IsCritical());
 }

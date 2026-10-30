@@ -13,16 +13,21 @@
 namespace zet::session {
 namespace {
 
-/// Resume as it is sealed: the type byte and one offset.
-constexpr std::size_t RESUME_PLAINTEXT_SIZE = 1 + sizeof(std::uint64_t);
+/// Resume as it is sealed under ver=1: type byte + c_recv_offset.
+///
+/// The session layer keeps speaking ver=1 on the wire until a follow-up PR
+/// threads the negotiated version through HandshakeResult into Connection and
+/// Channel. At that point RESUME_PLAINTEXT_SIZE becomes version-dependent
+/// (ver=2 adds stream_gen:u32be = 4 more bytes) and this constant is removed.
+constexpr std::size_t RESUME_PLAINTEXT_SIZE =
+    sizeof(wire::EMessageType) + sizeof(std::uint64_t);
 
-// Resume is written with its result ignored because the array is exactly this
-// wide. A field added to ResumeMessage must break the build here, not leave
-// the write failing quietly and the agent opening zeros.
-static_assert(sizeof(wire::ResumeMessage) == sizeof(std::uint64_t) &&
-              RESUME_PLAINTEXT_SIZE ==
-                  sizeof(wire::EMessageType) +
-                      sizeof(wire::ResumeMessage::ClientReceiveOffset));
+// Guard against accidentally widening the write buffer without updating
+// ParseResume call sites. The struct grew a StreamGen field in M6; the v1
+// encoding still uses only ClientReceiveOffset.
+static_assert(RESUME_PLAINTEXT_SIZE ==
+              sizeof(wire::EMessageType) +
+                  sizeof(wire::ResumeMessage::ClientReceiveOffset));
 
 /// What every cleartext frame must say in its epoch byte (§7).
 constexpr std::uint8_t CLEARTEXT_EPOCH = 0;
@@ -311,7 +316,9 @@ ConnectionResult AgentConnection::PumpResume(Timestamp now, MutableByteSpan out,
     if (!type || *type != wire::EMessageType::Resume) {
         return Refuse(SessionError{EProtoError::UnexpectedMessage});
     }
-    const auto resume = wire::ParseResume(reader);
+    // TODO(m6-session): pass the negotiated version once HandshakeResult
+    // carries it. Until then, always decode the v1 encoding.
+    const auto resume = wire::ParseResume(reader, wire::PROTOCOL_VERSION_MIN);
     if (!resume) {
         return Refuse(SessionError{resume.error()});
     }
@@ -463,7 +470,9 @@ ConnectionResult ClientConnection::SendResume(Timestamp now,
     ByteWriter writer{MutableByteSpan{plain}};
     const wire::ResumeMessage resume{.ClientReceiveOffset =
                                          Session_.ReceiveOffset()};
-    std::ignore = wire::WriteResume(writer, resume);
+    // TODO(m6-session): pass the negotiated version once HandshakeResult
+    // carries it. Until then, always encode the v1 format.
+    std::ignore = wire::WriteResume(writer, resume, wire::PROTOCOL_VERSION_MIN);
     // Sealed with the sealer the Channel then takes over, so its first frame
     // goes out under the next nonce rather than this one again.
     const auto sealed = frames.Sealer.Seal(out, writer.Written());

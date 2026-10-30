@@ -84,7 +84,30 @@ void CheckDisposition(EProtoError error) noexcept {
 
 [[nodiscard]] bool Same(const ResumeMessage& left,
                         const ResumeMessage& right) noexcept {
-    return left.ClientReceiveOffset == right.ClientReceiveOffset;
+    return left.StreamGen == right.StreamGen &&
+           left.ClientReceiveOffset == right.ClientReceiveOffset;
+}
+
+[[nodiscard]] bool Same(const GridChunkMessage& left,
+                        const GridChunkMessage& right) noexcept {
+    return left.ChunkOffset == right.ChunkOffset &&
+           std::ranges::equal(left.Data, right.Data);
+}
+
+[[nodiscard]] bool Same(const GridBeginMessage& left,
+                        const GridBeginMessage& right) noexcept {
+    return left.Flags == right.Flags && left.StreamGen == right.StreamGen &&
+           left.ScrollbackLen == right.ScrollbackLen &&
+           left.TotalLen == right.TotalLen;
+}
+
+[[nodiscard]] bool Same(const GridEndMessage&, const GridEndMessage&) noexcept {
+    return true;
+}
+
+[[nodiscard]] bool Same(const GridAppliedMessage& left,
+                        const GridAppliedMessage& right) noexcept {
+    return left.StreamGen == right.StreamGen;
 }
 
 [[nodiscard]] bool Same(const BootstrapOfferMessage& left,
@@ -154,6 +177,38 @@ void CheckDisposition(EProtoError error) noexcept {
 [[nodiscard]] bool Same(const MuxHandoffMessage& left,
                         const MuxHandoffMessage& right) noexcept {
     return std::ranges::equal(left.Prefix, right.Prefix);
+}
+
+// Version-pinned wrappers so the function-pointer helpers keep their
+// single-argument signature while Resume / SessionEnd grow version params.
+
+ProtoResult<ResumeMessage> ParseResumeV1(ByteReader& r) noexcept {
+    return ParseResume(r, PROTOCOL_VERSION_MIN);
+}
+ProtoResult<void> WriteResumeV1(ByteWriter& w,
+                                const ResumeMessage& m) noexcept {
+    return WriteResume(w, m, PROTOCOL_VERSION_MIN);
+}
+ProtoResult<ResumeMessage> ParseResumeV2(ByteReader& r) noexcept {
+    return ParseResume(r, PROTOCOL_VERSION_MAX);
+}
+ProtoResult<void> WriteResumeV2(ByteWriter& w,
+                                const ResumeMessage& m) noexcept {
+    return WriteResume(w, m, PROTOCOL_VERSION_MAX);
+}
+ProtoResult<SessionEndMessage> ParseSessionEndV1(ByteReader& r) noexcept {
+    return ParseSessionEnd(r, PROTOCOL_VERSION_MIN);
+}
+ProtoResult<void> WriteSessionEndV1(ByteWriter& w,
+                                    const SessionEndMessage& m) noexcept {
+    return WriteSessionEnd(w, m, PROTOCOL_VERSION_MIN);
+}
+ProtoResult<SessionEndMessage> ParseSessionEndV2(ByteReader& r) noexcept {
+    return ParseSessionEnd(r, PROTOCOL_VERSION_MAX);
+}
+ProtoResult<void> WriteSessionEndV2(ByteWriter& w,
+                                    const SessionEndMessage& m) noexcept {
+    return WriteSessionEnd(w, m, PROTOCOL_VERSION_MAX);
 }
 
 template <typename TMessage>
@@ -234,9 +289,16 @@ void ParseBody(ByteSpan input) noexcept {
         case EMessageType::AuthOk:
             ParseThenRoundTrip(reader, *type, ParseAuthOk, WriteAuthOk);
             return;
-        case EMessageType::Resume:
-            ParseThenRoundTrip(reader, *type, ParseResume, WriteResume);
+        case EMessageType::Resume: {
+            // Exercise both encodings from the same body bytes; each
+            // version is self-consistent independently.
+            const ByteSpan body = reader.Rest();
+            ByteReader r1{body};
+            ParseThenRoundTrip(r1, *type, ParseResumeV1, WriteResumeV1);
+            ByteReader r2{body};
+            ParseThenRoundTrip(r2, *type, ParseResumeV2, WriteResumeV2);
             return;
+        }
         case EMessageType::BootstrapOffer:
             ParseThenRoundTrip(reader, *type, ParseBootstrapOffer,
                                WriteBootstrapOffer);
@@ -260,8 +322,26 @@ void ParseBody(ByteSpan input) noexcept {
         case EMessageType::Pong:
             ParseThenRoundTrip(reader, *type, ParsePong, WritePong);
             return;
-        case EMessageType::SessionEnd:
-            ParseThenRoundTrip(reader, *type, ParseSessionEnd, WriteSessionEnd);
+        case EMessageType::SessionEnd: {
+            const ByteSpan body = reader.Rest();
+            ByteReader r1{body};
+            ParseThenRoundTrip(r1, *type, ParseSessionEndV1, WriteSessionEndV1);
+            ByteReader r2{body};
+            ParseThenRoundTrip(r2, *type, ParseSessionEndV2, WriteSessionEndV2);
+            return;
+        }
+        case EMessageType::GridChunk:
+            ParseThenRoundTrip(reader, *type, ParseGridChunk, WriteGridChunk);
+            return;
+        case EMessageType::GridBegin:
+            ParseThenRoundTrip(reader, *type, ParseGridBegin, WriteGridBegin);
+            return;
+        case EMessageType::GridEnd:
+            ParseThenRoundTrip(reader, *type, ParseGridEnd, WriteGridEnd);
+            return;
+        case EMessageType::GridApplied:
+            ParseThenRoundTrip(reader, *type, ParseGridApplied,
+                               WriteGridApplied);
             return;
         case EMessageType::MuxRegister:
             ParseThenRoundTrip(reader, *type, ParseMuxRegister,

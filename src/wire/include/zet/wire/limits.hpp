@@ -3,6 +3,8 @@
 #include <cstddef>
 #include <cstdint>
 
+#include "zet/crypto/crypto.hpp"
+
 namespace zet::wire {
 
 /// The cleartext part of a frame: len:u32be ‖ epoch:u8. All of it goes into AD.
@@ -23,10 +25,11 @@ inline constexpr std::uint32_t MAX_HANDSHAKE_FRAME = 4U * 1024U;
 /// The versions this build speaks, inclusive on both ends. A peer takes
 /// min(ver_max_theirs, ver_max_ours) out of the overlap and never compares for
 /// equality — equality is what left EternalTerminal unable to change anything
-/// without breaking every deployed client. One version so far, so the range is
-/// a point, and the machinery exists before it is needed on purpose.
+/// without breaking every deployed client. Two versions: v1 is the M1–M5 base;
+/// v2 adds Resume with stream_gen, the Grid snapshot messages and the
+/// GRID_CAPABLE TLV (§5, §7, ADR-035).
 inline constexpr std::uint16_t PROTOCOL_VERSION_MIN = 1;
-inline constexpr std::uint16_t PROTOCOL_VERSION_MAX = 1;
+inline constexpr std::uint16_t PROTOCOL_VERSION_MAX = 2;
 
 /// Options one handshake message may carry. The registry is a table in §7 that
 /// grows by review, not by whatever fits in a frame; sixteen is far above
@@ -45,5 +48,23 @@ inline constexpr std::size_t MAX_TLV_VALUE_SIZE = 0xFFFF;
 /// is a broken generator, not a peer replaying an old nonce — a replay earns
 /// nothing, since the other side still contributes a fresh one.
 inline constexpr std::size_t MAX_REMEMBERED_NONCES = 64;
+
+/// Maximum snapshot size the agent may send across GridBegin/Chunk/End (§7,
+/// §9). Enforced in ParseGridBegin; GridChunk bytes are accepted until the
+/// running total would exceed it.
+inline constexpr std::uint32_t SNAPSHOT_MAX_BYTES = 4U * 1024U * 1024U;
+
+/// Maximum payload a single GridChunk message may carry (§7).
+///
+/// Derived the same way as MAX_DATA_PAYLOAD: MAX_FRAME minus the AEAD tag,
+/// the type byte, and the chunk_offset field.
+inline constexpr std::size_t GRID_CHUNK_MAX_DATA =
+    MAX_FRAME - crypto::TAG_SIZE - sizeof(std::uint8_t) - sizeof(std::uint32_t);
+
+/// TLV type for the GRID_CAPABLE option in Hello (§7, TLV registry). Non-
+/// critical: a v2 agent that sees a v2 Hello without it treats the client as
+/// grid-unaware and falls back to SessionEnd(kind=2) on overflow. Checked only
+/// after successful authentication and only when the negotiated version is 2.
+inline constexpr std::uint16_t TLV_GRID_CAPABLE = 0x0003;
 
 }  // namespace zet::wire

@@ -172,7 +172,11 @@ ChannelResult<IncomingEvent> Channel::Receive(
             if (Role_ != ERole::Client) {
                 break;
             }
-            const auto msg = wire::ParseSessionEnd(reader);
+            // TODO(m6-session): pass the negotiated version once it is
+            // threaded through to Channel. v1 for now preserves existing
+            // behaviour (Overflow kind=2 is rejected as MalformedField).
+            const auto msg =
+                wire::ParseSessionEnd(reader, wire::PROTOCOL_VERSION_MIN);
             if (!msg) {
                 return std::unexpected(SessionError{msg.error()});
             }
@@ -193,6 +197,13 @@ ChannelResult<IncomingEvent> Channel::Receive(
         case wire::EMessageType::MuxRegistered:
         case wire::EMessageType::MuxRefused:
         case wire::EMessageType::MuxHandoff:
+        // TODO(m6-grid): Grid messages are wired but the session state machine
+        // has no handlers yet. They fall through to UnexpectedMessage until a
+        // follow-up PR adds the grid snapshot state machine.
+        case wire::EMessageType::GridBegin:
+        case wire::EMessageType::GridChunk:
+        case wire::EMessageType::GridEnd:
+        case wire::EMessageType::GridApplied:
             break;
     }
 
@@ -317,7 +328,10 @@ ChannelResult<std::size_t> Channel::PollOnce(Timestamp now, MutableByteSpan out,
     if (PendingEnd_ && !EndSent_ && SendBuf_.Size() == 0) {
         // type(1) + kind(1) + value(1).
         const auto n = SealControl<3>(out, [this](ByteWriter& writer) {
-            return wire::WriteSessionEnd(writer, *PendingEnd_);
+            // TODO(m6-session): pass the negotiated version once threaded
+            // through to Channel. v1 for now keeps pre-M6 behaviour.
+            return wire::WriteSessionEnd(writer, *PendingEnd_,
+                                         wire::PROTOCOL_VERSION_MIN);
         });
         if (!n) {
             return std::unexpected(n.error());

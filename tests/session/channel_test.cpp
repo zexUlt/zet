@@ -921,7 +921,8 @@ TEST_CASE_FIXTURE(SodiumFixture,
     std::array<std::byte, 1 + sizeof(std::uint64_t)> resume{};
     {
         ByteWriter writer{MutableByteSpan{resume}};
-        REQUIRE(WriteResume(writer, ResumeMessage{.ClientReceiveOffset = 0}));
+        REQUIRE(WriteResume(writer, ResumeMessage{.ClientReceiveOffset = 0},
+                            wire::PROTOCOL_VERSION_MIN));
     }
     std::vector<std::byte> wireBytes(HEADER_SIZE + resume.size() +
                                      crypto::TAG_SIZE);
@@ -1189,7 +1190,8 @@ TEST_CASE_FIXTURE(SodiumFixture, "a SessionEnd from the client is refused") {
                        pair.Keys.SaltClientToServer};
     std::array<std::byte, 3> plain{};
     ByteWriter writer{MutableByteSpan{plain}};
-    REQUIRE(wire::WriteSessionEnd(writer, TEST_END));
+    REQUIRE(
+        wire::WriteSessionEnd(writer, TEST_END, wire::PROTOCOL_VERSION_MIN));
     std::vector<std::byte> frame(HEADER_SIZE + plain.size() + crypto::TAG_SIZE);
     const auto sealed = sealer.Seal(MutableByteSpan{frame}, ByteSpan{plain});
     REQUIRE(sealed.has_value());
