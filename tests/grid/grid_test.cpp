@@ -2062,3 +2062,179 @@ TEST_CASE("SwitchAltScreen no-op when already in target state") {
     CHECK(CP(*g, 0, 0) == 'X');  // content unchanged
     delete g;
 }
+
+// ---------------------------------------------------------------------------
+// DCS entry: ESC P introduces a DCS pass-through sequence
+// ---------------------------------------------------------------------------
+
+TEST_CASE("ESC P starts DCS pass-through and exits on ST") {
+    Grid* g = MakeGrid(20, 5);
+    VtParser p;
+    // ESC P <payload bytes> ST:  DCS pass-through, then ESC \ terminates
+    Feed(p, *g, "\x1bPhello\x1b\\");
+    // After ST, parser must be back in Ground
+    CHECK(p.State() == EParserState::Ground);
+    // BypassBytes > 0: payload was counted
+    CHECK(p.BypassBytes() > 0);
+    delete g;
+}
+
+// ---------------------------------------------------------------------------
+// SOS/PM/APC: ESC X / ESC ^ / ESC _ introduce bypass sequences
+// ---------------------------------------------------------------------------
+
+TEST_CASE("ESC X starts SOS bypass sequence") {
+    Grid* g = MakeGrid(20, 5);
+    VtParser p;
+    std::size_t before = p.BypassBytes();
+    Feed(p, *g,
+         "\x1b\x58"
+         "data\x1b\\");  // ESC X payload ST
+    CHECK(p.State() == EParserState::Ground);
+    CHECK(p.BypassBytes() > before);
+    delete g;
+}
+
+TEST_CASE("ESC ^ starts PM bypass sequence") {
+    Grid* g = MakeGrid(20, 5);
+    VtParser p;
+    Feed(p, *g,
+         "\x1b\x5E"
+         "msg\x1b\\");  // ESC ^ payload ST
+    CHECK(p.State() == EParserState::Ground);
+    delete g;
+}
+
+TEST_CASE("ESC _ starts APC bypass sequence") {
+    Grid* g = MakeGrid(20, 5);
+    VtParser p;
+    Feed(p, *g,
+         "\x1b\x5F"
+         "app\x1b\\");  // ESC _ payload ST
+    CHECK(p.State() == EParserState::Ground);
+    delete g;
+}
+
+// ---------------------------------------------------------------------------
+// ESC Q-W range (0x51-0x57): dispatched via DispatchEsc, hit default branch
+// ---------------------------------------------------------------------------
+
+TEST_CASE("ESC Q increments UnknownSeqCount (ESC 0x51 range)") {
+    Grid* g = MakeGrid(20, 5);
+    VtParser p;
+    std::uint64_t before = p.UnknownSeqCount();
+    Feed(p, *g, "\x1bQ");  // ESC Q = 0x51
+    CHECK(p.UnknownSeqCount() > before);
+    CHECK(p.State() == EParserState::Ground);
+    delete g;
+}
+
+TEST_CASE("ESC W increments UnknownSeqCount (ESC 0x57 range)") {
+    Grid* g = MakeGrid(20, 5);
+    VtParser p;
+    std::uint64_t before = p.UnknownSeqCount();
+    Feed(p, *g, "\x1bW");  // ESC W = 0x57
+    CHECK(p.UnknownSeqCount() > before);
+    delete g;
+}
+
+// ---------------------------------------------------------------------------
+// ESC backslash ST terminator: case '\\' in DispatchEsc
+// ---------------------------------------------------------------------------
+
+TEST_CASE("OSC terminated with ESC-backslash ST exits to Ground") {
+    Grid* g = MakeGrid(20, 5);
+    VtParser p;
+    // OSC title: ESC ] 0 ; text ESC \  (ESC backslash = ST)
+    Feed(p, *g, "\x1b]0;my title\x1b\\");
+    CHECK(p.State() == EParserState::Ground);
+    delete g;
+}
+
+// ---------------------------------------------------------------------------
+// ESC DEL (0x7F) in Escape state: silently ignored
+// ---------------------------------------------------------------------------
+
+TEST_CASE("ESC 0x7F in Escape state is ignored") {
+    Grid* g = MakeGrid(20, 5);
+    VtParser p;
+    std::uint64_t before = p.UnknownSeqCount();
+    // Send ESC then 0x7F; parser should not crash and UnknownSeqCount unchanged
+    Feed(p, *g, "\x1b\x7f");
+    CHECK(p.UnknownSeqCount() == before);
+    delete g;
+}
+
+// ---------------------------------------------------------------------------
+// DECOM cursor movement: CUU/CUD clamp to scroll region, VPA clamps too
+// ---------------------------------------------------------------------------
+
+TEST_CASE("CUU with DECOM active clamps to scroll region top") {
+    Grid* g = MakeGrid(20, 24);
+    VtParser p;
+    // Set scroll region rows 5-20 (CSI 5;20 r), enable DECOM (?6h)
+    Feed(p, *g, "\x1b[5;20r");
+    Feed(p, *g, "\x1b[?6h");
+    // DECOM positions cursor relative to scroll region; move to row 5 (1-based
+    // in region)
+    Feed(
+        p, *g,
+        "\x1b[1;1H");  // cursor at top of scroll region under DECOM = row 4 abs
+    // Now move up more than allowed: scroll top limit should clamp
+    Feed(p, *g, "\x1b[10A");  // CUU 10: cannot go above ScrollTop_ (4)
+    CHECK(g->CursorRow() == g->ScrollTop());
+    delete g;
+}
+
+TEST_CASE("CUD with DECOM active clamps to scroll region bottom") {
+    Grid* g = MakeGrid(20, 24);
+    VtParser p;
+    // Set scroll region rows 5-20, enable DECOM
+    Feed(p, *g, "\x1b[5;20r");
+    Feed(p, *g, "\x1b[?6h");
+    // Move to bottom of scroll region and try to go further down
+    Feed(p, *g,
+         "\x1b[16;1H");       // row 16 in region = row 19 abs (near scroll bot)
+    Feed(p, *g, "\x1b[10B");  // CUD 10: clamps to ScrollBot_
+    CHECK(g->CursorRow() <= g->ScrollBot());
+    delete g;
+}
+
+TEST_CASE("VPA with DECOM active uses scroll region offset") {
+    Grid* g = MakeGrid(20, 24);
+    VtParser p;
+    // Set scroll region rows 5-20, enable DECOM
+    Feed(p, *g, "\x1b[5;20r");
+    Feed(p, *g, "\x1b[?6h");
+    // VPA 1 positions at top of scroll region
+    Feed(p, *g,
+         "\x1b[1d");  // CSI 1 d = VPA row 1 (1-based, in DECOM = scroll top)
+    CHECK(g->CursorRow() == g->ScrollTop());
+    delete g;
+}
+
+TEST_CASE("CUP with DECOM active positions within scroll region") {
+    Grid* g = MakeGrid(20, 24);
+    VtParser p;
+    // Set scroll region rows 5-20, enable DECOM
+    Feed(p, *g, "\x1b[5;20r");
+    Feed(p, *g, "\x1b[?6h");
+    // CUP 2;3 under DECOM = absolute row ScrollTop+1, col 2
+    Feed(p, *g, "\x1b[2;3H");
+    CHECK(g->CursorRow() == g->ScrollTop() + 1);
+    CHECK(g->CursorCol() == 2);
+    delete g;
+}
+
+// ---------------------------------------------------------------------------
+// RepeatChar (REP) before any printable char: early return
+// ---------------------------------------------------------------------------
+
+TEST_CASE("REP with no prior printable char is silently ignored") {
+    Grid* g = MakeGrid(20, 5);
+    VtParser p;
+    // CSI 5 b = REP 5 times — but LastPrintedChar_ is 0, so it's a no-op
+    Feed(p, *g, "\x1b[5b");
+    CHECK(CP(*g, 0, 0) == 0);  // nothing printed
+    delete g;
+}
