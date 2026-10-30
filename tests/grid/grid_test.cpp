@@ -2239,3 +2239,214 @@ TEST_CASE("REP with no prior printable char is silently ignored") {
     CHECK(CP(*g, 0, 0) == 0);  // nothing printed
     delete g;
 }
+
+// ---------------------------------------------------------------------------
+// EL 2 erases entire current line
+// ---------------------------------------------------------------------------
+
+TEST_CASE("EL 2 erases entire current line") {
+    Grid* g = MakeGrid(20, 5);
+    VtParser p;
+    Feed(p, *g, "Hello");
+    Feed(p, *g, "\x1b[2K");  // EL 2 = erase whole line
+    CHECK(CP(*g, 0, 0) == 0);
+    CHECK(CP(*g, 0, 4) == 0);
+    delete g;
+}
+
+// ---------------------------------------------------------------------------
+// IL (insert lines) and DL (delete lines)
+// ---------------------------------------------------------------------------
+
+TEST_CASE("IL inserts blank lines above cursor pushing content down") {
+    Grid* g = MakeGrid(20, 5);
+    VtParser p;
+    Feed(p, *g, "line0\r\n");
+    Feed(p, *g, "line1\r\n");
+    Feed(p, *g, "\x1b[2;1H");  // move to row 1 (second row)
+    Feed(p, *g, "\x1b[L");     // IL 1 — insert one blank line
+    // Row 1 should now be blank; "line1" shifted to row 2
+    CHECK(CP(*g, 1, 0) == 0);
+    CHECK(CP(*g, 2, 0) == 'l');
+    delete g;
+}
+
+TEST_CASE("IL outside scroll region is a no-op") {
+    Grid* g = MakeGrid(20, 5);
+    VtParser p;
+    Feed(p, *g, "ABCDE");
+    Feed(p, *g, "\x1b[3;5r");    // scroll region rows 3-5
+    Feed(p, *g, "\x1b[1;1H");    // cursor to row 0 (outside scroll region)
+    Feed(p, *g, "\x1b[L");       // IL — should be no-op
+    CHECK(CP(*g, 0, 0) == 'A');  // content unchanged
+    delete g;
+}
+
+TEST_CASE("DL deletes lines from cursor position") {
+    Grid* g = MakeGrid(20, 5);
+    VtParser p;
+    Feed(p, *g, "row0\r\n");
+    Feed(p, *g, "row1\r\n");
+    Feed(p, *g, "row2\r\n");
+    Feed(p, *g, "\x1b[2;1H");  // cursor to row 1
+    Feed(p, *g, "\x1b[M");     // DL 1 — delete current line
+    // row1 deleted; row2 shifts up to row 1
+    CHECK(CP(*g, 1, 0) == 'r');
+    CHECK(CP(*g, 1, 1) == 'o');
+    CHECK(CP(*g, 1, 2) == 'w');
+    CHECK(CP(*g, 1, 3) == '2');
+    delete g;
+}
+
+TEST_CASE("DL outside scroll region is a no-op") {
+    Grid* g = MakeGrid(20, 5);
+    VtParser p;
+    Feed(p, *g, "ABCDE");
+    Feed(p, *g, "\x1b[3;5r");    // scroll region rows 3-5
+    Feed(p, *g, "\x1b[1;1H");    // cursor to row 0 (outside scroll region)
+    Feed(p, *g, "\x1b[M");       // DL — should be no-op
+    CHECK(CP(*g, 0, 0) == 'A');  // content unchanged
+    delete g;
+}
+
+// ---------------------------------------------------------------------------
+// ICH (insert blank chars) and DCH (delete chars)
+// ---------------------------------------------------------------------------
+
+TEST_CASE("ICH inserts blank chars shifting content right") {
+    Grid* g = MakeGrid(20, 5);
+    VtParser p;
+    Feed(p, *g, "ABCDE");
+    Feed(p, *g, "\x1b[3G");      // move cursor to col 3 (1-based)
+    Feed(p, *g, "\x1b[2@");      // ICH 2 — insert 2 blank chars at col 2
+    CHECK(CP(*g, 0, 2) == 0);    // inserted blank
+    CHECK(CP(*g, 0, 3) == 0);    // inserted blank
+    CHECK(CP(*g, 0, 4) == 'C');  // original 'C' shifted right
+    delete g;
+}
+
+TEST_CASE("DCH deletes chars shifting content left") {
+    Grid* g = MakeGrid(20, 5);
+    VtParser p;
+    Feed(p, *g, "ABCDE");
+    Feed(p, *g, "\x1b[2G");      // move cursor to col 2 (1-based)
+    Feed(p, *g, "\x1b[2P");      // DCH 2 — delete 2 chars at col 1
+    CHECK(CP(*g, 0, 1) == 'D');  // 'D' shifted to col 1
+    CHECK(CP(*g, 0, 2) == 'E');  // 'E' shifted to col 2
+    delete g;
+}
+
+// ---------------------------------------------------------------------------
+// CNL (cursor next line) and CPL (cursor preceding line)
+// ---------------------------------------------------------------------------
+
+TEST_CASE("CNL moves cursor down and to col 0") {
+    Grid* g = MakeGrid(20, 5);
+    VtParser p;
+    Feed(p, *g, "\x1b[1;5H");  // row 0, col 4
+    Feed(p, *g, "\x1b[2E");    // CNL 2 — down 2 and to col 0
+    CHECK(g->CursorRow() == 2);
+    CHECK(g->CursorCol() == 0);
+    delete g;
+}
+
+TEST_CASE("CPL moves cursor up and to col 0") {
+    Grid* g = MakeGrid(20, 5);
+    VtParser p;
+    Feed(p, *g, "\x1b[4;8H");  // row 3, col 7
+    Feed(p, *g, "\x1b[2F");    // CPL 2 — up 2 and to col 0
+    CHECK(g->CursorRow() == 1);
+    CHECK(g->CursorCol() == 0);
+    delete g;
+}
+
+// ---------------------------------------------------------------------------
+// SU (scroll up) and SD (scroll down) CSI sequences
+// ---------------------------------------------------------------------------
+
+TEST_CASE("SU scrolls content up by n lines") {
+    Grid* g = MakeGrid(20, 5);
+    VtParser p;
+    Feed(p, *g, "row0\r\n");
+    Feed(p, *g, "row1\r\n");
+    Feed(p, *g, "\x1b[S");       // SU 1 — scroll up 1
+    CHECK(CP(*g, 0, 0) == 'r');  // "row1" moved to row 0
+    CHECK(CP(*g, 0, 3) == '1');
+    delete g;
+}
+
+TEST_CASE("SD scrolls content down by n lines") {
+    Grid* g = MakeGrid(20, 5);
+    VtParser p;
+    Feed(p, *g, "row0");
+    Feed(p, *g, "\x1b[T");       // SD 1 — scroll down 1
+    CHECK(CP(*g, 0, 0) == 0);    // blank line inserted at top
+    CHECK(CP(*g, 1, 0) == 'r');  // "row0" shifted down
+    delete g;
+}
+
+// ---------------------------------------------------------------------------
+// IRM (insert mode): characters insert rather than overwrite
+// ---------------------------------------------------------------------------
+
+TEST_CASE("IRM mode inserts chars shifting existing content right") {
+    Grid* g = MakeGrid(20, 5);
+    VtParser p;
+    Feed(p, *g, "BCD");
+    Feed(p, *g, "\x1b[1G");  // move to col 0
+    Feed(p, *g, "\x1b[4h");  // SM 4 = IRM on
+    Feed(p, *g, "A");        // insert 'A' — 'BCD' shifts right
+    CHECK(CP(*g, 0, 0) == 'A');
+    CHECK(CP(*g, 0, 1) == 'B');
+    Feed(p, *g, "\x1b[4l");  // SM 4 = IRM off
+    delete g;
+}
+
+// ---------------------------------------------------------------------------
+// TBC with param 3 clears all tab stops
+// ---------------------------------------------------------------------------
+
+TEST_CASE("TBC 3 clears all tab stops") {
+    Grid* g = MakeGrid(80, 5);
+    VtParser p;
+    Feed(p, *g, "\x1b[3g");  // TBC 3 — clear all tab stops
+    Feed(p, *g, "\x1b[1G");  // cursor to col 0
+    Feed(p, *g, "\x09");     // HT — should stay at col 0 (no tab stops)
+    CHECK(g->CursorCol() == 0);
+    delete g;
+}
+
+// ---------------------------------------------------------------------------
+// REP repeats the prior character n times
+// ---------------------------------------------------------------------------
+
+TEST_CASE("REP repeats the prior printable character") {
+    Grid* g = MakeGrid(20, 5);
+    VtParser p;
+    Feed(p, *g, "A");        // print 'A' — sets LastPrintedChar_
+    Feed(p, *g, "\x1b[3b");  // REP 3 — repeat 'A' three more times
+    CHECK(CP(*g, 0, 0) == 'A');
+    CHECK(CP(*g, 0, 1) == 'A');
+    CHECK(CP(*g, 0, 2) == 'A');
+    CHECK(CP(*g, 0, 3) == 'A');
+    delete g;
+}
+
+// ---------------------------------------------------------------------------
+// PushScrollback ring wrap: scrollback fills and overwrites oldest entry
+// ---------------------------------------------------------------------------
+
+TEST_CASE("PushScrollback wraps oldest entry when scrollback is full") {
+    // Create grid with scrollback limit = 2
+    auto res = Grid::Create(10, 3, 2);
+    REQUIRE(res.has_value());
+    Grid* g = res.value();
+    VtParser p;
+    // Write 3 lines to fill the main screen, then force lines into scrollback
+    Feed(p, *g, "AAA\r\n");  // row 0 pushed to scrollback
+    Feed(p, *g, "BBB\r\n");  // row 1 pushed, scrollback full
+    Feed(p, *g, "CCC\r\n");  // row 2 pushed, wraps: oldest (AAA) overwritten
+    // Scrollback should have 2 entries (limit)
+    CHECK(g->ScrollbackSize() == 2);
+    delete g;
+}
