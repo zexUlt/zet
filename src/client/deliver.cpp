@@ -49,7 +49,7 @@ std::vector<std::byte> LoadAgentBinary(std::string_view agentDir,
     const auto size = static_cast<std::size_t>(st.st_size);
     if (size > maxAgentSize) {
         if (reason != nullptr) {
-            *reason = "agent binary too large (> 16 MiB): " + std::string{arch};
+            *reason = "agent binary too large (> 16 MiB): " + path;
         }
         static_cast<void>(::close(fd));
         return {};

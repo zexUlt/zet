@@ -54,7 +54,9 @@ All tarballs carry agents for both `x86_64` and `aarch64` under
 `libexec/zet/`, so the client (M5.5) can bootstrap either server from any
 client machine. No environment variable is needed: the client finds the
 agents beside its own binary automatically. Set `ZET_AGENT_DIR` to
-point at a different directory if you keep agents elsewhere.
+point at a different directory if you keep agents elsewhere. The lookup follows symlinks of the `zet` binary and uses
+the real prefix of the resolved binary, so link or unpack the whole prefix, or
+set `ZET_AGENT_DIR`.
 
 ## Status
 

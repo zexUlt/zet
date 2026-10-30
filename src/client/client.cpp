@@ -427,7 +427,10 @@ static bool AgentMissing(std::string_view agentDir,
     path.append("zet-agent-");
     path.append(arch);
     struct ::stat st{};
-    return ::stat(path.c_str(), &st) != 0 && errno == ENOENT;
+    // ENOTDIR: a path component (e.g. a file named libexec) is not a
+    // directory, which is as absent as a missing one.
+    return ::stat(path.c_str(), &st) != 0 &&
+           (errno == ENOENT || errno == ENOTDIR);
 }
 
 /// Runs the probe exchange with the installer and delivers the agent binary
