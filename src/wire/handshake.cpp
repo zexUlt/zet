@@ -106,16 +106,17 @@ bool Transcript::Verify(const crypto::Key& auth, ByteSpan label,
 }
 
 PreAuthResult<std::uint16_t> NegotiateVersion(std::uint16_t peerMin,
-                                              std::uint16_t peerMax) noexcept {
+                                              std::uint16_t peerMax,
+                                              std::uint16_t ourMax) noexcept {
     if (peerMin > peerMax) {
         return std::unexpected(Fail(EProtoError::MalformedField));
     }
-    if (peerMin > PROTOCOL_VERSION_MAX || PROTOCOL_VERSION_MIN > peerMax) {
+    if (peerMin > ourMax || PROTOCOL_VERSION_MIN > peerMax) {
         return std::unexpected(Fail(EProtoError::VersionMismatch));
     }
     // The lower of the two maxima, never an equality test: a build that speaks
     // 1..3 and one that speaks 1..2 have to meet at 2 rather than refuse.
-    return std::min(peerMax, PROTOCOL_VERSION_MAX);
+    return std::min(peerMax, ourMax);
 }
 
 PreAuthResult<SessionId> PeekHelloSessionId(ByteSpan body) noexcept {
@@ -267,7 +268,8 @@ std::optional<HandshakeResult> ClientHandshake::TakeResult() noexcept {
                            .PeerReceiveOffset = PeerReceiveOffset_,
                            .ClientNonce = ClientNonce_,
                            .ServerNonce = ServerNonce_,
-                           .FallbackKeys = std::nullopt};
+                           .FallbackKeys = std::nullopt,
+                           .Version = Version_};
 }
 
 ServerHandshake::ServerHandshake(
@@ -385,7 +387,8 @@ std::optional<HandshakeResult> ServerHandshake::TakeResult() noexcept {
                            .PeerReceiveOffset = 0,
                            .ClientNonce = ClientNonce_,
                            .ServerNonce = ServerNonce_,
-                           .FallbackKeys = std::move(FallbackKeys_)};
+                           .FallbackKeys = std::move(FallbackKeys_),
+                           .Version = Version_};
 }
 
 }  // namespace zet::wire

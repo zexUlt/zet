@@ -137,6 +137,8 @@ struct HandshakeResult {
     /// when it was given one. A client whose answer to Resume was cut is
     /// still on that seed, and §8 has the agent try these second.
     std::optional<ConnectionKeys> FallbackKeys;
+    /// The protocol version both sides agreed on.
+    std::uint16_t Version{PROTOCOL_VERSION_MIN};
 };
 
 /// Reads a Hello far enough to route it and no further.
@@ -259,7 +261,11 @@ private:
 /// The overlap rule from §7: take min of the two maxima whenever the ranges
 /// meet at all. Never equality — that is what left EternalTerminal unable to
 /// change its handshake without breaking every client it had.
+///
+/// `ourMax` defaults to PROTOCOL_VERSION_MAX (v1). Pass PROTOCOL_VERSION_GRID
+/// to negotiate v2 when the session layer is ready to handle it.
 [[nodiscard]] PreAuthResult<std::uint16_t> NegotiateVersion(
-    std::uint16_t peerMin, std::uint16_t peerMax) noexcept;
+    std::uint16_t peerMin, std::uint16_t peerMax,
+    std::uint16_t ourMax = PROTOCOL_VERSION_MAX) noexcept;
 
 }  // namespace zet::wire
