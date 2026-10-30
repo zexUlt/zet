@@ -1579,16 +1579,16 @@ TEST_CASE("GridBegin rejects scrollback_len greater than total_len") {
 TEST_CASE("GRID_CHUNK_MAX_DATA is the largest payload GridChunk accepts") {
     // A payload of exactly GRID_CHUNK_MAX_DATA must succeed; one byte more
     // must be rejected by both WriteGridChunk and ParseGridChunk.
-    std::vector<std::byte> payload_max(GRID_CHUNK_MAX_DATA, std::byte{0xAB});
-    std::vector<std::byte> payload_over(GRID_CHUNK_MAX_DATA + 1,
-                                        std::byte{0xAB});
+    std::vector<std::byte> payloadMax(GRID_CHUNK_MAX_DATA, std::byte{0xAB});
+    std::vector<std::byte> payloadOver(GRID_CHUNK_MAX_DATA + 1,
+                                       std::byte{0xAB});
 
     // Write at limit must succeed.
     {
         std::vector<std::byte> out(MAX_FRAME);
         ByteWriter writer{MutableByteSpan{out}};
         const GridChunkMessage msg{.ChunkOffset = 0,
-                                   .Data = ByteSpan{payload_max}};
+                                   .Data = ByteSpan{payloadMax}};
         REQUIRE(WriteGridChunk(writer, msg).has_value());
     }
     // Write over limit must fail.
@@ -1596,7 +1596,7 @@ TEST_CASE("GRID_CHUNK_MAX_DATA is the largest payload GridChunk accepts") {
         std::vector<std::byte> out(MAX_FRAME);
         ByteWriter writer{MutableByteSpan{out}};
         const GridChunkMessage msg{.ChunkOffset = 0,
-                                   .Data = ByteSpan{payload_over}};
+                                   .Data = ByteSpan{payloadOver}};
         const auto written = WriteGridChunk(writer, msg);
         REQUIRE_FALSE(written.has_value());
         CHECK(written.error() == EProtoError::LengthLimitExceeded);

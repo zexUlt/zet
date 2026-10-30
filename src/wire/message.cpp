@@ -1095,15 +1095,15 @@ ProtoResult<void> WriteGridApplied(ByteWriter& writer,
 
 ProtoResult<std::size_t> AppendGridCapableTlv(MutableByteSpan out) noexcept {
     // Layout: type(u16be) + length(u16be) + value(u16be) = 6 bytes.
-    constexpr std::size_t TLV_SIZE = 3 * sizeof(std::uint16_t);
-    if (out.size() < TLV_SIZE) {
+    constexpr std::size_t tlvSize = 3 * sizeof(std::uint16_t);
+    if (out.size() < tlvSize) {
         return std::unexpected(EProtoError::BufferTooSmall);
     }
-    ByteWriter writer{out.first(TLV_SIZE)};
+    ByteWriter writer{out.first(tlvSize)};
     std::ignore = writer.WriteU16BE(TLV_GRID_CAPABLE);
     std::ignore = writer.WriteU16BE(sizeof(std::uint16_t));
     std::ignore = writer.WriteU16BE(1);
-    return TLV_SIZE;
+    return tlvSize;
 }
 
 ProtoResult<bool> HasGridCapableTlv(ByteSpan tlvs) noexcept {
