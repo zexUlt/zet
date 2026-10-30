@@ -31,6 +31,7 @@ readonly PORTABLE=(
     src/io/include/zet/io/errno.hpp
     src/io/include/zet/io/fd.hpp
     src/io/include/zet/io/poller.hpp
+    src/io/include/zet/io/self_path.hpp
     src/io/include/zet/io/tcp.hpp
     src/io/include/zet/io/terminal.hpp
 )
