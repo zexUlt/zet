@@ -14,19 +14,11 @@ inline constexpr std::uint16_t MAX_ROWS = 1024;
 /// Default scrollback ring size in lines (design.md §9).
 inline constexpr std::uint32_t DEFAULT_SCROLLBACK_LIMIT = 1000;
 
-/// Maximum number of extended-color side-table entries per Grid.
-///
-/// An entry holds one truecolor (R, G, B) tuple for a cell's fg or bg.
-/// 65536 entries × 3 bytes = 192 KiB per arena, well under budget.
-/// When the pool is exhausted the renderer degrades truecolor to 256-color
-/// for new cells (design.md §9, degrade ladder step 2).
-inline constexpr std::uint16_t MAX_EXT_CELLS = 65535;
-
 /// UTF-8 decode buffer capacity. A codepoint is at most 4 bytes.
 inline constexpr std::size_t MAX_UTF8_BYTES = 4;
 
 /// Maximum bytes in a CSI/OSC/etc. parameter string we accumulate.
-/// DCS/OSC/APC are bypassed (kBypass) so only CSI params land here.
+/// DCS/OSC/APC are bypassed (Bypass state) so only CSI params land here.
 inline constexpr std::size_t MAX_PARAM_BYTES = 256;
 
 /// Maximum number of CSI numeric sub-parameters parsed from one sequence.
