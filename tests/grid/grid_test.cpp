@@ -1372,3 +1372,428 @@ TEST_CASE("Alt-screen preserves colours on switch and restore") {
 
     delete g;
 }
+
+// ---------------------------------------------------------------------------
+// SGR: attribute flags 2/5/7/8/9 and their clear codes 22–29
+// ---------------------------------------------------------------------------
+
+TEST_CASE("SGR 2 sets Dim; SGR 22 clears Bold and Dim") {
+    Grid* g = MakeGrid(10, 5);
+    VtParser p;
+    Feed(p, *g, "\x1b[2m");
+    CHECK((g->PenAttrs() & Dim) != 0);
+    Feed(p, *g, "\x1b[22m");
+    CHECK((g->PenAttrs() & (Bold | Dim)) == 0);
+    delete g;
+}
+
+TEST_CASE("SGR 5 sets Blink; SGR 25 clears it") {
+    Grid* g = MakeGrid(10, 5);
+    VtParser p;
+    Feed(p, *g, "\x1b[5m");
+    CHECK((g->PenAttrs() & Blink) != 0);
+    Feed(p, *g, "\x1b[25m");
+    CHECK((g->PenAttrs() & Blink) == 0);
+    delete g;
+}
+
+TEST_CASE("SGR 7 sets Inverse; SGR 27 clears it") {
+    Grid* g = MakeGrid(10, 5);
+    VtParser p;
+    Feed(p, *g, "\x1b[7m");
+    CHECK((g->PenAttrs() & Inverse) != 0);
+    Feed(p, *g, "\x1b[27m");
+    CHECK((g->PenAttrs() & Inverse) == 0);
+    delete g;
+}
+
+TEST_CASE("SGR 8 sets Invisible; SGR 28 clears it") {
+    Grid* g = MakeGrid(10, 5);
+    VtParser p;
+    Feed(p, *g, "\x1b[8m");
+    CHECK((g->PenAttrs() & Invisible) != 0);
+    Feed(p, *g, "\x1b[28m");
+    CHECK((g->PenAttrs() & Invisible) == 0);
+    delete g;
+}
+
+TEST_CASE("SGR 9 sets StrikeThrough; SGR 29 clears it") {
+    Grid* g = MakeGrid(10, 5);
+    VtParser p;
+    Feed(p, *g, "\x1b[9m");
+    CHECK((g->PenAttrs() & StrikeThrough) != 0);
+    Feed(p, *g, "\x1b[29m");
+    CHECK((g->PenAttrs() & StrikeThrough) == 0);
+    delete g;
+}
+
+TEST_CASE("SGR 3 sets Italic; SGR 23 clears it") {
+    Grid* g = MakeGrid(10, 5);
+    VtParser p;
+    Feed(p, *g, "\x1b[3m");
+    CHECK((g->PenAttrs() & Italic) != 0);
+    Feed(p, *g, "\x1b[23m");
+    CHECK((g->PenAttrs() & Italic) == 0);
+    delete g;
+}
+
+TEST_CASE("SGR 4 sets Underline; SGR 24 clears it") {
+    Grid* g = MakeGrid(10, 5);
+    VtParser p;
+    Feed(p, *g, "\x1b[4m");
+    CHECK((g->PenAttrs() & Underline) != 0);
+    Feed(p, *g, "\x1b[24m");
+    CHECK((g->PenAttrs() & Underline) == 0);
+    delete g;
+}
+
+// ---------------------------------------------------------------------------
+// SGR: BG indexed colors 40–47 and bright FG/BG 90–107
+// ---------------------------------------------------------------------------
+
+TEST_CASE("SGR 40-47 sets indexed background color") {
+    Grid* g = MakeGrid(10, 5);
+    VtParser p;
+    Feed(p, *g, "\x1b[42m");  // green bg
+    CHECK(g->PenBgKind() == EColorKind::Indexed);
+    CHECK(g->PenBgIdx() == 2);
+    Feed(p, *g, "\x1b[47m");  // white bg
+    CHECK(g->PenBgIdx() == 7);
+    delete g;
+}
+
+TEST_CASE("SGR 90-97 sets bright indexed fg color") {
+    Grid* g = MakeGrid(10, 5);
+    VtParser p;
+    Feed(p, *g, "\x1b[91m");  // bright red
+    CHECK(g->PenFgKind() == EColorKind::Indexed);
+    CHECK(g->PenFgIdx() == 9);
+    Feed(p, *g, "\x1b[97m");  // bright white
+    CHECK(g->PenFgIdx() == 15);
+    delete g;
+}
+
+TEST_CASE("SGR 100-107 sets bright indexed bg color") {
+    Grid* g = MakeGrid(10, 5);
+    VtParser p;
+    Feed(p, *g, "\x1b[101m");  // bright red bg
+    CHECK(g->PenBgKind() == EColorKind::Indexed);
+    CHECK(g->PenBgIdx() == 9);
+    Feed(p, *g, "\x1b[107m");  // bright white bg
+    CHECK(g->PenBgIdx() == 15);
+    delete g;
+}
+
+// ---------------------------------------------------------------------------
+// SGR: 38;5;n and 48;5;n via semicolons
+// ---------------------------------------------------------------------------
+
+TEST_CASE("SGR 38;5;n sets indexed fg via semicolons") {
+    Grid* g = MakeGrid(10, 5);
+    VtParser p;
+    Feed(p, *g, "\x1b[38;5;200m");
+    CHECK(g->PenFgKind() == EColorKind::Indexed);
+    CHECK(g->PenFgIdx() == 200);
+    delete g;
+}
+
+TEST_CASE("SGR 48;5;n sets indexed bg via semicolons") {
+    Grid* g = MakeGrid(10, 5);
+    VtParser p;
+    Feed(p, *g, "\x1b[48;5;100m");
+    CHECK(g->PenBgKind() == EColorKind::Indexed);
+    CHECK(g->PenBgIdx() == 100);
+    delete g;
+}
+
+TEST_CASE("SGR 48;2;r;g;b sets truecolor bg via semicolons") {
+    Grid* g = MakeGrid(10, 5);
+    VtParser p;
+    Feed(p, *g, "\x1b[48;2;10;20;30m");
+    CHECK(g->PenBgKind() == EColorKind::TrueColor);
+    CHECK(g->PenBg()[0] == 10);
+    CHECK(g->PenBg()[1] == 20);
+    CHECK(g->PenBg()[2] == 30);
+    delete g;
+}
+
+// ---------------------------------------------------------------------------
+// SGR: 48 colon-form (256-color and truecolor bg)
+// ---------------------------------------------------------------------------
+
+TEST_CASE("SGR 48:5:n colon-form sets indexed bg") {
+    Grid* g = MakeGrid(10, 5);
+    VtParser p;
+    // CSI 48:5:77 m — colon sub-params for indexed bg
+    Feed(p, *g, "\x1b[48:5:77m");
+    CHECK(g->PenBgKind() == EColorKind::Indexed);
+    CHECK(g->PenBgIdx() == 77);
+    delete g;
+}
+
+TEST_CASE("SGR 48:2:r:g:b colon-form sets truecolor bg") {
+    Grid* g = MakeGrid(10, 5);
+    VtParser p;
+    Feed(p, *g, "\x1b[48:2:50:100:150m");
+    CHECK(g->PenBgKind() == EColorKind::TrueColor);
+    CHECK(g->PenBg()[0] == 50);
+    CHECK(g->PenBg()[1] == 100);
+    CHECK(g->PenBg()[2] == 150);
+    delete g;
+}
+
+TEST_CASE("SGR 48:2::r:g:b colon-form with colorspace sets truecolor bg") {
+    Grid* g = MakeGrid(10, 5);
+    VtParser p;
+    Feed(p, *g, "\x1b[48:2::60:120:180m");
+    CHECK(g->PenBgKind() == EColorKind::TrueColor);
+    CHECK(g->PenBg()[0] == 60);
+    CHECK(g->PenBg()[1] == 120);
+    CHECK(g->PenBg()[2] == 180);
+    delete g;
+}
+
+// ---------------------------------------------------------------------------
+// SGR 58: underline color truecolor consumes and drops
+// ---------------------------------------------------------------------------
+
+TEST_CASE("SGR 58;2;r;g;b underline truecolor is consumed silently") {
+    Grid* g = MakeGrid(10, 5);
+    VtParser p;
+    // Truecolor underline via semicolons: consume 4 extra params, no storage.
+    Feed(p, *g, "\x1b[58;2;1;2;3m");
+    CHECK(g->PenUlIdx() == 0);
+    delete g;
+}
+
+// ---------------------------------------------------------------------------
+// CSI I (CHT), CSI a (HPR), CSI e (VPR)
+// ---------------------------------------------------------------------------
+
+TEST_CASE("CSI I (CHT) advances cursor by n tab stops") {
+    Grid* g = MakeGrid(80, 5);
+    VtParser p;
+    Feed(p, *g, "\x1b[2I");  // CHT: advance 2 tab stops from col 0
+    CHECK(g->CursorCol() == 16);
+    delete g;
+}
+
+TEST_CASE("CSI a (HPR) moves cursor right by n columns") {
+    Grid* g = MakeGrid(80, 5);
+    VtParser p;
+    Feed(p, *g, "\x1b[5a");  // HPR: move right 5
+    CHECK(g->CursorCol() == 5);
+    delete g;
+}
+
+TEST_CASE("CSI e (VPR) moves cursor down by n rows") {
+    Grid* g = MakeGrid(80, 10);
+    VtParser p;
+    Feed(p, *g, "\x1b[3e");  // VPR: move down 3
+    CHECK(g->CursorRow() == 3);
+    delete g;
+}
+
+// ---------------------------------------------------------------------------
+// CSI s (SCP) and CSI u (RCP): save/restore cursor (ANSI)
+// ---------------------------------------------------------------------------
+
+TEST_CASE("CSI s saves cursor; CSI u restores it") {
+    Grid* g = MakeGrid(80, 24);
+    VtParser p;
+    Feed(p, *g, "\x1b[5;10H");  // move to row 4, col 9 (1-based → 0-based)
+    Feed(p, *g, "\x1b[s");      // SCP: save
+    Feed(p, *g, "\x1b[H");      // move to home
+    CHECK(g->CursorRow() == 0);
+    CHECK(g->CursorCol() == 0);
+    Feed(p, *g, "\x1b[u");  // RCP: restore
+    CHECK(g->CursorRow() == 4);
+    CHECK(g->CursorCol() == 9);
+    delete g;
+}
+
+// ---------------------------------------------------------------------------
+// CSI ! p (DECSTR via parser), CSI SP q (DECSCUSR), CSI c / n
+// ---------------------------------------------------------------------------
+
+TEST_CASE("CSI !p (DECSTR) performs soft reset via parser") {
+    Grid* g = MakeGrid(80, 24);
+    VtParser p;
+    Feed(p, *g, "\x1b[1m");  // set bold
+    CHECK((g->PenAttrs() & Bold) != 0);
+    Feed(p, *g, "\x1b[!p");  // DECSTR
+    CHECK((g->PenAttrs() & Bold) == 0);
+    delete g;
+}
+
+TEST_CASE("CSI SP q (DECSCUSR) sets cursor style") {
+    Grid* g = MakeGrid(80, 24);
+    VtParser p;
+    Feed(p, *g, "\x1b[2 q");  // DECSCUSR: steady block
+    CHECK(g->CursorStyle() == 2);
+    Feed(p, *g, "\x1b[0 q");  // DECSCUSR: default
+    CHECK(g->CursorStyle() == 0);
+    delete g;
+}
+
+TEST_CASE("CSI c (DA) and CSI n (DSR) are silently ignored") {
+    Grid* g = MakeGrid(80, 24);
+    VtParser p;
+    // DA1: ESC [ c — device attributes query
+    Feed(p, *g, "\x1b[c");
+    // DSR: ESC [ 6 n — cursor position report request
+    Feed(p, *g, "\x1b[6n");
+    // No crash; grid unchanged.
+    CHECK(g->CursorRow() == 0);
+    delete g;
+}
+
+TEST_CASE("CSI with unknown final increments UnknownSeqCount") {
+    Grid* g = MakeGrid(80, 24);
+    VtParser p;
+    // 'y' is not a handled final byte; must hit the default branch.
+    Feed(p, *g, "\x1b[5y");
+    CHECK(p.UnknownSeqCount() >= 1);
+    // Also check CSI p without '!' intermediate → unknown.
+    Feed(p, *g, "\x1b[p");
+    CHECK(p.UnknownSeqCount() >= 2);
+    delete g;
+}
+
+// ---------------------------------------------------------------------------
+// SetMode: untested DECSET/DECRST modes
+// ---------------------------------------------------------------------------
+
+TEST_CASE("DECSET ?25 shows cursor; DECRST ?25 hides it") {
+    Grid* g = MakeGrid(80, 24);
+    VtParser p;
+    Feed(p, *g, "\x1b[?25l");  // hide cursor
+    CHECK(!g->ModeSet(EMode::Dectcem));
+    Feed(p, *g, "\x1b[?25h");  // show cursor
+    CHECK(g->ModeSet(EMode::Dectcem));
+    delete g;
+}
+
+TEST_CASE("DECSET ?47 switches to alt screen") {
+    Grid* g = MakeGrid(20, 5);
+    VtParser p;
+    Feed(p, *g, "hello");
+    Feed(p, *g, "\x1b[?47h");  // enter alt via mode 47
+    CHECK(g->IsAltScreen());
+    CHECK(CP(*g, 0, 0) == 0);
+    Feed(p, *g, "\x1b[?47l");  // leave alt via mode 47
+    CHECK(!g->IsAltScreen());
+    CHECK(CP(*g, 0, 0) == 'h');
+    delete g;
+}
+
+TEST_CASE("SM/RM 20 toggles LNM mode") {
+    Grid* g = MakeGrid(80, 24);
+    VtParser p;
+    Feed(p, *g, "\x1b[20h");  // SM 20: set LNM
+    CHECK(g->ModeSet(EMode::Lnm));
+    Feed(p, *g, "\x1b[20l");  // RM 20: clear LNM
+    CHECK(!g->ModeSet(EMode::Lnm));
+    delete g;
+}
+
+TEST_CASE("DECSET ?1002/?1003/?1004/?1005/?1006/?1015 set mouse/focus modes") {
+    Grid* g = MakeGrid(80, 24);
+    VtParser p;
+    Feed(p, *g, "\x1b[?1002h");
+    CHECK(g->ModeSet(EMode::Mouse1002));
+    Feed(p, *g, "\x1b[?1003h");
+    CHECK(g->ModeSet(EMode::Mouse1003));
+    Feed(p, *g, "\x1b[?1004h");
+    CHECK(g->ModeSet(EMode::FocusEvents));
+    Feed(p, *g, "\x1b[?1005h");
+    CHECK(g->ModeSet(EMode::Mouse1005));
+    Feed(p, *g, "\x1b[?1006h");
+    CHECK(g->ModeSet(EMode::Mouse1006));
+    Feed(p, *g, "\x1b[?1015h");
+    CHECK(g->ModeSet(EMode::Mouse1015));
+    Feed(p, *g, "\x1b[?1002l");
+    CHECK(!g->ModeSet(EMode::Mouse1002));
+    delete g;
+}
+
+TEST_CASE("DECSET ?2026 sets SyncOutput mode") {
+    Grid* g = MakeGrid(80, 24);
+    VtParser p;
+    Feed(p, *g, "\x1b[?2026h");
+    CHECK(g->ModeSet(EMode::SyncOutput));
+    Feed(p, *g, "\x1b[?2026l");
+    CHECK(!g->ModeSet(EMode::SyncOutput));
+    delete g;
+}
+
+// ---------------------------------------------------------------------------
+// Accessors exercised for coverage (PenFg, PenBg, PenBgIdx, CursorStyle, etc.)
+// ---------------------------------------------------------------------------
+
+TEST_CASE("PenFg and PenBg return pointer to color bytes") {
+    Grid* g = MakeGrid(10, 5);
+    VtParser p;
+    Feed(p, *g, "\x1b[38;2;11;22;33m");
+    const std::uint8_t* fg = g->PenFg();
+    CHECK(fg[0] == 11);
+    CHECK(fg[1] == 22);
+    CHECK(fg[2] == 33);
+    Feed(p, *g, "\x1b[48;2;44;55;66m");
+    const std::uint8_t* bg = g->PenBg();
+    CHECK(bg[0] == 44);
+    CHECK(bg[1] == 55);
+    CHECK(bg[2] == 66);
+    delete g;
+}
+
+TEST_CASE("PossiblyDiverged can be set and read") {
+    Grid* g = MakeGrid(10, 5);
+    CHECK(!g->PossiblyDiverged());
+    g->SetPossiblyDiverged(true);
+    CHECK(g->PossiblyDiverged());
+    g->SetPossiblyDiverged(false);
+    CHECK(!g->PossiblyDiverged());
+    delete g;
+}
+
+TEST_CASE("Modes() returns the raw mode bitfield") {
+    Grid* g = MakeGrid(10, 5);
+    // Default: AWM and DECTCEM are set.
+    const std::uint32_t m = g->Modes();
+    CHECK((m & ModeFlag(EMode::Awm)) != 0);
+    CHECK((m & ModeFlag(EMode::Dectcem)) != 0);
+    delete g;
+}
+
+TEST_CASE("CharsetActive and G0/G1 accessors reflect designate and shift") {
+    Grid* g = MakeGrid(10, 5);
+    VtParser p;
+    Feed(p, *g, "\x1b(0");  // designate G0 as line-drawing (charset 1)
+    CHECK(g->CharsetG0() == 1);
+    CHECK(g->CharsetG1() == 0);
+    Feed(p, *g, "\x0E");  // SO: shift to G1
+    CHECK(g->CharsetActive() == 1);
+    Feed(p, *g, "\x0F");  // SI: shift back to G0
+    CHECK(g->CharsetActive() == 0);
+    delete g;
+}
+
+TEST_CASE("ScrollbackLimit and ScrollbackSize are readable") {
+    Grid* g = MakeGrid(10, 5, 50);
+    CHECK(g->ScrollbackLimit() == 50);
+    CHECK(g->ScrollbackSize() == 0);
+    delete g;
+}
+
+// ---------------------------------------------------------------------------
+// CSI q without space intermediate hits unknown branch
+// ---------------------------------------------------------------------------
+
+TEST_CASE("CSI q without space intermediate increments UnknownSeqCount") {
+    Grid* g = MakeGrid(80, 24);
+    VtParser p;
+    Feed(p, *g, "\x1b[2q");  // 'q' without space: unknown
+    CHECK(p.UnknownSeqCount() >= 1);
+    delete g;
+}
