@@ -36,7 +36,7 @@ ProtoResult<void> WriteMessageV1(ByteWriter& writer,
 }
 ProtoResult<void> WriteMessageV2(ByteWriter& writer,
                                  const ResumeMessage& message) {
-    return WriteResume(writer, message, PROTOCOL_VERSION_MAX);
+    return WriteResume(writer, message, PROTOCOL_VERSION_GRID);
 }
 // Default overload used by Encode<>: v1 keeps pre-M6 behaviour.
 ProtoResult<void> WriteMessage(ByteWriter& writer,
@@ -1169,7 +1169,7 @@ TEST_CASE("a v2 resume carries stream_gen before c_recv_offset on the wire") {
     }
 
     ByteReader reader{ByteSpan{out}.subspan(1)};
-    const auto parsed = ParseResume(reader, PROTOCOL_VERSION_MAX);
+    const auto parsed = ParseResume(reader, PROTOCOL_VERSION_GRID);
     REQUIRE(parsed.has_value());
     CHECK(parsed->StreamGen == msg.StreamGen);
     CHECK(parsed->ClientReceiveOffset == msg.ClientReceiveOffset);
@@ -1186,7 +1186,7 @@ TEST_CASE("a v1 resume is rejected by a v2 parser and vice versa") {
         ByteReader reader{ByteSpan{v1bytes}.subspan(1)};
         // v2 tries to read stream_gen(4) + c_recv_offset(8) = 12 bytes;
         // v1 body is only 8 bytes, so it truncates.
-        const auto parsed = ParseResume(reader, PROTOCOL_VERSION_MAX);
+        const auto parsed = ParseResume(reader, PROTOCOL_VERSION_GRID);
         REQUIRE_FALSE(parsed.has_value());
         CHECK(parsed.error() == EProtoError::Truncated);
     }
@@ -1196,7 +1196,7 @@ TEST_CASE("a v1 resume is rejected by a v2 parser and vice versa") {
         std::vector<std::byte> v2bytes(MAX_FRAME);
         ByteWriter w{MutableByteSpan{v2bytes}};
         REQUIRE(
-            WriteResume(w, MakeResumeV2(), PROTOCOL_VERSION_MAX).has_value());
+            WriteResume(w, MakeResumeV2(), PROTOCOL_VERSION_GRID).has_value());
         v2bytes.resize(w.Size());
         // Remove the type byte, feed body to a v1 parser.
         ByteReader reader{ByteSpan{v2bytes}.subspan(1)};
@@ -1217,7 +1217,7 @@ TEST_CASE("SessionEnd Overflow is accepted at v2 and rejected at v1") {
     std::vector<std::byte> out(MAX_FRAME);
     ByteWriter writer{MutableByteSpan{out}};
     REQUIRE(
-        WriteSessionEnd(writer, overflow, PROTOCOL_VERSION_MAX).has_value());
+        WriteSessionEnd(writer, overflow, PROTOCOL_VERSION_GRID).has_value());
     out.resize(writer.Size());
     REQUIRE(out.size() == 3);
     CHECK(out[0] == std::byte{0x15});  // SessionEnd type
@@ -1227,7 +1227,7 @@ TEST_CASE("SessionEnd Overflow is accepted at v2 and rejected at v1") {
     // Parse at v2 must round-trip.
     {
         ByteReader reader{ByteSpan{out}.subspan(1)};
-        const auto parsed = ParseSessionEnd(reader, PROTOCOL_VERSION_MAX);
+        const auto parsed = ParseSessionEnd(reader, PROTOCOL_VERSION_GRID);
         REQUIRE(parsed.has_value());
         CHECK(parsed->Kind == ESessionEndKind::Overflow);
         CHECK(parsed->Value == 0);
@@ -1519,4 +1519,100 @@ TEST_CASE("GRID_CAPABLE option survives a Hello round trip") {
     REQUIRE(parsed->Options.Options().size() == 1);
     CHECK(parsed->Options.Options().front().Type == TLV_GRID_CAPABLE);
     CHECK_FALSE(parsed->Options.Options().front().IsCritical());
+}
+
+TEST_CASE("AppendGridCapableTlv and HasGridCapableTlv round-trip") {
+    // type(2) + length(2) + value(2) = 6 bytes.
+    std::vector<std::byte> buf(6);
+    const auto written = AppendGridCapableTlv(MutableByteSpan{buf});
+    REQUIRE(written.has_value());
+    CHECK(*written == 6);
+
+    // HasGridCapableTlv must find it.
+    const auto found = HasGridCapableTlv(ByteSpan{buf}.first(*written));
+    REQUIRE(found.has_value());
+    CHECK(*found == true);
+
+    // An empty span has no TLV → false.
+    const auto absent = HasGridCapableTlv(ByteSpan{});
+    REQUIRE(absent.has_value());
+    CHECK(*absent == false);
+
+    // A buffer smaller than 6 bytes must fail.
+    std::vector<std::byte> tiny(5);
+    const auto refused = AppendGridCapableTlv(MutableByteSpan{tiny});
+    REQUIRE_FALSE(refused.has_value());
+    CHECK(refused.error() == EProtoError::BufferTooSmall);
+}
+
+TEST_CASE("GridBegin rejects scrollback_len greater than total_len") {
+    // Parse path.
+    {
+        // Build a valid GridBegin body but with scrollback_len > total_len.
+        // Layout (no type byte): flags(1) gen(4) scrollback(4) total(4) = 13 B
+        const std::vector<std::byte> body{
+            std::byte{0x01},  // flags
+            std::byte{0},    std::byte{0},
+            std::byte{0},    std::byte{1},  // gen=1
+            std::byte{0},    std::byte{0},
+            std::byte{0},    std::byte{5},  // scrollback=5
+            std::byte{0},    std::byte{0},
+            std::byte{0},    std::byte{4},  // total=4
+        };
+        ByteReader reader{ByteSpan{body}};
+        const auto parsed = ParseGridBegin(reader);
+        REQUIRE_FALSE(parsed.has_value());
+        CHECK(parsed.error() == EProtoError::LengthLimitExceeded);
+    }
+    // Write path.
+    {
+        GridBeginMessage msg = MakeGridBegin();
+        msg.ScrollbackLen = msg.TotalLen + 1;
+        std::vector<std::byte> out(MAX_FRAME);
+        ByteWriter writer{MutableByteSpan{out}};
+        const auto written = WriteGridBegin(writer, msg);
+        REQUIRE_FALSE(written.has_value());
+        CHECK(written.error() == EProtoError::LengthLimitExceeded);
+    }
+}
+
+TEST_CASE("GRID_CHUNK_MAX_DATA is the largest payload GridChunk accepts") {
+    // A payload of exactly GRID_CHUNK_MAX_DATA must succeed; one byte more
+    // must be rejected by both WriteGridChunk and ParseGridChunk.
+    const GridChunkMessage at_limit{
+        .ChunkOffset = 0,
+        .Data = ByteSpan{}.first(0),  // placeholder; resized below
+    };
+
+    std::vector<std::byte> payload_max(GRID_CHUNK_MAX_DATA, std::byte{0xAB});
+    std::vector<std::byte> payload_over(GRID_CHUNK_MAX_DATA + 1,
+                                        std::byte{0xAB});
+
+    // Write at limit must succeed.
+    {
+        std::vector<std::byte> out(MAX_FRAME);
+        ByteWriter writer{MutableByteSpan{out}};
+        const GridChunkMessage msg{.ChunkOffset = 0,
+                                   .Data = ByteSpan{payload_max}};
+        REQUIRE(WriteGridChunk(writer, msg).has_value());
+    }
+    // Write over limit must fail.
+    {
+        std::vector<std::byte> out(MAX_FRAME);
+        ByteWriter writer{MutableByteSpan{out}};
+        const GridChunkMessage msg{.ChunkOffset = 0,
+                                   .Data = ByteSpan{payload_over}};
+        const auto written = WriteGridChunk(writer, msg);
+        REQUIRE_FALSE(written.has_value());
+        CHECK(written.error() == EProtoError::LengthLimitExceeded);
+    }
+    // Parse over limit: build a frame manually with an oversized payload.
+    {
+        // body = offset(4) + payload(GRID_CHUNK_MAX_DATA + 1)
+        std::vector<std::byte> body(4 + GRID_CHUNK_MAX_DATA + 1, std::byte{0});
+        ByteReader reader{ByteSpan{body}};
+        const auto parsed = ParseGridChunk(reader);
+        REQUIRE_FALSE(parsed.has_value());
+        CHECK(parsed.error() == EProtoError::LengthLimitExceeded);
+    }
 }

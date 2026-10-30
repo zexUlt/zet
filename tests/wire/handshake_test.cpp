@@ -327,17 +327,26 @@ TEST_CASE("a pre-auth error can never ask for the session") {
 }
 
 TEST_CASE("version negotiation takes the lower maximum, never equality") {
-    // A build speaking 1..3 and one speaking 1..2 have to meet at 2.
+    // Peer max=3, our default max=1 → settle on 1.
     const auto met = NegotiateVersion(PROTOCOL_VERSION_MIN, 3);
     REQUIRE(met.has_value());
     CHECK(*met == PROTOCOL_VERSION_MAX);
 
+    // Both sides cap at PROTOCOL_VERSION_MAX (1) → settle on 1.
     const auto exact =
         NegotiateVersion(PROTOCOL_VERSION_MIN, PROTOCOL_VERSION_MAX);
     REQUIRE(exact.has_value());
     CHECK(*exact == PROTOCOL_VERSION_MAX);
 
-    const auto ahead = NegotiateVersion(PROTOCOL_VERSION_MAX + 1, 9);
+    // Passing ourMax=PROTOCOL_VERSION_GRID lets us settle on 2 when the peer
+    // also advertises at least 2.
+    const auto grid = NegotiateVersion(
+        PROTOCOL_VERSION_MIN, PROTOCOL_VERSION_GRID, PROTOCOL_VERSION_GRID);
+    REQUIRE(grid.has_value());
+    CHECK(*grid == PROTOCOL_VERSION_GRID);
+
+    // Peer min exceeds our max → VersionMismatch.
+    const auto ahead = NegotiateVersion(PROTOCOL_VERSION_GRID, 9);
     REQUIRE_FALSE(ahead.has_value());
     CHECK(ahead.error().Error() == EProtoError::VersionMismatch);
     CHECK(ahead.error().Disposition() == EDisposition::CloseConnection);
@@ -345,6 +354,17 @@ TEST_CASE("version negotiation takes the lower maximum, never equality") {
     const auto backwards = NegotiateVersion(4, 3);
     REQUIRE_FALSE(backwards.has_value());
     CHECK(backwards.error().Error() == EProtoError::MalformedField);
+}
+
+TEST_CASE_FIXTURE(SodiumFixture,
+                  "a completed handshake reports version 1 by default") {
+    Harness peers;
+    const auto run = peers.Run();
+    REQUIRE(run.Completed);
+    REQUIRE(run.FromClient.has_value());
+    REQUIRE(run.FromServer.has_value());
+    CHECK(run.FromClient->Version == PROTOCOL_VERSION_MAX);
+    CHECK(run.FromServer->Version == PROTOCOL_VERSION_MAX);
 }
 
 TEST_CASE("nonce memory finds a repeat and forgets the oldest") {
