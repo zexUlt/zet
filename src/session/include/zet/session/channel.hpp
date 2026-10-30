@@ -293,12 +293,6 @@ private:
     [[nodiscard]] ChannelResult<std::size_t> SealInto(
         MutableByteSpan out, ByteSpan plaintext) noexcept;
 
-    wire::FrameSealer Sealer_;
-    wire::FrameOpener Opener_;
-    ERole Role_;
-    LivenessLimits Liveness_;
-    std::uint16_t Version_{wire::PROTOCOL_VERSION_MIN};
-
     SendBuffer& SendBuf_;
     ReceiveCursor& RecvCursor_;
 
@@ -309,18 +303,6 @@ private:
     /// Data frame or in a bare Ack. Used to decide whether a bare Ack is due.
     std::uint64_t LastAckedOffset_{0};
 
-    /// When Poll first noticed un-acked receive bytes with nothing else to
-    /// send. std::nullopt means no idle-Ack is pending.
-    std::optional<Timestamp> AckPendingSince_;
-
-    /// A Pong we owe the peer, set by Receive on a Ping. Idempotent: a new
-    /// Ping replaces an unanswered one, per §9.
-    std::optional<wire::PongMessage> PendingPong_;
-
-    /// A Resize queued by QueueResize, to be sent on the next Poll. Replaces
-    /// any previous value that has not yet been sent. §9.
-    std::optional<wire::ResizeMessage> PendingResize_;
-
     std::uint64_t UnknownTypeCount_{0};
 
     /// When a frame last opened, and when one last went out. §9 liveness.
@@ -330,10 +312,19 @@ private:
     /// peer, which only echoes it.
     std::uint64_t NextPingToken_{1};
 
-    /// The SessionEnd to send once the stream is acknowledged, and whether it
-    /// has gone.
-    std::optional<wire::SessionEndMessage> PendingEnd_;
-    bool EndSent_{false};
+    LivenessLimits Liveness_;
+
+    /// When Poll first noticed un-acked receive bytes with nothing else to
+    /// send. std::nullopt means no idle-Ack is pending.
+    std::optional<Timestamp> AckPendingSince_;
+
+    /// A Pong we owe the peer, set by Receive on a Ping. Idempotent: a new
+    /// Ping replaces an unanswered one, per §9.
+    std::optional<wire::PongMessage> PendingPong_;
+
+    /// Completed snapshot buffer, kept alive until the next Receive/Poll so
+    /// that the DeliveredGridSnapshot.Bytes span remains valid. §9.
+    std::vector<std::byte> GridSnapshotBuf_;
 
     // ── M6 grid state (§9 ADR-030) ─────────────────────────────────────────
 
@@ -349,8 +340,6 @@ private:
         bool EndSent{false};
     };
     std::optional<GridEmission> GridEmitting_;
-    /// True after GridEnd is sent; cleared when GridApplied is received.
-    bool GridAwaitingApplied_{false};
 
     // ── Client side (receiving GridBegin → GridChunk* → GridEnd):
     struct GridReception {
@@ -362,15 +351,30 @@ private:
         std::vector<std::byte> Buffer;  ///< Accumulated chunk bytes.
     };
     std::optional<GridReception> GridReceiving_;
+
+    wire::FrameSealer Sealer_;
+    wire::FrameOpener Opener_;
+
     /// The last successfully applied stream generation (validated GridEnd).
     std::uint32_t AgentStreamGen_{0};
 
     /// GridApplied to send on the next Poll, set by QueueGridApplied. §9.
     std::optional<std::uint32_t> PendingGridApplied_;
 
-    /// Completed snapshot buffer, kept alive until the next Receive/Poll so
-    /// that the DeliveredGridSnapshot.Bytes span remains valid. §9.
-    std::vector<std::byte> GridSnapshotBuf_;
+    std::uint16_t Version_{wire::PROTOCOL_VERSION_MIN};
+
+    /// A Resize queued by QueueResize, to be sent on the next Poll. Replaces
+    /// any previous value that has not yet been sent. §9.
+    std::optional<wire::ResizeMessage> PendingResize_;
+
+    ERole Role_;
+    bool EndSent_{false};
+    /// True after GridEnd is sent; cleared when GridApplied is received.
+    bool GridAwaitingApplied_{false};
+
+    /// The SessionEnd to send once the stream is acknowledged, and whether it
+    /// has gone.
+    std::optional<wire::SessionEndMessage> PendingEnd_;
 };
 
 }  // namespace zet::session

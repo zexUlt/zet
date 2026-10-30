@@ -74,30 +74,36 @@ SessionResult<void> SessionHandle::ConfirmResume(EResumeKeys used) noexcept {
 }
 
 ResumeAttempt::ResumeAttempt(SessionRef session,
-                             wire::HandshakeNonce serverNonce) noexcept
+                             wire::HandshakeNonce serverNonce,
+                             std::uint16_t ceiling) noexcept
     : ResumeAttempt(session.Session_, Clone(session.Session_->Auth_),
                     Clone(session.Session_->Seed_),
                     Clone(session.Session_->PreviousSeed_), serverNonce,
-                    session.ReceiveOffset()) {}
+                    session.ReceiveOffset(), ceiling) {}
 
-ResumeAttempt ResumeAttempt::ForUnknown(
-    const crypto::Key& localSecret, const wire::SessionId& id,
-    wire::HandshakeNonce serverNonce) noexcept {
-    return ResumeAttempt{UnknownSession{}, localSecret, id, serverNonce};
+ResumeAttempt ResumeAttempt::ForUnknown(const crypto::Key& localSecret,
+                                        const wire::SessionId& id,
+                                        wire::HandshakeNonce serverNonce,
+                                        std::uint16_t ceiling) noexcept {
+    return ResumeAttempt{UnknownSession{}, localSecret, id, serverNonce,
+                         ceiling};
 }
 
 ResumeAttempt::ResumeAttempt(UnknownSession, const crypto::Key& localSecret,
                              const wire::SessionId& id,
-                             wire::HandshakeNonce serverNonce) noexcept
-    : ResumeAttempt(wire::DeriveDecoySecrets(localSecret, id), serverNonce) {}
+                             wire::HandshakeNonce serverNonce,
+                             std::uint16_t ceiling) noexcept
+    : ResumeAttempt(wire::DeriveDecoySecrets(localSecret, id), serverNonce,
+                    ceiling) {}
 
 ResumeAttempt::ResumeAttempt(wire::SessionSecrets decoy,
-                             wire::HandshakeNonce serverNonce) noexcept
+                             wire::HandshakeNonce serverNonce,
+                             std::uint16_t ceiling) noexcept
     // Offset zero, as for a session that has received nothing yet. It would
     // only reach the wire in AuthOk, and a decoy never gets that far.
     : ResumeAttempt(nullptr, std::move(decoy.Auth),
                     std::move(decoy.ConnectionSeed), std::nullopt, serverNonce,
-                    0) {}
+                    0, ceiling) {}
 
 SessionResult<void> SessionHandle::Attach(
     std::uint64_t clientReceiveOffset) noexcept {
@@ -178,11 +184,12 @@ ResumeAttempt::ResumeAttempt(AgentSession* session, crypto::Key auth,
                              crypto::Key seed,
                              std::optional<crypto::Key> previousSeed,
                              wire::HandshakeNonce serverNonce,
-                             std::uint64_t receiveOffset) noexcept
+                             std::uint64_t receiveOffset,
+                             std::uint16_t ceiling) noexcept
     : Session_(session),
       Shake_(std::move(auth), std::move(seed), serverNonce, receiveOffset,
              session != nullptr ? session->Seen_ : DecoySeen_,
-             std::move(previousSeed)) {}
+             std::move(previousSeed), ceiling) {}
 
 wire::PreAuthResult<wire::HandshakeStep> ResumeAttempt::Handle(
     ByteSpan body, MutableByteSpan out) noexcept {

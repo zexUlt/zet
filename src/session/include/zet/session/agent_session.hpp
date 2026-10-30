@@ -268,21 +268,23 @@ public:
     /// How much of the client's stream the agent holds goes into AuthOk under
     /// the transcript MAC; it is read from the session, so that it cannot
     /// disagree with the cursor the resend will meet.
-    ResumeAttempt(SessionRef session,
-                  wire::HandshakeNonce serverNonce) noexcept;
+    /// `ceiling` caps the negotiated version; default is PROTOCOL_VERSION_MAX.
+    ResumeAttempt(SessionRef session, wire::HandshakeNonce serverNonce,
+                  std::uint16_t ceiling = wire::PROTOCOL_VERSION_MAX) noexcept;
 
     /// For a sid no session answers to. The secrets come from
     /// DeriveDecoySecrets, so two probes for the same sid meet the same
     /// answer, and the attempt can never finish.
     [[nodiscard]] static ResumeAttempt ForUnknown(
         const crypto::Key& localSecret, const wire::SessionId& id,
-        wire::HandshakeNonce serverNonce) noexcept;
+        wire::HandshakeNonce serverNonce,
+        std::uint16_t ceiling = wire::PROTOCOL_VERSION_MAX) noexcept;
 
     /// The same as ForUnknown, as a constructor, for building the attempt in
     /// place — it can be neither copied nor moved.
     ResumeAttempt(UnknownSession, const crypto::Key& localSecret,
-                  const wire::SessionId& id,
-                  wire::HandshakeNonce serverNonce) noexcept;
+                  const wire::SessionId& id, wire::HandshakeNonce serverNonce,
+                  std::uint16_t ceiling = wire::PROTOCOL_VERSION_MAX) noexcept;
 
     ResumeAttempt(const ResumeAttempt&) = delete;
     ResumeAttempt& operator=(const ResumeAttempt&) = delete;
@@ -303,13 +305,13 @@ public:
 
 private:
     /// For a decoy: the secrets derived once, then taken apart.
-    ResumeAttempt(wire::SessionSecrets decoy,
-                  wire::HandshakeNonce serverNonce) noexcept;
+    ResumeAttempt(wire::SessionSecrets decoy, wire::HandshakeNonce serverNonce,
+                  std::uint16_t ceiling = wire::PROTOCOL_VERSION_MAX) noexcept;
 
     ResumeAttempt(AgentSession* session, crypto::Key auth, crypto::Key seed,
                   std::optional<crypto::Key> previousSeed,
-                  wire::HandshakeNonce serverNonce,
-                  std::uint64_t receiveOffset) noexcept;
+                  wire::HandshakeNonce serverNonce, std::uint64_t receiveOffset,
+                  std::uint16_t ceiling = wire::PROTOCOL_VERSION_MAX) noexcept;
 
     /// Null for a decoy. Never followed before Finish.
     AgentSession* Session_;

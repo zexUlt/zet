@@ -30,11 +30,13 @@ constexpr std::uint8_t CLEARTEXT_EPOCH = 0;
 
 // ── ConnectionBase ─────────────────────────────────────────────────────
 
-ConnectionBase::ConnectionBase(MutableByteSpan frameStorage,
-                               Timestamp now) noexcept
+ConnectionBase::ConnectionBase(MutableByteSpan frameStorage, Timestamp now,
+                               std::uint16_t ceiling) noexcept
     // Until the peer has proved itself it has not earned more than
     // MAX_HANDSHAKE_FRAME of our memory (§7); the limit widens once it has.
-    : Frames_(frameStorage, wire::MAX_HANDSHAKE_FRAME), Started_(now) {}
+    : Frames_(frameStorage, wire::MAX_HANDSHAKE_FRAME),
+      Started_(now),
+      Ceiling_(ceiling) {}
 
 ChannelResult<void> ConnectionBase::OnBytes(ByteSpan chunk) noexcept {
     if (Failed_) {
@@ -151,16 +153,16 @@ ConnectionResult ConnectionBase::PumpLive(Timestamp now, MutableByteSpan out,
 
 // ── AgentConnection ────────────────────────────────────────────────────
 
-AgentConnection::AgentConnection(MutableByteSpan frameStorage,
-                                 Timestamp now) noexcept
-    : ConnectionBase(frameStorage, now) {}
+AgentConnection::AgentConnection(MutableByteSpan frameStorage, Timestamp now,
+                                 std::uint16_t ceiling) noexcept
+    : ConnectionBase(frameStorage, now, ceiling) {}
 
 void AgentConnection::Route(SessionRef session,
                             wire::HandshakeNonce serverNonce) noexcept {
     if (Stage_ != EStage::AwaitRoute) {
         return;
     }
-    Attempt_.emplace(session, serverNonce);
+    Attempt_.emplace(session, serverNonce, Ceiling_);
     Stage_ = EStage::Handshake;
 }
 
@@ -169,7 +171,8 @@ void AgentConnection::RouteUnknown(const crypto::Key& localSecret,
     if (Stage_ != EStage::AwaitRoute) {
         return;
     }
-    Attempt_.emplace(UnknownSession{}, localSecret, HelloId_, serverNonce);
+    Attempt_.emplace(UnknownSession{}, localSecret, HelloId_, serverNonce,
+                     Ceiling_);
     Stage_ = EStage::Handshake;
 }
 
@@ -507,10 +510,11 @@ void AgentConnection::Close(Timestamp now) noexcept {
 ClientConnection::ClientConnection(ClientSession& session,
                                    wire::HandshakeNonce clientNonce,
                                    MutableByteSpan frameStorage, Timestamp now,
-                                   bool gridCapable) noexcept
-    : ConnectionBase(frameStorage, now),
+                                   bool gridCapable,
+                                   std::uint16_t ceiling) noexcept
+    : ConnectionBase(frameStorage, now, ceiling),
       Session_(session),
-      Attempt_(session, clientNonce, gridCapable) {}
+      Attempt_(session, clientNonce, gridCapable, ceiling) {}
 
 void ClientConnection::QueueResize(wire::ResizeMessage size) noexcept {
     if (Channel_) {

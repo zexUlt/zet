@@ -184,9 +184,12 @@ class ClientResumeAttempt {
 public:
     /// `gridCapable` causes GRID_CAPABLE to be included in the Hello TLV,
     /// signalling that this client can receive grid snapshots. §7 ADR-035.
-    ClientResumeAttempt(ClientSession& session,
-                        wire::HandshakeNonce clientNonce,
-                        bool gridCapable = false) noexcept;
+    /// `ceiling` caps the version negotiated in Hello; default is
+    /// PROTOCOL_VERSION_MAX. Tests that need ver=2 pass PROTOCOL_VERSION_GRID.
+    ClientResumeAttempt(
+        ClientSession& session, wire::HandshakeNonce clientNonce,
+        bool gridCapable = false,
+        std::uint16_t ceiling = wire::PROTOCOL_VERSION_MAX) noexcept;
 
     ClientResumeAttempt(const ClientResumeAttempt&) = delete;
     ClientResumeAttempt& operator=(const ClientResumeAttempt&) = delete;

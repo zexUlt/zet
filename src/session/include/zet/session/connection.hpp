@@ -137,7 +137,8 @@ public:
     [[nodiscard]] Deadline NextDeadline() const noexcept;
 
 protected:
-    ConnectionBase(MutableByteSpan frameStorage, Timestamp now) noexcept;
+    ConnectionBase(MutableByteSpan frameStorage, Timestamp now,
+                   std::uint16_t ceiling = wire::PROTOCOL_VERSION_MAX) noexcept;
     ~ConnectionBase() = default;
 
     /// Remembers the first error and hands it back; every later Pump returns
@@ -178,6 +179,7 @@ protected:
     std::optional<Channel> Channel_;
     std::optional<SessionError> Failed_;
     std::uint16_t NegotiatedVersion_{wire::PROTOCOL_VERSION_MIN};
+    std::uint16_t Ceiling_{wire::PROTOCOL_VERSION_MAX};
 };
 
 /// The agent's end.
@@ -185,7 +187,12 @@ class AgentConnection : public ConnectionBase {
 public:
     /// `frameStorage` must hold CONNECTION_FRAME_STORAGE bytes; until the peer
     /// authenticates only MAX_HANDSHAKE_FRAME of it is used.
-    AgentConnection(MutableByteSpan frameStorage, Timestamp now) noexcept;
+    /// `ceiling` caps the version negotiated in Hello; default is
+    /// PROTOCOL_VERSION_MAX (currently 1). Tests that exercise ver=2 pass
+    /// PROTOCOL_VERSION_GRID here.
+    AgentConnection(
+        MutableByteSpan frameStorage, Timestamp now,
+        std::uint16_t ceiling = wire::PROTOCOL_VERSION_MAX) noexcept;
 
     /// Answers NeedsSession for a sid that was found.
     void Route(SessionRef session, wire::HandshakeNonce serverNonce) noexcept;
@@ -273,9 +280,13 @@ public:
     /// `frameStorage` must hold CONNECTION_FRAME_STORAGE bytes.
     /// `gridCapable` includes GRID_CAPABLE in the Hello TLV so the agent can
     /// serve grid snapshots on path B reconnect. §7 ADR-035.
-    ClientConnection(ClientSession& session, wire::HandshakeNonce clientNonce,
-                     MutableByteSpan frameStorage, Timestamp now,
-                     bool gridCapable = false) noexcept;
+    /// `ceiling` caps the version negotiated in Hello; default is
+    /// PROTOCOL_VERSION_MAX (currently 1). Tests that exercise ver=2 pass
+    /// PROTOCOL_VERSION_GRID here.
+    ClientConnection(
+        ClientSession& session, wire::HandshakeNonce clientNonce,
+        MutableByteSpan frameStorage, Timestamp now, bool gridCapable = false,
+        std::uint16_t ceiling = wire::PROTOCOL_VERSION_MAX) noexcept;
 
     /// As AgentConnection::Pump. The first call writes Hello.
     [[nodiscard]] ConnectionResult Pump(Timestamp now, MutableByteSpan out,

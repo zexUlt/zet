@@ -66,7 +66,7 @@ HandshakeNonce MakeNonce(std::uint64_t counter) {
     return n;
 }
 
-const Timestamp kStart = Timestamp::FromNanos(1'000'000'000);
+const Timestamp START = Timestamp::FromNanos(1'000'000'000);
 
 /// Tiny limits for tests: ring overflows quickly.
 SessionLimits TinyLimits() {
@@ -150,11 +150,13 @@ TEST_CASE_FIXTURE(SodiumFixture,
     std::vector<std::byte> clientStorage(RESEND_BUFFER_MAX);
     AgentSession agent{DeriveSessionSecrets(MakeKey(1)),
                        SessionStreams{.Storage = MutableByteSpan{agentStorage},
-                                      .Now = kStart}};
+                                      .Now = START,
+                                      .Limits = {}}};
     ClientSession client{
         DeriveSessionSecrets(MakeKey(1)),
         SessionStreams{.Storage = MutableByteSpan{clientStorage},
-                       .Now = kStart}};
+                       .Now = START,
+                       .Limits = {}}};
     Space sp;
     std::uint64_t nonces = 0;
 
@@ -162,22 +164,22 @@ TEST_CASE_FIXTURE(SodiumFixture,
     const std::vector<std::byte> payload(128, std::byte{0xAB});
     std::ignore = agent.Write(ByteSpan{payload});
 
-    AgentConnection ac{MutableByteSpan{sp.AgentFrames}, kStart};
+    AgentConnection ac{MutableByteSpan{sp.AgentFrames}, START};
     // gridCapable=false (default): path B never chosen.
     ClientConnection cc{client, MakeNonce(++nonces),
-                        MutableByteSpan{sp.ClientFrames}, kStart};
-    REQUIRE(DriveToLive(ac, cc, agent, sp, kStart, nonces));
+                        MutableByteSpan{sp.ClientFrames}, START};
+    REQUIRE(DriveToLive(ac, cc, agent, sp, START, nonces));
 
     // Pump the live session; verify no NeedsSnapshot event.
     for (int i = 0; i < 200; ++i) {
-        auto ea = PumpAgent(ac, sp, kStart);
+        auto ea = PumpAgent(ac, sp, START);
         REQUIRE(ea.has_value());
         REQUIRE_FALSE(std::holds_alternative<NeedsSnapshot>(*ea));
         if (const auto* sf = std::get_if<SendFrame>(&*ea)) {
             REQUIRE(Feed(cc, sp, sf->Written));
         }
 
-        auto ec = PumpClient(cc, sp, kStart);
+        auto ec = PumpClient(cc, sp, START);
         REQUIRE(ec.has_value());
         REQUIRE_FALSE(std::holds_alternative<NeedsSnapshot>(*ec));
         if (const auto* sf = std::get_if<SendFrame>(&*ec)) {
@@ -202,12 +204,12 @@ TEST_CASE_FIXTURE(
     std::vector<std::byte> clientStorage(limits.ResendMax + 256);
     AgentSession agent{DeriveSessionSecrets(MakeKey(2)),
                        SessionStreams{.Storage = MutableByteSpan{agentStorage},
-                                      .Now = kStart,
+                                      .Now = START,
                                       .Limits = limits}};
     ClientSession client{
         DeriveSessionSecrets(MakeKey(2)),
         SessionStreams{.Storage = MutableByteSpan{clientStorage},
-                       .Now = kStart,
+                       .Now = START,
                        .Limits = limits}};
     Space sp;
     std::uint64_t nonces = 0;
@@ -215,12 +217,16 @@ TEST_CASE_FIXTURE(
     // First connection: authenticate so SetGridInfo(ver=2, gridCapable=true)
     // is called, switching the session to Resync overflow mode.
     {
-        AgentConnection ac{MutableByteSpan{sp.AgentFrames}, kStart};
-        ClientConnection cc{client, MakeNonce(++nonces),
-                            MutableByteSpan{sp.ClientFrames}, kStart,
-                            /*gridCapable=*/true};
-        REQUIRE(DriveToLive(ac, cc, agent, sp, kStart, nonces));
-        ac.Close(kStart);  // disconnect
+        AgentConnection ac{MutableByteSpan{sp.AgentFrames}, START,
+                           wire::PROTOCOL_VERSION_GRID};
+        ClientConnection cc{client,
+                            MakeNonce(++nonces),
+                            MutableByteSpan{sp.ClientFrames},
+                            START,
+                            /*gridCapable=*/true,
+                            wire::PROTOCOL_VERSION_GRID};
+        REQUIRE(DriveToLive(ac, cc, agent, sp, START, nonces));
+        ac.Close(START);  // disconnect
     }
 
     // Write until the ring overflows (Resync mode: ring fills, flag set).
@@ -232,11 +238,15 @@ TEST_CASE_FIXTURE(
     // At this point RingOverflowed should be set (DisconnectMax exceeded).
 
     // Second connection: agent must return NeedsSnapshot.
-    AgentConnection ac2{MutableByteSpan{sp.AgentFrames}, kStart};
-    ClientConnection cc2{client, MakeNonce(++nonces),
-                         MutableByteSpan{sp.ClientFrames}, kStart,
-                         /*gridCapable=*/true};
-    REQUIRE(DriveToLive(ac2, cc2, agent, sp, kStart, nonces));
+    AgentConnection ac2{MutableByteSpan{sp.AgentFrames}, START,
+                        wire::PROTOCOL_VERSION_GRID};
+    ClientConnection cc2{client,
+                         MakeNonce(++nonces),
+                         MutableByteSpan{sp.ClientFrames},
+                         START,
+                         /*gridCapable=*/true,
+                         wire::PROTOCOL_VERSION_GRID};
+    REQUIRE(DriveToLive(ac2, cc2, agent, sp, START, nonces));
 
     // Drive until NeedsSnapshot appears from the agent.
     bool gotNeedsSnapshot = false;
@@ -244,19 +254,19 @@ TEST_CASE_FIXTURE(
     const std::vector<std::byte> snapshot(64, std::byte{0xCC});
 
     for (int i = 0; i < 400 && !gotApplySnapshot; ++i) {
-        auto ea = PumpAgent(ac2, sp, kStart);
+        auto ea = PumpAgent(ac2, sp, START);
         REQUIRE(ea.has_value());
 
         if (std::get_if<NeedsSnapshot>(&*ea)) {
             gotNeedsSnapshot = true;
             // Caller supplies snapshot: ring cleared, GridBegin/Chunk/End
             // queued.
-            ac2.SupplySnapshot(kStart, ByteSpan{snapshot}, 0, 0);
+            ac2.SupplySnapshot(START, ByteSpan{snapshot}, 0, 0);
         } else if (const auto* sf = std::get_if<SendFrame>(&*ea)) {
             REQUIRE(Feed(cc2, sp, sf->Written));
         }
 
-        auto ec = PumpClient(cc2, sp, kStart);
+        auto ec = PumpClient(cc2, sp, START);
         REQUIRE(ec.has_value());
 
         if (const auto* as = std::get_if<ApplySnapshot>(&*ec)) {
@@ -286,12 +296,12 @@ TEST_CASE_FIXTURE(SodiumFixture,
     std::vector<std::byte> clientStorage(limits.ResendMax + 256);
     AgentSession agent{DeriveSessionSecrets(MakeKey(3)),
                        SessionStreams{.Storage = MutableByteSpan{agentStorage},
-                                      .Now = kStart,
+                                      .Now = START,
                                       .Limits = limits}};
     ClientSession client{
         DeriveSessionSecrets(MakeKey(3)),
         SessionStreams{.Storage = MutableByteSpan{clientStorage},
-                       .Now = kStart,
+                       .Now = START,
                        .Limits = limits}};
     Space sp;
     std::uint64_t nonces = 0;
@@ -306,29 +316,33 @@ TEST_CASE_FIXTURE(SodiumFixture,
             std::ignore = agent.Write(ByteSpan{chunk});
         }
 
-        AgentConnection ac{MutableByteSpan{sp.AgentFrames}, kStart};
-        ClientConnection cc{client, MakeNonce(++nonces),
-                            MutableByteSpan{sp.ClientFrames}, kStart,
-                            /*gridCapable=*/true};
-        if (!DriveToLive(ac, cc, agent, sp, kStart, nonces)) {
+        AgentConnection ac{MutableByteSpan{sp.AgentFrames}, START,
+                           wire::PROTOCOL_VERSION_GRID};
+        ClientConnection cc{client,
+                            MakeNonce(++nonces),
+                            MutableByteSpan{sp.ClientFrames},
+                            START,
+                            /*gridCapable=*/true,
+                            wire::PROTOCOL_VERSION_GRID};
+        if (!DriveToLive(ac, cc, agent, sp, START, nonces)) {
             return false;
         }
         const std::vector<std::byte> snap(32, std::byte{0xEE});
         bool applied = false;
         for (int i = 0; i < 400 && !applied; ++i) {
-            auto ea = ac.Pump(kStart, MutableByteSpan{sp.Out},
+            auto ea = ac.Pump(START, MutableByteSpan{sp.Out},
                               MutableByteSpan{sp.Scratch});
             if (!ea) {
                 return false;
             }
             if (std::holds_alternative<NeedsSnapshot>(*ea)) {
-                ac.SupplySnapshot(kStart, ByteSpan{snap}, 0, 0);
+                ac.SupplySnapshot(START, ByteSpan{snap}, 0, 0);
             } else if (const auto* sf = std::get_if<SendFrame>(&*ea)) {
                 if (!Feed(cc, sp, sf->Written)) {
                     return false;
                 }
             }
-            auto ec = cc.Pump(kStart, MutableByteSpan{sp.Out},
+            auto ec = cc.Pump(START, MutableByteSpan{sp.Out},
                               MutableByteSpan{sp.Scratch});
             if (!ec) {
                 return false;
@@ -348,12 +362,16 @@ TEST_CASE_FIXTURE(SodiumFixture,
     // and go through path B.
     {
         // Connect once to set Resync mode (no overflow yet).
-        AgentConnection ac0{MutableByteSpan{sp.AgentFrames}, kStart};
-        ClientConnection cc0{client, MakeNonce(++nonces),
-                             MutableByteSpan{sp.ClientFrames}, kStart,
-                             /*gridCapable=*/true};
-        REQUIRE(DriveToLive(ac0, cc0, agent, sp, kStart, nonces));
-        ac0.Close(kStart);
+        AgentConnection ac0{MutableByteSpan{sp.AgentFrames}, START,
+                            wire::PROTOCOL_VERSION_GRID};
+        ClientConnection cc0{client,
+                             MakeNonce(++nonces),
+                             MutableByteSpan{sp.ClientFrames},
+                             START,
+                             /*gridCapable=*/true,
+                             wire::PROTOCOL_VERSION_GRID};
+        REQUIRE(DriveToLive(ac0, cc0, agent, sp, START, nonces));
+        ac0.Close(START);
     }
     REQUIRE(doPathB());
 
@@ -365,18 +383,22 @@ TEST_CASE_FIXTURE(SodiumFixture,
     ClientSession freshClient{
         DeriveSessionSecrets(MakeKey(3)),
         SessionStreams{.Storage = MutableByteSpan{freshClientStorage},
-                       .Now = kStart,
+                       .Now = START,
                        .Limits = limits}};
 
-    AgentConnection ac3{MutableByteSpan{sp.AgentFrames}, kStart};
-    ClientConnection cc3{freshClient, MakeNonce(++nonces),
-                         MutableByteSpan{sp.ClientFrames}, kStart,
-                         /*gridCapable=*/true};
+    AgentConnection ac3{MutableByteSpan{sp.AgentFrames}, START,
+                        wire::PROTOCOL_VERSION_GRID};
+    ClientConnection cc3{freshClient,
+                         MakeNonce(++nonces),
+                         MutableByteSpan{sp.ClientFrames},
+                         START,
+                         /*gridCapable=*/true,
+                         wire::PROTOCOL_VERSION_GRID};
 
     // freshClient sends stream_gen=0; agent's session_gen=1 → mandatory path B.
     bool gotNeedsSnapshot = false;
     for (int i = 0; i < 64; ++i) {
-        auto ea = ac3.Pump(kStart, MutableByteSpan{sp.Out},
+        auto ea = ac3.Pump(START, MutableByteSpan{sp.Out},
                            MutableByteSpan{sp.Scratch});
         if (!ea) {
             break;
@@ -390,7 +412,7 @@ TEST_CASE_FIXTURE(SodiumFixture,
             gotNeedsSnapshot = true;
             break;
         }
-        auto ec = cc3.Pump(kStart, MutableByteSpan{sp.Out},
+        auto ec = cc3.Pump(START, MutableByteSpan{sp.Out},
                            MutableByteSpan{sp.Scratch});
         if (!ec) {
             break;
@@ -412,24 +434,28 @@ TEST_CASE_FIXTURE(SodiumFixture,
     std::vector<std::byte> clientStorage(limits.ResendMax + 256);
     AgentSession agent{DeriveSessionSecrets(MakeKey(4)),
                        SessionStreams{.Storage = MutableByteSpan{agentStorage},
-                                      .Now = kStart,
+                                      .Now = START,
                                       .Limits = limits}};
     ClientSession client{
         DeriveSessionSecrets(MakeKey(4)),
         SessionStreams{.Storage = MutableByteSpan{clientStorage},
-                       .Now = kStart,
+                       .Now = START,
                        .Limits = limits}};
     Space sp;
     std::uint64_t nonces = 0;
 
     // Connect to set Resync mode.
     {
-        AgentConnection ac0{MutableByteSpan{sp.AgentFrames}, kStart};
-        ClientConnection cc0{client, MakeNonce(++nonces),
-                             MutableByteSpan{sp.ClientFrames}, kStart,
-                             /*gridCapable=*/true};
-        REQUIRE(DriveToLive(ac0, cc0, agent, sp, kStart, nonces));
-        ac0.Close(kStart);
+        AgentConnection ac0{MutableByteSpan{sp.AgentFrames}, START,
+                            wire::PROTOCOL_VERSION_GRID};
+        ClientConnection cc0{client,
+                             MakeNonce(++nonces),
+                             MutableByteSpan{sp.ClientFrames},
+                             START,
+                             /*gridCapable=*/true,
+                             wire::PROTOCOL_VERSION_GRID};
+        REQUIRE(DriveToLive(ac0, cc0, agent, sp, START, nonces));
+        ac0.Close(START);
     }
 
     // Overflow ring.
@@ -440,11 +466,15 @@ TEST_CASE_FIXTURE(SodiumFixture,
     }
 
     // Second connection: path B expected.
-    AgentConnection ac{MutableByteSpan{sp.AgentFrames}, kStart};
-    ClientConnection cc{client, MakeNonce(++nonces),
-                        MutableByteSpan{sp.ClientFrames}, kStart,
-                        /*gridCapable=*/true};
-    REQUIRE(DriveToLive(ac, cc, agent, sp, kStart, nonces));
+    AgentConnection ac{MutableByteSpan{sp.AgentFrames}, START,
+                       wire::PROTOCOL_VERSION_GRID};
+    ClientConnection cc{client,
+                        MakeNonce(++nonces),
+                        MutableByteSpan{sp.ClientFrames},
+                        START,
+                        /*gridCapable=*/true,
+                        wire::PROTOCOL_VERSION_GRID};
+    REQUIRE(DriveToLive(ac, cc, agent, sp, START, nonces));
 
     // Client queues a Resize.
     const wire::ResizeMessage resize{.Rows = 24, .Cols = 80};
@@ -458,14 +488,14 @@ TEST_CASE_FIXTURE(SodiumFixture,
     // Pump client first each round so the Resize frame reaches the agent
     // before PumpAwaitSnapshot runs.
     for (int i = 0; i < 200 && !seenNeedsSnapshot.has_value(); ++i) {
-        auto ec = cc.Pump(kStart, MutableByteSpan{sp.Out},
+        auto ec = cc.Pump(START, MutableByteSpan{sp.Out},
                           MutableByteSpan{sp.Scratch});
         REQUIRE(ec.has_value());
         if (const auto* sf = std::get_if<SendFrame>(&*ec)) {
             REQUIRE(Feed(ac, sp, sf->Written));
         }
 
-        auto ea = ac.Pump(kStart, MutableByteSpan{sp.Out},
+        auto ea = ac.Pump(START, MutableByteSpan{sp.Out},
                           MutableByteSpan{sp.Scratch});
         REQUIRE(ea.has_value());
         if (const auto* r = std::get_if<Resized>(&*ea)) {
@@ -496,24 +526,24 @@ TEST_CASE_FIXTURE(
     std::vector<std::byte> clientStorage(limits.ResendMax + 256);
     AgentSession agent{DeriveSessionSecrets(MakeKey(5)),
                        SessionStreams{.Storage = MutableByteSpan{agentStorage},
-                                      .Now = kStart,
+                                      .Now = START,
                                       .Limits = limits}};
     ClientSession client{
         DeriveSessionSecrets(MakeKey(5)),
         SessionStreams{.Storage = MutableByteSpan{clientStorage},
-                       .Now = kStart,
+                       .Now = START,
                        .Limits = limits}};
     Space sp;
     std::uint64_t nonces = 0;
 
     // First connection WITHOUT GRID_CAPABLE: overflow mode stays Reap.
     {
-        AgentConnection ac0{MutableByteSpan{sp.AgentFrames}, kStart};
+        AgentConnection ac0{MutableByteSpan{sp.AgentFrames}, START};
         ClientConnection cc0{client, MakeNonce(++nonces),
-                             MutableByteSpan{sp.ClientFrames}, kStart,
+                             MutableByteSpan{sp.ClientFrames}, START,
                              /*gridCapable=*/false};
-        REQUIRE(DriveToLive(ac0, cc0, agent, sp, kStart, nonces));
-        ac0.Close(kStart);
+        REQUIRE(DriveToLive(ac0, cc0, agent, sp, START, nonces));
+        ac0.Close(START);
     }
 
     // Fill ring past DisconnectMax → session reaped (Reap mode).
@@ -546,24 +576,28 @@ TEST_CASE_FIXTURE(SodiumFixture,
     std::vector<std::byte> clientStorage(limits.ResendMax + 256);
     AgentSession agent{DeriveSessionSecrets(MakeKey(6)),
                        SessionStreams{.Storage = MutableByteSpan{agentStorage},
-                                      .Now = kStart,
+                                      .Now = START,
                                       .Limits = limits}};
     ClientSession client{
         DeriveSessionSecrets(MakeKey(6)),
         SessionStreams{.Storage = MutableByteSpan{clientStorage},
-                       .Now = kStart,
+                       .Now = START,
                        .Limits = limits}};
     Space sp;
     std::uint64_t nonces = 0;
 
     // Connect to set Resync mode.
     {
-        AgentConnection ac0{MutableByteSpan{sp.AgentFrames}, kStart};
-        ClientConnection cc0{client, MakeNonce(++nonces),
-                             MutableByteSpan{sp.ClientFrames}, kStart,
-                             /*gridCapable=*/true};
-        REQUIRE(DriveToLive(ac0, cc0, agent, sp, kStart, nonces));
-        ac0.Close(kStart);
+        AgentConnection ac0{MutableByteSpan{sp.AgentFrames}, START,
+                            wire::PROTOCOL_VERSION_GRID};
+        ClientConnection cc0{client,
+                             MakeNonce(++nonces),
+                             MutableByteSpan{sp.ClientFrames},
+                             START,
+                             /*gridCapable=*/true,
+                             wire::PROTOCOL_VERSION_GRID};
+        REQUIRE(DriveToLive(ac0, cc0, agent, sp, START, nonces));
+        ac0.Close(START);
     }
 
     // Overflow ring.
@@ -573,11 +607,15 @@ TEST_CASE_FIXTURE(SodiumFixture,
         std::ignore = agent.Write(ByteSpan{preData});
     }
 
-    AgentConnection ac{MutableByteSpan{sp.AgentFrames}, kStart};
-    ClientConnection cc{client, MakeNonce(++nonces),
-                        MutableByteSpan{sp.ClientFrames}, kStart,
-                        /*gridCapable=*/true};
-    REQUIRE(DriveToLive(ac, cc, agent, sp, kStart, nonces));
+    AgentConnection ac{MutableByteSpan{sp.AgentFrames}, START,
+                       wire::PROTOCOL_VERSION_GRID};
+    ClientConnection cc{client,
+                        MakeNonce(++nonces),
+                        MutableByteSpan{sp.ClientFrames},
+                        START,
+                        /*gridCapable=*/true,
+                        wire::PROTOCOL_VERSION_GRID};
+    REQUIRE(DriveToLive(ac, cc, agent, sp, START, nonces));
 
     // Drive path B to completion.
     const std::vector<std::byte> snap(32, std::byte{0x22});
@@ -585,11 +623,11 @@ TEST_CASE_FIXTURE(SodiumFixture,
     std::vector<std::byte> received;
 
     for (int i = 0; i < 400 && !appliedSnap; ++i) {
-        auto ea = ac.Pump(kStart, MutableByteSpan{sp.Out},
+        auto ea = ac.Pump(START, MutableByteSpan{sp.Out},
                           MutableByteSpan{sp.Scratch});
         REQUIRE(ea.has_value());
         if (std::holds_alternative<NeedsSnapshot>(*ea)) {
-            ac.SupplySnapshot(kStart, ByteSpan{snap}, 0, 0);
+            ac.SupplySnapshot(START, ByteSpan{snap}, 0, 0);
             // Write new data AFTER NewGeneration (new generation ring is
             // clear).
             const std::vector<std::byte> newData(32, std::byte{0x33});
@@ -597,7 +635,7 @@ TEST_CASE_FIXTURE(SodiumFixture,
         } else if (const auto* sf = std::get_if<SendFrame>(&*ea)) {
             REQUIRE(Feed(cc, sp, sf->Written));
         }
-        auto ec = cc.Pump(kStart, MutableByteSpan{sp.Out},
+        auto ec = cc.Pump(START, MutableByteSpan{sp.Out},
                           MutableByteSpan{sp.Scratch});
         REQUIRE(ec.has_value());
         if (std::holds_alternative<ApplySnapshot>(*ec)) {
@@ -613,13 +651,13 @@ TEST_CASE_FIXTURE(SodiumFixture,
 
     // After GridApplied, the new-generation data (0x33 bytes) should arrive.
     for (int i = 0; i < 200; ++i) {
-        auto ea = ac.Pump(kStart, MutableByteSpan{sp.Out},
+        auto ea = ac.Pump(START, MutableByteSpan{sp.Out},
                           MutableByteSpan{sp.Scratch});
         REQUIRE(ea.has_value());
         if (const auto* sf = std::get_if<SendFrame>(&*ea)) {
             REQUIRE(Feed(cc, sp, sf->Written));
         }
-        auto ec = cc.Pump(kStart, MutableByteSpan{sp.Out},
+        auto ec = cc.Pump(START, MutableByteSpan{sp.Out},
                           MutableByteSpan{sp.Scratch});
         REQUIRE(ec.has_value());
         if (const auto* sf = std::get_if<SendFrame>(&*ec)) {
