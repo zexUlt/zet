@@ -63,6 +63,7 @@ if(ZET_HAVE_IO)
         io/clock_test.cpp
         io/fd_test.cpp
         io/poller_test.cpp
+        io/self_path_test.cpp
         io/tcp_test.cpp
     )
     # The Waker test wakes the poller from a second thread.

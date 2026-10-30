@@ -47,13 +47,16 @@ tar -C ~/.local -xzf zet-X.Y.Z-macos-arm64.tar.gz --strip-components=1
 
 After unpacking, `bin/zet` lands under `~/.local`. Linux binaries are
 statically linked (musl + libc++); no other dependencies are needed. The
-macOS tarball contains `bin/zet` only; the macOS client links `libSystem`
-dynamically and `libsodium` statically. `zet --version` prints the release
-version.
+macOS client links `libSystem` dynamically and `libsodium` statically.
+`zet --version` prints the release version.
 
-The Linux tarballs carry agents for both `x86_64` and `aarch64` under
+All tarballs carry agents for both `x86_64` and `aarch64` under
 `libexec/zet/`, so the client (M5.5) can bootstrap either server from any
-client machine.
+client machine. No environment variable is needed: the client finds the
+agents beside its own binary automatically. Set `ZET_AGENT_DIR` to
+point at a different directory if you keep agents elsewhere. The lookup follows
+symlinks of the `zet` binary and uses the real prefix of the resolved binary,
+so link or unpack the whole prefix, or set `ZET_AGENT_DIR`.
 
 ## Status
 

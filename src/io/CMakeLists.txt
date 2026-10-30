@@ -17,12 +17,14 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
         poller_epoll.cpp
         pty.cpp
         seccomp.cpp
+        self_path_linux.cpp
         spawn.cpp
         unix.cpp
     )
 elseif(CMAKE_SYSTEM_NAME STREQUAL "Darwin")
     target_sources(zet_io PRIVATE
         poller_kqueue.cpp
+        self_path_macos.cpp
     )
 else()
     message(FATAL_ERROR "zet_io has no Poller backend for ${CMAKE_SYSTEM_NAME}")
