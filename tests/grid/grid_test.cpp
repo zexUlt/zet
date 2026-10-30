@@ -2544,10 +2544,10 @@ TEST_CASE("SGR 59 resets underline color index to 0") {
 TEST_CASE("SGR 23 clears Italic attribute") {
     Grid* g = MakeGrid(20, 5);
     VtParser p;
-    Feed(p, *g, "\x1b[3m");                                  // SGR 3 = Italic
-    CHECK(g->PenAttrs() & static_cast<std::uint8_t>(0x04));  // Italic flag
-    Feed(p, *g, "\x1b[23m");  // SGR 23 = clear Italic
-    CHECK(!(g->PenAttrs() & static_cast<std::uint8_t>(0x04)));
+    Feed(p, *g, "\x1b[3m");                            // SGR 3 = Italic
+    CHECK((g->PenAttrs() & std::uint8_t{0x04}) != 0);  // Italic bit set
+    Feed(p, *g, "\x1b[23m");                           // SGR 23 = clear Italic
+    CHECK((g->PenAttrs() & std::uint8_t{0x04}) == 0);  // Italic bit cleared
     delete g;
 }
 
