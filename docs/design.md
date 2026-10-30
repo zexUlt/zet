@@ -318,9 +318,9 @@ body, запечатанный режим — всё, начиная с Resume:
 | `0x12` | `Resize` | клиент | запечатанный | `rows:u16`, `cols:u16`, `xpixel:u16`, `ypixel:u16` |
 | `0x13` | `Ping` | оба | запечатанный | `token:u64be` |
 | `0x14` | `Pong` | оба | запечатанный | `token:u64be` из `Ping` |
-| `0x15` | `SessionEnd` | агент | запечатанный | `kind:u8` (0 — exit, 1 — сигнал, 2 — overflow при ver=1 без `GRID_CAPABLE`), `value:u8` |
+| `0x15` | `SessionEnd` | агент | запечатанный | `kind:u8` (0 — exit, 1 — сигнал, 2 — overflow, только ver=2, `value` зарезервирован = 0), `value:u8` |
 | `0x16` | `GridBegin` | агент | запечатанный | `flags:u8`, `stream_gen:u32be`, `scrollback_len:u32be`, `total_len:u32be` (только ver=2) |
-| `0x17` | `GridChunk` | агент | запечатанный | `chunk_offset:u32be`, `data:bytes`; max `len(data)` ≤ `MAX_FRAME − 4 − 16` |
+| `0x17` | `GridChunk` | агент | запечатанный | `chunk_offset:u32be`, `data:bytes`; max `len(data)` ≤ `MAX_FRAME − TAG_SIZE − 1 − 4` |
 | `0x18` | `GridEnd` | агент | запечатанный | (нет полей); AEAD каждого кадра + `total_len` гарантируют целостность (только ver=2) |
 | `0x19` | `GridApplied` | клиент | запечатанный | `stream_gen:u32be` — шлётся сразу после атомарного применения снимка; агент игнорирует все output ACK до его прихода (только ver=2) |
 | `0x1A`…`0x1F` | | | запечатанный | зарезервировано под сообщения сессии |
@@ -349,11 +349,12 @@ body, запечатанный режим — всё, начиная с Resume:
   | `GridEnd` при `received_bytes ≠ total_len` | `CloseConnection` |
   | `GridChunk` с пустыми данными | `CloseConnection` |
   | `total_len > SNAPSHOT_MAX_BYTES` | `CloseConnection` |
+  | `scrollback_len > total_len` | `CloseConnection` |
   | `Data` от агента между `GridBegin` и `GridEnd` | `CloseConnection` |
   | `stream_gen ≤ current_session_gen` (откат поколения) | `CloseConnection` |
   | `stream_gen > session_gen` в `Resume` | `CloseConnection` |
 
-**Версионирование M6.** `Resume`, `GridBegin`/`GridChunk`/`GridEnd`/`GridApplied`, `GRID_CAPABLE` применяются только при согласованной версии `ver = 2`. `PROTOCOL_VERSION_MIN = 1`, `PROTOCOL_VERSION_MAX = 2`. При ver=1 overflow даёт `SessionEnd(kind=2)` и сессия умирает как до M6. При ver=2 и клиенте без `GRID_CAPABLE` то же: TLV некритичен, но если агент видит ver=2 без него — overflow = Reap. `GRID_CAPABLE` принимается во внимание **только после успешной аутентификации** (после `AuthOk`); в `Hello` он некритичен и читается без доверия до завершения хендшейка. Флаг хранится per session (не per connection) и устанавливается один раз при первом подключении.
+**Версионирование M6.** `Resume`, `GridBegin`/`GridChunk`/`GridEnd`/`GridApplied`, `GRID_CAPABLE` применяются только при согласованной версии `ver = 2`. `PROTOCOL_VERSION_MIN = 1`, `PROTOCOL_VERSION_MAX = 1` (потолок рукопожатия по умолчанию), `PROTOCOL_VERSION_GRID = 2` (константа, которую сессионный слой передаёт, когда готов к ver=2). При ver=1 overflow всё равно приводит к завершению сессии — агент закрывает соединение (`CloseConnection`), но `SessionEnd(kind=2)` не пишется: вид 2 валиден только при ver=2. При ver=2 и клиенте без `GRID_CAPABLE` то же: TLV некритичен, но если агент видит ver=2 без него — overflow = Reap. `GRID_CAPABLE` принимается во внимание **только после успешной аутентификации** (после `AuthOk`); в `Hello` он некритичен и читается без доверия до завершения хендшейка. Флаг хранится per session (не per connection) и устанавливается один раз при первом подключении.
 
 **TLV-реестр `Hello`:**
 
