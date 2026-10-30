@@ -694,4 +694,133 @@ TEST_CASE_FIXTURE(SodiumFixture,
     CHECK_FALSE(hasStaleData);
 }
 
+// ── Item 3: non-grid-capable client must not trigger path B via cost check ───
+//
+// Bug: PumpResume runs the replay-vs-snapshot cost check even when the client
+// did not advertise GRID_CAPABLE.  If the replay cost exceeds the estimate the
+// agent sets usePathB=true and returns NeedsSnapshot — which is wrong because
+// the client cannot handle a grid snapshot.
+//
+// Fix: gate the cost check on `gridCapable = (ver >= PROTOCOL_VERSION_GRID &&
+// HelloGridCapable_)`.  A non-capable client always takes path A.
+//
+// Scenario: ver=2 peer, GRID_CAPABLE absent, 2 MiB replay at 24×80.
+// SnapshotEstimateBytes(24,80) = 591 488 bytes < 2 MiB → triggers bug.
+
+TEST_CASE_FIXTURE(SodiumFixture,
+                  "path A: non-grid-capable client keeps path A even when "
+                  "replay exceeds snapshot estimate") {
+    // Enough room to hold the 2 MiB chunk without hitting Reap.
+    const std::size_t disconnectMax = 4U * 1024U * 1024U;
+    const SessionLimits limits{
+        .ResendMax = RESEND_BUFFER_MAX,
+        .DisconnectMax = disconnectMax,
+        .OrphanTimeout = std::chrono::minutes{30},
+        .Liveness = {.KeepaliveInterval = Duration{0},
+                     .PeerSilenceTimeout = Duration{0}},
+    };
+    std::vector<std::byte> agentStorage(disconnectMax + 4096);
+    std::vector<std::byte> clientStorage(RESEND_BUFFER_MAX + 4096);
+    AgentSession agent{DeriveSessionSecrets(MakeKey(8)),
+                       SessionStreams{.Storage = MutableByteSpan{agentStorage},
+                                      .Now = START,
+                                      .Limits = limits}};
+    ClientSession client{
+        DeriveSessionSecrets(MakeKey(8)),
+        SessionStreams{.Storage = MutableByteSpan{clientStorage},
+                       .Now = START,
+                       .Limits = limits}};
+    Space sp;
+    std::uint64_t nonces = 0;
+
+    // First connection: ver=2, gridCapable=false.
+    // SetGridInfo(ver=2, false) leaves overflow mode as Reap.
+    // After going Live, send a Resize(24×80) from client so that the agent
+    // records LastKnownSize — the cost check only runs when it is set.
+    {
+        AgentConnection ac0{MutableByteSpan{sp.AgentFrames}, START,
+                            wire::PROTOCOL_VERSION_GRID};
+        ClientConnection cc0{client,
+                             MakeNonce(++nonces),
+                             MutableByteSpan{sp.ClientFrames},
+                             START,
+                             /*gridCapable=*/false,
+                             wire::PROTOCOL_VERSION_GRID};
+        REQUIRE(DriveToLive(ac0, cc0, agent, sp, START, nonces));
+
+        // Deliver Resize so agent stores LastKnownSize({24, 80}).
+        cc0.QueueResize(wire::ResizeMessage{.Rows = 24, .Cols = 80});
+        bool resized = false;
+        for (int i = 0; i < 50 && !resized; ++i) {
+            auto ec = PumpClient(cc0, sp, START);
+            REQUIRE(ec.has_value());
+            if (const auto* sf = std::get_if<SendFrame>(&*ec)) {
+                REQUIRE(Feed(ac0, sp, sf->Written));
+            }
+            auto ea = PumpAgent(ac0, sp, START);
+            REQUIRE(ea.has_value());
+            if (std::holds_alternative<Resized>(*ea)) {
+                resized = true;
+            } else if (const auto* sf = std::get_if<SendFrame>(&*ea)) {
+                REQUIRE(Feed(cc0, sp, sf->Written));
+            }
+        }
+        REQUIRE(resized);
+        ac0.Close(START);
+    }
+
+    // Write > SnapshotEstimateBytes(24,80) = 591 488 bytes.  In Reap mode
+    // with DisconnectMax=4 MiB no overflow occurs; the client will replay it
+    // all on reconnect.
+    const std::size_t toWrite = SnapshotEstimateBytes(24, 80) + 4096;
+    const std::vector<std::byte> chunk(4096, std::byte{0x7F});
+    for (std::size_t done = 0; done < toWrite; done += chunk.size()) {
+        std::ignore = agent.Write(ByteSpan{chunk});
+    }
+
+    // Second connection: ver=2, gridCapable=false.
+    // Without fix: cost check runs → usePathB=true → NeedsSnapshot (wrong).
+    // With fix:    gridCapable gate prevents cost check → path A.
+    AgentConnection ac{MutableByteSpan{sp.AgentFrames}, START,
+                       wire::PROTOCOL_VERSION_GRID};
+    ClientConnection cc{client,
+                        MakeNonce(++nonces),
+                        MutableByteSpan{sp.ClientFrames},
+                        START,
+                        /*gridCapable=*/false,
+                        wire::PROTOCOL_VERSION_GRID};
+
+    bool gotLive = false;
+    for (int i = 0; i < 400; ++i) {
+        auto ea = PumpAgent(ac, sp, START);
+        REQUIRE(ea.has_value());
+        REQUIRE_FALSE(std::holds_alternative<NeedsSnapshot>(*ea));
+        if (std::holds_alternative<NeedsSnapshot>(*ea)) {
+            break;
+        }
+        if (const auto* ns = std::get_if<NeedsSession>(&*ea)) {
+            REQUIRE(ns->Id == agent.Ref().Id());
+            ac.Route(agent.Ref(), MakeNonce(++nonces));
+        } else if (const auto* sf = std::get_if<SendFrame>(&*ea)) {
+            REQUIRE(Feed(cc, sp, sf->Written));
+        }
+
+        auto ec = PumpClient(cc, sp, START);
+        REQUIRE(ec.has_value());
+        REQUIRE_FALSE(std::holds_alternative<NeedsSnapshot>(*ec));
+        if (std::holds_alternative<NeedsSnapshot>(*ec)) {
+            break;
+        }
+        if (const auto* sf = std::get_if<SendFrame>(&*ec)) {
+            REQUIRE(Feed(ac, sp, sf->Written));
+        }
+
+        if (ac.IsLive() && cc.IsLive()) {
+            gotLive = true;
+            break;
+        }
+    }
+    CHECK(gotLive);
+}
+
 }  // namespace

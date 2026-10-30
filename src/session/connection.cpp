@@ -385,8 +385,14 @@ ConnectionResult AgentConnection::PumpResume(Timestamp now, MutableByteSpan out,
     const bool mandatoryB =
         Handle_->RingOverflowed() || resume->StreamGen < Handle_->SessionGen();
 
+    // Path B is only valid for clients that advertised GRID_CAPABLE and
+    // negotiated the grid protocol version.  A non-capable client cannot
+    // receive a grid snapshot, so the cost check must be gated on capability.
+    const bool gridCapable =
+        NegotiatedVersion_ >= wire::PROTOCOL_VERSION_GRID && HelloGridCapable_;
+
     bool usePathB = mandatoryB;
-    if (!usePathB) {
+    if (!usePathB && gridCapable) {
         // Cost check: prefer path B when the replay is more expensive than
         // building a snapshot. The estimate is coarse (bytes per cell) but
         // always well under SNAPSHOT_MAX_BYTES, so it is a safe sentinel.
