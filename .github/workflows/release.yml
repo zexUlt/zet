@@ -454,8 +454,14 @@ jobs:
           )
           check_tarball "$DIST/zet-${VERSION}-linux-x86_64.tar.gz" "${linux_required[@]}"
           check_tarball "$DIST/zet-${VERSION}-linux-aarch64.tar.gz" "${linux_required[@]}"
-          # The macOS tarball is client-only.
-          check_tarball "$DIST/zet-${VERSION}-macos-arm64.tar.gz" bin/zet
+          # The macOS tarball also carries both arch agents under libexec/zet/
+          # so the macOS client can deliver to either x86_64 or aarch64 servers.
+          macos_required=(
+            bin/zet
+            libexec/zet/zet-agent-x86_64
+            libexec/zet/zet-agent-aarch64
+          )
+          check_tarball "$DIST/zet-${VERSION}-macos-arm64.tar.gz" "${macos_required[@]}"
 
       - uses: actions/upload-artifact@v4
         with:
