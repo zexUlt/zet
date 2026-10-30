@@ -233,7 +233,7 @@ void Grid::ScrollRegionDown(std::uint16_t n) noexcept {
 // ---------------------------------------------------------------------------
 
 // DEC Special Graphics mapping (ESC ( 0) for codepoints 0x60–0x7E.
-static constexpr char32_t kDecGfx[31] = {
+static constexpr char32_t DEC_GFX[31] = {
     0x25C6, 0x2592, 0x2409, 0x240C, 0x240D, 0x240A, 0x00B0, 0x00B1,
     0x2424, 0x240B, 0x2518, 0x2510, 0x250C, 0x2514, 0x253C, 0x23BA,
     0x23BB, 0x2500, 0x23BC, 0x23BD, 0x251C, 0x2524, 0x2534, 0x252C,
@@ -245,7 +245,7 @@ void Grid::PutChar(char32_t cp, int width) noexcept {
     // SI restores G0).  Mapping covers 0x60–0x7E (30 entries + backtick).
     {
         const std::uint8_t cs = (CharsetActive_ == 0) ? CharsetG0_ : CharsetG1_;
-        if (cs == 1 && cp >= 0x60 && cp <= 0x7E) cp = kDecGfx[cp - 0x60];
+        if (cs == 1 && cp >= 0x60 && cp <= 0x7E) cp = DEC_GFX[cp - 0x60];
     }
 
     // Zero-width combining mark: per design.md §9 GRAPHEME_MAX_CODEPOINTS = 1.
@@ -1213,17 +1213,18 @@ bool Grid::Resize(std::uint16_t newCols, std::uint16_t newRows) noexcept {
                 newHistLines[r].Cells =
                     newHistCellsArena + static_cast<std::size_t>(r) * newCols;
             }
-            // HistorySize_ <= ScrollbackLimit_ is an invariant, so
-            // dst < ScrollbackLimit_ always; the explicit bound makes
-            // clang-analyzer track that newHistLines[dst].Cells was wired.
+            // HistorySize_ <= ScrollbackLimit_ is an invariant so i is always
+            // in the wired range.  Compute the arena pointer directly so
+            // clang-analyzer can follow the provenance without index math.
             for (std::uint32_t i = 0; i < HistorySize_ && i < ScrollbackLimit_;
                  ++i) {
                 const std::uint32_t src =
                     (HistoryStart_ + i) % ScrollbackLimit_;
-                const std::uint32_t dst = i;
-                CopyCells(newHistLines[dst].Cells, HistoryLines_[src].Cells,
-                          clampCols);
-                newHistLines[dst].CellsUsed =
+                Cell* const dstCells =
+                    newHistCellsArena + static_cast<std::size_t>(i) * newCols;
+                newHistLines[i].Cells = dstCells;
+                CopyCells(dstCells, HistoryLines_[src].Cells, clampCols);
+                newHistLines[i].CellsUsed =
                     HistoryLines_[src].CellsUsed < newCols
                         ? HistoryLines_[src].CellsUsed
                         : newCols;

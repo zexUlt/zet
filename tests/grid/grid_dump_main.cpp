@@ -66,6 +66,10 @@ int main(int argc, char** argv) {
         for (int col = 0; col < cols; ++col) {
             const Cell& cell = g->CellAt(static_cast<std::uint16_t>(r),
                                          static_cast<std::uint16_t>(col));
+            // Skip wide-character continuation placeholders (Width==0,
+            // Codepoint==0).  They have no glyph; the wide glyph was already
+            // emitted for the preceding cell.
+            if (cell.Width == 0 && cell.Codepoint == 0) continue;
             const char32_t cp = (cell.Codepoint != 0) ? cell.Codepoint : U' ';
             // Encode as UTF-8.
             if (cp < 0x80) {

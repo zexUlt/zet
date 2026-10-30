@@ -750,24 +750,24 @@ TEST_CASE("Bypass callback receives Start and End events") {
     Grid* g = MakeGrid(80, 5);
     VtParser p;
     struct Counts {
-        std::size_t start{0}, bytes{0}, end{0};
+        std::size_t Start{0}, Bytes{0}, End{0};
     } counts;
     p.SetBypassCallback(
         [](EBypassEvent ev, std::byte, void* ctx) {
             auto* c = static_cast<Counts*>(ctx);
             if (ev == EBypassEvent::Start)
-                ++c->start;
+                ++c->Start;
             else if (ev == EBypassEvent::Byte)
-                ++c->bytes;
+                ++c->Bytes;
             else if (ev == EBypassEvent::End)
-                ++c->end;
+                ++c->End;
         },
         &counts);
     // OSC terminated by BEL.
     Feed(p, *g, "\x1b]0;title\x07");
-    CHECK(counts.start == 1);
-    CHECK(counts.bytes > 0);
-    CHECK(counts.end == 1);
+    CHECK(counts.Start == 1);
+    CHECK(counts.Bytes > 0);
+    CHECK(counts.End == 1);
     delete g;
 }
 
