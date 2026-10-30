@@ -58,8 +58,12 @@ bool StreamState::AcceptsWrites() const noexcept {
                 return true;
             }
             if (Output_.RingOverflowed()) {
-                // Resync: ring full, path B is pending.
-                return false;
+                // Resync: ring full, path B is pending on reconnect.  The PTY
+                // loop must keep draining the shell's output so the process
+                // does not block on write(2) to the pseudo-terminal.  New
+                // bytes are silently discarded by Write() (room=0, returns 0)
+                // but AcceptsWrites must stay true so the loop keeps calling.
+                return true;
             }
             return Output_.Size() < Limits_.DisconnectMax && Output_.Room() > 0;
         case ESessionState::Reaped:

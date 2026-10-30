@@ -188,3 +188,32 @@ TEST_CASE_FIXTURE(Fixture,
     state.Detach(*live, START + 1s);
     CHECK(state.State() == ESessionState::Reaped);
 }
+
+// ── Item 4: Resync mode AcceptsWrites after ring overflow ─────────────────
+//
+// When the ring is full in Resync mode (RingOverflowed flag set), the PTY
+// loop must keep draining the shell's output — otherwise the process blocks
+// on write(2) to the pseudo-terminal.  AcceptsWrites must return true in the
+// Resync+Detached+RingOverflowed state.
+
+TEST_CASE_FIXTURE(
+    Fixture,
+    "Resync: AcceptsWrites stays true after ring overflows so PTY keeps "
+    "draining") {
+    StreamState state{Streams(), EDetachedOverflow::Resync};
+
+    // Fill the ring to exactly DisconnectMax: ring is full, flag not yet set.
+    REQUIRE(state.Write(ByteSpan{Bytes(DISCONNECT_MAX)}) == DISCONNECT_MAX);
+    CHECK_FALSE(state.AcceptsWrites());  // full but not overflowed yet
+
+    // One more Write with room=0 triggers SetRingOverflowed.
+    const auto overflow = state.Write(ByteSpan{Bytes(1)});
+    REQUIRE(overflow.has_value());
+    CHECK(*overflow == 0);
+    CHECK(state.Output().RingOverflowed());
+
+    // BUG: returned false before the fix — PTY loop stops reading and the
+    // process would block.  Fix: return true so the loop keeps draining.
+    CHECK(state.AcceptsWrites());
+    CHECK(state.State() == ESessionState::Detached);  // session stays alive
+}
