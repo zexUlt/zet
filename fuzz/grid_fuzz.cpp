@@ -6,7 +6,8 @@
 //   3. saved cursor within bounds (probed via SaveCursor/RestoreCursor)
 //   4. parser always in a valid EParserState (enum range 0..Bypass)
 //   5. scrollback within limit; scrollback-0 grid never has history
-//   6. wide-char pairing: a width==2 cell is followed by width==0 or EOL
+//   6. wide-char pairing: a width==2 cell is followed by width==0 or EOL;
+//      a width==0 cell is preceded by a width==2 cell (no orphan continuation)
 //   7. pending-wrap relation: PendingWrap only when col == cols–1
 //   8. byte-at-a-time produces identical screen to bulk feed
 //
@@ -50,13 +51,23 @@ static void CheckInvariants(const Grid& g, const VtParser& p) noexcept {
     if (g.ScrollbackLimit() == 0 && g.ScrollbackSize() != 0) __builtin_trap();
 
     // 6. Wide-char pairing invariant.
+    //    Lead (width==2) must be followed by continuation (width==0) or EOL.
+    //    Continuation (width==0) must be preceded by a lead — no orphans.
     for (std::uint16_t r = 0; r < rows; ++r) {
-        for (std::uint16_t c = 0; c + 1 < cols; ++c) {
+        for (std::uint16_t c = 0; c < cols; ++c) {
             const Cell& cell = g.CellAt(r, c);
             if (cell.Width == 2) {
-                const Cell& next =
-                    g.CellAt(r, static_cast<std::uint16_t>(c + 1));
-                if (next.Width != 0) __builtin_trap();
+                if (c + 1 < cols) {
+                    const Cell& next =
+                        g.CellAt(r, static_cast<std::uint16_t>(c + 1));
+                    if (next.Width != 0) __builtin_trap();
+                }
+            } else if (cell.Width == 0) {
+                // Orphan continuation: no lead cell before it.
+                if (c == 0) __builtin_trap();
+                const Cell& prev =
+                    g.CellAt(r, static_cast<std::uint16_t>(c - 1));
+                if (prev.Width != 2) __builtin_trap();
             }
         }
     }
