@@ -137,6 +137,8 @@ struct HandshakeResult {
     /// when it was given one. A client whose answer to Resume was cut is
     /// still on that seed, and §8 has the agent try these second.
     std::optional<ConnectionKeys> FallbackKeys;
+    /// The protocol version both sides agreed on.
+    std::uint16_t Version{PROTOCOL_VERSION_MIN};
 };
 
 /// Reads a Hello far enough to route it and no further.
@@ -149,8 +151,8 @@ struct HandshakeResult {
 class ClientHandshake {
 public:
     ClientHandshake(SessionId id, crypto::Key auth, crypto::Key connectionSeed,
-                    HandshakeNonce clientNonce,
-                    const NonceMemory& seen) noexcept;
+                    HandshakeNonce clientNonce, const NonceMemory& seen,
+                    std::uint16_t ceiling = PROTOCOL_VERSION_MAX) noexcept;
 
     ClientHandshake(const ClientHandshake&) = delete;
     ClientHandshake& operator=(const ClientHandshake&) = delete;
@@ -202,6 +204,7 @@ private:
     ConnectionKeys Keys_;
     std::uint64_t PeerReceiveOffset_{0};
     std::uint16_t Version_{0};
+    std::uint16_t Ceiling_{PROTOCOL_VERSION_MAX};
     EStage Stage_{EStage::Fresh};
 };
 
@@ -216,11 +219,11 @@ public:
     /// client may not have moved past it. Its keys are derived only after
     /// tag_c verifies: before that a real session and a decoy must cost the
     /// same, and a decoy never has a previous seed.
-    ServerHandshake(
-        crypto::Key auth, crypto::Key connectionSeed,
-        HandshakeNonce serverNonce, std::uint64_t receiveOffset,
-        const NonceMemory& seen,
-        std::optional<crypto::Key> previousSeed = std::nullopt) noexcept;
+    ServerHandshake(crypto::Key auth, crypto::Key connectionSeed,
+                    HandshakeNonce serverNonce, std::uint64_t receiveOffset,
+                    const NonceMemory& seen,
+                    std::optional<crypto::Key> previousSeed = std::nullopt,
+                    std::uint16_t ceiling = PROTOCOL_VERSION_MAX) noexcept;
 
     ServerHandshake(const ServerHandshake&) = delete;
     ServerHandshake& operator=(const ServerHandshake&) = delete;
@@ -253,13 +256,19 @@ private:
     ConnectionKeys Keys_;
     std::optional<ConnectionKeys> FallbackKeys_;
     std::uint16_t Version_{0};
+    std::uint16_t Ceiling_{PROTOCOL_VERSION_MAX};
     EStage Stage_{EStage::Fresh};
 };
 
 /// The overlap rule from §7: take min of the two maxima whenever the ranges
 /// meet at all. Never equality — that is what left EternalTerminal unable to
 /// change its handshake without breaking every client it had.
+///
+/// `ourMax` defaults to PROTOCOL_VERSION_MAX (v1). Pass PROTOCOL_VERSION_GRID
+/// to negotiate v2 when the session layer is ready to handle it.
+/// Returns VersionMismatch if `ourMax < PROTOCOL_VERSION_MIN`.
 [[nodiscard]] PreAuthResult<std::uint16_t> NegotiateVersion(
-    std::uint16_t peerMin, std::uint16_t peerMax) noexcept;
+    std::uint16_t peerMin, std::uint16_t peerMax,
+    std::uint16_t ourMax = PROTOCOL_VERSION_MAX) noexcept;
 
 }  // namespace zet::wire

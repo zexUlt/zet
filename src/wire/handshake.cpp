@@ -106,16 +106,20 @@ bool Transcript::Verify(const crypto::Key& auth, ByteSpan label,
 }
 
 PreAuthResult<std::uint16_t> NegotiateVersion(std::uint16_t peerMin,
-                                              std::uint16_t peerMax) noexcept {
+                                              std::uint16_t peerMax,
+                                              std::uint16_t ourMax) noexcept {
     if (peerMin > peerMax) {
         return std::unexpected(Fail(EProtoError::MalformedField));
     }
-    if (peerMin > PROTOCOL_VERSION_MAX || PROTOCOL_VERSION_MIN > peerMax) {
+    if (ourMax < PROTOCOL_VERSION_MIN) {
+        return std::unexpected(Fail(EProtoError::VersionMismatch));
+    }
+    if (peerMin > ourMax || PROTOCOL_VERSION_MIN > peerMax) {
         return std::unexpected(Fail(EProtoError::VersionMismatch));
     }
     // The lower of the two maxima, never an equality test: a build that speaks
     // 1..3 and one that speaks 1..2 have to meet at 2 rather than refuse.
-    return std::min(peerMax, PROTOCOL_VERSION_MAX);
+    return std::min(peerMax, ourMax);
 }
 
 PreAuthResult<SessionId> PeekHelloSessionId(ByteSpan body) noexcept {
@@ -134,12 +138,14 @@ PreAuthResult<SessionId> PeekHelloSessionId(ByteSpan body) noexcept {
 ClientHandshake::ClientHandshake(SessionId id, crypto::Key auth,
                                  crypto::Key connectionSeed,
                                  HandshakeNonce clientNonce,
-                                 const NonceMemory& seen) noexcept
+                                 const NonceMemory& seen,
+                                 std::uint16_t ceiling) noexcept
     : Id_(id),
       Auth_(std::move(auth)),
       ConnectionSeed_(std::move(connectionSeed)),
       ClientNonce_(clientNonce),
-      Seen_(seen) {}
+      Seen_(seen),
+      Ceiling_(ceiling) {}
 
 PreAuthResult<std::size_t> ClientHandshake::Start(
     MutableByteSpan out) noexcept {
@@ -164,7 +170,7 @@ PreAuthResult<std::size_t> ClientHandshake::StartStep(
 
     HelloMessage hello{};
     hello.VersionMin = PROTOCOL_VERSION_MIN;
-    hello.VersionMax = PROTOCOL_VERSION_MAX;
+    hello.VersionMax = Ceiling_;
     hello.Id = Id_;
     hello.ClientNonce = ClientNonce_;
 
@@ -216,7 +222,7 @@ PreAuthResult<HandshakeStep> ClientHandshake::OnChallenge(
         return std::unexpected(Fail(challenge.error()));
     }
     if (challenge->Version < PROTOCOL_VERSION_MIN ||
-        challenge->Version > PROTOCOL_VERSION_MAX) {
+        challenge->Version > Ceiling_) {
         return std::unexpected(Fail(EProtoError::VersionMismatch));
     }
     if (Seen_.Seen(challenge->ServerNonce)) {
@@ -267,19 +273,23 @@ std::optional<HandshakeResult> ClientHandshake::TakeResult() noexcept {
                            .PeerReceiveOffset = PeerReceiveOffset_,
                            .ClientNonce = ClientNonce_,
                            .ServerNonce = ServerNonce_,
-                           .FallbackKeys = std::nullopt};
+                           .FallbackKeys = std::nullopt,
+                           .Version = Version_};
 }
 
-ServerHandshake::ServerHandshake(
-    crypto::Key auth, crypto::Key connectionSeed, HandshakeNonce serverNonce,
-    std::uint64_t receiveOffset, const NonceMemory& seen,
-    std::optional<crypto::Key> previousSeed) noexcept
+ServerHandshake::ServerHandshake(crypto::Key auth, crypto::Key connectionSeed,
+                                 HandshakeNonce serverNonce,
+                                 std::uint64_t receiveOffset,
+                                 const NonceMemory& seen,
+                                 std::optional<crypto::Key> previousSeed,
+                                 std::uint16_t ceiling) noexcept
     : Auth_(std::move(auth)),
       ConnectionSeed_(std::move(connectionSeed)),
       ServerNonce_(serverNonce),
       ReceiveOffset_(receiveOffset),
       Seen_(seen),
-      PreviousSeed_(std::move(previousSeed)) {}
+      PreviousSeed_(std::move(previousSeed)),
+      Ceiling_(ceiling) {}
 
 PreAuthResult<HandshakeStep> ServerHandshake::Handle(
     ByteSpan body, MutableByteSpan out) noexcept {
@@ -313,7 +323,8 @@ PreAuthResult<HandshakeStep> ServerHandshake::OnHello(
     if (!hello) {
         return std::unexpected(Fail(hello.error()));
     }
-    const auto version = NegotiateVersion(hello->VersionMin, hello->VersionMax);
+    const auto version =
+        NegotiateVersion(hello->VersionMin, hello->VersionMax, Ceiling_);
     if (!version) {
         return std::unexpected(version.error());
     }
@@ -385,7 +396,8 @@ std::optional<HandshakeResult> ServerHandshake::TakeResult() noexcept {
                            .PeerReceiveOffset = 0,
                            .ClientNonce = ClientNonce_,
                            .ServerNonce = ServerNonce_,
-                           .FallbackKeys = std::move(FallbackKeys_)};
+                           .FallbackKeys = std::move(FallbackKeys_),
+                           .Version = Version_};
 }
 
 }  // namespace zet::wire
