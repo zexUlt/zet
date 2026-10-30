@@ -2411,8 +2411,8 @@ TEST_CASE("TBC 3 clears all tab stops") {
     VtParser p;
     Feed(p, *g, "\x1b[3g");  // TBC 3 — clear all tab stops
     Feed(p, *g, "\x1b[1G");  // cursor to col 0
-    Feed(p, *g, "\x09");     // HT — should stay at col 0 (no tab stops)
-    CHECK(g->CursorCol() == 0);
+    Feed(p, *g, "\x09");     // HT — no tab stop found: advances to Cols_-1 = 79
+    CHECK(g->CursorCol() == 79);
     delete g;
 }
 
@@ -2437,16 +2437,20 @@ TEST_CASE("REP repeats the prior printable character") {
 // ---------------------------------------------------------------------------
 
 TEST_CASE("PushScrollback wraps oldest entry when scrollback is full") {
-    // Create grid with scrollback limit = 2
+    // 3-row grid, scrollback limit 2
+    // Scrollback is only pushed when LineFeed occurs at the scroll-region
+    // bottom. With 3 rows (0-2): rows 0-1 never push; first push on LF at
+    // row 2. Need 5 newlines to force 3 pushes: fill=2 then ring-wrap on 3rd
+    // push.
     auto res = Grid::Create(10, 3, 2);
     REQUIRE(res.has_value());
     Grid* g = res.value();
     VtParser p;
-    // Write 3 lines to fill the main screen, then force lines into scrollback
-    Feed(p, *g, "AAA\r\n");  // row 0 pushed to scrollback
-    Feed(p, *g, "BBB\r\n");  // row 1 pushed, scrollback full
-    Feed(p, *g, "CCC\r\n");  // row 2 pushed, wraps: oldest (AAA) overwritten
-    // Scrollback should have 2 entries (limit)
+    Feed(p, *g, "AAA\r\n");  // cursor → row 1
+    Feed(p, *g, "BBB\r\n");  // cursor → row 2
+    Feed(p, *g, "CCC\r\n");  // LF at bot → push "AAA", HistorySize=1
+    Feed(p, *g, "DDD\r\n");  // LF at bot → push "BBB", HistorySize=2 (full)
+    Feed(p, *g, "EEE\r\n");  // LF at bot → push "CCC", ring wraps: size stays 2
     CHECK(g->ScrollbackSize() == 2);
     delete g;
 }
