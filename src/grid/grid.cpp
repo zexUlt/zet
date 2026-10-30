@@ -258,6 +258,14 @@ void Grid::PutChar(char32_t cp, int width) noexcept {
         }
     }
 
+    // If writing to a continuation cell (Width==0), break the wide char whose
+    // second half we are overwriting so the pairing invariant stays intact.
+    if (CursorCol_ > 0) {
+        Cell& left =
+            CellAt(CursorRow_, static_cast<std::uint16_t>(CursorCol_ - 1));
+        if (left.Width == 2) left.Width = 1;
+    }
+
     Cell& cell = CellAt(CursorRow_, CursorCol_);
     PenToCell(cell);
     cell.Codepoint = cp;
@@ -994,10 +1002,14 @@ void Grid::Resize(std::uint16_t newCols, std::uint16_t newRows) noexcept {
                 newHistLines[r].Cells =
                     newHistCellsArena + static_cast<std::size_t>(r) * newCols;
             }
-            for (std::uint32_t i = 0; i < HistorySize_; ++i) {
+            // HistorySize_ <= ScrollbackLimit_ is an invariant, so
+            // dst < ScrollbackLimit_ always; the explicit bound makes
+            // clang-analyzer track that newHistLines[dst].Cells was wired.
+            for (std::uint32_t i = 0; i < HistorySize_ && i < ScrollbackLimit_;
+                 ++i) {
                 const std::uint32_t src =
                     (HistoryStart_ + i) % ScrollbackLimit_;
-                const std::uint32_t dst = i % ScrollbackLimit_;
+                const std::uint32_t dst = i;
                 CopyCells(newHistLines[dst].Cells, HistoryLines_[src].Cells,
                           clampCols);
                 newHistLines[dst].CellsUsed =

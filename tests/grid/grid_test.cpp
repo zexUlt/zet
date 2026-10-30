@@ -738,3 +738,30 @@ TEST_CASE("IL/DL outside scroll region does not crash") {
     CHECK(g->CursorCol() < g->Cols());
     delete g;
 }
+
+// ---------------------------------------------------------------------------
+// Wide-char pairing: overwriting a continuation cell breaks the wide char
+// ---------------------------------------------------------------------------
+
+TEST_CASE("Narrow char at continuation cell breaks wide-char pair") {
+    // Regression for fuzz crash: write wide char (中 U+4E2D, width=2) at col 0
+    // → col 1 gets Width=0. Then CUP to col 1 and write a narrow char → the
+    // Width=2 at col 0 must be demoted to Width=1 so the pairing invariant
+    // holds.
+    Grid* g = MakeGrid(10, 4);
+    VtParser p;
+    // Write wide char at (0,0); continuation lands at (0,1).
+    Feed(p, *g, "\xe4\xb8\xad");  // U+4E2D (中), wcwidth=2
+    CHECK(g->CellAt(0, 0).Width == 2);
+    CHECK(g->CellAt(0, 1).Width == 0);
+
+    // Move cursor to (0,1) — the continuation cell.
+    Feed(p, *g, "\x1b[1;2H");
+    // Write a narrow char: must demote (0,0) from Width=2 to Width=1.
+    Feed(p, *g, "X");
+    CHECK(g->CellAt(0, 0).Width == 1);
+    CHECK(CP(*g, 0, 1) == U'X');
+    CHECK(g->CellAt(0, 1).Width == 1);
+
+    delete g;
+}

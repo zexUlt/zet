@@ -126,9 +126,9 @@ void VtParser::FeedByte(std::byte b, Grid& grid) noexcept {
             if (Utf8Remaining_ == 0) {
                 char32_t cp = static_cast<char32_t>(Utf8Accumulator_);
                 // Per-length overlong minimums (RFC 3629 §3).
-                static constexpr char32_t minCp[] = {0, 0x80, 0x800, 0x10000};
+                static constexpr char32_t MIN_CP[] = {0, 0x80, 0x800, 0x10000};
                 const std::uint8_t sl = Utf8SeqLen_;
-                if (cp < minCp[sl < 4 ? sl : 3] || cp > 0x10FFFF ||
+                if (cp < MIN_CP[sl < 4 ? sl : 3] || cp > 0x10FFFF ||
                     (cp >= 0xD800 && cp <= 0xDFFF)) {
                     cp = 0xFFFD;
                 }
@@ -157,8 +157,8 @@ void VtParser::FeedByte(std::byte b, Grid& grid) noexcept {
         const std::uint8_t extra = Utf8LeadLength(raw);
         if (extra > 0) {
             // Strip lead bits: 2-byte=0x1F, 3-byte=0x0F, 4-byte=0x07.
-            static constexpr std::uint8_t mask[] = {0, 0x1F, 0x0F, 0x07};
-            Utf8Accumulator_ = raw & mask[extra];
+            static constexpr std::uint8_t MASK[] = {0, 0x1F, 0x0F, 0x07};
+            Utf8Accumulator_ = raw & MASK[extra];
             Utf8Remaining_ = extra;
             Utf8SeqLen_ = extra;
             return;
