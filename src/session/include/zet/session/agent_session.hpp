@@ -120,11 +120,9 @@ private:
     std::optional<wire::SessionEndMessage> End_;
 
     // ── M6 per-session grid state (§9 ADR-035) ─────────────────────────────
-    /// Last negotiated version, updated on every authenticated connection.
-    std::uint16_t LastNegotiatedVer_{wire::PROTOCOL_VERSION_MIN};
     /// Whether the client in the last authenticated connection sent
     /// GRID_CAPABLE in Hello (trusted only post-auth). Determines overflow
-    /// mode.
+    /// mode (stored in Streams_; this mirrors it for the state-query path).
     bool GridCapable_{false};
     /// Last known terminal size, updated when a Resize is received while Live.
     /// Used for the path A/B cost comparison on the next reconnect.

@@ -455,7 +455,7 @@ ChannelResult<std::size_t> Channel::PollOnce(Timestamp now, MutableByteSpan out,
                 return *n;
             }
         }
-        if (ge.BeginSent && ge.BytesSent < ge.TotalLen && !ge.EndSent) {
+        if (ge.BeginSent && ge.BytesSent < ge.TotalLen) {
             // Stage the GridChunk plaintext in scratch.
             // plain = type(1) + offset(4) + data(N); max size =
             // POLL_SCRATCH_SIZE.
@@ -484,7 +484,7 @@ ChannelResult<std::size_t> Channel::PollOnce(Timestamp now, MutableByteSpan out,
             ge.BytesSent += static_cast<std::uint32_t>(chunkSize);
             return *n;
         }
-        if (ge.BeginSent && ge.BytesSent == ge.TotalLen && !ge.EndSent) {
+        if (ge.BeginSent && ge.BytesSent == ge.TotalLen) {
             // GridEnd: type(1) = 1 byte.
             std::array<std::byte, 1> plain{};
             ByteWriter writer{MutableByteSpan{plain}};
@@ -494,7 +494,6 @@ ChannelResult<std::size_t> Channel::PollOnce(Timestamp now, MutableByteSpan out,
                 if (!n) {
                     return std::unexpected(n.error());
                 }
-                ge.EndSent = true;
                 GridEmitting_.reset();
                 GridAwaitingApplied_ = true;
                 return *n;
@@ -713,7 +712,6 @@ void Channel::StartGrid(ByteSpan snapshot, std::uint8_t flags,
     GridEmitting_->Flags = flags;
     GridEmitting_->BytesSent = 0;
     GridEmitting_->BeginSent = false;
-    GridEmitting_->EndSent = false;
 }
 
 void Channel::QueueGridApplied(std::uint32_t streamGen) noexcept {

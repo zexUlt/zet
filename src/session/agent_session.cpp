@@ -148,7 +148,6 @@ void SessionHandle::SetGridInfo(std::uint16_t ver, bool gridCapable) noexcept {
     // Called right after ConfirmResume, before Attach — IsCurrent() is not yet
     // meaningful here.  The caller (AgentConnection) ensures this is only
     // called once per authenticated connection; no guard needed.
-    Session_->LastNegotiatedVer_ = ver;
     Session_->GridCapable_ = gridCapable;
     Session_->Streams_.SetOverflowMode(ver, gridCapable);
 }

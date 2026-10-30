@@ -341,7 +341,6 @@ private:
         std::uint8_t Flags{0};
         std::uint32_t BytesSent{0};  ///< Cumulative bytes sent via GridChunk.
         bool BeginSent{false};
-        bool EndSent{false};
     };
     std::optional<GridEmission> GridEmitting_;
 
