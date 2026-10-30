@@ -162,6 +162,11 @@ public:
     [[nodiscard]] const std::uint8_t* PenFg() const noexcept { return PenFg_; }
     /// Raw 3-byte inline bg color.
     [[nodiscard]] const std::uint8_t* PenBg() const noexcept { return PenBg_; }
+    /// Underline style (0=none, 1=single, 2=double, 3=curly, 4=dotted,
+    /// 5=dashed).
+    [[nodiscard]] std::uint8_t PenAttrEx() const noexcept { return PenAttrEx_; }
+    /// Underline colour palette index (0 = default; set via SGR 58).
+    [[nodiscard]] std::uint8_t PenUlIdx() const noexcept { return PenUlIdx_; }
 
     // -----------------------------------------------------------------------
     // Cell and line accessors
@@ -194,8 +199,10 @@ public:
 
     /// Backspace.
     void Backspace() noexcept;
-    /// Horizontal tab.
+    /// Horizontal tab (forward, HT/CHT).
     void HorizontalTab() noexcept;
+    /// Cursor backward tab (CBT — move left N tab stops).
+    void HorizontalTabBack(std::uint16_t n) noexcept;
 
     /// CUU/CUD/CUF/CUB — relative cursor movement.
     void MoveCursorUp(std::uint16_t n) noexcept;
@@ -246,7 +253,10 @@ public:
     void SetMode(std::uint16_t param, bool value) noexcept;
 
     /// SGR — set graphic rendition (attrs, colors).
-    void ApplySgr(const std::uint16_t* params, std::size_t count) noexcept;
+    /// colon[k] is true when param k is a sub-param of the previous entry
+    /// (separated by ':' rather than ';' in the original stream).
+    void ApplySgr(const std::uint16_t* params, const bool* colon,
+                  std::size_t count) noexcept;
 
     /// RIS/DECSTR — soft or hard reset.
     void Reset(bool hard) noexcept;
@@ -268,7 +278,9 @@ public:
     void SwitchAltScreen(bool enter) noexcept;
 
     /// Resize (design.md §9 — truncate, no reflow).
-    void Resize(std::uint16_t newCols, std::uint16_t newRows) noexcept;
+    /// Returns false on allocation failure (grid is partially resized).
+    [[nodiscard]] bool Resize(std::uint16_t newCols,
+                              std::uint16_t newRows) noexcept;
 
 private:
     explicit Grid() noexcept = default;
@@ -291,6 +303,8 @@ private:
     [[nodiscard]] Line& ActiveBuf(std::uint16_t row) noexcept;
     void PushScrollback(std::uint16_t row) noexcept;
     void UpdateCellsUsed(Line& line) noexcept;
+    void RepairWideOrphans(Line& line, std::uint16_t first,
+                           std::uint16_t last) noexcept;
 
     // Clamp col/row to [0, Cols_-1] / [0, Rows_-1].
     [[nodiscard]] std::uint16_t ClampCol(std::uint16_t c) const noexcept {

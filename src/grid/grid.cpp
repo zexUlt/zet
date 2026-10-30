@@ -150,6 +150,17 @@ void Grid::MoveCells(Cell* dst, const Cell* src, std::uint16_t count) noexcept {
     }
 }
 
+// Repair wide-char orphans after a region [first, last) on a line is
+// cleared or overwritten.  Fixes the cell just before and just after the
+// modified range so the width==2 → width==0 pairing invariant holds.
+void Grid::RepairWideOrphans(Line& line, std::uint16_t first,
+                             std::uint16_t last) noexcept {
+    if (first > 0 && line.Cells[first - 1].Width == 2)
+        BlankCell(line.Cells[first - 1]);
+    if (last < Cols_ && line.Cells[last].Width == 0)
+        BlankCell(line.Cells[last]);
+}
+
 void Grid::UpdateCellsUsed(Line& line) noexcept {
     std::uint16_t used = 0;
     for (std::uint16_t c = 0; c < Cols_; ++c) {
@@ -221,7 +232,22 @@ void Grid::ScrollRegionDown(std::uint16_t n) noexcept {
 // Print / cursor movement
 // ---------------------------------------------------------------------------
 
+// DEC Special Graphics mapping (ESC ( 0) for codepoints 0x60–0x7E.
+static constexpr char32_t kDecGfx[31] = {
+    0x25C6, 0x2592, 0x2409, 0x240C, 0x240D, 0x240A, 0x00B0, 0x00B1,
+    0x2424, 0x240B, 0x2518, 0x2510, 0x250C, 0x2514, 0x253C, 0x23BA,
+    0x23BB, 0x2500, 0x23BC, 0x23BD, 0x251C, 0x2524, 0x2534, 0x252C,
+    0x2502, 0x2264, 0x2265, 0x03C0, 0x2260, 0x00A3, 0x00B7,
+};
+
 void Grid::PutChar(char32_t cp, int width) noexcept {
+    // Apply DEC Special Graphics charset when active (SO selects G1=charset 1,
+    // SI restores G0).  Mapping covers 0x60–0x7E (30 entries + backtick).
+    {
+        const std::uint8_t cs = (CharsetActive_ == 0) ? CharsetG0_ : CharsetG1_;
+        if (cs == 1 && cp >= 0x60 && cp <= 0x7E) cp = kDecGfx[cp - 0x60];
+    }
+
     // Zero-width combining mark: per design.md §9 GRAPHEME_MAX_CODEPOINTS = 1.
     // Overwrite the previous cell's codepoint; discard if there is none.
     if (width == 0) {
@@ -344,6 +370,28 @@ void Grid::HorizontalTab() noexcept {
     CursorCol_ = static_cast<std::uint16_t>(Cols_ - 1);
 }
 
+void Grid::HorizontalTabBack(std::uint16_t n) noexcept {
+    PendingWrap_ = false;
+    if (n == 0) n = 1;
+    for (std::uint16_t step = 0; step < n; ++step) {
+        if (CursorCol_ == 0) break;
+        bool found = false;
+        for (std::uint16_t c = static_cast<std::uint16_t>(CursorCol_ - 1);;
+             --c) {
+            if ((TabStops_[c / 64] >> (c % 64)) & 1) {
+                CursorCol_ = c;
+                found = true;
+                break;
+            }
+            if (c == 0) break;
+        }
+        if (!found) {
+            CursorCol_ = 0;
+            break;
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Relative cursor movement
 // ---------------------------------------------------------------------------
@@ -402,7 +450,15 @@ void Grid::MoveCursorToCol(std::uint16_t col1) noexcept {
 
 void Grid::MoveCursorToRow(std::uint16_t row1) noexcept {
     PendingWrap_ = false;
-    CursorRow_ = ClampRow(row1 > 0 ? static_cast<std::uint16_t>(row1 - 1) : 0);
+    const std::uint16_t rowOff = ModeSet(EMode::Decom) ? ScrollTop_ : 0;
+    const std::uint16_t maxRow = ModeSet(EMode::Decom)
+                                     ? ScrollBot_
+                                     : static_cast<std::uint16_t>(Rows_ - 1);
+    const std::uint16_t row0 =
+        row1 > 0 ? static_cast<std::uint16_t>(row1 - 1) : 0;
+    CursorRow_ = static_cast<std::uint16_t>(rowOff + row0);
+    if (CursorRow_ > maxRow) CursorRow_ = maxRow;
+    if (CursorRow_ >= Rows_) CursorRow_ = static_cast<std::uint16_t>(Rows_ - 1);
 }
 
 void Grid::CursorNextLine(std::uint16_t n) noexcept {
@@ -495,15 +551,20 @@ void Grid::EraseInLine(std::uint8_t param) noexcept {
     Line& line = ActiveLine(CursorRow_);
     switch (param) {
         case 0:
+            RepairWideOrphans(line, CursorCol_, CursorCol_);
             for (std::uint16_t c = CursorCol_; c < Cols_; ++c)
                 BlankCell(line.Cells[c]);
             UpdateCellsUsed(line);
             break;
-        case 1:
-            for (std::uint16_t c = 0; c <= CursorCol_ && c < Cols_; ++c)
+        case 1: {
+            const std::uint16_t last =
+                static_cast<std::uint16_t>(CursorCol_ + 1);
+            RepairWideOrphans(line, 0, last);
+            for (std::uint16_t c = 0; c < last && c < Cols_; ++c)
                 BlankCell(line.Cells[c]);
             UpdateCellsUsed(line);
             break;
+        }
         case 2:
             ClearLine(line);
             break;
@@ -519,6 +580,7 @@ void Grid::EraseChars(std::uint16_t n) noexcept {
     const std::uint16_t end = (CursorCol_ + n < Cols_)
                                   ? static_cast<std::uint16_t>(CursorCol_ + n)
                                   : Cols_;
+    RepairWideOrphans(line, CursorCol_, end);
     for (std::uint16_t c = CursorCol_; c < end; ++c) BlankCell(line.Cells[c]);
     UpdateCellsUsed(line);
 }
@@ -532,6 +594,13 @@ void Grid::DeleteChars(std::uint16_t n) noexcept {
     MoveCells(line.Cells + CursorCol_, line.Cells + CursorCol_ + n,
               static_cast<std::uint16_t>(avail - n));
     ClearCells(line.Cells + Cols_ - n, n);
+    // The shift may have left a continuation-cell orphan at CursorCol (its
+    // lead was in the deleted range) or a wide-lead orphan at Cols_-n-1 (its
+    // continuation was in the cleared tail).
+    if (line.Cells[CursorCol_].Width == 0) BlankCell(line.Cells[CursorCol_]);
+    const std::uint16_t tailStart = static_cast<std::uint16_t>(Cols_ - n);
+    if (tailStart > 0 && line.Cells[tailStart - 1].Width == 2)
+        BlankCell(line.Cells[tailStart - 1]);
     UpdateCellsUsed(line);
 }
 
@@ -544,6 +613,14 @@ void Grid::InsertChars(std::uint16_t n) noexcept {
     MoveCells(line.Cells + CursorCol_ + n, line.Cells + CursorCol_,
               static_cast<std::uint16_t>(avail - n));
     ClearCells(line.Cells + CursorCol_, n);
+    // The wide char whose lead was just before CursorCol may now have no
+    // continuation; fix it.  The moved block may start with a continuation
+    // whose lead was in the cleared range; fix that too.
+    if (CursorCol_ > 0 && line.Cells[CursorCol_ - 1].Width == 2)
+        BlankCell(line.Cells[CursorCol_ - 1]);
+    const std::uint16_t movedStart = static_cast<std::uint16_t>(CursorCol_ + n);
+    if (movedStart < Cols_ && line.Cells[movedStart].Width == 0)
+        BlankCell(line.Cells[movedStart]);
     UpdateCellsUsed(line);
 }
 
@@ -675,7 +752,8 @@ void Grid::SetMode(std::uint16_t param, bool value) noexcept {
 // SGR
 // ---------------------------------------------------------------------------
 
-void Grid::ApplySgr(const std::uint16_t* params, std::size_t count) noexcept {
+void Grid::ApplySgr(const std::uint16_t* params, const bool* colon,
+                    std::size_t count) noexcept {
     auto resetPen = [&]() noexcept {
         PenAttrs_ = 0;
         PenAttrEx_ = 0;
@@ -707,7 +785,23 @@ void Grid::ApplySgr(const std::uint16_t* params, std::size_t count) noexcept {
                 PenAttrs_ |= Italic;
                 break;
             case 4:
-                PenAttrs_ |= Underline;
+                // 4:n = underline style (colon-separated sub-param).
+                // Plain 4 or 4;n (semicolon) = single underline.
+                if (i + 1 < count && colon[i + 1] && params[i + 1] <= 5) {
+                    const std::uint8_t style =
+                        static_cast<std::uint8_t>(params[i + 1]);
+                    if (style == 0) {
+                        PenAttrs_ &= static_cast<std::uint8_t>(~Underline);
+                        PenAttrEx_ = 0;
+                    } else {
+                        PenAttrs_ |= Underline;
+                        PenAttrEx_ = style;
+                    }
+                    ++i;
+                } else {
+                    PenAttrs_ |= Underline;
+                    PenAttrEx_ = 1;
+                }
                 break;
             case 5:
                 PenAttrs_ |= Blink;
@@ -756,7 +850,38 @@ void Grid::ApplySgr(const std::uint16_t* params, std::size_t count) noexcept {
                 PenFg_[1] = PenFg_[2] = 0;
                 break;
             case 38: {
-                if (i + 2 < count && params[i + 1] == 5) {
+                // Colon-style: 38:5:n or 38:2::r:g:b / 38:2:r:g:b
+                // Semi-style: 38;5;n or 38;2;r;g;b
+                if (i + 1 < count && colon[i + 1]) {
+                    // Colon sub-params: skip all colon-linked entries.
+                    std::size_t sub = i + 1;
+                    while (sub + 1 < count && colon[sub + 1]) ++sub;
+                    const std::size_t nsub = sub - i;
+                    if (nsub >= 2 && params[i + 1] == 5) {
+                        PenFgKind_ = EColorKind::Indexed;
+                        PenFg_[0] = static_cast<std::uint8_t>(params[i + 2]);
+                        PenFg_[1] = PenFg_[2] = 0;
+                    } else if (nsub >= 5 && params[i + 1] == 2) {
+                        // 38:2::r:g:b (5 sub-params: type, colorspace, r, g, b)
+                        PenFgKind_ = EColorKind::TrueColor;
+                        PenFg_[0] =
+                            static_cast<std::uint8_t>(params[i + 3] & 0xFF);
+                        PenFg_[1] =
+                            static_cast<std::uint8_t>(params[i + 4] & 0xFF);
+                        PenFg_[2] =
+                            static_cast<std::uint8_t>(params[i + 5] & 0xFF);
+                    } else if (nsub >= 4 && params[i + 1] == 2) {
+                        // 38:2:r:g:b (4 sub-params: type, r, g, b)
+                        PenFgKind_ = EColorKind::TrueColor;
+                        PenFg_[0] =
+                            static_cast<std::uint8_t>(params[i + 2] & 0xFF);
+                        PenFg_[1] =
+                            static_cast<std::uint8_t>(params[i + 3] & 0xFF);
+                        PenFg_[2] =
+                            static_cast<std::uint8_t>(params[i + 4] & 0xFF);
+                    }
+                    i = sub;
+                } else if (i + 2 < count && params[i + 1] == 5) {
                     PenFgKind_ = EColorKind::Indexed;
                     PenFg_[0] = static_cast<std::uint8_t>(params[i + 2]);
                     PenFg_[1] = PenFg_[2] = 0;
@@ -788,7 +913,35 @@ void Grid::ApplySgr(const std::uint16_t* params, std::size_t count) noexcept {
                 PenBg_[1] = PenBg_[2] = 0;
                 break;
             case 48: {
-                if (i + 2 < count && params[i + 1] == 5) {
+                if (i + 1 < count && colon[i + 1]) {
+                    std::size_t sub = i + 1;
+                    while (sub + 1 < count && colon[sub + 1]) ++sub;
+                    const std::size_t nsub = sub - i;
+                    if (nsub >= 2 && params[i + 1] == 5) {
+                        PenBgKind_ = EColorKind::Indexed;
+                        PenBg_[0] = static_cast<std::uint8_t>(params[i + 2]);
+                        PenBg_[1] = PenBg_[2] = 0;
+                    } else if (nsub >= 5 && params[i + 1] == 2) {
+                        // 48:2::r:g:b (5 sub-params: type, colorspace, r, g, b)
+                        PenBgKind_ = EColorKind::TrueColor;
+                        PenBg_[0] =
+                            static_cast<std::uint8_t>(params[i + 3] & 0xFF);
+                        PenBg_[1] =
+                            static_cast<std::uint8_t>(params[i + 4] & 0xFF);
+                        PenBg_[2] =
+                            static_cast<std::uint8_t>(params[i + 5] & 0xFF);
+                    } else if (nsub >= 4 && params[i + 1] == 2) {
+                        // 48:2:r:g:b (4 sub-params: type, r, g, b)
+                        PenBgKind_ = EColorKind::TrueColor;
+                        PenBg_[0] =
+                            static_cast<std::uint8_t>(params[i + 2] & 0xFF);
+                        PenBg_[1] =
+                            static_cast<std::uint8_t>(params[i + 3] & 0xFF);
+                        PenBg_[2] =
+                            static_cast<std::uint8_t>(params[i + 4] & 0xFF);
+                    }
+                    i = sub;
+                } else if (i + 2 < count && params[i + 1] == 5) {
                     PenBgKind_ = EColorKind::Indexed;
                     PenBg_[0] = static_cast<std::uint8_t>(params[i + 2]);
                     PenBg_[1] = PenBg_[2] = 0;
@@ -805,6 +958,31 @@ void Grid::ApplySgr(const std::uint16_t* params, std::size_t count) noexcept {
             case 49:
                 PenBgKind_ = EColorKind::Default;
                 PenBg_[0] = PenBg_[1] = PenBg_[2] = 0;
+                break;
+
+            // SGR 58/59 – underline colour (consume sub-params, store index
+            // when indexed colour is given, silently drop truecolour since
+            // UlIdx is only 1 byte reserved for future use).
+            case 58: {
+                if (i + 1 < count && colon[i + 1]) {
+                    std::size_t sub = i + 1;
+                    while (sub + 1 < count && colon[sub + 1]) ++sub;
+                    const std::size_t nsub = sub - i;
+                    if (nsub >= 2 && params[i + 1] == 5) {
+                        PenUlIdx_ = static_cast<std::uint8_t>(params[i + 2]);
+                    }
+                    i = sub;
+                } else if (i + 2 < count && params[i + 1] == 5) {
+                    PenUlIdx_ = static_cast<std::uint8_t>(params[i + 2]);
+                    i += 2;
+                } else if (i + 4 < count && params[i + 1] == 2) {
+                    // Truecolour underline: consume but silently drop.
+                    i += 4;
+                }
+                break;
+            }
+            case 59:
+                PenUlIdx_ = 0;
                 break;
 
             case 90:
@@ -844,6 +1022,7 @@ void Grid::ApplySgr(const std::uint16_t* params, std::size_t count) noexcept {
 // ---------------------------------------------------------------------------
 
 void Grid::Reset(bool hard) noexcept {
+    // Always reset pen and scroll region.
     PenAttrs_ = 0;
     PenAttrEx_ = 0;
     PenUlIdx_ = 0;
@@ -853,15 +1032,16 @@ void Grid::Reset(bool hard) noexcept {
     PenBg_[0] = PenBg_[1] = PenBg_[2] = 0;
     ScrollTop_ = 0;
     ScrollBot_ = static_cast<std::uint16_t>(Rows_ - 1);
-    CursorRow_ = 0;
-    CursorCol_ = 0;
-    PendingWrap_ = false;
     CharsetActive_ = 0;
     CharsetG0_ = 0;
     CharsetG1_ = 0;
-    Modes_ = ModeFlag(EMode::Awm) | ModeFlag(EMode::Dectcem);
 
     if (hard) {
+        // RIS: full reset — clear screen, scrollback, cursor, saved cursors.
+        CursorRow_ = 0;
+        CursorCol_ = 0;
+        PendingWrap_ = false;
+        Modes_ = ModeFlag(EMode::Awm) | ModeFlag(EMode::Dectcem);
         for (std::uint16_t r = 0; r < Rows_; ++r) {
             ClearLine(MainLines_[r]);
             ClearLine(AltLines_[r]);
@@ -874,6 +1054,14 @@ void Grid::Reset(bool hard) noexcept {
         SavedCursorMain_ = {};
         SavedCursorAlt_ = {};
         CursorStyle_ = 0;
+    } else {
+        // DECSTR (soft reset): keep cursor position, alt-screen flag, and
+        // tab stops.  Only reset DECOM, IRM, LNM, bracketed-paste, and
+        // the other modes that DECSTR is specified to clear.
+        const bool wasAlt = ModeSet(EMode::AltScreen);
+        Modes_ = ModeFlag(EMode::Awm) | ModeFlag(EMode::Dectcem);
+        if (wasAlt) Modes_ |= ModeFlag(EMode::AltScreen);
+        // Cursor position and PendingWrap are preserved by DECSTR.
     }
 }
 
@@ -925,22 +1113,31 @@ void Grid::SwitchAltScreen(bool enter) noexcept {
     }
 }
 
-void Grid::Resize(std::uint16_t newCols, std::uint16_t newRows) noexcept {
+bool Grid::Resize(std::uint16_t newCols, std::uint16_t newRows) noexcept {
     if (newCols == 0) newCols = 1;
     if (newRows == 0) newRows = 1;
     if (newCols > MAX_COLS) newCols = MAX_COLS;
     if (newRows > MAX_ROWS) newRows = MAX_ROWS;
 
-    if (newCols == Cols_ && newRows == Rows_) return;
+    if (newCols == Cols_ && newRows == Rows_) return true;
 
-    if (CursorRow_ >= newRows)
+    const std::uint16_t oldRows = Rows_;
+
+    // When shrinking, content shifts up: adjust cursor accordingly.
+    if (newRows < oldRows) {
+        const std::uint16_t lost =
+            static_cast<std::uint16_t>(oldRows - newRows);
+        CursorRow_ = (CursorRow_ >= lost)
+                         ? static_cast<std::uint16_t>(CursorRow_ - lost)
+                         : 0;
+    } else if (CursorRow_ >= newRows) {
         CursorRow_ = static_cast<std::uint16_t>(newRows - 1);
+    }
     if (CursorCol_ >= newCols)
         CursorCol_ = static_cast<std::uint16_t>(newCols - 1);
     PendingWrap_ = false;
 
     const std::uint16_t clampCols = newCols < Cols_ ? newCols : Cols_;
-    const std::uint16_t oldRows = Rows_;
     auto truncateCellsUsed = [&](Line* lines, std::uint16_t rows) noexcept {
         for (std::uint16_t r = 0; r < rows; ++r)
             if (lines[r].CellsUsed > clampCols) lines[r].CellsUsed = clampCols;
@@ -963,7 +1160,15 @@ void Grid::Resize(std::uint16_t newCols, std::uint16_t newRows) noexcept {
         Rows_ = (newRows < Rows_) ? newRows : Rows_;
         ScrollTop_ = 0;
         ScrollBot_ = static_cast<std::uint16_t>(Rows_ - 1);
-        return;
+        return false;
+    }
+
+    // When shrinking rows, push the main-screen rows that fall off the top
+    // into scrollback so they are not lost.  Alt-screen rows are discarded.
+    if (newRows < oldRows && !IsAltScreen()) {
+        const std::uint16_t lost =
+            static_cast<std::uint16_t>(oldRows - newRows);
+        for (std::uint16_t r = 0; r < lost; ++r) PushScrollback(r);
     }
 
     for (std::uint16_t r = 0; r < newRows; ++r) {
@@ -971,15 +1176,21 @@ void Grid::Resize(std::uint16_t newCols, std::uint16_t newRows) noexcept {
         newAltLines[r].Cells = newAlt + static_cast<std::size_t>(r) * newCols;
     }
 
+    // When shrinking rows, copy from the bottom of the old screen so the most
+    // recent content (near the cursor) is preserved.
     const std::uint16_t copyRows = newRows < oldRows ? newRows : oldRows;
+    const std::uint16_t srcStart =
+        newRows < oldRows ? static_cast<std::uint16_t>(oldRows - newRows) : 0;
     for (std::uint16_t r = 0; r < copyRows; ++r) {
-        CopyCells(newMainLines[r].Cells, MainLines_[r].Cells, clampCols);
-        CopyCells(newAltLines[r].Cells, AltLines_[r].Cells, clampCols);
-        newMainLines[r].CellsUsed = MainLines_[r].CellsUsed < newCols
-                                        ? MainLines_[r].CellsUsed
+        const std::uint16_t src = static_cast<std::uint16_t>(srcStart + r);
+        CopyCells(newMainLines[r].Cells, MainLines_[src].Cells, clampCols);
+        CopyCells(newAltLines[r].Cells, AltLines_[src].Cells, clampCols);
+        newMainLines[r].CellsUsed = MainLines_[src].CellsUsed < newCols
+                                        ? MainLines_[src].CellsUsed
                                         : newCols;
-        newAltLines[r].CellsUsed =
-            AltLines_[r].CellsUsed < newCols ? AltLines_[r].CellsUsed : newCols;
+        newAltLines[r].CellsUsed = AltLines_[src].CellsUsed < newCols
+                                       ? AltLines_[src].CellsUsed
+                                       : newCols;
     }
 
     delete[] MainCells_;
@@ -1044,6 +1255,7 @@ void Grid::Resize(std::uint16_t newCols, std::uint16_t newRows) noexcept {
     };
     clampSC(SavedCursorMain_);
     clampSC(SavedCursorAlt_);
+    return true;
 }
 
 }  // namespace zet::grid

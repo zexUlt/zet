@@ -62,6 +62,7 @@ void VtParser::FeedByte(std::byte b, Grid& grid) noexcept {
     if (State_ == EParserState::Bypass) {
         // CAN (0x18) / SUB (0x1A) abort the sequence.
         if (raw == 0x18 || raw == 0x1A) {
+            EmitBypassEnd();
             BypassBytes_ = 0;
             InOsc_ = false;
             State_ = EParserState::Ground;
@@ -70,6 +71,7 @@ void VtParser::FeedByte(std::byte b, Grid& grid) noexcept {
         // ESC starts potential ST (ESC \).
         if (raw == 0x1B) {
             // Remember ESC; next byte decides.
+            EmitBypassEnd();
             BypassBytes_ = 0;
             InOsc_ = false;
             State_ = EParserState::Escape;
@@ -77,6 +79,7 @@ void VtParser::FeedByte(std::byte b, Grid& grid) noexcept {
         }
         // BEL terminates OSC only.
         if (raw == 0x07 && InOsc_) {
+            EmitBypassEnd();
             BypassBytes_ = 0;
             InOsc_ = false;
             State_ = EParserState::Ground;
@@ -85,12 +88,16 @@ void VtParser::FeedByte(std::byte b, Grid& grid) noexcept {
         // Enforce bypass limit (design.md §9).
         ++BypassBytes_;
         if (BypassBytes_ >= BYPASS_LIMIT_BYTES) {
+            EmitBypassEnd();
             BypassBytes_ = 0;
             InOsc_ = false;
             State_ = EParserState::Ground;
+            // Signal that the parser lost sync: the output of the pty
+            // may have diverged from what we tracked.
+            grid.SetPossiblyDiverged(true);
             return;
         }
-        EmitBypass(b);
+        EmitBypassByte(b);
         return;
     }
 
@@ -133,6 +140,13 @@ void VtParser::FeedByte(std::byte b, Grid& grid) noexcept {
                     cp = 0xFFFD;
                 }
                 // C1 controls (U+0080–U+009F): do not store as cell content.
+                //
+                // U+009B (C1 CSI) and U+009C (C1 ST) are included in this
+                // range and are silently dropped.  We do NOT treat C1 CSI as
+                // an alternative CSI introducer because real pty output uses
+                // ESC [ exclusively; C1 ST does NOT terminate an open
+                // DCS/OSC/SosPmApcString bypass — that terminator is ESC \.
+                // This matches xterm's behaviour in UTF-8 mode.
                 if (cp >= 0x0080 && cp <= 0x009F) {
                     return;
                 }
@@ -213,11 +227,13 @@ void VtParser::FeedByte(std::byte b, Grid& grid) noexcept {
                 InOsc_ = true;
                 BypassBytes_ = 0;
                 State_ = EParserState::Bypass;
+                EmitBypassStart();
             } else if (raw == 0x58 || raw == 0x5E || raw == 0x5F) {
                 // SOS (0x58), PM (0x5E), APC (0x5F) → bypass
                 InOsc_ = false;
                 BypassBytes_ = 0;
                 State_ = EParserState::Bypass;
+                EmitBypassStart();
             } else if (raw >= 0x51 && raw <= 0x57) {
                 // 0x51–0x57 (Q–W): single-char ESC dispatch.
                 DispatchEsc(static_cast<char32_t>(raw), grid);
@@ -307,8 +323,9 @@ void VtParser::FeedByte(std::byte b, Grid& grid) noexcept {
             InOsc_ = false;
             BypassBytes_ = 0;
             State_ = EParserState::Bypass;
+            EmitBypassStart();
             // Re-process this byte as a bypass payload.
-            EmitBypass(b);
+            EmitBypassByte(b);
             break;
 
         // DcsParam, DcsIntermediate, DcsPassthrough, DcsIgnore are handled
@@ -322,14 +339,16 @@ void VtParser::FeedByte(std::byte b, Grid& grid) noexcept {
             InOsc_ = false;
             BypassBytes_ = 0;
             State_ = EParserState::Bypass;
-            EmitBypass(b);
+            EmitBypassStart();
+            EmitBypassByte(b);
             break;
 
         case EParserState::OscString:
         case EParserState::SosPmApcString:
             // Also reachable only in edge cases; route to bypass.
             State_ = EParserState::Bypass;
-            EmitBypass(b);
+            EmitBypassStart();
+            EmitBypassByte(b);
             break;
 
         case EParserState::Bypass:
@@ -355,8 +374,16 @@ void VtParser::CollectIntermediate(std::uint8_t ch) noexcept {
         Intermediates_[IntermediateCount_++] = ch;
 }
 
-void VtParser::EmitBypass(std::byte byt) noexcept {
-    if (BypassFn_) BypassFn_(byt, BypassCtx_);
+void VtParser::EmitBypassByte(std::byte byt) noexcept {
+    if (BypassFn_) BypassFn_(EBypassEvent::Byte, byt, BypassCtx_);
+}
+
+void VtParser::EmitBypassStart() noexcept {
+    if (BypassFn_) BypassFn_(EBypassEvent::Start, std::byte{0}, BypassCtx_);
+}
+
+void VtParser::EmitBypassEnd() noexcept {
+    if (BypassFn_) BypassFn_(EBypassEvent::End, std::byte{0}, BypassCtx_);
 }
 
 void VtParser::TransitionTo(EParserState next, Grid& /*grid*/) noexcept {
@@ -418,7 +445,7 @@ void VtParser::HandleControl(std::uint8_t c, Grid& grid) noexcept {
 // ParseParams: parse the accumulated param buffer.
 // ---------------------------------------------------------------------------
 
-std::size_t VtParser::ParseParams(std::uint16_t* out,
+std::size_t VtParser::ParseParams(std::uint16_t* out, bool* colon,
                                   std::size_t maxOut) const noexcept {
     // Skip the private-mode prefix byte ('?', '>', '<', '=') if present.
     std::size_t start = 0;
@@ -430,6 +457,7 @@ std::size_t VtParser::ParseParams(std::uint16_t* out,
     std::size_t count = 0;
     std::uint32_t acc = 0;
     bool hasDigit = false;
+    bool prevColon = false;  // separator before the next value
 
     for (std::size_t i = start; i < ParamLen_; ++i) {
         const std::uint8_t ch = static_cast<std::uint8_t>(ParamBuf_[i]);
@@ -438,15 +466,22 @@ std::size_t VtParser::ParseParams(std::uint16_t* out,
             if (acc > 0xFFFF) acc = 0xFFFF;  // clamp
             hasDigit = true;
         } else if (ch == ';' || ch == ':') {
-            if (count < maxOut)
-                out[count++] = static_cast<std::uint16_t>(hasDigit ? acc : 0);
+            if (count < maxOut) {
+                out[count] = static_cast<std::uint16_t>(hasDigit ? acc : 0);
+                colon[count] = prevColon;
+                ++count;
+            }
+            prevColon = (ch == ':');
             acc = 0;
             hasDigit = false;
         }
     }
     // Last (or only) param.
-    if (count < maxOut)
-        out[count++] = static_cast<std::uint16_t>(hasDigit ? acc : 0);
+    if (count < maxOut) {
+        out[count] = static_cast<std::uint16_t>(hasDigit ? acc : 0);
+        colon[count] = prevColon;
+        ++count;
+    }
 
     return count;
 }
@@ -516,7 +551,8 @@ void VtParser::DispatchEsc(char32_t final, Grid& grid) noexcept {
 
 void VtParser::DispatchCsi(char32_t final, Grid& grid) noexcept {
     std::uint16_t params[MAX_PARAMS]{};
-    const std::size_t nparams = ParseParams(params, MAX_PARAMS);
+    bool colon[MAX_PARAMS]{};
+    const std::size_t nparams = ParseParams(params, colon, MAX_PARAMS);
 
     // Helper: first param or default.
     auto p = [&](std::size_t idx, std::uint16_t def) noexcept -> std::uint16_t {
@@ -574,6 +610,20 @@ void VtParser::DispatchCsi(char32_t final, Grid& grid) noexcept {
         case 'f':  // HVP – horizontal vertical position (same as CUP)
             grid.MoveCursorTo(p(0, 1), p(1, 1));
             break;
+        case 'I': {  // CHT – cursor horizontal forward tab (n stops)
+            const std::uint16_t n = p(0, 1);
+            for (std::uint16_t t = 0; t < n; ++t) grid.HorizontalTab();
+            break;
+        }
+        case 'Z':  // CBT – cursor backward tab
+            grid.HorizontalTabBack(p(0, 1));
+            break;
+        case 'a':  // HPR – horizontal position relative
+            grid.MoveCursorRight(p(0, 1));
+            break;
+        case 'e':  // VPR – vertical position relative
+            grid.MoveCursorDown(p(0, 1));
+            break;
         case 'd':  // VPA – vertical line position absolute
             grid.MoveCursorToRow(p(0, 1));
             break;
@@ -613,7 +663,7 @@ void VtParser::DispatchCsi(char32_t final, Grid& grid) noexcept {
 
         // SGR.
         case 'm':  // SGR – select graphic rendition
-            grid.ApplySgr(params, nparams);
+            grid.ApplySgr(params, colon, nparams);
             break;
 
         // Modes (non-private).

@@ -378,6 +378,76 @@ TEST_CASE("SGR 39/49 resets fg/bg to default") {
     delete g;
 }
 
+TEST_CASE("SGR 4:3 colon sub-param sets curly underline style") {
+    Grid* g = MakeGrid(10, 5);
+    VtParser p;
+    Feed(p, *g, "\x1b[4:3m");
+    CHECK((g->PenAttrs() & static_cast<uint8_t>(EAttr::Underline)) != 0);
+    CHECK(g->PenAttrEx() == 3);
+    delete g;
+}
+
+TEST_CASE("SGR 4;3 semicolons set underline then italic, not style 3") {
+    Grid* g = MakeGrid(10, 5);
+    VtParser p;
+    Feed(p, *g, "\x1b[4;3m");
+    CHECK((g->PenAttrs() & static_cast<uint8_t>(EAttr::Underline)) != 0);
+    CHECK((g->PenAttrs() & static_cast<uint8_t>(EAttr::Italic)) != 0);
+    CHECK(g->PenAttrEx() == 1);  // plain underline, not style 3
+    delete g;
+}
+
+TEST_CASE("SGR 4:0 colon sub-param clears underline") {
+    Grid* g = MakeGrid(10, 5);
+    VtParser p;
+    Feed(p, *g, "\x1b[4m");    // set underline
+    Feed(p, *g, "\x1b[4:0m");  // clear via sub-param 0
+    CHECK((g->PenAttrs() & static_cast<uint8_t>(EAttr::Underline)) == 0);
+    CHECK(g->PenAttrEx() == 0);
+    delete g;
+}
+
+TEST_CASE("SGR 38:2:r:g:b colon-form sets truecolor fg") {
+    Grid* g = MakeGrid(10, 5);
+    VtParser p;
+    Feed(p, *g, "\x1b[38:2:255:128:0m");
+    CHECK(g->PenFgKind() == EColorKind::TrueColor);
+    CHECK(g->PenFg()[0] == 255);
+    CHECK(g->PenFg()[1] == 128);
+    CHECK(g->PenFg()[2] == 0);
+    delete g;
+}
+
+TEST_CASE("SGR 38:2::r:g:b colon-form with colorspace sets truecolor fg") {
+    Grid* g = MakeGrid(10, 5);
+    VtParser p;
+    Feed(p, *g, "\x1b[38:2::200:100:50m");
+    CHECK(g->PenFgKind() == EColorKind::TrueColor);
+    CHECK(g->PenFg()[0] == 200);
+    CHECK(g->PenFg()[1] == 100);
+    CHECK(g->PenFg()[2] == 50);
+    delete g;
+}
+
+TEST_CASE("SGR 38:5:n colon-form sets indexed fg") {
+    Grid* g = MakeGrid(10, 5);
+    VtParser p;
+    Feed(p, *g, "\x1b[38:5:9m");
+    CHECK(g->PenFgKind() == EColorKind::Indexed);
+    CHECK(g->PenFgIdx() == 9);
+    delete g;
+}
+
+TEST_CASE("SGR 58:5:n sets underline colour index; 59 resets") {
+    Grid* g = MakeGrid(10, 5);
+    VtParser p;
+    Feed(p, *g, "\x1b[58:5:3m");
+    CHECK(g->PenUlIdx() == 3);
+    Feed(p, *g, "\x1b[59m");
+    CHECK(g->PenUlIdx() == 0);
+    delete g;
+}
+
 // ---------------------------------------------------------------------------
 // DECSET / DECRST modes
 // ---------------------------------------------------------------------------
@@ -427,9 +497,10 @@ TEST_CASE("Resize preserves content up to new bounds") {
     Feed(p, *g, "Hello");
     CHECK(CP(*g, 0, 0) == U'H');
 
-    g->Resize(6, 4);
+    // Shrink columns only — rows stays the same, no rows go to scrollback.
+    REQUIRE(g->Resize(6, 5));
     CHECK(g->Cols() == 6);
-    CHECK(g->Rows() == 4);
+    CHECK(g->Rows() == 5);
     CHECK(CP(*g, 0, 0) == U'H');
     CHECK(CP(*g, 0, 4) == U'o');
     delete g;
@@ -442,7 +513,7 @@ TEST_CASE("Resize clamps cursor to new bounds") {
     CHECK(g->CursorRow() == 7);
     CHECK(g->CursorCol() == 7);
 
-    g->Resize(5, 5);
+    REQUIRE(g->Resize(5, 5));
     CHECK(g->CursorRow() <= 4);
     CHECK(g->CursorCol() <= 4);
     delete g;
@@ -453,7 +524,7 @@ TEST_CASE("Resize clamps saved cursors") {
     VtParser p;
     Feed(p, *g, "\x1b[8;8H");
     Feed(p, *g, "\x1b[s");  // save
-    g->Resize(5, 5);
+    REQUIRE(g->Resize(5, 5));
     Feed(p, *g, "\x1b[u");  // restore — must not panic
     CHECK(g->CursorRow() <= 4);
     CHECK(g->CursorCol() <= 4);
@@ -462,7 +533,7 @@ TEST_CASE("Resize clamps saved cursors") {
 
 TEST_CASE("Resize to zero is clamped to 1x1") {
     Grid* g = MakeGrid(10, 10);
-    g->Resize(0, 0);
+    REQUIRE(g->Resize(0, 0));
     CHECK(g->Cols() >= 1);
     CHECK(g->Rows() >= 1);
     delete g;
@@ -536,7 +607,8 @@ TEST_CASE("Many distinct truecolor SGRs do not crash") {
         const std::uint8_t gv = static_cast<std::uint8_t>((i >> 8) & 0xFF);
         const std::uint8_t bv = 0;
         std::uint16_t params[] = {38, 2, rv, gv, bv};
-        g->ApplySgr(params, 5);
+        bool colon[5]{};  // all semicolons (no colon sub-params)
+        g->ApplySgr(params, colon, 5);
         g->PutChar('X', 1);
     }
     CHECK(g->Cols() == 80);
@@ -614,6 +686,23 @@ TEST_CASE("RIS performs hard reset") {
     delete g;
 }
 
+TEST_CASE("DECSTR keeps cursor position and alt-screen") {
+    Grid* g = MakeGrid(20, 10);
+    VtParser p;
+    // Enter alt screen, move cursor, set bold.
+    Feed(p, *g, "\x1b[?1049h");  // enter alt screen
+    Feed(p, *g, "\x1b[5;7H");    // move to row 5 col 7 (1-based → 4, 6)
+    Feed(p, *g, "\x1b[1m");      // bold
+    Feed(p, *g, "\x1b[!p");      // DECSTR – soft reset
+    // Cursor must stay at (4, 6); alt screen must still be active.
+    CHECK(g->CursorRow() == 4);
+    CHECK(g->CursorCol() == 6);
+    CHECK(g->IsAltScreen());
+    // SGR attributes must be reset.
+    CHECK((g->PenAttrs() & Bold) == 0);
+    delete g;
+}
+
 // ---------------------------------------------------------------------------
 // Wcwidth
 // ---------------------------------------------------------------------------
@@ -640,15 +729,43 @@ TEST_CASE("Wcwidth returns 0 for combining marks") {
 TEST_CASE("OSC is bypassed without accumulation") {
     Grid* g = MakeGrid(80, 5);
     VtParser p;
+    // Count Byte events only (Start and End are also fired, not counted here).
     std::size_t bypassCount = 0;
     p.SetBypassCallback(
-        [](std::byte, void* ctx) { *static_cast<std::size_t*>(ctx) += 1; },
+        [](EBypassEvent ev, std::byte, void* ctx) {
+            if (ev == EBypassEvent::Byte) *static_cast<std::size_t*>(ctx) += 1;
+        },
         &bypassCount);
 
     // OSC: ESC ] ... BEL
     Feed(p, *g, "\x1b]0;window title\x07");
     CHECK(bypassCount > 0);
     CHECK(p.State() == EParserState::Ground);
+    delete g;
+}
+
+TEST_CASE("Bypass callback receives Start and End events") {
+    Grid* g = MakeGrid(80, 5);
+    VtParser p;
+    struct Counts {
+        std::size_t start{0}, bytes{0}, end{0};
+    } counts;
+    p.SetBypassCallback(
+        [](EBypassEvent ev, std::byte, void* ctx) {
+            auto* c = static_cast<Counts*>(ctx);
+            if (ev == EBypassEvent::Start)
+                ++c->start;
+            else if (ev == EBypassEvent::Byte)
+                ++c->bytes;
+            else if (ev == EBypassEvent::End)
+                ++c->end;
+        },
+        &counts);
+    // OSC terminated by BEL.
+    Feed(p, *g, "\x1b]0;title\x07");
+    CHECK(counts.start == 1);
+    CHECK(counts.bytes > 0);
+    CHECK(counts.end == 1);
     delete g;
 }
 

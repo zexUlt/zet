@@ -55,6 +55,13 @@ enum class EAction : std::uint8_t {
     Ignore,
 };
 
+/// Event kind passed to the bypass callback (design.md §9).
+enum class EBypassEvent : std::uint8_t {
+    Start,  ///< DCS/OSC/APC/PM/SOS sequence begins; byte is the introducer.
+    Byte,   ///< One payload byte.
+    End,    ///< Sequence ended normally (ST, BEL for OSC) or was aborted.
+};
+
 /// The VT parser (sans-I/O, feeds bytes into a Grid).
 ///
 /// Implements Paul Williams' DEC ANSI state machine with the following
@@ -62,7 +69,7 @@ enum class EAction : std::uint8_t {
 ///   - UTF-8 decoding: multibyte sequences are assembled and dispatched
 ///     as a single Print action with the decoded codepoint.
 ///   - Bypass: DCS/OSC/APC/PM/SOS content is forwarded without accumulation.
-///     The BypassCallback, if set, receives each bypass byte.
+///     The BypassCallback, if set, receives Start, Byte, and End events.
 ///   - UnknownSeqCount: monotonically incremented for unrecognised sequences.
 ///
 /// Usage:
@@ -72,9 +79,11 @@ class VtParser {
 public:
     VtParser() noexcept;
 
-    /// Optional callback invoked for each bypass byte (DCS/OSC/APC/PM/SOS
-    /// payload).  Signature: void(std::byte).
-    using BypassFn = void (*)(std::byte, void*);
+    /// Optional callback invoked for bypass events (DCS/OSC/APC/PM/SOS).
+    /// Receives Start on sequence entry, Byte for each payload byte, End on
+    /// termination (ST/BEL/CAN/SUB/ESC or bypass-limit expiry).
+    /// The byte argument for Start and End events is 0.
+    using BypassFn = void (*)(EBypassEvent, std::byte, void*);
     void SetBypassCallback(BypassFn fn, void* ctx) noexcept {
         BypassFn_ = fn;
         BypassCtx_ = ctx;
@@ -123,15 +132,17 @@ private:
     void ClearParams() noexcept;
     void AddParam(std::uint8_t ch) noexcept;
     void CollectIntermediate(std::uint8_t ch) noexcept;
-    void EmitBypass(std::byte b) noexcept;
+    void EmitBypassByte(std::byte b) noexcept;
+    void EmitBypassStart() noexcept;
+    void EmitBypassEnd() noexcept;
     void HandleControl(std::uint8_t c, Grid& grid) noexcept;
 
     /// Parse collected numeric params into an array of uint16 values.
-    /// Returns count. Sub-params (separated by ':') are coalesced into one
-    /// slot (only the leading value is kept for sub-params beyond index 0
-    /// within the same slot, because the callers that need sub-params —
-    /// SGR 38/48/58 — read them explicitly below).
-    std::size_t ParseParams(std::uint16_t* out,
+    /// Returns count.  colon[k] is true when param k was preceded by ':',
+    /// meaning it is a sub-param of the previous entry (not a standalone SGR).
+    /// Callers use this to distinguish "4:3" (underline style 3) from "4;3"
+    /// (underline then italic).
+    std::size_t ParseParams(std::uint16_t* out, bool* colon,
                             std::size_t maxOut) const noexcept;
 
     // -----------------------------------------------------------------------

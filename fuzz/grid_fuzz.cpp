@@ -42,11 +42,11 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data,
 
     VtParser p;
 
-    // Set a bypass callback to prove it does not crash on any bypass byte.
+    // Set a bypass callback to prove it does not crash on any bypass event.
     std::size_t bypassCount = 0;
-    p.SetBypassCallback(
-        [](std::byte, void* ctx) { *static_cast<std::size_t*>(ctx) += 1; },
-        &bypassCount);
+    p.SetBypassCallback([](EBypassEvent, std::byte,
+                           void* ctx) { *static_cast<std::size_t*>(ctx) += 1; },
+                        &bypassCount);
 
     const std::byte* bytes = reinterpret_cast<const std::byte*>(data + 4);
     const std::size_t len = size - 4;
