@@ -456,12 +456,10 @@ K_master --"zet-sess"--> { R, K_auth, K_conn_seed[0] }
 
   **Лестница деградации снимка (SNAPSHOT_MAX_BYTES).** Снимок обязан вписаться в `SNAPSHOT_MAX_BYTES`. Агент применяет шаги по порядку до первого, при котором размер ≤ `SNAPSHOT_MAX_BYTES`:
   1. Уменьшать количество строк истории от `SCROLLBACK_LIMIT` до 0 (обрезка по счётчику строк, не линейная пересборка байт).
-  2. Опустить truecolor — сохранить только 256-цветовую палитру (одна `ExtCell` даёт `fg`/`bg` из ближайшего индекса палитры).
+  2. Опустить truecolor — сохранить только 256-цветовую палитру (FgKind/BgKind опускается до Indexed с ближайшим индексом).
   3. Опустить цвет полностью — только атрибуты (bold/italic/…).
   4. Обрезать строки экрана **сверху** (уменьшать `rows` от текущего до минимума 1; строки снизу — те, что видит пользователь — сохраняются).
   Шаг 4 всегда гарантирует победу: однострочный терминал без цвета и истории вписывается в несколько килобайт. Реконнект-петля невозможна.
-
-  **ExtCell reclamation.** `EXT_CELLS_PER_SESSION` — жёсткий лимит side-table. При его исчерпании новые `ExtCell` не выделяются, ячейка сохраняется в деградированном виде (256-цвет или без цвета). Для корректной работы 400×300 truecolor (120 000 ячеек, большинство с `ExtCell`) таблица должна позволять столько записей без отказа; при шаге 2 лестницы деградации `ExtCell`-записи освобождаются и таблица очищается. Явная рекламация (free list по индексу): при стирании ячейки с `flags = EXT` её `ExtCell`-слот возвращается в free list; новая `ExtCell` берётся из free list или с конца массива.
 
   **Capability negotiation.** Клиент анонсирует поддержку GridSnapshot некритичным TLV `GRID_CAPABLE (0x0003, u16be = 1)` в `Hello` при ver_max ≥ 2. Флаг учитывается только после аутентификации и хранится per session. Без него при overflow при ver=2 — `SessionEnd(kind=2)`, сессия умирает, как до M6.
 - **Что вообще возобновляемо.** Только каналы данных. Управляющие сообщения (`Resize`, `Ping`/`Pong`, `Ack`) живут в области видимости соединения и обязаны быть идемпотентными; клиент заново шлёт текущий размер окна после каждого реконнекта. Правило кодирования: *должно пережить реконнект — идёт в поток данных; иначе обязано быть идемпотентным*.
@@ -477,16 +475,25 @@ K_master --"zet-sess"--> { R, K_auth, K_conn_seed[0] }
 
 ### Grid и VT-парсер (M6)
 
-**Ячейка (`Cell`, 8 байт):**
+**Ячейка (`Cell`, 16 байт):**
 
 ```
-rune   : u32   // Unicode codepoint основного глифа; 0 = пусто
-fg, bg : u8    // индекс 256-цветовой палитры; 0xFF = цвет по умолчанию (не то же, что индекс 255)
-flags  : u8    // WIDE_CHAR | CONT | COMBINING | EXT
-attrs  : u8    // Bold | Dim | Italic | Underline | Blink | Reverse | Invis | Strike
+Codepoint : u32     // Unicode codepoint основного глифа; 0 = пусто
+Width     : u8      // 1 = обычная, 2 = wide, 0 = продолжение wide
+Attrs     : u8      // битовая маска: Bold|Dim|Italic|Underline|Blink|Inverse|Invisible|StrikeThrough
+FgKind    : u8      // EColorKind: Default=0, Indexed=1, TrueColor=2
+BgKind    : u8      // EColorKind: Default=0, Indexed=1, TrueColor=2
+Fg        : u8[3]   // Indexed: Fg[0]=индекс; TrueColor: Fg[0..2]=R,G,B
+Bg        : u8[3]   // Indexed: Bg[0]=индекс; TrueColor: Bg[0..2]=R,G,B
+AttrEx    : u8      // стиль подчёркивания: 0=нет,1=одинарное,2=двойное,3=фигурное,4=пунктирное,5=пунктир
+UlIdx     : u8      // индекс цвета подчёркивания (палитра; 0 = по умолчанию)
 ```
 
-`fg`/`bg` = 0xFF — дефолтный цвет терминала; индекс 255 — отдельный цвет палитры. Truecolor, расширенные стили подчёркивания (одинарное, двойное, фигурное, пунктирное) и grapheme clusters из нескольких codepoint хранятся в `ExtCell` — расширенной записи в side-table, на которую указывает `flags = EXT`. **Truecolor — обычное, а не редкое явление** в современных терминалах; `ExtCell` нужна для значительной доли ячеек в цветном вводе. Rune в снимке санируется: запрещены C0/C1 (0x00–0x1F, 0x80–0x9F), 0x7F, суррогаты (0xD800–0xDFFF) и > U+10FFFF.
+Truecolor хранится прямо в ячейке без side-table. Нет `ExtCell`, нет пула. `sizeof(Cell) == 16`.
+
+**Grapheme clusters.** Вторая и последующие combining-метки графемы прикрепляются к предыдущей ячейке без сдвига курсора; codepoint в ячейке остаётся первичным, дополнительные метки отбрасываются. Один codepoint на ячейку достаточен для подавляющего большинства реального вывода терминалов.
+
+Rune в снимке санируется: запрещены C0/C1 (0x00–0x1F, 0x80–0x9F), 0x7F, суррогаты (0xD800–0xDFFF) и > U+10FFFF.
 
 **Именованные константы и поведение при исчерпании:**
 
@@ -494,8 +501,7 @@ attrs  : u8    // Bold | Dim | Italic | Underline | Blink | Reverse | Invis | St
 |---|---|---|
 | `GRID_MAX_COLS` | 4096 | Resize до 4096, не CloseConnection |
 | `GRID_MAX_ROWS` | 1024 | Resize до 1024, не CloseConnection |
-| `EXT_CELLS_PER_SESSION` | 65536 | Деградация до 256-цветовой палитры; free list рекламирует освобождённые слоты |
-| `GRAPHEME_MAX_CODEPOINTS` | 8 | Лишние codepoints в кластере отбрасываются |
+| `GRAPHEME_MAX_CODEPOINTS` | 1 | Только первичный codepoint; дополнительные combining-метки отбрасываются |
 | `CSI_MAX_PARAMS` | 16 | Параметры сверх лимита игнорируются |
 | `CSI_PARAM_MAX_VALUE` | 65535 | Значения выше зажимаются |
 | `REPEAT_MAX` (REP) | текущий размер экрана | Repeat count зажимается до `rows × cols` |
@@ -508,7 +514,7 @@ attrs  : u8    // Bold | Dim | Italic | Underline | Blink | Reverse | Invis | St
 | `PROTOCOL_VERSION_MIN` | 1 | ver=1: нет Grid, overflow = SessionEnd(kind=2) |
 | `PROTOCOL_VERSION_MAX` | 2 | ver=2: Resume + stream_gen, GridBegin/Chunk/End/Applied, GRID_CAPABLE |
 
-**Хранение (nm-gate совместимость).** `zet_grid` не использует `std::vector` для основных структур данных: рост вектора тянет `__throw_length_error`, а nm-гейт запрещает `__cxa_throw` в `zet_grid`. Ячейки экрана и кольцевой буфер истории — **фиксированные арены**, выделяемые через `new(std::nothrow)` при создании Grid с максимальным размером; `ExtCell` side-table — плоский массив с счётчиком, не `std::vector`. Все аллокации возвращают `expected<…, GridError>` при сбое; нет `abort`, нет `terminate`.
+**Хранение (nm-gate совместимость).** `zet_grid` не использует `std::vector` для основных структур данных: рост вектора тянет `__throw_length_error`, а nm-гейт запрещает `__cxa_throw` в `zet_grid`. Ячейки экрана и кольцевой буфер истории — **фиксированные арены**, выделяемые через `new(std::nothrow)` при создании Grid с фактическим размером; нет side-table, нет `ExtCell`. Все аллокации возвращают `expected<…, GridError>` при сбое; нет `abort`, нет `terminate`.
 
 **Grid:**
 
@@ -519,7 +525,7 @@ history_size     : u32
 history_start    : u32
 scroll_top, bot  : u16   // DECSTBM
 cursor_row, col  : u16
-saved_cursor     : {row:u16, col:u16, attrs:u8, fg:u8, bg:u8, ext_fg, ext_bg}  // цвета тоже сохраняются
+saved_cursor     : {row:u16, col:u16, attrs:u8, fg_kind:u8, fg:u8[3], bg_kind:u8, bg:u8[3], attr_ex:u8}  // цвета тоже сохраняются
 pending_wrap     : bool  // курсор в последней колонке, следующий символ начнёт новую строку
 modes            : u32   // битовая маска DECSET/DECRST-режимов (см. ниже)
 charset_g0/g1    : u8    // текущий набор символов
@@ -780,7 +786,7 @@ tab_stops        : bitset  // HTS/TBC; по умолчанию каждые 8 с
 
 Альтернативой рассматривался monocypher: +28 КБ против +222 КБ, два файла вместо autotools. Отвергнут потому, что не даёт ни RNG, ни kx, ни KDF с контекстом — это примерно 65 строк своего кода, из которых 30 приходятся на обёртку `getrandom`, а ошибка там не ловится тестами: при непроверенной ошибке ключ соберётся из непроинициализированной памяти, и всё будет выглядеть работающим. Скорость на выбор не влияла, см. ADR-016.
 
-Тестовые: pytest (сценарные и интеграционные), doctest (мелкие C++-юниты), libFuzzer. В поставляемые бинари не попадают.
+Тестовые: pytest (сценарные и интеграционные), doctest (мелкие C++-юниты), libFuzzer. В поставляемые бинари не попадают. **pyte** (Python VT100-эмулятор, дифференциальные тесты) устанавливается через pip в venv внутри интеграционного контейнера: версия и SHA-256-хеши закреплены в `tools/pyte-requirements.txt`, установка через `pip install --require-hashes`. `py3-pip` из Alpine устанавливается как часть `tools/integration-packages.txt`.
 
 `external/` — пустой каталог. Для сравнения: у ET там 200 МБ сабмодулей на 12 000 строк своего кода, причём `msgpack-c` весом 16 МБ не подключён вообще.
 
@@ -851,9 +857,8 @@ Workflow собирает статические musl-бинари для `x86_6
 
 | Компонент | Формула | При 220×50, 1000 строк scrollback |
 |---|---|---|
-| Экран (два буфера: main + alt) | `2 × cols × rows × 8` байт | 2 × 220 × 50 × 8 = 176 КБ |
-| Scrollback ring | `cols × SCROLLBACK_LIMIT × 8` байт | 220 × 1000 × 8 = 1 760 КБ |
-| ExtCell side-table | `EXT_CELLS_PER_SESSION × sizeof(ExtCell)` | ≤ 65 536 × 32 ≈ 2 048 КБ |
+| Экран (два буфера: main + alt) | `2 × cols × rows × sizeof(Cell)` байт | 2 × 220 × 50 × 16 = 352 КБ |
+| Scrollback ring | `cols × SCROLLBACK_LIMIT × sizeof(Cell)` байт | 220 × 1000 × 16 = 3 520 КБ |
 | Output ring | `DISCONNECT_BUFFER_MAX` | 16 МБ |
 | Снимок (временно, путь B) | ≤ `SNAPSHOT_MAX_BYTES` | 4 МБ |
 | **Итого на сессию** | | **≤ 24 МБ** |
@@ -925,7 +930,7 @@ Workflow собирает статические musl-бинари для `x86_6
 
 **Сценарии M5** (`tests/integration/test_mux.py`, контракт `zet-muxd` — в `tests/integration/mux.py`) идут в том же контейнере. `zet-muxd` запускается под пользователем `zet`, порт ему передаётся так, как это сделал бы systemd: сокет на fd 3, `LISTEN_FDS=1`, `LISTEN_PID` равен pid самого mux — его ставит маленький лаунчер перед `exec`, потому что `Popen` закрывает всё, кроме `pass_fds`, уже после `preexec_fn`. Нарушитель — отдельный локальный пользователь без ssh: его подключения к сокету агентов делает дочерний процесс под его uid и передаёт дескриптор тесту, так что `SO_PEERCRED` у mux видит именно его. `sid` живой сессии тест берёт из лога mux (`registered sid=… uid=…`): `sid` публичен, а иначе его неоткуда узнать, не встраиваясь в трафик. Каталог сокета принадлежит пользователю `zet`, потому что mux биндит сокет сам; `root:root` из §6 годится, только если и unix-сокет приходит от systemd.
 
-Устроено так. `tools/integration.sh <preset>` собирает пресет и запускает `tests/integration` под pytest в том же Alpine-контейнере, что и сборка, с двумя добавками: пакетами из `tools/integration-packages.txt` (openssh, bash, vim, htop, iptables, python3, pytest) и `--cap-add=NET_ADMIN`. Права нужны только внутри сетевого namespace контейнера: правило `-j DROP` на `lo` превращает установленное соединение в half-open, и тест проверяет, что сегмент не доходит и не отбивается, а после снятия правила доходит ретрансмитом. Фикстуры поднимают sshd на 127.0.0.1 со свежими ключами и входят обычным пользователем `zettest`: агент обязан работать без root, и проверяется он от имени того, кем будет запущен. Шумный `.bashrc` печатает баннер, подделку блока `BEGIN ZET BOOTSTRAP`, небинарный мусор и строку без перевода строки; bash в Alpine, в отличие от Debian, не читает `.bashrc` на `ssh host cmd`, поэтому sshd выставляет `BASH_ENV`. Ожидание везде через `select` с дедлайном и pidfd, ни одного сна. В CI это джоба `integration` на двух пресетах, `musl-dev` и `musl-asan-ubsan`; сценарии, которым нужны `zet` и `zet-agent`, пропускаются с причиной, пока бинарей нет.
+Устроено так. `tools/integration.sh <preset>` собирает пресет, создаёт venv (`python3 -m venv`), устанавливает в него pyte из `tools/pyte-requirements.txt` с `--require-hashes`, а затем запускает `tests/integration` через pytest из этого venv — в том же Alpine-контейнере, что и сборка, с двумя добавками: пакетами из `tools/integration-packages.txt` (openssh, bash, vim, htop, iptables, python3, pytest, py3-pip) и `--cap-add=NET_ADMIN`. Права нужны только внутри сетевого namespace контейнера: правило `-j DROP` на `lo` превращает установленное соединение в half-open, и тест проверяет, что сегмент не доходит и не отбивается, а после снятия правила доходит ретрансмитом. Фикстуры поднимают sshd на 127.0.0.1 со свежими ключами и входят обычным пользователем `zettest`: агент обязан работать без root, и проверяется он от имени того, кем будет запущен. Шумный `.bashrc` печатает баннер, подделку блока `BEGIN ZET BOOTSTRAP`, небинарный мусор и строку без перевода строки; bash в Alpine, в отличие от Debian, не читает `.bashrc` на `ssh host cmd`, поэтому sshd выставляет `BASH_ENV`. Ожидание везде через `select` с дедлайном и pidfd, ни одного сна. В CI это джоба `integration` на двух пресетах, `musl-dev` и `musl-asan-ubsan`; сценарии, которым нужны `zet` и `zet-agent`, пропускаются с причиной, пока бинарей нет.
 
 **macOS-клиент против Linux-агента.** Клиент на macOS (§12) проверяется на настоящем ssh и настоящем агенте так же, как на Linux, только хост теперь по другую сторону границы контейнера. `tools/macos_e2e_host.sh up` поднимает долгоживущий контейнер с тем же хостом, что и у Linux-набора (`tests/integration/sshhost.py`, режим `host.py`): sshd и пользователь `zettest`, но без предустановленного агента — доставку делает сам клиент (M5.5). Агент строится Linux-джобом (`macos e2e / build zet-agent`), кладётся в артефакт `zet-agent-x86_64`, а macOS-джоб выставляет путь к нему через `ZET_AGENT_DIR`; клиент при первом подключении ставит бинарь под `~/.cache/zet/<hash>/zet-agent` и при повторном находит его там уже готовым. Клиентская сторона получает `build/macos-e2e/ssh_config` и `host.json`; `tests/macos_e2e` гоняется уже на маке, нативно. Root-операции на хосте, то есть iptables, идут через `docker exec`, и правила ставятся на `eth0`: так докер доставляет трафик с мака.
 
@@ -986,7 +991,7 @@ Workflow собирает статические musl-бинари для `x86_6
 
 **Тест v1↔v2 совместимости.** `test_m6_v1_compat`: клиент с ver_max=1 подключается к агенту с ver_max=2; overflow → `SessionEnd(kind=2)`; никаких GridBegin/Chunk/End.
 
-**Тест 400×300 truecolor.** `test_m6_400x300`: 400×300, truecolor в каждой ячейке; 120 000 `ExtCell` > лимита 65 536 → деградация до 256-цвет без краша; снимок строится; лестница деградации укладывается в cap.
+**Тест 400×300 truecolor.** `test_m6_400x300`: 400×300, truecolor в каждой ячейке; truecolor хранится inline в Cell — нет лимита side-table; снимок строится; лестница деградации укладывается в cap.
 
 **Тест vim после :q.** `test_m6_vim_after_quit`: vim в alt screen, выход `:q`; разрыв и реконнект — снимок без `flags` бит 0, обычный буфер.
 
@@ -996,7 +1001,7 @@ Workflow собирает статические musl-бинари для `x86_6
 
 **Разделение тестов путей A и B.** `test_m6_path_a_only` (переключатель `ZET_TEST_FORCE_PATH=A`): при коротком разрыве путь B не выбран. `test_m6_path_b_only` (`ZET_TEST_FORCE_PATH=B`): при `ring_overflowed=true` путь A заблокирован.
 
-**Soak M6.** Три сессии с разными скоростями вывода; принудительное превышение порога path B каждые 30 мин. RSS ≤ `N × (базовый_агент + 2 × cols × rows × 8 + SCROLLBACK_LIMIT × cols × 8 + EXT_CELLS_PER_SESSION × sizeof(ExtCell) + DISCONNECT_BUFFER_MAX + SNAPSHOT_MAX_BYTES_peak)` — пиковое: два экранных буфера (main + alt) + scrollback-ring + ext-cells + replay-ring + снимок в полёте. Снимок освобождается после `GridApplied`.
+**Soak M6.** Три сессии с разными скоростями вывода; принудительное превышение порога path B каждые 30 мин. RSS ≤ `N × (базовый_агент + 2 × cols × rows × sizeof(Cell) + SCROLLBACK_LIMIT × cols × sizeof(Cell) + DISCONNECT_BUFFER_MAX + SNAPSHOT_MAX_BYTES_peak)` — пиковое: два экранных буфера (main + alt) + scrollback-ring + replay-ring + снимок в полёте. Снимок освобождается после `GridApplied`.
 
 ---
 
