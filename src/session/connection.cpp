@@ -30,11 +30,15 @@ constexpr std::uint8_t CLEARTEXT_EPOCH = 0;
 
 // ── ConnectionBase ─────────────────────────────────────────────────────
 
-ConnectionBase::ConnectionBase(MutableByteSpan frameStorage,
-                               Timestamp now) noexcept
+ConnectionBase::ConnectionBase(MutableByteSpan frameStorage, Timestamp now,
+                               std::uint16_t ceiling,
+                               MutableByteSpan snapshotBuf) noexcept
     // Until the peer has proved itself it has not earned more than
     // MAX_HANDSHAKE_FRAME of our memory (§7); the limit widens once it has.
-    : Frames_(frameStorage, wire::MAX_HANDSHAKE_FRAME), Started_(now) {}
+    : Frames_(frameStorage, wire::MAX_HANDSHAKE_FRAME),
+      Started_(now),
+      SnapshotBuf_(snapshotBuf),
+      Ceiling_(ceiling) {}
 
 ChannelResult<void> ConnectionBase::OnBytes(ByteSpan chunk) noexcept {
     if (Failed_) {
@@ -55,6 +59,16 @@ Deadline ConnectionBase::NextDeadline() const noexcept {
     }
     return Deadline{Started_ + HANDSHAKE_TIMEOUT};
 }
+
+// ── AgentConnection ────────────────────────────────────────────────────
+
+Deadline AgentConnection::NextDeadline() const noexcept {
+    return Earliest(
+        ConnectionBase::NextDeadline(),
+        ResizeWaitDeadline_ ? Deadline{*ResizeWaitDeadline_} : Deadline{});
+}
+
+// ── ConnectionBase ─────────────────────────────────────────────────────
 
 SessionError ConnectionBase::Fail(SessionError error) noexcept {
     if (!Failed_) {
@@ -97,10 +111,11 @@ MutableByteSpan ConnectionBase::HandshakeBody(MutableByteSpan out) noexcept {
                                      wire::MAX_HANDSHAKE_FRAME));
 }
 
-template <typename TOnOpened>
+template <typename TOnOpened, typename TOnGridSnap>
 ConnectionResult ConnectionBase::PumpLive(Timestamp now, MutableByteSpan out,
                                           MutableByteSpan scratch,
-                                          TOnOpened&& onOpened) noexcept {
+                                          TOnOpened&& onOpened,
+                                          TOnGridSnap&& onGridSnap) noexcept {
     // Incoming first: it can carry an ack that frees room for what we send.
     // A frame that delivered nothing — a bare Ack, a duplicate, a Ping — is
     // not an event of its own, so look further in the same call.
@@ -124,8 +139,24 @@ ConnectionResult ConnectionBase::PumpLive(Timestamp now, MutableByteSpan out,
             return Resized{.Size = resize->Resize};
         }
         if (const auto* end = std::get_if<DeliveredSessionEnd>(&*event)) {
+            // kind=2 (Overflow) is a distinct event: the infrastructure
+            // killed the session, not the shell.  Callers must handle it
+            // separately so they can display a targeted message (§7).
+            if (end->End.Kind == wire::ESessionEndKind::Overflow) {
+                return SessionOverflowed{};
+            }
             return Ended{.End = end->End};
         }
+        if (const auto* snap = std::get_if<DeliveredGridSnapshot>(&*event)) {
+            // Agent side: DeliveredGridSnapshot should never arrive; the
+            // channel already closed the connection on that violation.
+            // Client side: caller queues GridApplied and returns ApplySnapshot.
+            if (auto r = std::forward<TOnGridSnap>(onGridSnap)(*snap)) {
+                return std::move(*r);
+            }
+        }
+        // DeliveredNothing, DeliveredGridApplied → loop; channel already
+        // cleared GridAwaitingApplied_ on the agent side.
     }
 
     auto written = Channel_->Poll(now, out, scratch);
@@ -140,16 +171,16 @@ ConnectionResult ConnectionBase::PumpLive(Timestamp now, MutableByteSpan out,
 
 // ── AgentConnection ────────────────────────────────────────────────────
 
-AgentConnection::AgentConnection(MutableByteSpan frameStorage,
-                                 Timestamp now) noexcept
-    : ConnectionBase(frameStorage, now) {}
+AgentConnection::AgentConnection(MutableByteSpan frameStorage, Timestamp now,
+                                 std::uint16_t ceiling) noexcept
+    : ConnectionBase(frameStorage, now, ceiling) {}
 
 void AgentConnection::Route(SessionRef session,
                             wire::HandshakeNonce serverNonce) noexcept {
     if (Stage_ != EStage::AwaitRoute) {
         return;
     }
-    Attempt_.emplace(session, serverNonce);
+    Attempt_.emplace(session, serverNonce, Ceiling_);
     Stage_ = EStage::Handshake;
 }
 
@@ -158,7 +189,8 @@ void AgentConnection::RouteUnknown(const crypto::Key& localSecret,
     if (Stage_ != EStage::AwaitRoute) {
         return;
     }
-    Attempt_.emplace(UnknownSession{}, localSecret, HelloId_, serverNonce);
+    Attempt_.emplace(UnknownSession{}, localSecret, HelloId_, serverNonce,
+                     Ceiling_);
     Stage_ = EStage::Handshake;
 }
 
@@ -182,14 +214,35 @@ ConnectionResult AgentConnection::Pump(Timestamp now, MutableByteSpan out,
             return PumpHandshake(out);
         case EStage::AwaitResume:
             return PumpResume(now, out, scratch);
-        case EStage::Live:
+        case EStage::AwaitSnapshot:
+            if (!Handle_->IsCurrent()) {
+                return Refuse(ESessionError::Superseded);
+            }
+            return PumpAwaitSnapshot(now, out, scratch);
+        case EStage::Live: {
             // A newer connection authenticated and took the streams; this one
             // must stop touching them before it sends a byte.
             if (!Handle_->IsCurrent()) {
                 return Refuse(ESessionError::Superseded);
             }
             QueueEnd();
-            return PumpLive(now, out, scratch, [] {});
+            auto result = PumpLive(
+                now, out, scratch, [] {},
+                [](const DeliveredGridSnapshot&)
+                    -> std::optional<ConnectionResult> {
+                    // Agent never legitimately receives a GridSnapshot; channel
+                    // already enforces this. Nothing to do here.
+                    return std::nullopt;
+                });
+            // Keep LastKnownSize_ in the session up to date for the next
+            // reconnect's path A/B cost comparison.
+            if (result) {
+                if (const auto* resized = std::get_if<Resized>(&*result)) {
+                    Handle_->ReportResize(resized->Size);
+                }
+            }
+            return result;
+        }
     }
     return Idle{};
 }
@@ -228,6 +281,26 @@ ConnectionResult AgentConnection::PumpHello() noexcept {
     std::ranges::copy(frame.Body, kept.begin());
     HelloSize_ = frame.Body.size();
     HelloId_ = *id;
+
+    // Extract GRID_CAPABLE TLV pre-auth; trusted only after SetGridInfo
+    // confirms the handshake (§7, TLV registry). Re-parse the stored Hello
+    // so we don't rely on frame.Body staying valid across Pumps.
+    {
+        ByteReader helloReader{ByteSpan{Hello_}.first(HelloSize_)};
+        std::ignore = wire::ParseMessageType(helloReader);  // skip type byte
+        if (auto hello = wire::ParseHello(helloReader); hello) {
+            for (const auto& opt : hello->Options.Options()) {
+                if (opt.Type == wire::TLV_GRID_CAPABLE &&
+                    opt.Value.size() == 2) {
+                    ByteReader vr{opt.Value};
+                    if (auto v = vr.ReadU16BE(); v && *v == 1) {
+                        HelloGridCapable_ = true;
+                    }
+                }
+            }
+        }
+    }
+
     Stage_ = EStage::AwaitRoute;
     return NeedsSession{.Id = HelloId_};
 }
@@ -271,6 +344,8 @@ ConnectionResult AgentConnection::PumpHandshake(MutableByteSpan out) noexcept {
                                                   ERole::Agent));
         }
         Handle_.emplace(std::move(resumed->Handle));
+        // Now trusted: the client proved K_auth, so the TLV it claimed is real.
+        Handle_->SetGridInfo(NegotiatedVersion_, HelloGridCapable_);
         Attempt_.reset();
         Stage_ = EStage::AwaitResume;
     }
@@ -318,23 +393,193 @@ ConnectionResult AgentConnection::PumpResume(Timestamp now, MutableByteSpan out,
     if (auto confirmed = Handle_->ConfirmResume(used); !confirmed) {
         return Refuse(SessionError{confirmed.error()});
     }
-    if (auto attached = Handle_->Attach(resume->ClientReceiveOffset);
-        !attached) {
-        return Refuse(SessionError{attached.error()});
+
+    // Violation: client claims a generation the agent has never sent.  This
+    // cannot happen in honest operation; close the connection rather than
+    // silently accepting a corrupt or misbehaving peer.  §9 violation table.
+    if (resume->StreamGen > Handle_->SessionGen()) {
+        return Refuse(SessionError{EProtoError::MalformedField});
     }
 
+    // Path B is only valid for clients that advertised GRID_CAPABLE and
+    // negotiated the grid protocol version.  A non-capable client cannot
+    // receive a grid snapshot, so the cost check must be gated on capability.
+    const bool gridCapable =
+        NegotiatedVersion_ >= wire::PROTOCOL_VERSION_GRID && HelloGridCapable_;
+
+    // Path A/B decision (§9 ADR-030). Feasibility comes first, then cost.
+    //   ring_overflowed: the ring filled in Resync mode; path B is mandatory.
+    //   stream_gen < session_gen: the client applied a generation the agent has
+    //     already superseded; the client must catch up via a new snapshot.
+    // Both conditions are only meaningful for GRID_CAPABLE peers: a non-capable
+    // peer cannot receive a snapshot, so never force path B for one. §9.
+    const bool mandatoryB =
+        gridCapable && (Handle_->RingOverflowed() ||
+                        resume->StreamGen < Handle_->SessionGen());
+
+    bool usePathB = mandatoryB;
+    if (!usePathB && gridCapable) {
+        // Cost check: prefer path B when the replay is more expensive than
+        // building a snapshot. The estimate is coarse (bytes per cell) but
+        // always well under SNAPSHOT_MAX_BYTES, so it is a safe sentinel.
+        const std::uint64_t replayCost =
+            Handle_->Output().End() > resume->ClientReceiveOffset
+                ? Handle_->Output().End() - resume->ClientReceiveOffset
+                : std::uint64_t{0};
+        if (const auto size = Handle_->LastKnownSize(); size.has_value()) {
+            const auto estimate = SnapshotEstimateBytes(size->Rows, size->Cols);
+            usePathB = (replayCost > estimate);
+        }
+    }
+
+    // Move the chosen direction frames now, before either attach path.
     DirectionFrames chosen = used == EResumeKeys::Current
                                  ? std::move(*Current_)
                                  : std::move(*Fallback_);
     Current_.reset();
     Fallback_.reset();
+
+    if (usePathB) {
+        // Path B: open a new output generation. NewGeneration() (called inside
+        // SupplySnapshot) will clear the ring; for now we just become live so
+        // incoming frames are accepted during the snapshot-build window.
+        if (auto attached = Handle_->AttachPathB(); !attached) {
+            return Refuse(SessionError{attached.error()});
+        }
+        Channel_.emplace(std::move(chosen), Handle_->Output(), Handle_->Input(),
+                         now, Handle_->Liveness(), NegotiatedVersion_,
+                         SnapshotBuf_);
+        // Prevent Poll from sending stale pre-NewGeneration Data frames while
+        // waiting for SupplySnapshot to clear the ring. §9 ADR-030.
+        Channel_->SuppressDataUntilGrid();
+        Stage_ = EStage::AwaitSnapshot;
+        // Wait for the client's post-Resume Resize before reporting dimensions
+        // in NeedsSnapshot, unless the terminal size is not yet known.  §9 (a).
+        WaitForResize_ = Handle_->LastKnownSize().has_value();
+        if (WaitForResize_) {
+            ResizeWaitDeadline_ = now + RESIZE_WAIT_TIMEOUT;
+        }
+        SnapshotReminderSent_ = false;
+        return Idle{};
+    }
+
+    // Path A: byte-identical replay from what the client reports receiving.
+    if (auto attached = Handle_->Attach(resume->ClientReceiveOffset);
+        !attached) {
+        // For a v2 non-capable client whose session ended with overflow: report
+        // the overflow so the caller can tell the user why the session is gone.
+        // §9 defect (1): a reaped session must still notify the peer once.
+        if (attached.error() == ESessionError::SessionReaped) {
+            if (const auto end = Handle_->EndedWith();
+                end && end->Kind == wire::ESessionEndKind::Overflow) {
+                return SessionOverflowed{};
+            }
+        }
+        return Refuse(SessionError{attached.error()});
+    }
     Channel_.emplace(std::move(chosen), Handle_->Output(), Handle_->Input(),
-                     now, Handle_->Liveness(), NegotiatedVersion_);
+                     now, Handle_->Liveness(), NegotiatedVersion_,
+                     SnapshotBuf_);
     Stage_ = EStage::Live;
     QueueEnd();
     // Straight on: the resend is waiting, and an Idle here would tell the
     // caller there is nothing to do until the client speaks again.
-    return PumpLive(now, out, scratch, [] {});
+    return PumpLive(
+        now, out, scratch, [] {},
+        [](const DeliveredGridSnapshot&) -> std::optional<ConnectionResult> {
+            return std::nullopt;
+        });
+}
+
+ConnectionResult AgentConnection::PumpAwaitSnapshot(
+    Timestamp now, MutableByteSpan out, MutableByteSpan scratch) noexcept {
+    // Process one incoming frame (Resize, keyboard Data, Ping/Pong, Ack), but
+    // do not poll — no output goes out until SupplySnapshot clears the ring
+    // and starts the grid emission. §9 ADR-030.
+    auto next = Frames_.Next();
+    if (!next) {
+        return std::unexpected(Fail(SessionError{next.error()}));
+    }
+    if (*next) {
+        auto event = Channel_->Receive(now, **next, scratch);
+        if (!event) {
+            return std::unexpected(Fail(event.error()));
+        }
+        if (const auto* data = std::get_if<DeliveredData>(&*event)) {
+            return Deliver{.Bytes = data->Bytes};
+        }
+        if (const auto* resize = std::get_if<DeliveredResize>(&*event)) {
+            Handle_->ReportResize(resize->Resize);
+            // Client sent its post-Resume Resize: unblock NeedsSnapshot and
+            // re-arm the reminder so it carries the fresh dimensions.  §9 (a).
+            WaitForResize_ = false;
+            ResizeWaitDeadline_.reset();
+            SnapshotReminderSent_ = false;
+            return Resized{.Size = resize->Resize};
+        }
+        // DeliveredSessionEnd, DeliveredNothing, DeliveredGridApplied → fall
+        // through; none of these change the snapshot wait.
+    }
+    // Poll keepalive/liveness maintenance even in the await-snapshot window so
+    // the connection does not go silent.  §9 ADR-030.
+    auto written = Channel_->Poll(now, out, scratch);
+    if (!written) {
+        return std::unexpected(Fail(written.error()));
+    }
+    if (*written > 0) {
+        return SendFrame{.Written = *written};
+    }
+    // Suppress NeedsSnapshot until the client's post-Resume Resize arrives so
+    // the reported dimensions reflect the current terminal.  §9 (a).
+    // After RESIZE_WAIT_TIMEOUT, give up waiting and use the last known size.
+    if (WaitForResize_) {
+        if (ResizeWaitDeadline_ && now >= *ResizeWaitDeadline_) {
+            WaitForResize_ = false;
+            ResizeWaitDeadline_.reset();
+        } else {
+            return Idle{};
+        }
+    }
+    // Return NeedsSnapshot on the first idle pump so the caller learns a
+    // snapshot is required.  Subsequent idle pumps return Idle to avoid a
+    // busy-loop in the caller's event loop.  §9 ADR-030.
+    if (!SnapshotReminderSent_) {
+        SnapshotReminderSent_ = true;
+        const auto size = Handle_->LastKnownSize();
+        return NeedsSnapshot{
+            .Rows = size ? size->Rows : std::uint16_t{0},
+            .Cols = size ? size->Cols : std::uint16_t{0},
+        };
+    }
+    return Idle{};
+}
+
+void AgentConnection::SupplySnapshot([[maybe_unused]] Timestamp now,
+                                     ByteSpan snapshot,
+                                     std::uint32_t scrollbackLen,
+                                     std::uint8_t flags) noexcept {
+    if (Stage_ != EStage::AwaitSnapshot || !Channel_ || !Handle_) {
+        return;
+    }
+    // A superseded connection must not call NewGeneration (which advances the
+    // ring) on behalf of a session whose newer owner did not ask for it.
+    if (!Handle_->IsCurrent()) {
+        return;
+    }
+    // Reject empty or oversize snapshots without changing state — caller can
+    // retry. The wire layer rejects total_len == 0 (§7), so supplying an
+    // empty snapshot would produce an unsendable GridBegin; keeping the
+    // session in AwaitSnapshot is the consistent behaviour. §9.
+    if (snapshot.empty() || snapshot.size() > wire::SNAPSHOT_MAX_BYTES) {
+        SnapshotReminderSent_ = false;  // re-arm NeedsSnapshot for the caller
+        return;
+    }
+    // Clear the ring and open a new output generation, then queue the snapshot
+    // for emission. Everything sent after this point is in the new generation.
+    Handle_->NewGeneration();
+    Channel_->StartGrid(snapshot, flags, Handle_->SessionGen(), scrollbackLen);
+    Stage_ = EStage::Live;
+    QueueEnd();
 }
 
 ConnectionResult AgentConnection::Refuse(SessionError error) noexcept {
@@ -359,11 +604,12 @@ void AgentConnection::Close(Timestamp now) noexcept {
 
 ClientConnection::ClientConnection(ClientSession& session,
                                    wire::HandshakeNonce clientNonce,
-                                   MutableByteSpan frameStorage,
-                                   Timestamp now) noexcept
-    : ConnectionBase(frameStorage, now),
+                                   MutableByteSpan frameStorage, Timestamp now,
+                                   bool gridCapable, std::uint16_t ceiling,
+                                   MutableByteSpan snapshotBuf) noexcept
+    : ConnectionBase(frameStorage, now, ceiling, snapshotBuf),
       Session_(session),
-      Attempt_(session, clientNonce) {}
+      Attempt_(session, clientNonce, gridCapable, ceiling) {}
 
 void ClientConnection::QueueResize(wire::ResizeMessage size) noexcept {
     if (Channel_) {
@@ -403,11 +649,31 @@ ConnectionResult ClientConnection::Pump(Timestamp now, MutableByteSpan out,
             // agent's opens, which proves the agent opened Resume and moved
             // first. ConfirmAgentFrame does it once per connection.
             {
-                auto event = PumpLive(now, out, scratch,
-                                      [this] { Handle_->ConfirmAgentFrame(); });
+                auto event = PumpLive(
+                    now, out, scratch, [this] { Handle_->ConfirmAgentFrame(); },
+                    [this](const DeliveredGridSnapshot& snap)
+                        -> std::optional<ConnectionResult> {
+                        // Store the pending gen; the caller must call
+                        // ConfirmApply(gen) or DenyApply(gen) once it renders
+                        // the snapshot. GridApplied and SetStreamGen are
+                        // deferred until then.
+                        PendingApplyGen_ = snap.StreamGen;
+                        return ApplySnapshot{
+                            .Bytes = snap.Bytes,
+                            .StreamGen = snap.StreamGen,
+                            .ScrollbackLen = snap.ScrollbackLen,
+                            .Flags = snap.Flags};
+                    });
                 if (event) {
                     if (const auto* ended = std::get_if<Ended>(&*event)) {
                         Handle_->RecordEnd(ended->End);
+                    } else if (std::holds_alternative<SessionOverflowed>(
+                                   *event)) {
+                        // The channel sent kind=2; record it so EndedWith()
+                        // returns it and the caller does not reconnect.
+                        Handle_->RecordEnd(
+                            {.Kind = wire::ESessionEndKind::Overflow,
+                             .Value = 0});
                     }
                 }
                 return event;
@@ -462,8 +728,15 @@ ConnectionResult ClientConnection::SendResume(Timestamp now,
     // The array is wide enough for the largest Resume (v2), so no write fails.
     std::array<std::byte, RESUME_PLAINTEXT_MAX> plain{};
     ByteWriter writer{MutableByteSpan{plain}};
-    const wire::ResumeMessage resume{.ClientReceiveOffset =
-                                         Session_.ReceiveOffset()};
+    // At ver=2, stream_gen tells the agent which output generation the client
+    // last applied so the agent can decide between path A and path B.  At
+    // ver=1 the field does not exist in the wire format; send 0 so
+    // WriteResume does not reject it as MalformedField. §9.
+    const wire::ResumeMessage resume{
+        .StreamGen = NegotiatedVersion_ >= wire::PROTOCOL_VERSION_GRID
+                         ? Session_.StreamGen()
+                         : std::uint32_t{0},
+        .ClientReceiveOffset = Session_.ReceiveOffset()};
     const auto written = wire::WriteResume(writer, resume, NegotiatedVersion_);
     if (!written) {
         return Refuse(SessionError{written.error()});
@@ -474,8 +747,16 @@ ConnectionResult ClientConnection::SendResume(Timestamp now,
     if (!sealed) {
         return Refuse(SessionError{sealed.error()});
     }
+    // Seed AgentStreamGen_ from the session's current stream gen so that a
+    // GridBegin with gen ≤ Session_.StreamGen() is rejected on reconnect.
+    // Without this, every new Channel starts at 0 and would accept a forged
+    // or replayed GridBegin from a previous generation. §9 item (4).
+    const std::uint32_t baseline =
+        NegotiatedVersion_ >= wire::PROTOCOL_VERSION_GRID ? Session_.StreamGen()
+                                                          : 0;
     Channel_.emplace(std::move(frames), Handle_->Output(), Handle_->Input(),
-                     now, Handle_->Liveness(), NegotiatedVersion_);
+                     now, Handle_->Liveness(), NegotiatedVersion_, SnapshotBuf_,
+                     baseline);
     if (PendingResize_) {
         Channel_->QueueResize(*PendingResize_);
         PendingResize_.reset();
@@ -498,6 +779,26 @@ void ClientConnection::Close(Timestamp now) noexcept {
     if (Handle_) {
         Handle_->Detach(now);
     }
+}
+
+void ClientConnection::ConfirmApply(std::uint32_t gen) noexcept {
+    if (!PendingApplyGen_ || *PendingApplyGen_ != gen) {
+        return;
+    }
+    PendingApplyGen_.reset();
+    if (Channel_) {
+        Channel_->QueueGridApplied(gen);
+    }
+    if (Handle_) {
+        Handle_->SetStreamGen(gen);
+    }
+}
+
+void ClientConnection::DenyApply(std::uint32_t gen) noexcept {
+    if (!PendingApplyGen_ || *PendingApplyGen_ != gen) {
+        return;
+    }
+    PendingApplyGen_.reset();
 }
 
 }  // namespace zet::session

@@ -78,11 +78,35 @@ struct Ended {
     wire::SessionEndMessage End;
 };
 
+/// The agent's ring overflowed while the client did not have GRID_CAPABLE
+/// (ver=2 only, §7). Client only. The session is dead; the caller does not
+/// reconnect. Distinct from Ended so callers can display a targeted message
+/// rather than mapping it to a signal-exit code.
+struct SessionOverflowed {};
+
 /// Nothing to do until more bytes arrive or NextDeadline passes.
 struct Idle {};
 
+/// The agent needs a grid snapshot to start path B on reconnect. Agent only.
+/// The caller builds a snapshot of size {Rows×Cols} and delivers it via
+/// SupplySnapshot before the next Pump. §9 ADR-030.
+struct NeedsSnapshot {
+    std::uint16_t Rows{0};
+    std::uint16_t Cols{0};
+};
+
+/// A complete grid snapshot has been received and is ready to apply. Client
+/// only. `Bytes` is valid until the next Pump call. §9 ADR-030.
+struct ApplySnapshot {
+    ByteSpan Bytes;
+    std::uint32_t StreamGen{0};
+    std::uint32_t ScrollbackLen{0};
+    std::uint8_t Flags{0};
+};
+
 using ConnectionEvent =
-    std::variant<NeedsSession, SendFrame, Deliver, Resized, Ended, Idle>;
+    std::variant<NeedsSession, SendFrame, Deliver, Resized, Ended, Idle,
+                 NeedsSnapshot, ApplySnapshot, SessionOverflowed>;
 
 using ConnectionResult = ChannelResult<ConnectionEvent>;
 
@@ -120,7 +144,9 @@ public:
     [[nodiscard]] Deadline NextDeadline() const noexcept;
 
 protected:
-    ConnectionBase(MutableByteSpan frameStorage, Timestamp now) noexcept;
+    ConnectionBase(MutableByteSpan frameStorage, Timestamp now,
+                   std::uint16_t ceiling = wire::PROTOCOL_VERSION_MAX,
+                   MutableByteSpan snapshotBuf = {}) noexcept;
     ~ConnectionBase() = default;
 
     /// Remembers the first error and hands it back; every later Pump returns
@@ -150,16 +176,19 @@ protected:
     /// opened, which is where the client confirms the seed. A connection that
     /// hears nothing for the session's PeerSilenceTimeout fails here with
     /// PeerSilent (§9).
-    template <typename TOnOpened>
+    template <typename TOnOpened, typename TOnGridSnap>
     [[nodiscard]] ConnectionResult PumpLive(Timestamp now, MutableByteSpan out,
                                             MutableByteSpan scratch,
-                                            TOnOpened&& onOpened) noexcept;
+                                            TOnOpened&& onOpened,
+                                            TOnGridSnap&& onGridSnap) noexcept;
 
     wire::FrameStream Frames_;
     Timestamp Started_;
     std::optional<Channel> Channel_;
     std::optional<SessionError> Failed_;
+    MutableByteSpan SnapshotBuf_;
     std::uint16_t NegotiatedVersion_{wire::PROTOCOL_VERSION_MIN};
+    std::uint16_t Ceiling_{wire::PROTOCOL_VERSION_MAX};
 };
 
 /// The agent's end.
@@ -167,7 +196,12 @@ class AgentConnection : public ConnectionBase {
 public:
     /// `frameStorage` must hold CONNECTION_FRAME_STORAGE bytes; until the peer
     /// authenticates only MAX_HANDSHAKE_FRAME of it is used.
-    AgentConnection(MutableByteSpan frameStorage, Timestamp now) noexcept;
+    /// `ceiling` caps the version negotiated in Hello; default is
+    /// PROTOCOL_VERSION_MAX (currently 1). Tests that exercise ver=2 pass
+    /// PROTOCOL_VERSION_GRID here.
+    AgentConnection(
+        MutableByteSpan frameStorage, Timestamp now,
+        std::uint16_t ceiling = wire::PROTOCOL_VERSION_MAX) noexcept;
 
     /// Answers NeedsSession for a sid that was found.
     void Route(SessionRef session, wire::HandshakeNonce serverNonce) noexcept;
@@ -198,12 +232,32 @@ public:
     /// the whole stream; a close of any other connection says nothing.
     [[nodiscard]] bool DeliveredEnd() const noexcept;
 
+    /// Delivers a grid snapshot after a NeedsSnapshot event. Starts the
+    /// GridBegin → GridChunk* → GridEnd sequence on the next Pump and
+    /// transitions to Live. `snapshot` is borrowed; the caller must keep it
+    /// alive until GridEmissionDone() returns true. §9 ADR-030.
+    ///
+    /// No-op if Stage is not AwaitSnapshot.
+    void SupplySnapshot(Timestamp now, ByteSpan snapshot,
+                        std::uint32_t scrollbackLen,
+                        std::uint8_t flags) noexcept;
+
+    /// Returns the earlier of the base deadline and any AwaitSnapshot deadline
+    /// (RESIZE_WAIT_TIMEOUT).  Shadows ConnectionBase so callers that hold an
+    /// AgentConnection directly see the resize-wait deadline.
+    [[nodiscard]] Deadline NextDeadline() const noexcept;
+
 private:
     enum class EStage : std::uint8_t {
         AwaitHello,
         AwaitRoute,
         Handshake,
         AwaitResume,
+        /// Path B: waiting for the caller to build and supply a grid snapshot
+        /// via SupplySnapshot. Incoming frames (Resize, Data) are still
+        /// processed; outgoing polling is suspended until SupplySnapshot is
+        /// called. §9 ADR-030.
+        AwaitSnapshot,
         Live,
     };
 
@@ -212,6 +266,8 @@ private:
     [[nodiscard]] ConnectionResult PumpResume(Timestamp now,
                                               MutableByteSpan out,
                                               MutableByteSpan scratch) noexcept;
+    [[nodiscard]] ConnectionResult PumpAwaitSnapshot(
+        Timestamp now, MutableByteSpan out, MutableByteSpan scratch) noexcept;
     [[nodiscard]] ConnectionResult Refuse(SessionError error) noexcept;
     /// Hands the session's SessionEnd, if any, to the live channel.
     void QueueEnd() noexcept;
@@ -223,6 +279,23 @@ private:
     std::size_t HelloSize_{0};
     wire::SessionId HelloId_{};
     bool HelloAnswered_{false};
+    /// Whether the client's Hello carried a valid GRID_CAPABLE TLV. Read
+    /// pre-auth but trusted only after SetGridInfo is called post-auth. §7.
+    bool HelloGridCapable_{false};
+    /// True once PumpAwaitSnapshot has returned NeedsSnapshot once.  Avoids a
+    /// busy-loop: the first call informs the caller a snapshot is needed;
+    /// subsequent calls return Idle until the snapshot is supplied. §9.
+    bool SnapshotReminderSent_{false};
+    /// True when entering AwaitSnapshot with a non-null LastKnownSize: the
+    /// caller sent a terminal size on the *previous* connection.  We wait for
+    /// the client to send its post-Resume Resize (which may differ) before
+    /// issuing NeedsSnapshot, so the dimensions carried by NeedsSnapshot
+    /// reflect the current terminal rather than the stale one. §9 item (a).
+    bool WaitForResize_{false};
+    /// Cleared once: deadline for WaitForResize_ (START + RESIZE_WAIT_TIMEOUT).
+    /// Once expired, WaitForResize_ is cleared so NeedsSnapshot fires with the
+    /// last known size.  std::nullopt when WaitForResize_ is false.
+    std::optional<Timestamp> ResizeWaitDeadline_{};
     std::optional<ResumeAttempt> Attempt_;
     std::optional<SessionHandle> Handle_;
     std::optional<DirectionFrames> Current_;
@@ -233,8 +306,19 @@ private:
 class ClientConnection : public ConnectionBase {
 public:
     /// `frameStorage` must hold CONNECTION_FRAME_STORAGE bytes.
+    /// `gridCapable` includes GRID_CAPABLE in the Hello TLV so the agent can
+    /// serve grid snapshots on path B reconnect. §7 ADR-035.
+    /// `ceiling` caps the version negotiated in Hello; default is
+    /// PROTOCOL_VERSION_MAX (currently 1). Tests that exercise ver=2 pass
+    /// PROTOCOL_VERSION_GRID here.
+    /// `snapshotBuf` is the caller-owned buffer for incoming grid snapshots
+    /// (§1: no allocation in the core). Must be at least
+    /// wire::SNAPSHOT_MAX_BYTES when path B may be used; pass {} otherwise.
     ClientConnection(ClientSession& session, wire::HandshakeNonce clientNonce,
-                     MutableByteSpan frameStorage, Timestamp now) noexcept;
+                     MutableByteSpan frameStorage, Timestamp now,
+                     bool gridCapable = false,
+                     std::uint16_t ceiling = wire::PROTOCOL_VERSION_MAX,
+                     MutableByteSpan snapshotBuf = {}) noexcept;
 
     /// As AgentConnection::Pump. The first call writes Hello.
     [[nodiscard]] ConnectionResult Pump(Timestamp now, MutableByteSpan out,
@@ -246,6 +330,18 @@ public:
 
     /// As AgentConnection::Close.
     void Close(Timestamp now) noexcept;
+
+    /// The snapshot carried by ApplySnapshot was rendered.  Queues GridApplied
+    /// on the wire and advances the session's stream gen so the next Resume
+    /// carries the updated gen.  No-op if gen does not match the pending apply.
+    void ConfirmApply(std::uint32_t gen) noexcept;
+
+    /// The snapshot could not be applied (allocation failure, etc.).  Clears
+    /// the pending apply without sending GridApplied.  The session's stream gen
+    /// stays at its current value; the agent will resend the snapshot on the
+    /// next reconnect if needed.  No-op if gen does not match the pending
+    /// apply.
+    void DenyApply(std::uint32_t gen) noexcept;
 
 private:
     enum class EStage : std::uint8_t {
@@ -265,6 +361,8 @@ private:
     ClientResumeAttempt Attempt_;
     std::optional<ClientSessionHandle> Handle_;
     std::optional<wire::ResizeMessage> PendingResize_;
+    /// Set when Pump returns ApplySnapshot; cleared by ConfirmApply/DenyApply.
+    std::optional<std::uint32_t> PendingApplyGen_{};
 };
 
 }  // namespace zet::session

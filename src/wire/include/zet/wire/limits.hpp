@@ -28,7 +28,9 @@ inline constexpr std::uint32_t MAX_HANDSHAKE_FRAME = 4U * 1024U;
 /// v1 is the M1–M5 base; v2 (PROTOCOL_VERSION_GRID) adds Resume with
 /// stream_gen, the Grid snapshot messages and the GRID_CAPABLE TLV (§5, §7,
 /// ADR-035). PROTOCOL_VERSION_MAX is the default ceiling advertised in Hello;
-/// pass PROTOCOL_VERSION_GRID explicitly to opt into grid-capable negotiation.
+/// it stays 1 until the agent/client binaries are wired for grid snapshots.
+/// Tests that need ver=2 pass PROTOCOL_VERSION_GRID as an explicit ceiling to
+/// AgentConnection/ClientConnection (§9, ADR-035).
 inline constexpr std::uint16_t PROTOCOL_VERSION_MIN = 1;
 inline constexpr std::uint16_t PROTOCOL_VERSION_MAX = 1;
 inline constexpr std::uint16_t PROTOCOL_VERSION_GRID = 2;

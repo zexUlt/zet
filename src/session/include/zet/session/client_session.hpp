@@ -90,6 +90,13 @@ public:
         return End_;
     }
 
+    /// The last output generation the client has applied (via GridApplied).
+    /// Sent in Resume at ver=2 as stream_gen so the agent knows whether path
+    /// B is needed. §9 ADR-030.
+    [[nodiscard]] std::uint32_t StreamGen() const noexcept {
+        return StreamGen_;
+    }
+
 private:
     friend class ClientSessionHandle;
     friend class ClientResumeAttempt;
@@ -100,6 +107,8 @@ private:
     wire::NonceMemory Seen_;
     StreamState Streams_;
     std::optional<wire::SessionEndMessage> End_;
+    /// See StreamGen(). Zero until the first GridApplied is sent.
+    std::uint32_t StreamGen_{0};
 };
 
 /// Proof that the handshake succeeded with an agent that knows K_auth, and the
@@ -147,6 +156,10 @@ public:
     /// the same message on every connection.
     void RecordEnd(wire::SessionEndMessage end) noexcept;
 
+    /// Update StreamGen after the client applies a grid snapshot and sends
+    /// GridApplied. The session then sends stream_gen in the next Resume. §9.
+    void SetStreamGen(std::uint32_t gen) noexcept;
+
 private:
     friend class ClientResumeAttempt;
 
@@ -169,8 +182,14 @@ struct ClientResumed {
 /// session it wants and there is no routing step between them.
 class ClientResumeAttempt {
 public:
-    ClientResumeAttempt(ClientSession& session,
-                        wire::HandshakeNonce clientNonce) noexcept;
+    /// `gridCapable` causes GRID_CAPABLE to be included in the Hello TLV,
+    /// signalling that this client can receive grid snapshots. §7 ADR-035.
+    /// `ceiling` caps the version negotiated in Hello; default is
+    /// PROTOCOL_VERSION_MAX. Tests that need ver=2 pass PROTOCOL_VERSION_GRID.
+    ClientResumeAttempt(
+        ClientSession& session, wire::HandshakeNonce clientNonce,
+        bool gridCapable = false,
+        std::uint16_t ceiling = wire::PROTOCOL_VERSION_MAX) noexcept;
 
     ClientResumeAttempt(const ClientResumeAttempt&) = delete;
     ClientResumeAttempt& operator=(const ClientResumeAttempt&) = delete;

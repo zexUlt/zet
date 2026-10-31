@@ -74,30 +74,36 @@ SessionResult<void> SessionHandle::ConfirmResume(EResumeKeys used) noexcept {
 }
 
 ResumeAttempt::ResumeAttempt(SessionRef session,
-                             wire::HandshakeNonce serverNonce) noexcept
+                             wire::HandshakeNonce serverNonce,
+                             std::uint16_t ceiling) noexcept
     : ResumeAttempt(session.Session_, Clone(session.Session_->Auth_),
                     Clone(session.Session_->Seed_),
                     Clone(session.Session_->PreviousSeed_), serverNonce,
-                    session.ReceiveOffset()) {}
+                    session.ReceiveOffset(), ceiling) {}
 
-ResumeAttempt ResumeAttempt::ForUnknown(
-    const crypto::Key& localSecret, const wire::SessionId& id,
-    wire::HandshakeNonce serverNonce) noexcept {
-    return ResumeAttempt{UnknownSession{}, localSecret, id, serverNonce};
+ResumeAttempt ResumeAttempt::ForUnknown(const crypto::Key& localSecret,
+                                        const wire::SessionId& id,
+                                        wire::HandshakeNonce serverNonce,
+                                        std::uint16_t ceiling) noexcept {
+    return ResumeAttempt{UnknownSession{}, localSecret, id, serverNonce,
+                         ceiling};
 }
 
 ResumeAttempt::ResumeAttempt(UnknownSession, const crypto::Key& localSecret,
                              const wire::SessionId& id,
-                             wire::HandshakeNonce serverNonce) noexcept
-    : ResumeAttempt(wire::DeriveDecoySecrets(localSecret, id), serverNonce) {}
+                             wire::HandshakeNonce serverNonce,
+                             std::uint16_t ceiling) noexcept
+    : ResumeAttempt(wire::DeriveDecoySecrets(localSecret, id), serverNonce,
+                    ceiling) {}
 
 ResumeAttempt::ResumeAttempt(wire::SessionSecrets decoy,
-                             wire::HandshakeNonce serverNonce) noexcept
+                             wire::HandshakeNonce serverNonce,
+                             std::uint16_t ceiling) noexcept
     // Offset zero, as for a session that has received nothing yet. It would
     // only reach the wire in AuthOk, and a decoy never gets that far.
     : ResumeAttempt(nullptr, std::move(decoy.Auth),
                     std::move(decoy.ConnectionSeed), std::nullopt, serverNonce,
-                    0) {}
+                    0, ceiling) {}
 
 SessionResult<void> SessionHandle::Attach(
     std::uint64_t clientReceiveOffset) noexcept {
@@ -138,15 +144,66 @@ std::optional<wire::SessionEndMessage> SessionHandle::EndedWith()
     return Session_->End_;
 }
 
+void SessionHandle::SetGridInfo(std::uint16_t ver, bool gridCapable) noexcept {
+    // Called right after ConfirmResume, before Attach — IsCurrent() is not yet
+    // meaningful here.  The caller (AgentConnection) ensures this is only
+    // called once per authenticated connection; no guard needed.
+    Session_->Streams_.SetOverflowMode(ver, gridCapable);
+    // v2 non-capable: overflow ends the session with SessionEnd{Overflow}. §9.
+    Session_->ShouldReportOverflow_ =
+        (ver >= wire::PROTOCOL_VERSION_GRID && !gridCapable);
+}
+
+void SessionHandle::NewGeneration() noexcept {
+    // Guard against a superseded SupplySnapshot call: advancing the ring
+    // generation on a stale handle would corrupt the stream state.
+    if (!IsCurrent()) {
+        return;
+    }
+    Session_->Streams_.NewGeneration();
+}
+
+std::uint32_t SessionHandle::SessionGen() const noexcept {
+    return Session_->Streams_.SessionGen();
+}
+
+bool SessionHandle::RingOverflowed() const noexcept {
+    return Session_->Streams_.RingOverflowed();
+}
+
+SessionResult<void> SessionHandle::AttachPathB() noexcept {
+    auto generation = Session_->Streams_.AttachPathB();
+    if (!generation) {
+        return std::unexpected(generation.error());
+    }
+    Generation_ = *generation;
+    return {};
+}
+
+void SessionHandle::ReportResize(wire::ResizeMessage size) noexcept {
+    // Stale resize reports from a superseded connection must not overwrite the
+    // size that the newer connection's client reported.
+    if (!IsCurrent()) {
+        return;
+    }
+    Session_->LastKnownSize_ = size;
+}
+
+std::optional<wire::ResizeMessage> SessionHandle::LastKnownSize()
+    const noexcept {
+    return Session_->LastKnownSize_;
+}
+
 ResumeAttempt::ResumeAttempt(AgentSession* session, crypto::Key auth,
                              crypto::Key seed,
                              std::optional<crypto::Key> previousSeed,
                              wire::HandshakeNonce serverNonce,
-                             std::uint64_t receiveOffset) noexcept
+                             std::uint64_t receiveOffset,
+                             std::uint16_t ceiling) noexcept
     : Session_(session),
       Shake_(std::move(auth), std::move(seed), serverNonce, receiveOffset,
              session != nullptr ? session->Seen_ : DecoySeen_,
-             std::move(previousSeed)) {}
+             std::move(previousSeed), ceiling) {}
 
 wire::PreAuthResult<wire::HandshakeStep> ResumeAttempt::Handle(
     ByteSpan body, MutableByteSpan out) noexcept {
