@@ -1287,9 +1287,13 @@ GridResult<void> Grid::Resize(std::uint16_t newCols,
     // on every screen line and every scrollback line.
     if (newCols < Cols_) {
         for (std::uint16_t r = 0; r < newRows; ++r) {
-            if (MainLines_[r].Cells[newCols - 1].Width == 2)
+            // CopyCells() above initialised these cells; the analyzer does not
+            // model the callee and reports Width as uninitialized.
+            if (MainLines_[r].Cells[newCols - 1].Width ==
+                2)  // NOLINT(clang-analyzer-core.UndefinedBinaryOperatorResult)
                 BlankCell(MainLines_[r].Cells[newCols - 1]);
-            if (AltLines_[r].Cells[newCols - 1].Width == 2)
+            if (AltLines_[r].Cells[newCols - 1].Width ==
+                2)  // NOLINT(clang-analyzer-core.UndefinedBinaryOperatorResult)
                 BlankCell(AltLines_[r].Cells[newCols - 1]);
         }
         if (HistoryLines_) {

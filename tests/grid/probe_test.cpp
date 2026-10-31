@@ -10,9 +10,9 @@
 #include "zet/grid/vt_parser.hpp"
 using namespace zet::grid;
 
-static bool g_failAlloc = false;
-static int g_failAt = -1;
-static int g_cnt = 0;
+static bool G_FAIL_ALLOC = false;
+static int G_FAIL_AT = -1;
+static int G_CNT = 0;
 
 // Override the regular throwing form so that ALL array allocations in this
 // binary go through malloc.  Without this, doctest uses the standard new[]
@@ -26,8 +26,8 @@ void* operator new[](std::size_t n) {
 }
 // Grid uses new(nothrow)[] exclusively; this is the interception point for OOM.
 void* operator new[](std::size_t n, const std::nothrow_t&) noexcept {
-    if (g_failAlloc) return nullptr;
-    if (g_failAt >= 0 && g_cnt++ == g_failAt) return nullptr;
+    if (G_FAIL_ALLOC) return nullptr;
+    if (G_FAIL_AT >= 0 && G_CNT++ == G_FAIL_AT) return nullptr;
     return std::malloc(n ? n : 1);
 }
 void operator delete[](void* p) noexcept { std::free(p); }
@@ -233,10 +233,10 @@ TEST_CASE("P7 resize alloc fail") {
     auto sz = g->ScrollbackSize();
     auto cr = g->CursorRow(), cc = g->CursorCol();
     auto t = g->ScrollTop(), b = g->ScrollBot();
-    g_failAlloc = true;
+    G_FAIL_ALLOC = true;
     auto r = g->Resize(30, 5);
     auto r2 = g->Resize(10, 20);
-    g_failAlloc = false;
+    G_FAIL_ALLOC = false;
     CHECK(!r.has_value());
     CHECK(!r2.has_value());
     CHECK(g->Cols() == 20);
@@ -321,9 +321,9 @@ TEST_CASE("misc defects") {
 #include <random>
 TEST_CASE("Q targeted") {
     struct C {
-        const char* name;
-        const char* seq;
-        int cols;
+        const char* Name;
+        const char* Seq;
+        int Cols;
     };
     C cs[] = {
         {"overwrite head narrow",
@@ -366,9 +366,9 @@ TEST_CASE("Q targeted") {
     };
     for (auto& c : cs) {
         VtParser p;
-        Grid* g = Mk(c.cols, 3, 0);
-        F(p, *g, c.seq);
-        CHECK_MESSAGE(Inv(*g) == "", std::string(c.name) << " -> " << Inv(*g));
+        Grid* g = Mk(c.Cols, 3, 0);
+        F(p, *g, c.Seq);
+        CHECK_MESSAGE(Inv(*g) == "", std::string(c.Name) << " -> " << Inv(*g));
         delete g;
     }
 }
@@ -492,10 +492,10 @@ TEST_CASE("S nth alloc fail in Resize") {
         auto cr = g->CursorRow(), cc = g->CursorCol();
         auto t = g->ScrollTop(), b = g->ScrollBot();
         char32_t c0 = CP(*g, 0, 0);
-        g_cnt = 0;
-        g_failAt = n;
+        G_CNT = 0;
+        G_FAIL_AT = n;
         auto r = g->Resize(30, 5);
-        g_failAt = -1;
+        G_FAIL_AT = -1;
         INFO("fail at alloc " << n << " ok=" << r.has_value());
         if (!r.has_value()) {
             CHECK(g->Cols() == 20);
@@ -513,9 +513,9 @@ TEST_CASE("S nth alloc fail in Resize") {
     Grid* g = Mk(20, 10, 50);
     VtParser p;
     F(p, *g, "abc");
-    g_failAlloc = true;
+    G_FAIL_ALLOC = true;
     auto r = g->Resize(20, 4);
-    g_failAlloc = false;
+    G_FAIL_ALLOC = false;
     CHECK(!r);
     CHECK(g->ScrollbackSize() == 0);
     delete g;
