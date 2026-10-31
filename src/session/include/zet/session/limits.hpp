@@ -80,9 +80,10 @@ inline constexpr std::uint32_t SNAPSHOT_BYTES_PER_CELL = 35U;
 /// Only for the cost comparison; SNAPSHOT_MAX_BYTES in wire/limits.hpp is the
 /// hard cap. A zero-size terminal returns SNAPSHOT_SCROLLBACK_BYTES, which is
 /// cheaper than always forcing path B.
-[[nodiscard]] inline std::uint32_t SnapshotEstimateBytes(
+[[nodiscard]] inline std::uint64_t SnapshotEstimateBytes(
     std::uint32_t rows, std::uint32_t cols) noexcept {
-    return rows * cols * SNAPSHOT_BYTES_PER_CELL + SNAPSHOT_SCROLLBACK_BYTES;
+    return std::uint64_t{rows} * cols * SNAPSHOT_BYTES_PER_CELL +
+           SNAPSHOT_SCROLLBACK_BYTES;
 }
 
 /// The two liveness timers of one connection. Zero switches either off,

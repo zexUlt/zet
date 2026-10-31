@@ -391,18 +391,21 @@ ConnectionResult AgentConnection::PumpResume(Timestamp now, MutableByteSpan out,
         return Refuse(SessionError{EProtoError::MalformedField});
     }
 
-    // Path A/B decision (§9 ADR-030). Feasibility comes first, then cost.
-    //   ring_overflowed: the ring filled in Resync mode; path B is mandatory.
-    //   stream_gen < session_gen: the client applied a generation the agent has
-    //     already superseded; the client must catch up via a new snapshot.
-    const bool mandatoryB =
-        Handle_->RingOverflowed() || resume->StreamGen < Handle_->SessionGen();
-
     // Path B is only valid for clients that advertised GRID_CAPABLE and
     // negotiated the grid protocol version.  A non-capable client cannot
     // receive a grid snapshot, so the cost check must be gated on capability.
     const bool gridCapable =
         NegotiatedVersion_ >= wire::PROTOCOL_VERSION_GRID && HelloGridCapable_;
+
+    // Path A/B decision (§9 ADR-030). Feasibility comes first, then cost.
+    //   ring_overflowed: the ring filled in Resync mode; path B is mandatory.
+    //   stream_gen < session_gen: the client applied a generation the agent has
+    //     already superseded; the client must catch up via a new snapshot.
+    // Both conditions are only meaningful for GRID_CAPABLE peers: a non-capable
+    // peer cannot receive a snapshot, so never force path B for one. §9.
+    const bool mandatoryB =
+        gridCapable && (Handle_->RingOverflowed() ||
+                        resume->StreamGen < Handle_->SessionGen());
 
     bool usePathB = mandatoryB;
     if (!usePathB && gridCapable) {
@@ -436,6 +439,9 @@ ConnectionResult AgentConnection::PumpResume(Timestamp now, MutableByteSpan out,
         Channel_.emplace(std::move(chosen), Handle_->Output(), Handle_->Input(),
                          now, Handle_->Liveness(), NegotiatedVersion_,
                          SnapshotBuf_);
+        // Prevent Poll from sending stale pre-NewGeneration Data frames while
+        // waiting for SupplySnapshot to clear the ring. §9 ADR-030.
+        Channel_->SuppressDataUntilGrid();
         Stage_ = EStage::AwaitSnapshot;
         const auto size = Handle_->LastKnownSize();
         return NeedsSnapshot{
@@ -482,17 +488,35 @@ ConnectionResult AgentConnection::PumpAwaitSnapshot(
         }
         if (const auto* resize = std::get_if<DeliveredResize>(&*event)) {
             Handle_->ReportResize(resize->Resize);
+            // A new Resize updates the terminal size; re-arm the reminder so
+            // the caller sees NeedsSnapshot with the fresh dimensions. §9.
+            SnapshotReminderSent_ = false;
             return Resized{.Size = resize->Resize};
         }
         // DeliveredSessionEnd, DeliveredNothing, DeliveredGridApplied → fall
         // through; none of these change the snapshot wait.
     }
-    (void)out;
-    const auto size = Handle_->LastKnownSize();
-    return NeedsSnapshot{
-        .Rows = size ? size->Rows : std::uint16_t{0},
-        .Cols = size ? size->Cols : std::uint16_t{0},
-    };
+    // Poll keepalive/liveness maintenance even in the await-snapshot window so
+    // the connection does not go silent.  §9 ADR-030.
+    auto written = Channel_->Poll(now, out, scratch);
+    if (!written) {
+        return std::unexpected(Fail(written.error()));
+    }
+    if (*written > 0) {
+        return SendFrame{.Written = *written};
+    }
+    // Return NeedsSnapshot on the first idle pump so the caller learns a
+    // snapshot is required.  Subsequent idle pumps return Idle to avoid a
+    // busy-loop in the caller's event loop.  §9 ADR-030.
+    if (!SnapshotReminderSent_) {
+        SnapshotReminderSent_ = true;
+        const auto size = Handle_->LastKnownSize();
+        return NeedsSnapshot{
+            .Rows = size ? size->Rows : std::uint16_t{0},
+            .Cols = size ? size->Cols : std::uint16_t{0},
+        };
+    }
+    return Idle{};
 }
 
 void AgentConnection::SupplySnapshot([[maybe_unused]] Timestamp now,
@@ -661,9 +685,13 @@ ConnectionResult ClientConnection::SendResume(Timestamp now,
     std::array<std::byte, RESUME_PLAINTEXT_MAX> plain{};
     ByteWriter writer{MutableByteSpan{plain}};
     // At ver=2, stream_gen tells the agent which output generation the client
-    // last applied so the agent can decide between path A and path B. §9.
+    // last applied so the agent can decide between path A and path B.  At
+    // ver=1 the field does not exist in the wire format; send 0 so
+    // WriteResume does not reject it as MalformedField. §9.
     const wire::ResumeMessage resume{
-        .StreamGen = Session_.StreamGen(),
+        .StreamGen = NegotiatedVersion_ >= wire::PROTOCOL_VERSION_GRID
+                         ? Session_.StreamGen()
+                         : std::uint32_t{0},
         .ClientReceiveOffset = Session_.ReceiveOffset()};
     const auto written = wire::WriteResume(writer, resume, NegotiatedVersion_);
     if (!written) {

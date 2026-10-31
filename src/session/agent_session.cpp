@@ -148,8 +148,10 @@ void SessionHandle::SetGridInfo(std::uint16_t ver, bool gridCapable) noexcept {
     // Called right after ConfirmResume, before Attach — IsCurrent() is not yet
     // meaningful here.  The caller (AgentConnection) ensures this is only
     // called once per authenticated connection; no guard needed.
-    Session_->GridCapable_ = gridCapable;
     Session_->Streams_.SetOverflowMode(ver, gridCapable);
+    // v2 non-capable: overflow ends the session with SessionEnd{Overflow}. §9.
+    Session_->ShouldReportOverflow_ =
+        (ver >= wire::PROTOCOL_VERSION_GRID && !gridCapable);
 }
 
 void SessionHandle::NewGeneration() noexcept {

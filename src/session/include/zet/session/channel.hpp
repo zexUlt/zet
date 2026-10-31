@@ -276,6 +276,13 @@ public:
     /// `streamGen` is the StreamGen from the snapshot event.
     void QueueGridApplied(std::uint32_t streamGen) noexcept;
 
+    /// Agent side: suppress outgoing Data until the next StartGrid call.
+    ///
+    /// Called once after Channel creation on path B, before SupplySnapshot
+    /// has cleared the ring.  Without this guard, Poll would send pre-snapshot
+    /// bytes that belong to the old generation.  StartGrid clears the flag.
+    void SuppressDataUntilGrid() noexcept;
+
 private:
     /// Poll without the liveness bookkeeping around it.
     [[nodiscard]] ChannelResult<std::size_t> PollOnce(
@@ -375,6 +382,13 @@ private:
     bool EndSent_{false};
     /// True after GridEnd is sent; cleared when GridApplied is received.
     bool GridAwaitingApplied_{false};
+    /// The stream generation the agent expects to see in the next GridApplied.
+    /// Set by StartGrid; validated when GridApplied arrives. §9.
+    std::uint32_t GridExpectedAppliedGen_{0};
+    /// Set by SuppressDataUntilGrid(); cleared by StartGrid(). Prevents Poll
+    /// from sending pre-NewGeneration bytes between AttachPathB and
+    /// SupplySnapshot. §9 ADR-030.
+    bool AwaitingSnapshotSupply_{false};
 
     /// The SessionEnd to send once the stream is acknowledged, and whether it
     /// has gone.

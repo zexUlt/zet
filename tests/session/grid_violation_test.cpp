@@ -488,3 +488,42 @@ TEST_CASE_FIXTURE(
     // Must succeed: the stale ack is silently ignored, keyboard is delivered.
     REQUIRE(ev.has_value());
 }
+
+// ── Probe-derived tests ───────────────────────────────────────────────────
+
+TEST_CASE_FIXTURE(SodiumFixture,
+                  "GridApplied with nothing awaited is a violation") {
+    ViolationRig rig;
+    const auto plain = GridAppliedRaw(99);
+    const auto ev = rig.InjectToAgent(ByteSpan{plain});
+    MESSAGE(
+        "GridApplied(99) with nothing awaited: has_value=" << ev.has_value());
+    CHECK_FALSE(ev.has_value());
+}
+
+TEST_CASE_FIXTURE(SodiumFixture,
+                  "GridApplied wrong gen while awaited is a violation") {
+    ViolationRig rig;
+    const std::vector<std::byte> snap(32, std::byte{0xCC});
+    rig.Agent.StartGrid(ByteSpan{snap}, 0, 1, 0);
+    const auto plain = GridAppliedRaw(99);
+    const auto ev = rig.InjectToAgent(ByteSpan{plain});
+    MESSAGE(
+        "GridApplied(99) when awaiting gen 1: has_value=" << ev.has_value());
+    CHECK_FALSE(ev.has_value());
+}
+
+TEST_CASE_FIXTURE(SodiumFixture,
+                  "stale acks during grid emission do not advance Base") {
+    ViolationRig rig;
+    const std::vector<std::byte> snap(32, std::byte{0xCC});
+    const std::vector<std::byte> junk(200, std::byte{1});
+    std::ignore = rig.AgentSendBuf.Append(ByteSpan{junk});
+    rig.Agent.StartGrid(ByteSpan{snap}, 0, 1, 0);
+    for (std::uint64_t ack : {50ull, 1000ull}) {
+        const auto plain = DataWithAck(ack, 4);
+        const auto ev = rig.InjectToAgent(ByteSpan{plain});
+        CHECK(ev.has_value());
+        CHECK(rig.AgentSendBuf.Base() == 0);
+    }
+}

@@ -20,7 +20,8 @@ SessionResult<std::size_t> StreamState::Write(ByteSpan bytes) noexcept {
     }
     // Resync mode: once ring_overflowed is set the ring is full and no more
     // bytes are accepted. The pty loop sees 0 and stops reading.
-    if (State_ == ESessionState::Detached && Output_.RingOverflowed()) {
+    if (State_ == ESessionState::Detached &&
+        Overflow_ == EDetachedOverflow::Resync && Output_.RingOverflowed()) {
         return 0;
     }
     const std::size_t ceiling = State_ == ESessionState::Live
@@ -37,10 +38,18 @@ SessionResult<std::size_t> StreamState::Write(ByteSpan bytes) noexcept {
             Reap(ESessionError::DisconnectBufferOverflow);
             return std::unexpected(ESessionError::DisconnectBufferOverflow);
         }
-        if (Overflow_ == EDetachedOverflow::Resync && room == 0) {
-            // Ring is full: set the flag that forces path B on reconnect.
+        if (Overflow_ == EDetachedOverflow::Resync) {
+            if (room == 0) {
+                // Ring is full: set the flag that forces path B on reconnect.
+                Output_.SetRingOverflowed();
+                return 0;
+            }
+            // Partial fill: write what fits, then set the flag so the
+            // next AcceptsWrites call sees RingOverflowed and stays true.
+            // The PTY loop will keep draining even though no more bytes fit.
+            auto written = Output_.Append(bytes.first(room));
             Output_.SetRingOverflowed();
-            return 0;
+            return written;
         }
     }
     return Output_.Append(bytes.first(std::min(bytes.size(), room)));
@@ -88,11 +97,10 @@ void StreamState::OnTimer(Timestamp now) noexcept {
 
 void StreamState::SetOverflowMode(std::uint16_t negotiatedVer,
                                   bool gridCapable) noexcept {
-    if (negotiatedVer >= wire::PROTOCOL_VERSION_GRID && gridCapable) {
-        Overflow_ = EDetachedOverflow::Resync;
-    }
-    // ver=1 or ver=2 without GRID_CAPABLE: keep Reap (default).
-    // The client side always uses Backpressure regardless.
+    // Overflow mode is decided per authenticated connection, not sticky. §9.
+    Overflow_ = (negotiatedVer >= wire::PROTOCOL_VERSION_GRID && gridCapable)
+                    ? EDetachedOverflow::Resync
+                    : EDetachedOverflow::Reap;
 }
 
 SessionResult<std::uint64_t> StreamState::AttachPathB() noexcept {

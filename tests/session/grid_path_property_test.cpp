@@ -1210,3 +1210,217 @@ TEST_CASE_FIXTURE(
     ac2.Close(START);
     cc2.Close(START);
 }
+
+// ── Probe-derived tests ───────────────────────────────────────────────────
+
+namespace {
+
+struct Rig {
+    SessionLimits limits = TinyLimits();
+    std::vector<std::byte> as =
+        std::vector<std::byte>(limits.DisconnectMax + 256);
+    std::vector<std::byte> cs = std::vector<std::byte>(limits.ResendMax + 256);
+    AgentSession agent{
+        DeriveSessionSecrets(MakeKey(33)),
+        SessionStreams{
+            .Storage = MutableByteSpan{as}, .Now = START, .Limits = limits}};
+    ClientSession client{
+        DeriveSessionSecrets(MakeKey(33)),
+        SessionStreams{
+            .Storage = MutableByteSpan{cs}, .Now = START, .Limits = limits}};
+    Space sp;
+    std::uint64_t nonces = 0;
+};
+
+// Connect, drive, return a label describing what the agent pumped:
+//   "no-snapshot"           path A (or close succeeded without a snapshot)
+//   "NeedsSnapshot"         path B requested but not supplied
+//   "NeedsSnapshot+applied" path B supplied and client applied it
+// Appends " agent-err" or " client-err" on unexpected pump failures.
+std::string Reconnect(Rig& r, bool capable, std::uint16_t ceiling,
+                      bool close = true, bool supply = false) {
+    AgentConnection ac{MutableByteSpan{r.sp.AgentFrames}, START, ceiling};
+    ClientConnection cc{r.client,
+                        MakeNonce(++r.nonces),
+                        MutableByteSpan{r.sp.ClientFrames},
+                        START,
+                        capable,
+                        ceiling,
+                        MutableByteSpan{r.sp.SnapshotBuf}};
+    if (!DriveToLive(ac, cc, r.agent, r.sp, START, r.nonces)) {
+        return "drive-failed";
+    }
+    std::string res = "no-snapshot";
+    const std::vector<std::byte> snap(16, std::byte{0x22});
+    bool applied = false;
+    for (int i = 0; i < 60; ++i) {
+        auto ea = PumpAgent(ac, r.sp, START);
+        if (!ea) {
+            res += " agent-err";
+            break;
+        }
+        if (std::holds_alternative<NeedsSnapshot>(*ea)) {
+            res = "NeedsSnapshot";
+            if (!supply) {
+                break;
+            }
+            ac.SupplySnapshot(START, ByteSpan{snap}, 0, 0);
+        } else if (const auto* sf = std::get_if<SendFrame>(&*ea)) {
+            if (!Feed(cc, r.sp, sf->Written)) {
+                break;
+            }
+        }
+        auto ec = PumpClient(cc, r.sp, START);
+        if (!ec) {
+            res += " client-err";
+            break;
+        }
+        if (std::holds_alternative<ApplySnapshot>(*ec)) {
+            applied = true;
+        }
+        if (const auto* sf = std::get_if<SendFrame>(&*ec)) {
+            if (!Feed(ac, r.sp, sf->Written)) {
+                break;
+            }
+        }
+    }
+    if (applied) {
+        res += "+applied";
+    }
+    if (close) {
+        ac.Close(START);
+    }
+    return res;
+}
+
+}  // namespace
+
+TEST_CASE_FIXTURE(SodiumFixture,
+                  "write loop in Resync mode reaches ring_overflowed") {
+    Rig r;
+    Reconnect(r, true, wire::PROTOCOL_VERSION_GRID);
+    const std::vector<std::byte> chunk(100, std::byte{0xBB});
+    int writes = 0;
+    while (r.agent.AcceptsWrites() && writes < 100) {
+        std::ignore = r.agent.Write(ByteSpan{chunk});
+        ++writes;
+    }
+    MESSAGE("writes=" << writes
+                      << " AcceptsWrites=" << r.agent.AcceptsWrites());
+    auto res = Reconnect(r, true, wire::PROTOCOL_VERSION_GRID);
+    MESSAGE("reconnect: " << res);
+    CHECK(res == "NeedsSnapshot");
+}
+
+TEST_CASE_FIXTURE(
+    SodiumFixture,
+    "capable then non-capable v2 connection resets overflow mode to Reap") {
+    Rig r;
+    Reconnect(r, true, wire::PROTOCOL_VERSION_GRID);
+    Reconnect(r, false, wire::PROTOCOL_VERSION_GRID);  // non-capable now
+    const std::vector<std::byte> chunk(200, std::byte{0xBB});
+    SessionResult<std::size_t> last = 0;
+    for (int i = 0; i < 6; ++i) {
+        last = r.agent.Write(ByteSpan{chunk});
+    }
+    MESSAGE("state=" << int(r.agent.State())
+                     << " lastWrite ok=" << last.has_value());
+    CHECK(r.agent.State() == ESessionState::Reaped);
+}
+
+TEST_CASE_FIXTURE(SodiumFixture,
+                  "v1 and non-capable v2 peers after path B get path A") {
+    Rig r;
+    Reconnect(r, true, wire::PROTOCOL_VERSION_GRID);
+    const std::vector<std::byte> chunk(200, std::byte{0xBB});
+    for (int i = 0; i < 6; ++i) {
+        std::ignore = r.agent.Write(ByteSpan{chunk});
+    }
+    auto a = Reconnect(r, true, wire::PROTOCOL_VERSION_GRID, true, true);
+    MESSAGE("pathB: " << a << " client gen=" << r.client.StreamGen());
+    auto b = Reconnect(r, false, wire::PROTOCOL_VERSION_MAX);  // v1 peer
+    MESSAGE("v1 reconnect: " << b);
+    CHECK(b == "no-snapshot");
+    auto c =
+        Reconnect(r, false, wire::PROTOCOL_VERSION_GRID);  // v2 non-capable
+    MESSAGE("v2 non-capable reconnect: " << c);
+    CHECK(c == "no-snapshot");
+}
+
+TEST_CASE_FIXTURE(SodiumFixture,
+                  "PumpAwaitSnapshot does not busy-loop: returns Idle") {
+    Rig r;
+    Reconnect(r, true, wire::PROTOCOL_VERSION_GRID);
+    const std::vector<std::byte> chunk(200, std::byte{0xBB});
+    for (int i = 0; i < 6; ++i) {
+        std::ignore = r.agent.Write(ByteSpan{chunk});
+    }
+    AgentConnection ac{MutableByteSpan{r.sp.AgentFrames}, START,
+                       wire::PROTOCOL_VERSION_GRID};
+    ClientConnection cc{r.client,
+                        MakeNonce(++r.nonces),
+                        MutableByteSpan{r.sp.ClientFrames},
+                        START,
+                        true,
+                        wire::PROTOCOL_VERSION_GRID,
+                        MutableByteSpan{r.sp.SnapshotBuf}};
+    REQUIRE(DriveToLive(ac, cc, r.agent, r.sp, START, r.nonces));
+    int needs = 0, idle = 0;
+    for (int i = 0; i < 20; ++i) {
+        auto ea = PumpAgent(ac, r.sp, START);
+        REQUIRE(ea.has_value());
+        needs += std::holds_alternative<NeedsSnapshot>(*ea) ? 1 : 0;
+        idle += std::holds_alternative<Idle>(*ea) ? 1 : 0;
+    }
+    MESSAGE("20 pumps, no input: NeedsSnapshot=" << needs << " Idle=" << idle);
+    CHECK(idle > 0);
+}
+
+TEST_CASE("SnapshotEstimateBytes does not overflow at max dimensions") {
+    auto e = SnapshotEstimateBytes(65535, 65535);
+    MESSAGE("estimate(65535x65535)="
+            << e << " expected="
+            << (std::uint64_t{65535} * 65535 * 35 + SNAPSHOT_SCROLLBACK_BYTES));
+    CHECK(std::uint64_t{e} ==
+          (std::uint64_t{65535} * 65535 * 35 + SNAPSHOT_SCROLLBACK_BYTES));
+}
+
+TEST_CASE_FIXTURE(SodiumFixture,
+                  "v2 non-capable overflow produces SessionEnd Overflow") {
+    Rig r;
+    Reconnect(r, false, wire::PROTOCOL_VERSION_GRID);
+    const std::vector<std::byte> chunk(200, std::byte{0xBB});
+    for (int i = 0; i < 6; ++i) {
+        std::ignore = r.agent.Write(ByteSpan{chunk});
+    }
+    MESSAGE("state=" << int(r.agent.State())
+                     << " endedWith=" << r.agent.EndedWith().has_value());
+    REQUIRE(r.agent.EndedWith().has_value());
+    CHECK(r.agent.EndedWith()->Kind == wire::ESessionEndKind::Overflow);
+}
+
+TEST_CASE_FIXTURE(SodiumFixture,
+                  "overflow mode resets per connection: non-capable v2 after "
+                  "capable gets Reap not NeedsSnapshot") {
+    Rig r;
+    Reconnect(r, true, wire::PROTOCOL_VERSION_GRID);
+    Reconnect(r, false, wire::PROTOCOL_VERSION_GRID);
+    const std::vector<std::byte> chunk(200, std::byte{0xBB});
+    for (int i = 0; i < 8; ++i) {
+        std::ignore = r.agent.Write(ByteSpan{chunk});
+    }
+    auto c = Reconnect(r, false, wire::PROTOCOL_VERSION_GRID);
+    MESSAGE("non-capable v2 reconnect after overflow: " << c);
+    CHECK(c != "NeedsSnapshot");
+}
+
+TEST_CASE_FIXTURE(SodiumFixture, "v1 peer overflow is silently reaped") {
+    Rig r;
+    Reconnect(r, false, wire::PROTOCOL_VERSION_MAX);
+    const std::vector<std::byte> chunk(200, std::byte{0xBB});
+    for (int i = 0; i < 8; ++i) {
+        std::ignore = r.agent.Write(ByteSpan{chunk});
+    }
+    CHECK(r.agent.State() == ESessionState::Reaped);
+    CHECK(r.agent.ReapReason() == ESessionError::DisconnectBufferOverflow);
+}

@@ -66,8 +66,17 @@ public:
     // session itself, only a SessionRef — so this is no way around §5.
 
     /// See StreamState::Write. The agent reaps on overflow while detached.
+    /// For v2 non-capable peers, overflow also produces SessionEnd{Overflow}.
     [[nodiscard]] SessionResult<std::size_t> Write(ByteSpan output) noexcept {
-        return Streams_.Write(output);
+        auto result = Streams_.Write(output);
+        // v2 non-capable overflow: the session is reaped; also set the session
+        // end so the next connection delivers SessionEnd{Overflow}. §9.
+        if (!result &&
+            result.error() == ESessionError::DisconnectBufferOverflow &&
+            ShouldReportOverflow_) {
+            End({.Kind = wire::ESessionEndKind::Overflow, .Value = 0});
+        }
+        return result;
     }
     [[nodiscard]] bool AcceptsWrites() const noexcept {
         return Streams_.AcceptsWrites();
@@ -120,10 +129,10 @@ private:
     std::optional<wire::SessionEndMessage> End_;
 
     // ── M6 per-session grid state (§9 ADR-035) ─────────────────────────────
-    /// Whether the client in the last authenticated connection sent
-    /// GRID_CAPABLE in Hello (trusted only post-auth). Determines overflow
-    /// mode (stored in Streams_; this mirrors it for the state-query path).
-    bool GridCapable_{false};
+    /// Whether the current connection is v2 without GRID_CAPABLE. When true,
+    /// a Reap overflow also sets End_ to SessionEnd{Overflow} so the next
+    /// connection delivers it to the client. Updated by SetGridInfo. §9.
+    bool ShouldReportOverflow_{false};
     /// Last known terminal size, updated when a Resize is received while Live.
     /// Used for the path A/B cost comparison on the next reconnect.
     std::optional<wire::ResizeMessage> LastKnownSize_;

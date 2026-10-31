@@ -277,6 +277,10 @@ private:
     /// Whether the client's Hello carried a valid GRID_CAPABLE TLV. Read
     /// pre-auth but trusted only after SetGridInfo is called post-auth. §7.
     bool HelloGridCapable_{false};
+    /// True once PumpAwaitSnapshot has returned NeedsSnapshot once.  Avoids a
+    /// busy-loop: the first call informs the caller a snapshot is needed;
+    /// subsequent calls return Idle until the snapshot is supplied. §9.
+    bool SnapshotReminderSent_{false};
     std::optional<ResumeAttempt> Attempt_;
     std::optional<SessionHandle> Handle_;
     std::optional<DirectionFrames> Current_;

@@ -323,6 +323,17 @@ ChannelResult<IncomingEvent> Channel::Receive(
             if (!msg) {
                 return std::unexpected(SessionError{msg.error()});
             }
+            // Violation: GridApplied when not awaiting one, or while still
+            // emitting (GridEnd not yet sent). §9 violation table.
+            if (!GridAwaitingApplied_ || GridEmitting_.has_value()) {
+                return std::unexpected(
+                    SessionError{EProtoError::UnexpectedMessage});
+            }
+            // Violation: wrong stream generation. §9 violation table.
+            if (msg->StreamGen != GridExpectedAppliedGen_) {
+                return std::unexpected(
+                    SessionError{EProtoError::MalformedField});
+            }
             // Clear the grid-in-flight window.
             GridAwaitingApplied_ = false;
             return DeliveredGridApplied{.StreamGen = msg->StreamGen};
@@ -507,7 +518,9 @@ ChannelResult<std::size_t> Channel::PollOnce(Timestamp now, MutableByteSpan out,
     //
     // Agent: suppressed during grid emission window (GridBegin sent but
     // GridApplied not yet received). §9 ADR-030.
-    if (SendBuf_.Unsent() > 0 && !(Role_ == ERole::Agent && GridInFlight())) {
+    if (SendBuf_.Unsent() > 0 &&
+        !(Role_ == ERole::Agent &&
+          (GridInFlight() || AwaitingSnapshotSupply_))) {
         // §1: no allocation in the protocol core — scratch is the caller's
         // buffer. Plaintext layout: type(1) | ack:u64be(8) | offset:u64be(8)
         // | payload(N). We write the 17-byte header into scratch[0..17) with
@@ -705,6 +718,8 @@ void Channel::StartGrid(ByteSpan snapshot, std::uint8_t flags,
     // NewGeneration() has already cleared SendBuf (End=0); any piggybacked ack
     // from the old generation would fire AckBeyondSent.  §9 ADR-030.
     GridAwaitingApplied_ = true;
+    GridExpectedAppliedGen_ = streamGen;
+    AwaitingSnapshotSupply_ = false;
     GridEmitting_->Snapshot = snapshot;
     GridEmitting_->StreamGen = streamGen;
     GridEmitting_->TotalLen = static_cast<std::uint32_t>(snapshot.size());
@@ -719,6 +734,12 @@ void Channel::QueueGridApplied(std::uint32_t streamGen) noexcept {
         return;
     }
     PendingGridApplied_ = streamGen;
+}
+
+void Channel::SuppressDataUntilGrid() noexcept {
+    if (Role_ == ERole::Agent) {
+        AwaitingSnapshotSupply_ = true;
+    }
 }
 
 }  // namespace zet::session
