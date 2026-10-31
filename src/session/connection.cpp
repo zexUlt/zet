@@ -653,10 +653,11 @@ ConnectionResult ClientConnection::Pump(Timestamp now, MutableByteSpan out,
                     now, out, scratch, [this] { Handle_->ConfirmAgentFrame(); },
                     [this](const DeliveredGridSnapshot& snap)
                         -> std::optional<ConnectionResult> {
-                        // Queue GridApplied (next Poll sends it), update the
-                        // session's stream gen so the next Resume carries it.
-                        Channel_->QueueGridApplied(snap.StreamGen);
-                        Handle_->SetStreamGen(snap.StreamGen);
+                        // Store the pending gen; the caller must call
+                        // ConfirmApply(gen) or DenyApply(gen) once it renders
+                        // the snapshot. GridApplied and SetStreamGen are
+                        // deferred until then.
+                        PendingApplyGen_ = snap.StreamGen;
                         return ApplySnapshot{
                             .Bytes = snap.Bytes,
                             .StreamGen = snap.StreamGen,
@@ -778,6 +779,26 @@ void ClientConnection::Close(Timestamp now) noexcept {
     if (Handle_) {
         Handle_->Detach(now);
     }
+}
+
+void ClientConnection::ConfirmApply(std::uint32_t gen) noexcept {
+    if (!PendingApplyGen_ || *PendingApplyGen_ != gen) {
+        return;
+    }
+    PendingApplyGen_.reset();
+    if (Channel_) {
+        Channel_->QueueGridApplied(gen);
+    }
+    if (Handle_) {
+        Handle_->SetStreamGen(gen);
+    }
+}
+
+void ClientConnection::DenyApply(std::uint32_t gen) noexcept {
+    if (!PendingApplyGen_ || *PendingApplyGen_ != gen) {
+        return;
+    }
+    PendingApplyGen_.reset();
 }
 
 }  // namespace zet::session

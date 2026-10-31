@@ -82,8 +82,10 @@ struct Conn {
             Log.push_back({"client-err"});
             return false;
         }
-        if (std::holds_alternative<ApplySnapshot>(*ec))
+        if (const auto* as = std::get_if<ApplySnapshot>(&*ec)) {
             Log.push_back({"client:ApplySnapshot"});
+            cc.ConfirmApply(as->StreamGen);
+        }
         if (const auto* sf = std::get_if<SendFrame>(&*ec)) {
             if (!Feed(ac, r.sp, sf->Written)) {
                 Log.push_back({"agent-feed-err"});
@@ -291,9 +293,10 @@ TEST_CASE_FIXTURE(
                 res += "client-err ";
                 break;
             }
-            if (std::holds_alternative<ApplySnapshot>(*ec)) {
+            if (const auto* as = std::get_if<ApplySnapshot>(&*ec)) {
                 res += "applied ";
                 done = true;
+                c2.cc.ConfirmApply(as->StreamGen);
             }
             if (auto* sf = std::get_if<SendFrame>(&*ec)) {
                 if (!Feed(c2.ac, r.sp, sf->Written)) {
@@ -517,4 +520,92 @@ TEST_CASE_FIXTURE(SodiumFixture,
         }
     }
     CHECK(gotNeeds);
+}
+
+// ── Item 2: ConfirmApply / DenyApply ─────────────────────────────────────────
+//
+// GridApplied must not be sent and StreamGen must not advance until the caller
+// explicitly calls ConfirmApply.  DenyApply discards the pending gen so
+// StreamGen stays unchanged.
+
+TEST_CASE_FIXTURE(SodiumFixture,
+                  "ConfirmApply sends GridApplied and advances StreamGen; "
+                  "DenyApply leaves StreamGen unchanged") {
+    Rig r;
+    // First connection: populate last known size and disconnect.
+    {
+        Conn c1(r, true, PROTOCOL_VERSION_GRID);
+        c1.cc.QueueResize(ResizeMessage{.Rows = 24, .Cols = 80});
+        for (int i = 0; i < 40; ++i) c1.Step();
+        c1.ac.Close(START);
+    }
+    const std::vector<std::byte> chunk(200, std::byte{0xBB});
+    for (int i = 0; i < 6; ++i) std::ignore = r.agent.Write(ByteSpan{chunk});
+
+    // ── DenyApply: snapshot applied gets discarded, StreamGen stays 0.
+    {
+        Conn c2(r, true, PROTOCOL_VERSION_GRID);
+        c2.cc.QueueResize(ResizeMessage{.Rows = 24, .Cols = 80});
+        const std::uint32_t genBefore = r.client.StreamGen();
+        bool gotApply = false;
+        for (int i = 0; i < 120 && !gotApply; ++i) {
+            auto ea = PumpAgent(c2.ac, r.sp, START);
+            REQUIRE(ea.has_value());
+            if (std::holds_alternative<NeedsSnapshot>(*ea)) {
+                static std::vector<std::byte> snap(16, std::byte{0x11});
+                c2.ac.SupplySnapshot(START, ByteSpan{snap}, 0, 0);
+            } else if (const auto* sf = std::get_if<SendFrame>(&*ea)) {
+                REQUIRE(Feed(c2.cc, r.sp, sf->Written));
+            } else if (std::get_if<NeedsSession>(&*ea)) {
+                c2.ac.Route(r.agent.Ref(), MakeNonce(++r.nonces));
+            }
+            auto ec = PumpClient(c2.cc, r.sp, START);
+            REQUIRE(ec.has_value());
+            if (const auto* as = std::get_if<ApplySnapshot>(&*ec)) {
+                gotApply = true;
+                // DenyApply — do NOT send GridApplied, do NOT advance
+                // StreamGen.
+                c2.cc.DenyApply(as->StreamGen);
+            } else if (const auto* sf = std::get_if<SendFrame>(&*ec)) {
+                REQUIRE(Feed(c2.ac, r.sp, sf->Written));
+            }
+        }
+        REQUIRE(gotApply);
+        // StreamGen must NOT have advanced after DenyApply.
+        CHECK(r.client.StreamGen() == genBefore);
+        c2.ac.Close(START);
+    }
+
+    // ── ConfirmApply: StreamGen must advance after explicit confirm.
+    // Re-write data to keep path B forced on the next reconnect.
+    for (int i = 0; i < 6; ++i) std::ignore = r.agent.Write(ByteSpan{chunk});
+    {
+        Conn c3(r, true, PROTOCOL_VERSION_GRID);
+        c3.cc.QueueResize(ResizeMessage{.Rows = 24, .Cols = 80});
+        const std::uint32_t genBefore = r.client.StreamGen();
+        bool gotApply = false;
+        for (int i = 0; i < 120 && !gotApply; ++i) {
+            auto ea = PumpAgent(c3.ac, r.sp, START);
+            REQUIRE(ea.has_value());
+            if (std::holds_alternative<NeedsSnapshot>(*ea)) {
+                static std::vector<std::byte> snap(16, std::byte{0x22});
+                c3.ac.SupplySnapshot(START, ByteSpan{snap}, 0, 0);
+            } else if (const auto* sf = std::get_if<SendFrame>(&*ea)) {
+                REQUIRE(Feed(c3.cc, r.sp, sf->Written));
+            } else if (std::get_if<NeedsSession>(&*ea)) {
+                c3.ac.Route(r.agent.Ref(), MakeNonce(++r.nonces));
+            }
+            auto ec = PumpClient(c3.cc, r.sp, START);
+            REQUIRE(ec.has_value());
+            if (const auto* as = std::get_if<ApplySnapshot>(&*ec)) {
+                gotApply = true;
+                c3.cc.ConfirmApply(as->StreamGen);
+            } else if (const auto* sf = std::get_if<SendFrame>(&*ec)) {
+                REQUIRE(Feed(c3.ac, r.sp, sf->Written));
+            }
+        }
+        REQUIRE(gotApply);
+        // StreamGen must have advanced after ConfirmApply.
+        CHECK(r.client.StreamGen() > genBefore);
+    }
 }

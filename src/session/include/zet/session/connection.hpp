@@ -331,6 +331,18 @@ public:
     /// As AgentConnection::Close.
     void Close(Timestamp now) noexcept;
 
+    /// The snapshot carried by ApplySnapshot was rendered.  Queues GridApplied
+    /// on the wire and advances the session's stream gen so the next Resume
+    /// carries the updated gen.  No-op if gen does not match the pending apply.
+    void ConfirmApply(std::uint32_t gen) noexcept;
+
+    /// The snapshot could not be applied (allocation failure, etc.).  Clears
+    /// the pending apply without sending GridApplied.  The session's stream gen
+    /// stays at its current value; the agent will resend the snapshot on the
+    /// next reconnect if needed.  No-op if gen does not match the pending
+    /// apply.
+    void DenyApply(std::uint32_t gen) noexcept;
+
 private:
     enum class EStage : std::uint8_t {
         SendHello,
@@ -349,6 +361,8 @@ private:
     ClientResumeAttempt Attempt_;
     std::optional<ClientSessionHandle> Handle_;
     std::optional<wire::ResizeMessage> PendingResize_;
+    /// Set when Pump returns ApplySnapshot; cleared by ConfirmApply/DenyApply.
+    std::optional<std::uint32_t> PendingApplyGen_{};
 };
 
 }  // namespace zet::session

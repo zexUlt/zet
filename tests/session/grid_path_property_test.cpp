@@ -276,6 +276,7 @@ TEST_CASE_FIXTURE(
             gotApplySnapshot = true;
             CHECK(as->StreamGen == 1);
             CHECK(as->Bytes.size() == snapshot.size());
+            cc2.ConfirmApply(as->StreamGen);
         } else if (const auto* sf = std::get_if<SendFrame>(&*ec)) {
             REQUIRE(Feed(ac2, sp, sf->Written));
         } else if (const auto* d = std::get_if<Deliver>(&*ec)) {
@@ -351,8 +352,9 @@ TEST_CASE_FIXTURE(SodiumFixture,
             if (!ec) {
                 return false;
             }
-            if (std::holds_alternative<ApplySnapshot>(*ec)) {
+            if (const auto* as = std::get_if<ApplySnapshot>(&*ec)) {
                 applied = true;
+                cc.ConfirmApply(as->StreamGen);
             } else if (const auto* sf = std::get_if<SendFrame>(&*ec)) {
                 if (!Feed(ac, sp, sf->Written)) {
                     return false;
@@ -648,8 +650,9 @@ TEST_CASE_FIXTURE(SodiumFixture,
         auto ec = cc.Pump(START, MutableByteSpan{sp.Out},
                           MutableByteSpan{sp.Scratch});
         REQUIRE(ec.has_value());
-        if (std::holds_alternative<ApplySnapshot>(*ec)) {
+        if (const auto* as = std::get_if<ApplySnapshot>(&*ec)) {
             appliedSnap = true;
+            cc.ConfirmApply(as->StreamGen);
         } else if (const auto* sf = std::get_if<SendFrame>(&*ec)) {
             REQUIRE(Feed(ac, sp, sf->Written));
         } else if (const auto* d = std::get_if<Deliver>(&*ec)) {
@@ -900,8 +903,9 @@ TEST_CASE_FIXTURE(
             }
             auto ec = PumpClient(cc, sp, START);
             REQUIRE(ec.has_value());
-            if (std::holds_alternative<ApplySnapshot>(*ec)) {
+            if (const auto* as = std::get_if<ApplySnapshot>(&*ec)) {
                 applied = true;
+                cc.ConfirmApply(as->StreamGen);
             } else if (const auto* sf = std::get_if<SendFrame>(&*ec)) {
                 REQUIRE(Feed(ac, sp, sf->Written));
             }
@@ -1275,8 +1279,9 @@ std::string Reconnect(Rig& r, bool capable, std::uint16_t ceiling,
             res += " client-err";
             break;
         }
-        if (std::holds_alternative<ApplySnapshot>(*ec)) {
+        if (const auto* as = std::get_if<ApplySnapshot>(&*ec)) {
             applied = true;
+            cc.ConfirmApply(as->StreamGen);
         }
         if (const auto* sf = std::get_if<SendFrame>(&*ec)) {
             if (!Feed(ac, r.sp, sf->Written)) {

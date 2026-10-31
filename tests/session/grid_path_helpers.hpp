@@ -186,8 +186,9 @@ struct Rig {
             res += " client-err";
             break;
         }
-        if (std::holds_alternative<ApplySnapshot>(*ec)) {
+        if (const auto* as = std::get_if<ApplySnapshot>(&*ec)) {
             applied = true;
+            cc.ConfirmApply(as->StreamGen);
         }
         if (const auto* sf = std::get_if<SendFrame>(&*ec)) {
             if (!Feed(ac, r.sp, sf->Written)) {
