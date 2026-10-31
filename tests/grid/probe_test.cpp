@@ -13,6 +13,18 @@ using namespace zet::grid;
 static bool g_failAlloc = false;
 static int g_failAt = -1;
 static int g_cnt = 0;
+
+// Override the regular throwing form so that ALL array allocations in this
+// binary go through malloc.  Without this, doctest uses the standard new[]
+// while delete[] calls free(), which ASAN reports as alloc-dealloc-mismatch.
+// The fail-alloc counters are intentionally NOT checked here: doctest and
+// other support code must not be disrupted by OOM injection.
+void* operator new[](std::size_t n) {
+    void* p = std::malloc(n ? n : 1);
+    if (!p) throw std::bad_alloc{};
+    return p;
+}
+// Grid uses new(nothrow)[] exclusively; this is the interception point for OOM.
 void* operator new[](std::size_t n, const std::nothrow_t&) noexcept {
     if (g_failAlloc) return nullptr;
     if (g_failAt >= 0 && g_cnt++ == g_failAt) return nullptr;
