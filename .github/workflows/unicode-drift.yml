@@ -1,0 +1,33 @@
+name: Unicode drift check
+
+on:
+  workflow_dispatch:
+  schedule:
+    # Run weekly on Mondays at 06:00 UTC.
+    - cron: '0 6 * * 1'
+
+jobs:
+  drift:
+    name: Regenerate unicode tables and check for drift
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Regenerate unicode_tables.cpp
+        run: python3 tools/gen_unicode_width.py
+
+      - name: Check for drift
+        run: |
+          if git diff --exit-code src/grid/unicode_tables.cpp; then
+            echo "No drift: unicode_tables.cpp is up to date."
+          else
+            echo "DRIFT DETECTED: unicode_tables.cpp differs from what"
+            echo "gen_unicode_width.py would generate."
+            echo "Run 'python3 tools/gen_unicode_width.py' and commit the result."
+            exit 1
+          fi

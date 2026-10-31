@@ -12,6 +12,8 @@ FetchContent_MakeAvailable(doctest)
 
 add_executable(zet_tests
     main.cpp
+    grid/grid_test.cpp
+    grid/probe_test.cpp
     core/byte_reader_test.cpp
     core/byte_writer_test.cpp
     core/log_test.cpp
@@ -47,6 +49,7 @@ target_link_libraries(zet_tests PRIVATE
     zet::crypto
     zet::wire
     zet::session
+    zet::grid
     zet::compile_options
     doctest::doctest
 )
@@ -95,5 +98,10 @@ endif()
 
 include(${doctest_SOURCE_DIR}/scripts/cmake/doctest.cmake)
 doctest_discover_tests(zet_tests)
+
+# Differential-test helper: reads raw bytes from stdin, renders through
+# VtParser+Grid, outputs the visible screen as JSON on stdout.
+add_executable(zet_grid_dump grid/grid_dump_main.cpp)
+target_link_libraries(zet_grid_dump PRIVATE zet::grid zet::compile_options)
 
 add_subdirectory(compile_fail)

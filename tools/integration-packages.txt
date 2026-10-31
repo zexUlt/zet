@@ -19,3 +19,4 @@ zsh
 fish
 tcsh
 iproute2
+py3-pip

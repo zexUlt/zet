@@ -67,6 +67,13 @@ expect "fuzz/probe_fuzz.cpp" "fuzz checks"
 expect "tests/integration/test_deliver.py" "integration"
 expect "tools/integration-packages.txt" "integration macos_e2e"
 
+# M6 grid paths.
+expect "src/grid/grid.cpp" "test integration coverage checks macos fuzz"
+expect "src/grid/vt_parser.cpp" "test integration coverage checks macos fuzz"
+expect "tests/grid/grid_test.cpp" "test integration coverage checks macos"
+expect "tests/grid/grid_dump_main.cpp" "test integration coverage checks macos"
+expect "tests/integration/test_grid_diff.py" "integration"
+
 # A path the table does not know runs everything.
 expect "something/new.txt" "$all"
 
