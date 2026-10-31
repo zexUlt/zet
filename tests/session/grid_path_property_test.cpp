@@ -1220,20 +1220,20 @@ TEST_CASE_FIXTURE(
 namespace {
 
 struct Rig {
-    SessionLimits limits = TinyLimits();
-    std::vector<std::byte> as =
-        std::vector<std::byte>(limits.DisconnectMax + 256);
-    std::vector<std::byte> cs = std::vector<std::byte>(limits.ResendMax + 256);
-    AgentSession agent{
+    SessionLimits Limits = TinyLimits();
+    std::vector<std::byte> As =
+        std::vector<std::byte>(Limits.DisconnectMax + 256);
+    std::vector<std::byte> Cs = std::vector<std::byte>(Limits.ResendMax + 256);
+    AgentSession Agent{
         DeriveSessionSecrets(MakeKey(33)),
         SessionStreams{
-            .Storage = MutableByteSpan{as}, .Now = START, .Limits = limits}};
-    ClientSession client{
+            .Storage = MutableByteSpan{As}, .Now = START, .Limits = Limits}};
+    ClientSession Client{
         DeriveSessionSecrets(MakeKey(33)),
         SessionStreams{
-            .Storage = MutableByteSpan{cs}, .Now = START, .Limits = limits}};
-    Space sp;
-    std::uint64_t nonces = 0;
+            .Storage = MutableByteSpan{Cs}, .Now = START, .Limits = Limits}};
+    Space Sp;
+    std::uint64_t Nonces = 0;
 };
 
 // Connect, drive, return a label describing what the agent pumped:
@@ -1243,22 +1243,22 @@ struct Rig {
 // Appends " agent-err" or " client-err" on unexpected pump failures.
 std::string Reconnect(Rig& r, bool capable, std::uint16_t ceiling,
                       bool close = true, bool supply = false) {
-    AgentConnection ac{MutableByteSpan{r.sp.AgentFrames}, START, ceiling};
-    ClientConnection cc{r.client,
-                        MakeNonce(++r.nonces),
-                        MutableByteSpan{r.sp.ClientFrames},
+    AgentConnection ac{MutableByteSpan{r.Sp.AgentFrames}, START, ceiling};
+    ClientConnection cc{r.Client,
+                        MakeNonce(++r.Nonces),
+                        MutableByteSpan{r.Sp.ClientFrames},
                         START,
                         capable,
                         ceiling,
-                        MutableByteSpan{r.sp.SnapshotBuf}};
-    if (!DriveToLive(ac, cc, r.agent, r.sp, START, r.nonces)) {
+                        MutableByteSpan{r.Sp.SnapshotBuf}};
+    if (!DriveToLive(ac, cc, r.Agent, r.Sp, START, r.Nonces)) {
         return "drive-failed";
     }
     std::string res = "no-snapshot";
     const std::vector<std::byte> snap(16, std::byte{0x22});
     bool applied = false;
     for (int i = 0; i < 60; ++i) {
-        auto ea = PumpAgent(ac, r.sp, START);
+        auto ea = PumpAgent(ac, r.Sp, START);
         if (!ea) {
             res += " agent-err";
             break;
@@ -1270,11 +1270,11 @@ std::string Reconnect(Rig& r, bool capable, std::uint16_t ceiling,
             }
             ac.SupplySnapshot(START, ByteSpan{snap}, 0, 0);
         } else if (const auto* sf = std::get_if<SendFrame>(&*ea)) {
-            if (!Feed(cc, r.sp, sf->Written)) {
+            if (!Feed(cc, r.Sp, sf->Written)) {
                 break;
             }
         }
-        auto ec = PumpClient(cc, r.sp, START);
+        auto ec = PumpClient(cc, r.Sp, START);
         if (!ec) {
             res += " client-err";
             break;
@@ -1284,7 +1284,7 @@ std::string Reconnect(Rig& r, bool capable, std::uint16_t ceiling,
             cc.ConfirmApply(as->StreamGen);
         }
         if (const auto* sf = std::get_if<SendFrame>(&*ec)) {
-            if (!Feed(ac, r.sp, sf->Written)) {
+            if (!Feed(ac, r.Sp, sf->Written)) {
                 break;
             }
         }
@@ -1306,12 +1306,12 @@ TEST_CASE_FIXTURE(SodiumFixture,
     Reconnect(r, true, wire::PROTOCOL_VERSION_GRID);
     const std::vector<std::byte> chunk(100, std::byte{0xBB});
     int writes = 0;
-    while (r.agent.AcceptsWrites() && writes < 100) {
-        std::ignore = r.agent.Write(ByteSpan{chunk});
+    while (r.Agent.AcceptsWrites() && writes < 100) {
+        std::ignore = r.Agent.Write(ByteSpan{chunk});
         ++writes;
     }
     MESSAGE("writes=" << writes
-                      << " AcceptsWrites=" << r.agent.AcceptsWrites());
+                      << " AcceptsWrites=" << r.Agent.AcceptsWrites());
     auto res = Reconnect(r, true, wire::PROTOCOL_VERSION_GRID);
     MESSAGE("reconnect: " << res);
     CHECK(res == "NeedsSnapshot");
@@ -1326,11 +1326,11 @@ TEST_CASE_FIXTURE(
     const std::vector<std::byte> chunk(200, std::byte{0xBB});
     SessionResult<std::size_t> last = 0;
     for (int i = 0; i < 6; ++i) {
-        last = r.agent.Write(ByteSpan{chunk});
+        last = r.Agent.Write(ByteSpan{chunk});
     }
-    MESSAGE("state=" << int(r.agent.State())
+    MESSAGE("state=" << int(r.Agent.State())
                      << " lastWrite ok=" << last.has_value());
-    CHECK(r.agent.State() == ESessionState::Reaped);
+    CHECK(r.Agent.State() == ESessionState::Reaped);
 }
 
 TEST_CASE_FIXTURE(SodiumFixture,
@@ -1339,10 +1339,10 @@ TEST_CASE_FIXTURE(SodiumFixture,
     Reconnect(r, true, wire::PROTOCOL_VERSION_GRID);
     const std::vector<std::byte> chunk(200, std::byte{0xBB});
     for (int i = 0; i < 6; ++i) {
-        std::ignore = r.agent.Write(ByteSpan{chunk});
+        std::ignore = r.Agent.Write(ByteSpan{chunk});
     }
     auto a = Reconnect(r, true, wire::PROTOCOL_VERSION_GRID, true, true);
-    MESSAGE("pathB: " << a << " client gen=" << r.client.StreamGen());
+    MESSAGE("pathB: " << a << " client gen=" << r.Client.StreamGen());
     auto b = Reconnect(r, false, wire::PROTOCOL_VERSION_MAX);  // v1 peer
     MESSAGE("v1 reconnect: " << b);
     CHECK(b == "no-snapshot");
@@ -1358,21 +1358,21 @@ TEST_CASE_FIXTURE(SodiumFixture,
     Reconnect(r, true, wire::PROTOCOL_VERSION_GRID);
     const std::vector<std::byte> chunk(200, std::byte{0xBB});
     for (int i = 0; i < 6; ++i) {
-        std::ignore = r.agent.Write(ByteSpan{chunk});
+        std::ignore = r.Agent.Write(ByteSpan{chunk});
     }
-    AgentConnection ac{MutableByteSpan{r.sp.AgentFrames}, START,
+    AgentConnection ac{MutableByteSpan{r.Sp.AgentFrames}, START,
                        wire::PROTOCOL_VERSION_GRID};
-    ClientConnection cc{r.client,
-                        MakeNonce(++r.nonces),
-                        MutableByteSpan{r.sp.ClientFrames},
+    ClientConnection cc{r.Client,
+                        MakeNonce(++r.Nonces),
+                        MutableByteSpan{r.Sp.ClientFrames},
                         START,
                         true,
                         wire::PROTOCOL_VERSION_GRID,
-                        MutableByteSpan{r.sp.SnapshotBuf}};
-    REQUIRE(DriveToLive(ac, cc, r.agent, r.sp, START, r.nonces));
+                        MutableByteSpan{r.Sp.SnapshotBuf}};
+    REQUIRE(DriveToLive(ac, cc, r.Agent, r.Sp, START, r.Nonces));
     int needs = 0, idle = 0;
     for (int i = 0; i < 20; ++i) {
-        auto ea = PumpAgent(ac, r.sp, START);
+        auto ea = PumpAgent(ac, r.Sp, START);
         REQUIRE(ea.has_value());
         needs += std::holds_alternative<NeedsSnapshot>(*ea) ? 1 : 0;
         idle += std::holds_alternative<Idle>(*ea) ? 1 : 0;
@@ -1396,12 +1396,12 @@ TEST_CASE_FIXTURE(SodiumFixture,
     Reconnect(r, false, wire::PROTOCOL_VERSION_GRID);
     const std::vector<std::byte> chunk(200, std::byte{0xBB});
     for (int i = 0; i < 6; ++i) {
-        std::ignore = r.agent.Write(ByteSpan{chunk});
+        std::ignore = r.Agent.Write(ByteSpan{chunk});
     }
-    MESSAGE("state=" << int(r.agent.State())
-                     << " endedWith=" << r.agent.EndedWith().has_value());
-    REQUIRE(r.agent.EndedWith().has_value());
-    CHECK(r.agent.EndedWith()->Kind == wire::ESessionEndKind::Overflow);
+    MESSAGE("state=" << int(r.Agent.State())
+                     << " endedWith=" << r.Agent.EndedWith().has_value());
+    REQUIRE(r.Agent.EndedWith().has_value());
+    CHECK(r.Agent.EndedWith()->Kind == wire::ESessionEndKind::Overflow);
 }
 
 TEST_CASE_FIXTURE(SodiumFixture,
@@ -1412,7 +1412,7 @@ TEST_CASE_FIXTURE(SodiumFixture,
     Reconnect(r, false, wire::PROTOCOL_VERSION_GRID);
     const std::vector<std::byte> chunk(200, std::byte{0xBB});
     for (int i = 0; i < 8; ++i) {
-        std::ignore = r.agent.Write(ByteSpan{chunk});
+        std::ignore = r.Agent.Write(ByteSpan{chunk});
     }
     auto c = Reconnect(r, false, wire::PROTOCOL_VERSION_GRID);
     MESSAGE("non-capable v2 reconnect after overflow: " << c);
@@ -1424,10 +1424,10 @@ TEST_CASE_FIXTURE(SodiumFixture, "v1 peer overflow is silently reaped") {
     Reconnect(r, false, wire::PROTOCOL_VERSION_MAX);
     const std::vector<std::byte> chunk(200, std::byte{0xBB});
     for (int i = 0; i < 8; ++i) {
-        std::ignore = r.agent.Write(ByteSpan{chunk});
+        std::ignore = r.Agent.Write(ByteSpan{chunk});
     }
-    CHECK(r.agent.State() == ESessionState::Reaped);
-    CHECK(r.agent.ReapReason() == ESessionError::DisconnectBufferOverflow);
+    CHECK(r.Agent.State() == ESessionState::Reaped);
+    CHECK(r.Agent.ReapReason() == ESessionError::DisconnectBufferOverflow);
 }
 
 // ── Item 5a: path A byte-identical property
@@ -1542,26 +1542,26 @@ TEST_CASE_FIXTURE(SodiumFixture,
     // Send a Resize so the agent records LastKnownSize (prevents WaitForResize_
     // blocking NeedsSnapshot on the next reconnect).
     {
-        AgentConnection ac0{MutableByteSpan{r.sp.AgentFrames}, START,
+        AgentConnection ac0{MutableByteSpan{r.Sp.AgentFrames}, START,
                             wire::PROTOCOL_VERSION_GRID};
-        ClientConnection cc0{r.client,
-                             MakeNonce(++r.nonces),
-                             MutableByteSpan{r.sp.ClientFrames},
+        ClientConnection cc0{r.Client,
+                             MakeNonce(++r.Nonces),
+                             MutableByteSpan{r.Sp.ClientFrames},
                              START,
                              true,
                              wire::PROTOCOL_VERSION_GRID,
-                             MutableByteSpan{r.sp.SnapshotBuf}};
-        REQUIRE(DriveToLive(ac0, cc0, r.agent, r.sp, START, r.nonces));
+                             MutableByteSpan{r.Sp.SnapshotBuf}};
+        REQUIRE(DriveToLive(ac0, cc0, r.Agent, r.Sp, START, r.Nonces));
         cc0.QueueResize(wire::ResizeMessage{.Rows = 24, .Cols = 80});
         for (int i = 0; i < 40; ++i) {
-            auto ea = PumpAgent(ac0, r.sp, START);
+            auto ea = PumpAgent(ac0, r.Sp, START);
             if (!ea) break;
             if (const auto* sf = std::get_if<SendFrame>(&*ea))
-                std::ignore = Feed(cc0, r.sp, sf->Written);
-            auto ec = PumpClient(cc0, r.sp, START);
+                std::ignore = Feed(cc0, r.Sp, sf->Written);
+            auto ec = PumpClient(cc0, r.Sp, START);
             if (!ec) break;
             if (const auto* sf = std::get_if<SendFrame>(&*ec))
-                std::ignore = Feed(ac0, r.sp, sf->Written);
+                std::ignore = Feed(ac0, r.Sp, sf->Written);
             if (std::holds_alternative<Idle>(*ea) &&
                 std::holds_alternative<Idle>(*ec))
                 break;
@@ -1569,22 +1569,22 @@ TEST_CASE_FIXTURE(SodiumFixture,
         ac0.Close(START);
     }
     const std::vector<std::byte> chunk(200, std::byte{0xBB});
-    for (int i = 0; i < 6; ++i) std::ignore = r.agent.Write(ByteSpan{chunk});
+    for (int i = 0; i < 6; ++i) std::ignore = r.Agent.Write(ByteSpan{chunk});
 
     // Try reconnect but cut after the first GridBegin/chunk/GridEnd batch
     // without sending GridApplied.  Then reconnect again and confirm.
     // (The first reconnect ends with Close before GridApplied arrives.)
     {
-        AgentConnection ac{MutableByteSpan{r.sp.AgentFrames}, START,
+        AgentConnection ac{MutableByteSpan{r.Sp.AgentFrames}, START,
                            wire::PROTOCOL_VERSION_GRID};
-        ClientConnection cc{r.client,
-                            MakeNonce(++r.nonces),
-                            MutableByteSpan{r.sp.ClientFrames},
+        ClientConnection cc{r.Client,
+                            MakeNonce(++r.Nonces),
+                            MutableByteSpan{r.Sp.ClientFrames},
                             START,
                             true,
                             wire::PROTOCOL_VERSION_GRID,
-                            MutableByteSpan{r.sp.SnapshotBuf}};
-        REQUIRE(DriveToLive(ac, cc, r.agent, r.sp, START, r.nonces));
+                            MutableByteSpan{r.Sp.SnapshotBuf}};
+        REQUIRE(DriveToLive(ac, cc, r.Agent, r.Sp, START, r.Nonces));
         // Queue a Resize before the loop so WaitForResize_ is cleared once the
         // Resize wire frame reaches the agent (agent waits because
         // LastKnownSize was set by the initial connection).  The loop feeds
@@ -1592,19 +1592,19 @@ TEST_CASE_FIXTURE(SodiumFixture,
         cc.QueueResize(wire::ResizeMessage{.Rows = 24, .Cols = 80});
         bool gotNeeds = false;
         for (int i = 0; i < 80 && !gotNeeds; ++i) {
-            auto ea = PumpAgent(ac, r.sp, START);
+            auto ea = PumpAgent(ac, r.Sp, START);
             REQUIRE(ea.has_value());
             if (std::holds_alternative<NeedsSnapshot>(*ea)) {
                 gotNeeds = true;
                 static std::vector<std::byte> snap(16, std::byte{0x55});
                 ac.SupplySnapshot(START, ByteSpan{snap}, 0, 0);
             } else if (const auto* sf = std::get_if<SendFrame>(&*ea)) {
-                REQUIRE(Feed(cc, r.sp, sf->Written));
+                REQUIRE(Feed(cc, r.Sp, sf->Written));
             }
-            auto ec = PumpClient(cc, r.sp, START);
+            auto ec = PumpClient(cc, r.Sp, START);
             if (ec.has_value()) {
                 if (const auto* sf = std::get_if<SendFrame>(&*ec))
-                    std::ignore = Feed(ac, r.sp, sf->Written);
+                    std::ignore = Feed(ac, r.Sp, sf->Written);
             }
         }
         REQUIRE(gotNeeds);
@@ -1615,35 +1615,35 @@ TEST_CASE_FIXTURE(SodiumFixture,
     // Second reconnect: must still deliver ApplySnapshot.
     bool finalApply = false;
     {
-        AgentConnection ac{MutableByteSpan{r.sp.AgentFrames}, START,
+        AgentConnection ac{MutableByteSpan{r.Sp.AgentFrames}, START,
                            wire::PROTOCOL_VERSION_GRID};
-        ClientConnection cc{r.client,
-                            MakeNonce(++r.nonces),
-                            MutableByteSpan{r.sp.ClientFrames},
+        ClientConnection cc{r.Client,
+                            MakeNonce(++r.Nonces),
+                            MutableByteSpan{r.Sp.ClientFrames},
                             START,
                             true,
                             wire::PROTOCOL_VERSION_GRID,
-                            MutableByteSpan{r.sp.SnapshotBuf}};
-        REQUIRE(DriveToLive(ac, cc, r.agent, r.sp, START, r.nonces));
+                            MutableByteSpan{r.Sp.SnapshotBuf}};
+        REQUIRE(DriveToLive(ac, cc, r.Agent, r.Sp, START, r.Nonces));
         // Queue Resize before the loop; the loop feeds the resulting wire frame
         // back to the agent so WaitForResize_ is cleared before NeedsSnapshot.
         cc.QueueResize(wire::ResizeMessage{.Rows = 24, .Cols = 80});
         for (int i = 0; i < 120 && !finalApply; ++i) {
-            auto ea = PumpAgent(ac, r.sp, START);
+            auto ea = PumpAgent(ac, r.Sp, START);
             REQUIRE(ea.has_value());
             if (std::holds_alternative<NeedsSnapshot>(*ea)) {
                 static std::vector<std::byte> snap(16, std::byte{0x66});
                 ac.SupplySnapshot(START, ByteSpan{snap}, 0, 0);
             } else if (const auto* sf = std::get_if<SendFrame>(&*ea)) {
-                REQUIRE(Feed(cc, r.sp, sf->Written));
+                REQUIRE(Feed(cc, r.Sp, sf->Written));
             }
-            auto ec = PumpClient(cc, r.sp, START);
+            auto ec = PumpClient(cc, r.Sp, START);
             REQUIRE(ec.has_value());
             if (const auto* as = std::get_if<ApplySnapshot>(&*ec)) {
                 finalApply = true;
                 cc.ConfirmApply(as->StreamGen);
             } else if (const auto* sf = std::get_if<SendFrame>(&*ec)) {
-                REQUIRE(Feed(ac, r.sp, sf->Written));
+                REQUIRE(Feed(ac, r.Sp, sf->Written));
             }
         }
     }

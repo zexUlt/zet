@@ -48,7 +48,8 @@ DirectionFrames MakeDirectionFrames(const wire::ConnectionKeys& keys,
 Channel::Channel(DirectionFrames frames, SendBuffer& sendBuf,
                  ReceiveCursor& recvCursor, Timestamp now,
                  LivenessLimits liveness, std::uint16_t version,
-                 MutableByteSpan snapshotBuf) noexcept
+                 MutableByteSpan snapshotBuf,
+                 std::uint32_t agentStreamGen) noexcept
     : SendBuf_{sendBuf},
       RecvCursor_{recvCursor},
       EpochStart_{now},
@@ -59,6 +60,7 @@ Channel::Channel(DirectionFrames frames, SendBuffer& sendBuf,
       SnapshotBuf_{snapshotBuf},
       Sealer_{std::move(frames.Sealer)},
       Opener_{std::move(frames.Opener)},
+      AgentStreamGen_{agentStreamGen},
       Version_{version},
       Role_{frames.Role} {}
 
@@ -66,9 +68,11 @@ Channel::Channel(const wire::ConnectionKeys& keys, ERole role,
                  SendBuffer& sendBuf, ReceiveCursor& recvCursor, Timestamp now,
                  std::uint64_t frameLimit, std::uint64_t byteLimit,
                  LivenessLimits liveness, std::uint16_t version,
-                 MutableByteSpan snapshotBuf) noexcept
+                 MutableByteSpan snapshotBuf,
+                 std::uint32_t agentStreamGen) noexcept
     : Channel(MakeDirectionFrames(keys, role, frameLimit, byteLimit), sendBuf,
-              recvCursor, now, liveness, version, snapshotBuf) {}
+              recvCursor, now, liveness, version, snapshotBuf, agentStreamGen) {
+}
 
 ChannelResult<IncomingEvent> Channel::Receive(
     Timestamp now, const wire::FrameView& frame,
@@ -728,12 +732,6 @@ void Channel::StartGrid(ByteSpan snapshot, std::uint8_t flags,
     }
     if (GridEmitting_.has_value() || GridAwaitingApplied_) {
         // Emission already in progress — caller error, ignore.
-        return;
-    }
-    // A zero-byte snapshot means the terminal is empty: skip the grid wire
-    // protocol entirely and just clear the suppression flag so Data can flow.
-    if (snapshot.empty()) {
-        AwaitingSnapshotSupply_ = false;
         return;
     }
     GridEmitting_.emplace();

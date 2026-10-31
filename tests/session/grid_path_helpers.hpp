@@ -131,41 +131,41 @@ bool DriveToLive(AgentConnection& agent, ClientConnection& client,
 // ── Probe harness (Rig + Reconnect) ──────────────────────────────────────
 
 struct Rig {
-    SessionLimits limits = TinyLimits();
-    std::vector<std::byte> as =
-        std::vector<std::byte>(limits.DisconnectMax + 256);
-    std::vector<std::byte> cs = std::vector<std::byte>(limits.ResendMax + 256);
-    AgentSession agent{
+    SessionLimits Limits = TinyLimits();
+    std::vector<std::byte> As =
+        std::vector<std::byte>(Limits.DisconnectMax + 256);
+    std::vector<std::byte> Cs = std::vector<std::byte>(Limits.ResendMax + 256);
+    AgentSession Agent{
         DeriveSessionSecrets(MakeKey(33)),
         SessionStreams{
-            .Storage = MutableByteSpan{as}, .Now = START, .Limits = limits}};
-    ClientSession client{
+            .Storage = MutableByteSpan{As}, .Now = START, .Limits = Limits}};
+    ClientSession Client{
         DeriveSessionSecrets(MakeKey(33)),
         SessionStreams{
-            .Storage = MutableByteSpan{cs}, .Now = START, .Limits = limits}};
-    Space sp;
-    std::uint64_t nonces = 0;
+            .Storage = MutableByteSpan{Cs}, .Now = START, .Limits = Limits}};
+    Space Sp;
+    std::uint64_t Nonces = 0;
 };
 
 [[maybe_unused]] std::string Reconnect(Rig& r, bool capable,
                                        std::uint16_t ceiling, bool close = true,
                                        bool supply = false) {
-    AgentConnection ac{MutableByteSpan{r.sp.AgentFrames}, START, ceiling};
-    ClientConnection cc{r.client,
-                        MakeNonce(++r.nonces),
-                        MutableByteSpan{r.sp.ClientFrames},
+    AgentConnection ac{MutableByteSpan{r.Sp.AgentFrames}, START, ceiling};
+    ClientConnection cc{r.Client,
+                        MakeNonce(++r.Nonces),
+                        MutableByteSpan{r.Sp.ClientFrames},
                         START,
                         capable,
                         ceiling,
-                        MutableByteSpan{r.sp.SnapshotBuf}};
-    if (!DriveToLive(ac, cc, r.agent, r.sp, START, r.nonces)) {
+                        MutableByteSpan{r.Sp.SnapshotBuf}};
+    if (!DriveToLive(ac, cc, r.Agent, r.Sp, START, r.Nonces)) {
         return "drive-failed";
     }
     std::string res = "no-snapshot";
     const std::vector<std::byte> snap(16, std::byte{0x22});
     bool applied = false;
     for (int i = 0; i < 60; ++i) {
-        auto ea = PumpAgent(ac, r.sp, START);
+        auto ea = PumpAgent(ac, r.Sp, START);
         if (!ea) {
             res += " agent-err";
             break;
@@ -177,21 +177,21 @@ struct Rig {
             }
             ac.SupplySnapshot(START, ByteSpan{snap}, 0, 0);
         } else if (const auto* sf = std::get_if<SendFrame>(&*ea)) {
-            if (!Feed(cc, r.sp, sf->Written)) {
+            if (!Feed(cc, r.Sp, sf->Written)) {
                 break;
             }
         }
-        auto ec = PumpClient(cc, r.sp, START);
+        auto ec = PumpClient(cc, r.Sp, START);
         if (!ec) {
             res += " client-err";
             break;
         }
-        if (const auto* as = std::get_if<ApplySnapshot>(&*ec)) {
+        if (const auto* snap_ev = std::get_if<ApplySnapshot>(&*ec)) {
             applied = true;
-            cc.ConfirmApply(as->StreamGen);
+            cc.ConfirmApply(snap_ev->StreamGen);
         }
         if (const auto* sf = std::get_if<SendFrame>(&*ec)) {
-            if (!Feed(ac, r.sp, sf->Written)) {
+            if (!Feed(ac, r.Sp, sf->Written)) {
                 break;
             }
         }

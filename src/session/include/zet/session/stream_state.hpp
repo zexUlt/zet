@@ -80,6 +80,11 @@ public:
     /// DisconnectMax, and crossing it either reaps the session with
     /// DisconnectBufferOverflow or holds back like the live case, by
     /// EDetachedOverflow. A reaped session takes nothing: SessionReaped.
+    ///
+    /// Resync mode after ring_overflowed: returns bytes.size() (all bytes
+    /// "accepted") so the pty loop does not retry stale data. The bytes are
+    /// discarded because the ring is full and path B will deliver a snapshot
+    /// of everything that matters; flushing old bytes would corrupt the stream.
     [[nodiscard]] SessionResult<std::size_t> Write(ByteSpan bytes) noexcept;
 
     /// Whether reading the local source is worth it right now. A detached

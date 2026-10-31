@@ -34,21 +34,21 @@ std::string EvName(const ConnectionEvent& e) {
 /// Connection wrapper that logs all agent-side events.  Caller controls
 /// whether NeedsSnapshot triggers an immediate SupplySnapshot.
 struct Conn {
-    Rig& r;
-    AgentConnection ac;
-    ClientConnection cc;
+    Rig& R;
+    AgentConnection Ac;
+    ClientConnection Cc;
     std::vector<Ev> Log;
     Timestamp Now = START;
     Conn(Rig& rig, bool capable, std::uint16_t ceiling)
-        : r(rig),
-          ac{MutableByteSpan{rig.sp.AgentFrames}, START, ceiling},
-          cc{rig.client,
-             MakeNonce(++rig.nonces),
-             MutableByteSpan{rig.sp.ClientFrames},
+        : R(rig),
+          Ac{MutableByteSpan{rig.Sp.AgentFrames}, START, ceiling},
+          Cc{rig.Client,
+             MakeNonce(++rig.Nonces),
+             MutableByteSpan{rig.Sp.ClientFrames},
              START,
              capable,
              ceiling,
-             MutableByteSpan{rig.sp.SnapshotBuf}} {}
+             MutableByteSpan{rig.Sp.SnapshotBuf}} {}
     void Rec(const ConnectionEvent& e) {
         Ev v{EvName(e)};
         if (const auto* n = std::get_if<NeedsSnapshot>(&e)) {
@@ -58,7 +58,7 @@ struct Conn {
         Log.push_back(v);
     }
     bool Step(bool supply = false, std::size_t supplySize = 16) {
-        auto ea = PumpAgent(ac, r.sp, Now);
+        auto ea = PumpAgent(Ac, R.Sp, Now);
         if (!ea) {
             Log.push_back({"agent-err"});
             return false;
@@ -66,28 +66,28 @@ struct Conn {
         Rec(*ea);
         if (const auto* ns = std::get_if<NeedsSession>(&*ea)) {
             (void)ns;
-            ac.Route(r.agent.Ref(), MakeNonce(++r.nonces));
+            Ac.Route(R.Agent.Ref(), MakeNonce(++R.Nonces));
         } else if (std::holds_alternative<NeedsSnapshot>(*ea) && supply) {
             static std::vector<std::byte> snap;
             snap.assign(supplySize, std::byte{0x22});
-            ac.SupplySnapshot(Now, ByteSpan{snap}, 0, 0);
+            Ac.SupplySnapshot(Now, ByteSpan{snap}, 0, 0);
         } else if (const auto* sf = std::get_if<SendFrame>(&*ea)) {
-            if (!Feed(cc, r.sp, sf->Written)) {
+            if (!Feed(Cc, R.Sp, sf->Written)) {
                 Log.push_back({"client-feed-err"});
                 return false;
             }
         }
-        auto ec = PumpClient(cc, r.sp, Now);
+        auto ec = PumpClient(Cc, R.Sp, Now);
         if (!ec) {
             Log.push_back({"client-err"});
             return false;
         }
-        if (const auto* as = std::get_if<ApplySnapshot>(&*ec)) {
+        if (const auto* snap_ev = std::get_if<ApplySnapshot>(&*ec)) {
             Log.push_back({"client:ApplySnapshot"});
-            cc.ConfirmApply(as->StreamGen);
+            Cc.ConfirmApply(snap_ev->StreamGen);
         }
         if (const auto* sf = std::get_if<SendFrame>(&*ec)) {
-            if (!Feed(ac, r.sp, sf->Written)) {
+            if (!Feed(Ac, R.Sp, sf->Written)) {
                 Log.push_back({"agent-feed-err"});
                 return false;
             }
@@ -132,9 +132,9 @@ TEST_CASE_FIXTURE(SodiumFixture,
         c1.ac.Close(START);
     }
     const std::vector<std::byte> chunk(200, std::byte{0xBB});
-    for (int i = 0; i < 6; ++i) std::ignore = r.agent.Write(ByteSpan{chunk});
+    for (int i = 0; i < 6; ++i) std::ignore = r.Agent.Write(ByteSpan{chunk});
     Conn c2(r, true, PROTOCOL_VERSION_GRID);
-    c2.cc.QueueResize(ResizeMessage{.Rows = 50, .Cols = 200});
+    c2.Cc.QueueResize(ResizeMessage{.Rows = 50, .Cols = 200});
     bool supplied = false;
     for (int i = 0; i < 60; ++i) {
         bool needs = false;
@@ -168,12 +168,12 @@ TEST_CASE_FIXTURE(SodiumFixture,
         c1.ac.Close(START);
     }
     const std::vector<std::byte> chunk(200, std::byte{0xBB});
-    for (int i = 0; i < 6; ++i) std::ignore = r.agent.Write(ByteSpan{chunk});
+    for (int i = 0; i < 6; ++i) std::ignore = r.Agent.Write(ByteSpan{chunk});
     Conn c2(r, true, PROTOCOL_VERSION_GRID);
-    c2.cc.QueueResize(ResizeMessage{.Rows = 50, .Cols = 200});
+    c2.Cc.QueueResize(ResizeMessage{.Rows = 50, .Cols = 200});
     for (int i = 0; i < 40; ++i) c2.Step();
     MESSAGE("conn2 (no supply): " << c2.Dump());
-    const auto dl = c2.ac.NextDeadline();
+    const auto dl = c2.Ac.NextDeadline();
     MESSAGE("NextDeadline set=" << (dl.IsSet()));
 }
 
@@ -185,17 +185,17 @@ TEST_CASE_FIXTURE(SodiumFixture,
 TEST_CASE_FIXTURE(SodiumFixture,
                   "peer silence timeout is enforced during await-snapshot") {
     Rig r;
-    r.limits = LiveLimits();
-    std::vector<std::byte> as2(r.limits.DisconnectMax + 256),
-        cs2(r.limits.ResendMax + 256);
+    r.Limits = LiveLimits();
+    std::vector<std::byte> as2(r.Limits.DisconnectMax + 256),
+        cs2(r.Limits.ResendMax + 256);
     AgentSession agent{
         DeriveSessionSecrets(MakeKey(33)),
         SessionStreams{
-            .Storage = MutableByteSpan{as2}, .Now = START, .Limits = r.limits}};
+            .Storage = MutableByteSpan{as2}, .Now = START, .Limits = r.Limits}};
     ClientSession client{
         DeriveSessionSecrets(MakeKey(33)),
         SessionStreams{
-            .Storage = MutableByteSpan{cs2}, .Now = START, .Limits = r.limits}};
+            .Storage = MutableByteSpan{cs2}, .Now = START, .Limits = r.Limits}};
     Space sp;
     std::uint64_t nonces = 0;
     {
@@ -265,30 +265,30 @@ TEST_CASE_FIXTURE(
         }
         const std::vector<std::byte> chunk(200, std::byte{0xBB});
         for (int i = 0; i < 6; ++i)
-            std::ignore = r.agent.Write(ByteSpan{chunk});
+            std::ignore = r.Agent.Write(ByteSpan{chunk});
         Conn c2(r, true, PROTOCOL_VERSION_GRID);
         std::vector<std::byte> big(sz, std::byte{1});
         bool done = false;
         std::string res;
         for (int i = 0; i < 80 && !done; ++i) {
-            auto ea = PumpAgent(c2.ac, r.sp, START);
+            auto ea = PumpAgent(c2.Ac, r.Sp, START);
             if (!ea) {
                 res += "agent-err ";
                 break;
             }
             if (auto* ns = std::get_if<NeedsSession>(&*ea)) {
                 (void)ns;
-                c2.ac.Route(r.agent.Ref(), MakeNonce(++r.nonces));
+                c2.Ac.Route(r.Agent.Ref(), MakeNonce(++r.Nonces));
             } else if (std::holds_alternative<NeedsSnapshot>(*ea)) {
-                c2.ac.SupplySnapshot(START, ByteSpan{big}, 0, 0);
+                c2.Ac.SupplySnapshot(START, ByteSpan{big}, 0, 0);
                 res += "supplied ";
             } else if (auto* sf = std::get_if<SendFrame>(&*ea)) {
-                if (!Feed(c2.cc, r.sp, sf->Written)) {
+                if (!Feed(c2.Cc, r.Sp, sf->Written)) {
                     res += "cl-feed-err ";
                     break;
                 }
             }
-            auto ec = PumpClient(c2.cc, r.sp, START);
+            auto ec = PumpClient(c2.Cc, r.Sp, START);
             if (!ec) {
                 res += "client-err ";
                 break;
@@ -296,18 +296,18 @@ TEST_CASE_FIXTURE(
             if (const auto* as = std::get_if<ApplySnapshot>(&*ec)) {
                 res += "applied ";
                 done = true;
-                c2.cc.ConfirmApply(as->StreamGen);
+                c2.Cc.ConfirmApply(as->StreamGen);
             }
             if (auto* sf = std::get_if<SendFrame>(&*ec)) {
-                if (!Feed(c2.ac, r.sp, sf->Written)) {
+                if (!Feed(c2.Ac, r.Sp, sf->Written)) {
                     res += "ag-feed-err ";
                     break;
                 }
             }
         }
         MESSAGE("size=" << sz << " -> " << res
-                        << " gen=" << r.agent.Ref().Id().size()
-                        << " client gen=" << r.client.StreamGen());
+                        << " gen=" << r.Agent.Ref().Id().size()
+                        << " client gen=" << r.Client.StreamGen());
     }
 }
 
@@ -327,7 +327,7 @@ TEST_CASE_FIXTURE(SodiumFixture,
         c1.ac.Close(START);
     }
     const std::vector<std::byte> chunk(200, std::byte{0xBB});
-    for (int i = 0; i < 6; ++i) std::ignore = r.agent.Write(ByteSpan{chunk});
+    for (int i = 0; i < 6; ++i) std::ignore = r.Agent.Write(ByteSpan{chunk});
     Conn c2(r, true, PROTOCOL_VERSION_GRID);
     int needsCount = 0;
     bool emptySupplied = false;
@@ -344,12 +344,12 @@ TEST_CASE_FIXTURE(SodiumFixture,
             if (!emptySupplied) {
                 // First NeedsSnapshot: supply empty — must be rejected.
                 emptySupplied = true;
-                c2.ac.SupplySnapshot(START, ByteSpan{}, 0, 0);
+                c2.Ac.SupplySnapshot(START, ByteSpan{}, 0, 0);
             } else if (!validSupplied) {
                 // Second NeedsSnapshot (re-emitted after rejection): supply
                 // valid.
                 validSupplied = true;
-                c2.ac.SupplySnapshot(START, ByteSpan{snap}, 0, 0);
+                c2.Ac.SupplySnapshot(START, ByteSpan{snap}, 0, 0);
             }
         }
     }
@@ -360,18 +360,18 @@ TEST_CASE_FIXTURE(SodiumFixture,
     CHECK(emptySupplied);
     CHECK(validSupplied);
     // Session must now be live: a subsequent Write delivers to the client.
-    std::ignore = r.agent.Write(ByteSpan{chunk}.first(10));
+    std::ignore = r.Agent.Write(ByteSpan{chunk}.first(10));
     int delivered = 0;
     for (int i = 0; i < 100; ++i) {
-        auto ea = PumpAgent(c2.ac, r.sp, START);
+        auto ea = PumpAgent(c2.Ac, r.Sp, START);
         if (!ea) break;
         if (auto* sf = std::get_if<SendFrame>(&*ea))
-            REQUIRE(Feed(c2.cc, r.sp, sf->Written));
-        auto ec = PumpClient(c2.cc, r.sp, START);
+            REQUIRE(Feed(c2.Cc, r.Sp, sf->Written));
+        auto ec = PumpClient(c2.Cc, r.Sp, START);
         if (!ec) break;
         if (std::holds_alternative<Deliver>(*ec)) ++delivered;
         if (auto* sf = std::get_if<SendFrame>(&*ec))
-            REQUIRE(Feed(c2.ac, r.sp, sf->Written));
+            REQUIRE(Feed(c2.Ac, r.Sp, sf->Written));
     }
     MESSAGE("Deliver events after valid snapshot: " << delivered);
     CHECK(delivered > 0);
@@ -393,7 +393,7 @@ TEST_CASE_FIXTURE(
         }
         const std::vector<std::byte> chunk(200, std::byte{0xBB});
         for (int i = 0; i < 6; ++i)
-            std::ignore = r.agent.Write(ByteSpan{chunk});
+            std::ignore = r.Agent.Write(ByteSpan{chunk});
         Conn c2(r, true, PROTOCOL_VERSION_GRID);
         bool supplied = false;
         for (int i = 0; i < 80; ++i) {
@@ -402,11 +402,11 @@ TEST_CASE_FIXTURE(
             for (auto k = b; k < c2.Log.size(); ++k)
                 if (c2.Log[k].Name == "NeedsSnapshot") supplied = true;
         }
-        MESSAGE("round " << round << " client gen=" << r.client.StreamGen()
+        MESSAGE("round " << round << " client gen=" << r.Client.StreamGen()
                          << " : " << c2.Dump());
-        c2.ac.Close(START);
+        c2.Ac.Close(START);
     }
-    CHECK(r.client.StreamGen() == 2);
+    CHECK(r.Client.StreamGen() == 2);
 }
 
 // ── VPROBE i1 ────────────────────────────────────────────────────────────────
@@ -425,9 +425,9 @@ TEST_CASE_FIXTURE(
         c1.ac.Close(START);
     }
     const std::vector<std::byte> chunk(200, std::byte{0xBB});
-    for (int i = 0; i < 6; ++i) std::ignore = r.agent.Write(ByteSpan{chunk});
-    MESSAGE("agent state=" << int(r.agent.State())
-                           << " ended=" << r.agent.EndedWith().has_value());
+    for (int i = 0; i < 6; ++i) std::ignore = r.Agent.Write(ByteSpan{chunk});
+    MESSAGE("agent state=" << int(r.Agent.State())
+                           << " ended=" << r.Agent.EndedWith().has_value());
     Conn c2(r, false, PROTOCOL_VERSION_GRID);
     for (int i = 0; i < 30; ++i)
         if (!c2.Step()) break;
@@ -453,9 +453,9 @@ TEST_CASE_FIXTURE(
     }
     const std::vector<std::byte> chunk(300, std::byte{0xBB});
     for (int i = 0; i < 4; ++i) {
-        auto w = r.agent.Write(ByteSpan{chunk});
+        auto w = r.Agent.Write(ByteSpan{chunk});
         MESSAGE("write " << i << " -> " << (w ? int(*w) : -1)
-                         << " accepts=" << r.agent.AcceptsWrites());
+                         << " accepts=" << r.Agent.AcceptsWrites());
     }
 }
 
@@ -480,23 +480,23 @@ TEST_CASE_FIXTURE(SodiumFixture,
     }
     // Write enough data to force path B.
     const std::vector<std::byte> chunk(200, std::byte{0xBB});
-    for (int i = 0; i < 6; ++i) std::ignore = r.agent.Write(ByteSpan{chunk});
+    for (int i = 0; i < 6; ++i) std::ignore = r.Agent.Write(ByteSpan{chunk});
 
     // Second connection: client does NOT send a Resize.
-    AgentConnection ac{MutableByteSpan{r.sp.AgentFrames}, START,
+    AgentConnection ac{MutableByteSpan{r.Sp.AgentFrames}, START,
                        PROTOCOL_VERSION_GRID};
-    ClientConnection cc{r.client,
-                        MakeNonce(++r.nonces),
-                        MutableByteSpan{r.sp.ClientFrames},
+    ClientConnection cc{r.Client,
+                        MakeNonce(++r.Nonces),
+                        MutableByteSpan{r.Sp.ClientFrames},
                         START,
                         true,
                         PROTOCOL_VERSION_GRID,
-                        MutableByteSpan{r.sp.SnapshotBuf}};
-    REQUIRE(DriveToLive(ac, cc, r.agent, r.sp, START, r.nonces));
+                        MutableByteSpan{r.Sp.SnapshotBuf}};
+    REQUIRE(DriveToLive(ac, cc, r.Agent, r.Sp, START, r.Nonces));
 
     // At t=0 (WaitForResize_ active): pumping yields Idle, not NeedsSnapshot.
     {
-        auto e = PumpAgent(ac, r.sp, START);
+        auto e = PumpAgent(ac, r.Sp, START);
         REQUIRE(e.has_value());
         CHECK(std::holds_alternative<Idle>(*e));
     }
@@ -508,7 +508,7 @@ TEST_CASE_FIXTURE(SodiumFixture,
     const Timestamp after = START + RESIZE_WAIT_TIMEOUT;
     bool gotNeeds = false;
     for (int i = 0; i < 32 && !gotNeeds; ++i) {
-        auto e = PumpAgent(ac, r.sp, after);
+        auto e = PumpAgent(ac, r.Sp, after);
         REQUIRE(e.has_value());
         if (std::holds_alternative<NeedsSnapshot>(*e)) {
             gotNeeds = true;
@@ -516,7 +516,7 @@ TEST_CASE_FIXTURE(SodiumFixture,
             CHECK(ns.Rows == 24);
             CHECK(ns.Cols == 80);
         } else if (const auto* sf = std::get_if<SendFrame>(&*e)) {
-            REQUIRE(Feed(cc, r.sp, sf->Written));
+            REQUIRE(Feed(cc, r.Sp, sf->Written));
         }
     }
     CHECK(gotNeeds);
@@ -540,72 +540,72 @@ TEST_CASE_FIXTURE(SodiumFixture,
         c1.ac.Close(START);
     }
     const std::vector<std::byte> chunk(200, std::byte{0xBB});
-    for (int i = 0; i < 6; ++i) std::ignore = r.agent.Write(ByteSpan{chunk});
+    for (int i = 0; i < 6; ++i) std::ignore = r.Agent.Write(ByteSpan{chunk});
 
     // ── DenyApply: snapshot applied gets discarded, StreamGen stays 0.
     {
         Conn c2(r, true, PROTOCOL_VERSION_GRID);
-        c2.cc.QueueResize(ResizeMessage{.Rows = 24, .Cols = 80});
-        const std::uint32_t genBefore = r.client.StreamGen();
+        c2.Cc.QueueResize(ResizeMessage{.Rows = 24, .Cols = 80});
+        const std::uint32_t genBefore = r.Client.StreamGen();
         bool gotApply = false;
         for (int i = 0; i < 120 && !gotApply; ++i) {
-            auto ea = PumpAgent(c2.ac, r.sp, START);
+            auto ea = PumpAgent(c2.Ac, r.Sp, START);
             REQUIRE(ea.has_value());
             if (std::holds_alternative<NeedsSnapshot>(*ea)) {
                 static std::vector<std::byte> snap(16, std::byte{0x11});
-                c2.ac.SupplySnapshot(START, ByteSpan{snap}, 0, 0);
+                c2.Ac.SupplySnapshot(START, ByteSpan{snap}, 0, 0);
             } else if (const auto* sf = std::get_if<SendFrame>(&*ea)) {
-                REQUIRE(Feed(c2.cc, r.sp, sf->Written));
+                REQUIRE(Feed(c2.Cc, r.Sp, sf->Written));
             } else if (std::get_if<NeedsSession>(&*ea)) {
-                c2.ac.Route(r.agent.Ref(), MakeNonce(++r.nonces));
+                c2.Ac.Route(r.Agent.Ref(), MakeNonce(++r.Nonces));
             }
-            auto ec = PumpClient(c2.cc, r.sp, START);
+            auto ec = PumpClient(c2.Cc, r.Sp, START);
             REQUIRE(ec.has_value());
             if (const auto* as = std::get_if<ApplySnapshot>(&*ec)) {
                 gotApply = true;
                 // DenyApply — do NOT send GridApplied, do NOT advance
                 // StreamGen.
-                c2.cc.DenyApply(as->StreamGen);
+                c2.Cc.DenyApply(as->StreamGen);
             } else if (const auto* sf = std::get_if<SendFrame>(&*ec)) {
-                REQUIRE(Feed(c2.ac, r.sp, sf->Written));
+                REQUIRE(Feed(c2.Ac, r.Sp, sf->Written));
             }
         }
         REQUIRE(gotApply);
         // StreamGen must NOT have advanced after DenyApply.
-        CHECK(r.client.StreamGen() == genBefore);
-        c2.ac.Close(START);
+        CHECK(r.Client.StreamGen() == genBefore);
+        c2.Ac.Close(START);
     }
 
     // ── ConfirmApply: StreamGen must advance after explicit confirm.
     // Re-write data to keep path B forced on the next reconnect.
-    for (int i = 0; i < 6; ++i) std::ignore = r.agent.Write(ByteSpan{chunk});
+    for (int i = 0; i < 6; ++i) std::ignore = r.Agent.Write(ByteSpan{chunk});
     {
         Conn c3(r, true, PROTOCOL_VERSION_GRID);
-        c3.cc.QueueResize(ResizeMessage{.Rows = 24, .Cols = 80});
-        const std::uint32_t genBefore = r.client.StreamGen();
+        c3.Cc.QueueResize(ResizeMessage{.Rows = 24, .Cols = 80});
+        const std::uint32_t genBefore = r.Client.StreamGen();
         bool gotApply = false;
         for (int i = 0; i < 120 && !gotApply; ++i) {
-            auto ea = PumpAgent(c3.ac, r.sp, START);
+            auto ea = PumpAgent(c3.Ac, r.Sp, START);
             REQUIRE(ea.has_value());
             if (std::holds_alternative<NeedsSnapshot>(*ea)) {
                 static std::vector<std::byte> snap(16, std::byte{0x22});
-                c3.ac.SupplySnapshot(START, ByteSpan{snap}, 0, 0);
+                c3.Ac.SupplySnapshot(START, ByteSpan{snap}, 0, 0);
             } else if (const auto* sf = std::get_if<SendFrame>(&*ea)) {
-                REQUIRE(Feed(c3.cc, r.sp, sf->Written));
+                REQUIRE(Feed(c3.Cc, r.Sp, sf->Written));
             } else if (std::get_if<NeedsSession>(&*ea)) {
-                c3.ac.Route(r.agent.Ref(), MakeNonce(++r.nonces));
+                c3.Ac.Route(r.Agent.Ref(), MakeNonce(++r.Nonces));
             }
-            auto ec = PumpClient(c3.cc, r.sp, START);
+            auto ec = PumpClient(c3.Cc, r.Sp, START);
             REQUIRE(ec.has_value());
             if (const auto* as = std::get_if<ApplySnapshot>(&*ec)) {
                 gotApply = true;
-                c3.cc.ConfirmApply(as->StreamGen);
+                c3.Cc.ConfirmApply(as->StreamGen);
             } else if (const auto* sf = std::get_if<SendFrame>(&*ec)) {
-                REQUIRE(Feed(c3.ac, r.sp, sf->Written));
+                REQUIRE(Feed(c3.Ac, r.Sp, sf->Written));
             }
         }
         REQUIRE(gotApply);
         // StreamGen must have advanced after ConfirmApply.
-        CHECK(r.client.StreamGen() > genBefore);
+        CHECK(r.Client.StreamGen() > genBefore);
     }
 }

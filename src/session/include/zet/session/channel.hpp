@@ -151,9 +151,14 @@ public:
     /// (§1 forbids allocation in the core; the connection layer provides the
     /// buffer). Must be at least wire::SNAPSHOT_MAX_BYTES for client-role
     /// channels; agent-role channels never receive snapshots and may pass {}.
+    /// `agentStreamGen` seeds the generation baseline for GridBegin validation
+    /// on the client side: the first GridBegin received must have
+    /// stream_gen > agentStreamGen. Pass Session_.StreamGen() on reconnect so
+    /// a forged GridBegin from a previous generation is rejected. §9 item (4).
     Channel(DirectionFrames frames, SendBuffer& sendBuf,
             ReceiveCursor& recvCursor, Timestamp now, LivenessLimits liveness,
-            std::uint16_t version, MutableByteSpan snapshotBuf = {}) noexcept;
+            std::uint16_t version, MutableByteSpan snapshotBuf = {},
+            std::uint32_t agentStreamGen = 0) noexcept;
 
     /// Builds a Channel straight from connection keys, counters at zero.
     ///
@@ -168,7 +173,8 @@ public:
             std::uint64_t byteLimit = wire::MAX_BYTES_PER_EPOCH,
             LivenessLimits liveness = {},
             std::uint16_t version = wire::PROTOCOL_VERSION_MIN,
-            MutableByteSpan snapshotBuf = {}) noexcept;
+            MutableByteSpan snapshotBuf = {},
+            std::uint32_t agentStreamGen = 0) noexcept;
 
     Channel(const Channel&) = delete;
     Channel& operator=(const Channel&) = delete;

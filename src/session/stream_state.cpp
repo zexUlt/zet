@@ -18,11 +18,12 @@ SessionResult<std::size_t> StreamState::Write(ByteSpan bytes) noexcept {
     if (State_ == ESessionState::Reaped) {
         return std::unexpected(ESessionError::SessionReaped);
     }
-    // Resync mode: once ring_overflowed is set the ring is full and no more
-    // bytes are accepted. The pty loop sees 0 and stops reading.
+    // Resync mode: ring_overflowed means path B will deliver a snapshot; any
+    // new bytes from the pty are discarded (the ring is full), but we return
+    // bytes.size() so the pty loop does not retry stale data and block. §9.
     if (State_ == ESessionState::Detached &&
         Overflow_ == EDetachedOverflow::Resync && Output_.RingOverflowed()) {
-        return 0;
+        return bytes.size();
     }
     const std::size_t ceiling = State_ == ESessionState::Live
                                     ? Limits_.ResendMax

@@ -180,8 +180,12 @@ PreAuthResult<std::size_t> ClientHandshake::StartStep(
     if (GridCapable_) {
         static constexpr std::array<std::byte, 2> GRID_CAPABLE_VALUE{
             std::byte{0}, std::byte{1}};
-        std::ignore = hello.Options.Append(TlvOption{
-            .Type = TLV_GRID_CAPABLE, .Value = ByteSpan{GRID_CAPABLE_VALUE}});
+        if (auto appended = hello.Options.Append(
+                TlvOption{.Type = TLV_GRID_CAPABLE,
+                          .Value = ByteSpan{GRID_CAPABLE_VALUE}});
+            !appended) {
+            return std::unexpected(Fail(appended.error()));
+        }
     }
 
     ByteWriter writer{out};

@@ -217,3 +217,34 @@ TEST_CASE_FIXTURE(
     CHECK(state.AcceptsWrites());
     CHECK(state.State() == ESessionState::Detached);  // session stays alive
 }
+
+// ── Item 8: Write in Resync+overflow returns bytes.size() ────────────────────
+//
+// Once the ring_overflowed flag is set (path B pending), subsequent Write calls
+// must return bytes.size() so the PTY loop does not retry stale bytes.
+// Returning 0 would mean the loop sees "nothing accepted" and tries the same
+// bytes again; path B would then replay them twice. §9 contract.
+
+TEST_CASE_FIXTURE(
+    Fixture,
+    "Write in Resync+overflow returns bytes.size() so PTY loop discards data") {
+    StreamState state{Streams(), EDetachedOverflow::Resync};
+
+    // Fill the ring to trigger partial fill then overflow on the same Write.
+    REQUIRE(state.Write(ByteSpan{Bytes(DISCONNECT_MAX - 1)}) ==
+            DISCONNECT_MAX - 1);
+    // Partial fill: 1 byte fits, then ring_overflowed is set.
+    const auto first = state.Write(ByteSpan{Bytes(2)});
+    REQUIRE(first.has_value());
+    CHECK(*first == 1);  // only 1 byte fit before overflow
+    REQUIRE(state.Output().RingOverflowed());
+
+    // Subsequent Write: ring is full, ring_overflowed is already set.
+    // Must return bytes.size(), not 0.
+    const auto second = state.Write(ByteSpan{Bytes(7)});
+    REQUIRE(second.has_value());
+    CHECK(*second == 7);  // all bytes "accepted" (discarded, not buffered)
+
+    // AcceptsWrites still true so the PTY loop keeps draining.
+    CHECK(state.AcceptsWrites());
+}
