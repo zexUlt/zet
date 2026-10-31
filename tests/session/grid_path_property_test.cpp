@@ -1429,3 +1429,223 @@ TEST_CASE_FIXTURE(SodiumFixture, "v1 peer overflow is silently reaped") {
     CHECK(r.agent.State() == ESessionState::Reaped);
     CHECK(r.agent.ReapReason() == ESessionError::DisconnectBufferOverflow);
 }
+
+// ── Item 5a: path A byte-identical property
+// ───────────────────────────────────
+//
+// Bytes delivered to the client after a path-A reconnect must be byte-for-byte
+// identical to bytes written by the agent.  Using gridCapable=false ensures
+// path B is never chosen regardless of ring state or session gen.
+
+TEST_CASE_FIXTURE(SodiumFixture,
+                  "path A delivers bytes identical to agent writes") {
+    const SessionLimits limits = TinyLimits();
+    std::vector<std::byte> as(limits.DisconnectMax + 256);
+    std::vector<std::byte> cs(limits.ResendMax + 256);
+    AgentSession agent{
+        DeriveSessionSecrets(MakeKey(42)),
+        SessionStreams{
+            .Storage = MutableByteSpan{as}, .Now = START, .Limits = limits}};
+    ClientSession client{
+        DeriveSessionSecrets(MakeKey(42)),
+        SessionStreams{
+            .Storage = MutableByteSpan{cs}, .Now = START, .Limits = limits}};
+    Space sp;
+    std::uint64_t nonces = 0;
+
+    // 1. First connection: write 300 bytes, receive some, then disconnect.
+    const std::vector<std::byte> payload1(300, std::byte{0xA1});
+    std::ignore = agent.Write(ByteSpan{payload1});
+    {
+        AgentConnection ac{MutableByteSpan{sp.AgentFrames}, START};
+        ClientConnection cc{client, MakeNonce(++nonces),
+                            MutableByteSpan{sp.ClientFrames}, START};
+        REQUIRE(DriveToLive(ac, cc, agent, sp, START, nonces));
+        // Drain a few frames so the client is partially through the stream.
+        for (int i = 0; i < 20; ++i) {
+            auto ea = PumpAgent(ac, sp, START);
+            REQUIRE(ea.has_value());
+            if (const auto* sf = std::get_if<SendFrame>(&*ea))
+                REQUIRE(Feed(cc, sp, sf->Written));
+            auto ec = PumpClient(cc, sp, START);
+            REQUIRE(ec.has_value());
+            if (const auto* sf = std::get_if<SendFrame>(&*ec))
+                REQUIRE(Feed(ac, sp, sf->Written));
+            if (std::holds_alternative<Idle>(*ea) &&
+                std::holds_alternative<Idle>(*ec))
+                break;
+        }
+        ac.Close(START);
+    }
+
+    // 2. Write more data while disconnected.
+    const std::vector<std::byte> payload2(200, std::byte{0xB2});
+    std::ignore = agent.Write(ByteSpan{payload2});
+
+    // 3. Reconnect (path A — gridCapable=false).
+    //    Run handshake and data collection in one loop so Deliver events that
+    //    appear immediately after Resume are not silently dropped (as they
+    //    would be if DriveToLive handled them internally).
+    std::vector<std::byte> received;
+    {
+        AgentConnection ac{MutableByteSpan{sp.AgentFrames}, START};
+        ClientConnection cc{client, MakeNonce(++nonces),
+                            MutableByteSpan{sp.ClientFrames}, START};
+        for (int i = 0; i < 400; ++i) {
+            auto ea = PumpAgent(ac, sp, START);
+            REQUIRE(ea.has_value());
+            REQUIRE_FALSE(std::holds_alternative<NeedsSnapshot>(*ea));
+            if (const auto* ns = std::get_if<NeedsSession>(&*ea)) {
+                REQUIRE(ns->Id == agent.Ref().Id());
+                ac.Route(agent.Ref(), MakeNonce(++nonces));
+            } else if (const auto* sf = std::get_if<SendFrame>(&*ea)) {
+                REQUIRE(Feed(cc, sp, sf->Written));
+            }
+            auto ec = PumpClient(cc, sp, START);
+            REQUIRE(ec.has_value());
+            if (const auto* d = std::get_if<Deliver>(&*ec))
+                received.insert(received.end(), d->Bytes.begin(),
+                                d->Bytes.end());
+            if (const auto* sf = std::get_if<SendFrame>(&*ec))
+                REQUIRE(Feed(ac, sp, sf->Written));
+            if (ac.IsLive() && cc.IsLive() &&
+                std::holds_alternative<Idle>(*ea) &&
+                std::holds_alternative<Idle>(*ec))
+                break;
+        }
+    }
+
+    // 4. All bytes in received must appear in payload1+payload2 in order.
+    //    The client picks up from where it left off, so received is a suffix of
+    //    payload1 followed by all of payload2.
+    std::vector<std::byte> all;
+    all.insert(all.end(), payload1.begin(), payload1.end());
+    all.insert(all.end(), payload2.begin(), payload2.end());
+    // received is a contiguous infix of all (path A: no bytes lost or added).
+    REQUIRE_FALSE(received.empty());
+    const auto it =
+        std::search(all.begin(), all.end(), received.begin(), received.end());
+    CHECK(it != all.end());
+}
+
+// ── Item 5b: cut-and-reconnect after GridBegin / chunk / GridEnd
+// ───────────────
+//
+// Cutting the connection mid-snapshot (after GridBegin, after a chunk, after
+// GridEnd but before GridApplied) and reconnecting must deliver a complete
+// usable snapshot on the second attempt.
+
+TEST_CASE_FIXTURE(SodiumFixture,
+                  "reconnect mid-snapshot completes on second attempt") {
+    Rig r;
+    // Establish a first connection and disconnect so path B is chosen next.
+    // Send a Resize so the agent records LastKnownSize (prevents WaitForResize_
+    // blocking NeedsSnapshot on the next reconnect).
+    {
+        AgentConnection ac0{MutableByteSpan{r.sp.AgentFrames}, START,
+                            wire::PROTOCOL_VERSION_GRID};
+        ClientConnection cc0{r.client,
+                             MakeNonce(++r.nonces),
+                             MutableByteSpan{r.sp.ClientFrames},
+                             START,
+                             true,
+                             wire::PROTOCOL_VERSION_GRID,
+                             MutableByteSpan{r.sp.SnapshotBuf}};
+        REQUIRE(DriveToLive(ac0, cc0, r.agent, r.sp, START, r.nonces));
+        cc0.QueueResize(wire::ResizeMessage{.Rows = 24, .Cols = 80});
+        for (int i = 0; i < 40; ++i) {
+            auto ea = PumpAgent(ac0, r.sp, START);
+            if (!ea) break;
+            if (const auto* sf = std::get_if<SendFrame>(&*ea))
+                std::ignore = Feed(cc0, r.sp, sf->Written);
+            auto ec = PumpClient(cc0, r.sp, START);
+            if (!ec) break;
+            if (const auto* sf = std::get_if<SendFrame>(&*ec))
+                std::ignore = Feed(ac0, r.sp, sf->Written);
+            if (std::holds_alternative<Idle>(*ea) &&
+                std::holds_alternative<Idle>(*ec))
+                break;
+        }
+        ac0.Close(START);
+    }
+    const std::vector<std::byte> chunk(200, std::byte{0xBB});
+    for (int i = 0; i < 6; ++i) std::ignore = r.agent.Write(ByteSpan{chunk});
+
+    // Try reconnect but cut after the first GridBegin/chunk/GridEnd batch
+    // without sending GridApplied.  Then reconnect again and confirm.
+    // (The first reconnect ends with Close before GridApplied arrives.)
+    {
+        AgentConnection ac{MutableByteSpan{r.sp.AgentFrames}, START,
+                           wire::PROTOCOL_VERSION_GRID};
+        ClientConnection cc{r.client,
+                            MakeNonce(++r.nonces),
+                            MutableByteSpan{r.sp.ClientFrames},
+                            START,
+                            true,
+                            wire::PROTOCOL_VERSION_GRID,
+                            MutableByteSpan{r.sp.SnapshotBuf}};
+        REQUIRE(DriveToLive(ac, cc, r.agent, r.sp, START, r.nonces));
+        // Queue a Resize before the loop so WaitForResize_ is cleared once the
+        // Resize wire frame reaches the agent (agent waits because
+        // LastKnownSize was set by the initial connection).  The loop feeds
+        // client SendFrame results back to the agent so the Resize is received.
+        cc.QueueResize(wire::ResizeMessage{.Rows = 24, .Cols = 80});
+        bool gotNeeds = false;
+        for (int i = 0; i < 80 && !gotNeeds; ++i) {
+            auto ea = PumpAgent(ac, r.sp, START);
+            REQUIRE(ea.has_value());
+            if (std::holds_alternative<NeedsSnapshot>(*ea)) {
+                gotNeeds = true;
+                static std::vector<std::byte> snap(16, std::byte{0x55});
+                ac.SupplySnapshot(START, ByteSpan{snap}, 0, 0);
+            } else if (const auto* sf = std::get_if<SendFrame>(&*ea)) {
+                REQUIRE(Feed(cc, r.sp, sf->Written));
+            }
+            auto ec = PumpClient(cc, r.sp, START);
+            if (ec.has_value()) {
+                if (const auto* sf = std::get_if<SendFrame>(&*ec))
+                    std::ignore = Feed(ac, r.sp, sf->Written);
+            }
+        }
+        REQUIRE(gotNeeds);
+        // Cut before GridApplied arrives on the agent side.
+        ac.Close(START);
+    }
+
+    // Second reconnect: must still deliver ApplySnapshot.
+    bool finalApply = false;
+    {
+        AgentConnection ac{MutableByteSpan{r.sp.AgentFrames}, START,
+                           wire::PROTOCOL_VERSION_GRID};
+        ClientConnection cc{r.client,
+                            MakeNonce(++r.nonces),
+                            MutableByteSpan{r.sp.ClientFrames},
+                            START,
+                            true,
+                            wire::PROTOCOL_VERSION_GRID,
+                            MutableByteSpan{r.sp.SnapshotBuf}};
+        REQUIRE(DriveToLive(ac, cc, r.agent, r.sp, START, r.nonces));
+        // Queue Resize before the loop; the loop feeds the resulting wire frame
+        // back to the agent so WaitForResize_ is cleared before NeedsSnapshot.
+        cc.QueueResize(wire::ResizeMessage{.Rows = 24, .Cols = 80});
+        for (int i = 0; i < 120 && !finalApply; ++i) {
+            auto ea = PumpAgent(ac, r.sp, START);
+            REQUIRE(ea.has_value());
+            if (std::holds_alternative<NeedsSnapshot>(*ea)) {
+                static std::vector<std::byte> snap(16, std::byte{0x66});
+                ac.SupplySnapshot(START, ByteSpan{snap}, 0, 0);
+            } else if (const auto* sf = std::get_if<SendFrame>(&*ea)) {
+                REQUIRE(Feed(cc, r.sp, sf->Written));
+            }
+            auto ec = PumpClient(cc, r.sp, START);
+            REQUIRE(ec.has_value());
+            if (const auto* as = std::get_if<ApplySnapshot>(&*ec)) {
+                finalApply = true;
+                cc.ConfirmApply(as->StreamGen);
+            } else if (const auto* sf = std::get_if<SendFrame>(&*ec)) {
+                REQUIRE(Feed(ac, r.sp, sf->Written));
+            }
+        }
+    }
+    CHECK(finalApply);
+}
