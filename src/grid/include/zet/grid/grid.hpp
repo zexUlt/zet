@@ -140,6 +140,14 @@ public:
         return ModeSet(EMode::AltScreen);
     }
 
+    /// Saved cursor state for the main and alt screens (DECSC/DECRC).
+    [[nodiscard]] const SavedCursor& SavedCursorMainState() const noexcept {
+        return SavedCursorMain_;
+    }
+    [[nodiscard]] const SavedCursor& SavedCursorAltState() const noexcept {
+        return SavedCursorAlt_;
+    }
+
     /// Whether the parser has lost sync with the pty (sixel/DCS without ST,
     /// or a force-reset to Ground). Cleared on each new snapshot.
     [[nodiscard]] bool PossiblyDiverged() const noexcept {

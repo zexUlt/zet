@@ -34,6 +34,11 @@ bool Grid::Allocate(std::uint16_t cols, std::uint16_t rows,
     ScrollBot_ = static_cast<std::uint16_t>(rows - 1);
 
     const std::size_t screenCells = static_cast<std::size_t>(cols) * rows;
+    // Guard: both screen arenas together must be strictly less than the
+    // scrollback budget.  Prevents Create(MAX_COLS, MAX_ROWS, ...) which
+    // needs 2 × 64 MiB = 128 MiB for screens alone, leaving nothing for
+    // history and hitting the practical memory ceiling.
+    if (screenCells * sizeof(Cell) * 2 >= MAX_SCROLLBACK_BYTES) return false;
     MainCells_ = new (std::nothrow) Cell[screenCells]{};
     AltCells_ = new (std::nothrow) Cell[screenCells]{};
     MainLines_ = new (std::nothrow) Line[rows]{};
@@ -266,6 +271,13 @@ void Grid::PutChar(char32_t cp, int width) noexcept {
         InsertChars(static_cast<std::uint16_t>(width));
     }
 
+    // D4: in a 1-column grid a wide char can never fit regardless of AWM.
+    // Replace with a narrow space placeholder (xterm behaviour).
+    if (width == 2 && Cols_ == 1) {
+        width = 1;
+        cp = U' ';
+    }
+
     if (width == 2 && CursorCol_ + 1 >= Cols_) {
         if (ModeSet(EMode::Awm)) {
             ActiveLine(CursorRow_).CellsUsed = Cols_;
@@ -282,6 +294,15 @@ void Grid::PutChar(char32_t cp, int width) noexcept {
         Cell& left =
             CellAt(CursorRow_, static_cast<std::uint16_t>(CursorCol_ - 1));
         if (left.Width == 2) left.Width = 1;
+    }
+
+    // D2: if writing over a wide head, blank its continuation to prevent an
+    // orphan continuation cell (width==0 with no preceding width==2).
+    {
+        Cell& cur = CellAt(CursorRow_, CursorCol_);
+        if (cur.Width == 2 && CursorCol_ + 1 < Cols_)
+            BlankCell(
+                CellAt(CursorRow_, static_cast<std::uint16_t>(CursorCol_ + 1)));
     }
 
     Cell& cell = CellAt(CursorRow_, CursorCol_);
@@ -390,11 +411,21 @@ void Grid::HorizontalTabBack(std::uint16_t n) noexcept {
 
 void Grid::MoveCursorUp(std::uint16_t n) noexcept {
     PendingWrap_ = false;
-    // When cursor is inside the scroll region, always stop at ScrollTop_
-    // regardless of DECOM (CUU must not cross the scroll margin).
-    const std::uint16_t limit = (CursorRow_ >= ScrollTop_)
-                                    ? ScrollTop_
-                                    : (ModeSet(EMode::Decom) ? ScrollTop_ : 0);
+    // Determine the limit (topmost row the cursor may reach):
+    //   • Inside the scroll region  → stop at ScrollTop_ (never cross the top
+    //   margin). • Below the scroll region   → stop at ScrollBot_+1 (don't
+    //   enter the region
+    //     from below — xterm behaviour for cursor outside the region going up).
+    //   • Above the scroll region   → stop at 0 normally, ScrollTop_ under
+    //   DECOM.
+    std::uint16_t limit;
+    if (CursorRow_ >= ScrollTop_ && CursorRow_ <= ScrollBot_) {
+        limit = ScrollTop_;
+    } else if (CursorRow_ > ScrollBot_) {
+        limit = static_cast<std::uint16_t>(ScrollBot_ + 1);
+    } else {
+        limit = ModeSet(EMode::Decom) ? ScrollTop_ : 0;
+    }
     if (n > CursorRow_ - limit)
         n = static_cast<std::uint16_t>(CursorRow_ - limit);
     CursorRow_ = static_cast<std::uint16_t>(CursorRow_ - n);
@@ -627,6 +658,9 @@ void Grid::InsertChars(std::uint16_t n) noexcept {
     const std::uint16_t movedStart = static_cast<std::uint16_t>(CursorCol_ + n);
     if (movedStart < Cols_ && line.Cells[movedStart].Width == 0)
         BlankCell(line.Cells[movedStart]);
+    // D3: the shift may have pushed a wide head into the last column where
+    // its continuation would fall outside the grid — blank it.
+    if (line.Cells[Cols_ - 1].Width == 2) BlankCell(line.Cells[Cols_ - 1]);
     UpdateCellsUsed(line);
 }
 
@@ -1246,6 +1280,24 @@ GridResult<void> Grid::Resize(std::uint16_t newCols,
         HistoryCells_ = newHistCellsArena;
         HistoryLines_ = newHistLines;
         HistoryStart_ = 0;
+    }
+
+    // D1: after a column shrink a wide char spanning the old/new boundary
+    // leaves a head at newCols-1 with no continuation — blank those cells
+    // on every screen line and every scrollback line.
+    if (newCols < Cols_) {
+        for (std::uint16_t r = 0; r < newRows; ++r) {
+            if (MainLines_[r].Cells[newCols - 1].Width == 2)
+                BlankCell(MainLines_[r].Cells[newCols - 1]);
+            if (AltLines_[r].Cells[newCols - 1].Width == 2)
+                BlankCell(AltLines_[r].Cells[newCols - 1]);
+        }
+        if (HistoryLines_) {
+            for (std::uint32_t i = 0; i < HistorySize_; ++i) {
+                Cell& hcell = HistoryLines_[i].Cells[newCols - 1];
+                if (hcell.Width == 2) BlankCell(hcell);
+            }
+        }
     }
 
     // Add new tab stops for any columns that didn't exist before.
