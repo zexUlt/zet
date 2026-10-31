@@ -1082,3 +1082,68 @@ TEST_CASE_FIXTURE(
     agent.Close(START + ACK_IDLE_DELAY);
     client.Close(START + ACK_IDLE_DELAY);
 }
+
+// ── Item 5c: forged Hello ─────────────────────────────────────────────────
+//
+// A Hello claiming GRID_CAPABLE but authenticated with the wrong key must be
+// rejected with AuthenticationFailed.  The GRID_CAPABLE flag must not be
+// acted on before the signature is verified.
+
+TEST_CASE_FIXTURE(
+    SodiumFixture,
+    "forged GRID_CAPABLE Hello with wrong key is AuthenticationFailed") {
+    // Agent has key 1; client uses key 2 — the Noise handshake will fail.
+    std::vector<std::byte> agentStorage(STREAM_STORAGE);
+    std::vector<std::byte> clientStorage(STREAM_STORAGE);
+    AgentSession agent{DeriveSessionSecrets(MakeKey(1)), Streams(agentStorage)};
+    ClientSession client{DeriveSessionSecrets(MakeKey(2)),
+                         Streams(clientStorage)};
+
+    std::vector<std::byte> agentFrames(CONNECTION_FRAME_STORAGE);
+    std::vector<std::byte> clientFrames(CONNECTION_FRAME_STORAGE);
+    std::vector<std::byte> snapBuf(wire::SNAPSHOT_MAX_BYTES);
+    std::vector<std::byte> out(CONNECTION_OUT_SIZE);
+    std::vector<std::byte> scratch(CONNECTION_SCRATCH_SIZE);
+
+    AgentConnection agentConn{MutableByteSpan{agentFrames}, START,
+                              wire::PROTOCOL_VERSION_GRID};
+    ClientConnection clientConn{client,
+                                NextNonce(),
+                                MutableByteSpan{clientFrames},
+                                START,
+                                /*gridCapable=*/true,
+                                wire::PROTOCOL_VERSION_GRID,
+                                MutableByteSpan{snapBuf}};
+
+    std::optional<SessionError> agentErr;
+    for (int step = 0; step < MAX_STEPS; ++step) {
+        auto ea = agentConn.Pump(START, MutableByteSpan{out},
+                                 MutableByteSpan{scratch});
+        if (!ea) {
+            agentErr = ea.error();
+            break;
+        }
+        if (const auto* ns = std::get_if<NeedsSession>(&*ea)) {
+            if (ns->Id == agent.Ref().Id())
+                agentConn.Route(agent.Ref(), NextNonce());
+            else
+                agentConn.RouteUnknown(MakeKey(99), NextNonce());
+        } else if (const auto* sf = std::get_if<SendFrame>(&*ea)) {
+            REQUIRE(clientConn.OnBytes(ByteSpan{out}.first(sf->Written)));
+        }
+        auto ec = clientConn.Pump(START, MutableByteSpan{out},
+                                  MutableByteSpan{scratch});
+        if (!ec) break;
+        if (const auto* sf = std::get_if<SendFrame>(&*ec)) {
+            REQUIRE(agentConn.OnBytes(ByteSpan{out}.first(sf->Written)));
+        }
+        if (agentErr) break;
+    }
+
+    REQUIRE(agentErr.has_value());
+    CHECK(agentErr->Proto() == EProtoError::AuthenticationFailed);
+    CHECK(agentErr->Disposition() == EDisposition::CloseConnection);
+    CHECK_FALSE(agentConn.IsLive());
+    // The agent session must not have been modified by the failed attempt.
+    CHECK(agent.State() == ESessionState::Detached);
+}
