@@ -259,6 +259,7 @@ TEST_CASE_FIXTURE(SodiumFixture,
     const auto ev = rig.InjectToAgent(ByteSpan{plain});
     REQUIRE_FALSE(ev.has_value());
     CHECK(ev.error().Disposition() == EDisposition::CloseConnection);
+    CHECK(ev.error().Proto() == EProtoError::UnexpectedMessage);
 }
 
 // ── Violation 2: stream_gen ≤ current AgentStreamGen_ ────────────────────
@@ -275,6 +276,7 @@ TEST_CASE_FIXTURE(SodiumFixture,
     const auto ev = rig.InjectToClient(ByteSpan{plain});
     REQUIRE_FALSE(ev.has_value());
     CHECK(ev.error().Disposition() == EDisposition::CloseConnection);
+    CHECK(ev.error().Proto() == EProtoError::UnexpectedMessage);
 }
 
 // ── Violation 3: total_len > SNAPSHOT_MAX_BYTES ───────────────────────────
@@ -290,6 +292,7 @@ TEST_CASE_FIXTURE(SodiumFixture,
     const auto ev = rig.InjectToClient(ByteSpan{plain});
     REQUIRE_FALSE(ev.has_value());
     CHECK(ev.error().Disposition() == EDisposition::CloseConnection);
+    CHECK(ev.error().Proto() == EProtoError::LengthLimitExceeded);
 }
 
 // ── Violation 4: scrollback_len > total_len ───────────────────────────────
@@ -304,6 +307,7 @@ TEST_CASE_FIXTURE(SodiumFixture,
     const auto ev = rig.InjectToClient(ByteSpan{plain});
     REQUIRE_FALSE(ev.has_value());
     CHECK(ev.error().Disposition() == EDisposition::CloseConnection);
+    CHECK(ev.error().Proto() == EProtoError::LengthLimitExceeded);
 }
 
 // ── Violation 5: second GridBegin before GridEnd ──────────────────────────
@@ -320,6 +324,7 @@ TEST_CASE_FIXTURE(SodiumFixture,
     const auto ev = rig.InjectToClient(ByteSpan{second});
     REQUIRE_FALSE(ev.has_value());
     CHECK(ev.error().Disposition() == EDisposition::CloseConnection);
+    CHECK(ev.error().Proto() == EProtoError::UnexpectedMessage);
 }
 
 // ── Violation 6: GridChunk without preceding GridBegin ────────────────────
@@ -333,6 +338,7 @@ TEST_CASE_FIXTURE(SodiumFixture,
     const auto ev = rig.InjectToClient(ByteSpan{plain});
     REQUIRE_FALSE(ev.has_value());
     CHECK(ev.error().Disposition() == EDisposition::CloseConnection);
+    CHECK(ev.error().Proto() == EProtoError::UnexpectedMessage);
 }
 
 // ── Violation 7: GridChunk offset does not match running total ────────────
@@ -350,6 +356,7 @@ TEST_CASE_FIXTURE(SodiumFixture,
     const auto ev = rig.InjectToClient(ByteSpan{chunk});
     REQUIRE_FALSE(ev.has_value());
     CHECK(ev.error().Disposition() == EDisposition::CloseConnection);
+    CHECK(ev.error().Proto() == EProtoError::UnexpectedMessage);
 }
 
 // ── Violation 8: GridChunk would exceed total_len ─────────────────────────
@@ -367,6 +374,7 @@ TEST_CASE_FIXTURE(SodiumFixture,
     const auto ev = rig.InjectToClient(ByteSpan{chunk});
     REQUIRE_FALSE(ev.has_value());
     CHECK(ev.error().Disposition() == EDisposition::CloseConnection);
+    CHECK(ev.error().Proto() == EProtoError::UnexpectedMessage);
 }
 
 // ── Violation 9: GridEnd when received_bytes ≠ total_len ─────────────────
@@ -383,6 +391,7 @@ TEST_CASE_FIXTURE(SodiumFixture,
     const auto ev = rig.InjectToClient(ByteSpan{end});
     REQUIRE_FALSE(ev.has_value());
     CHECK(ev.error().Disposition() == EDisposition::CloseConnection);
+    CHECK(ev.error().Proto() == EProtoError::UnexpectedMessage);
 }
 
 // ── Violation 10: Data from the agent while GridReceiving is in progress ──
@@ -398,6 +407,7 @@ TEST_CASE_FIXTURE(SodiumFixture,
     const auto ev = rig.InjectToClient(ByteSpan{data});
     REQUIRE_FALSE(ev.has_value());
     CHECK(ev.error().Disposition() == EDisposition::CloseConnection);
+    CHECK(ev.error().Proto() == EProtoError::UnexpectedMessage);
 }
 
 // ── Extra: GridEnd without preceding GridBegin ────────────────────────────
@@ -410,6 +420,7 @@ TEST_CASE_FIXTURE(SodiumFixture,
     const auto ev = rig.InjectToClient(ByteSpan{end});
     REQUIRE_FALSE(ev.has_value());
     CHECK(ev.error().Disposition() == EDisposition::CloseConnection);
+    CHECK(ev.error().Proto() == EProtoError::UnexpectedMessage);
 }
 
 // ── Extra: GridApplied directed to the client ─────────────────────────────
@@ -422,6 +433,7 @@ TEST_CASE_FIXTURE(SodiumFixture,
     const auto ev = rig.InjectToClient(ByteSpan{plain});
     REQUIRE_FALSE(ev.has_value());
     CHECK(ev.error().Disposition() == EDisposition::CloseConnection);
+    CHECK(ev.error().Proto() == EProtoError::UnexpectedMessage);
 }
 
 // ── Happy path sanity: full GridBegin → GridChunk → GridEnd round trip ────
@@ -458,6 +470,7 @@ TEST_CASE_FIXTURE(
     const auto ev = rig.InjectToClient(ByteSpan{plain});
     REQUIRE_FALSE(ev.has_value());
     CHECK(ev.error().Disposition() == EDisposition::CloseConnection);
+    CHECK(ev.error().Proto() == EProtoError::UnexpectedMessage);
 }
 
 // ── Stale-ack guard: acks received during emission are ignored ─────────────
@@ -498,19 +511,41 @@ TEST_CASE_FIXTURE(SodiumFixture,
     const auto ev = rig.InjectToAgent(ByteSpan{plain});
     MESSAGE(
         "GridApplied(99) with nothing awaited: has_value=" << ev.has_value());
-    CHECK_FALSE(ev.has_value());
+    REQUIRE_FALSE(ev.has_value());
+    CHECK(ev.error().Disposition() == EDisposition::CloseConnection);
+    CHECK(ev.error().Proto() == EProtoError::UnexpectedMessage);
 }
 
 TEST_CASE_FIXTURE(SodiumFixture,
                   "GridApplied wrong gen while awaited is a violation") {
     ViolationRig rig;
+    // Set up: StartGrid populates GridEmitting_. Drive Poll until GridEnd is
+    // sent (GridEmitting_ cleared, GridAwaitingApplied_ = true). Only then
+    // does the wrong-gen check (MalformedField) become reachable.
     const std::vector<std::byte> snap(32, std::byte{0xCC});
     rig.Agent.StartGrid(ByteSpan{snap}, 0, 1, 0);
+    static constexpr std::size_t OUT_SIZE = wire::HEADER_SIZE + wire::MAX_FRAME;
+    std::vector<std::byte> out(OUT_SIZE);
+    std::vector<std::byte> scratch(Channel::POLL_SCRATCH_SIZE);
+    // Poll until the agent has nothing left to send for the grid
+    // (Begin+Chunks+End).
+    bool gridSent = false;
+    for (int i = 0; i < 20 && !gridSent; ++i) {
+        auto r = rig.Agent.Poll(Timestamp{}, MutableByteSpan{out},
+                                MutableByteSpan{scratch});
+        if (!r || *r == 0) {
+            gridSent = true;
+        }
+    }
+    // Now GridEmitting_ is empty, GridAwaitingApplied_ = true.
+    // Sending GridApplied with the wrong gen must yield MalformedField.
     const auto plain = GridAppliedRaw(99);
     const auto ev = rig.InjectToAgent(ByteSpan{plain});
     MESSAGE(
         "GridApplied(99) when awaiting gen 1: has_value=" << ev.has_value());
-    CHECK_FALSE(ev.has_value());
+    REQUIRE_FALSE(ev.has_value());
+    CHECK(ev.error().Disposition() == EDisposition::CloseConnection);
+    CHECK(ev.error().Proto() == EProtoError::MalformedField);
 }
 
 TEST_CASE_FIXTURE(SodiumFixture,
@@ -526,4 +561,115 @@ TEST_CASE_FIXTURE(SodiumFixture,
         CHECK(ev.has_value());
         CHECK(rig.AgentSendBuf.Base() == 0);
     }
+}
+
+// ── Item 4: GridBegin gen baseline from ClientSession::StreamGen
+// ──────────────
+//
+// After a path-B reconnect the client session has StreamGen = N.  On the next
+// reconnect the client channel must be seeded with AgentStreamGen_ = N so that
+// a replayed or forged GridBegin with gen ≤ N is rejected with
+// UnexpectedMessage. (In the full connection path, SendResume passes
+// Session_.StreamGen() as the agentStreamGen constructor parameter.)
+
+/// Inject a single plaintext frame into a channel using a fresh sealer keyed
+/// for the server-to-client direction.  Each call creates its own sealer so
+/// nonces start at 0, matching a freshly constructed channel's opener.
+static ChannelResult<IncomingEvent> InjectOnce(Channel& ch,
+                                               const ConnectionKeys& keys,
+                                               ByteSpan plain) {
+    wire::FrameSealer sealer{ViolationRig::CloneKey(keys.ServerToClient),
+                             keys.SaltServerToClient};
+    std::vector<std::byte> frame(wire::HEADER_SIZE + plain.size() +
+                                 crypto::TAG_SIZE);
+    const auto sealed = sealer.Seal(MutableByteSpan{frame}, plain);
+    REQUIRE(sealed.has_value());
+    const auto view =
+        wire::ReadFrame(ByteSpan{frame}.first(*sealed), wire::MAX_FRAME);
+    REQUIRE(view.has_value());
+    std::vector<std::byte> scratch(wire::MAX_FRAME);
+    return ch.Receive(Timestamp{}, *view, MutableByteSpan{scratch});
+}
+
+TEST_CASE_FIXTURE(
+    SodiumFixture,
+    "GridBegin gen=1 with baseline 1 is rejected after reconnect") {
+    static constexpr std::size_t BUF = ViolationRig::BUF_SIZE;
+    const ConnectionKeys keys{DeriveConnectionKeys(
+        DeriveSessionSecrets(ViolationRig::MakeKey(7)).ConnectionSeed,
+        ViolationRig::MakeNonce(3), ViolationRig::MakeNonce(4))};
+    std::vector<std::byte> sendStore(BUF), snap(wire::SNAPSHOT_MAX_BYTES);
+    SendBuffer send{MutableByteSpan{sendStore}, 0};
+    ReceiveCursor recv{0};
+    Channel ch{keys,
+               ERole::Client,
+               send,
+               recv,
+               Timestamp{},
+               MAX_FRAMES_PER_EPOCH,
+               MAX_BYTES_PER_EPOCH,
+               {},
+               std::uint16_t{2},
+               MutableByteSpan{snap},
+               std::uint32_t{1}};
+    const auto plain = GridBeginRaw(0, 1, 0, 16);
+    const auto ev = InjectOnce(ch, keys, ByteSpan{plain});
+    REQUIRE_FALSE(ev.has_value());
+    CHECK(ev.error().Disposition() == EDisposition::CloseConnection);
+    CHECK(ev.error().Proto() == EProtoError::UnexpectedMessage);
+}
+
+TEST_CASE_FIXTURE(
+    SodiumFixture,
+    "GridBegin gen=0 with baseline 1 is rejected after reconnect") {
+    static constexpr std::size_t BUF = ViolationRig::BUF_SIZE;
+    const ConnectionKeys keys{DeriveConnectionKeys(
+        DeriveSessionSecrets(ViolationRig::MakeKey(7)).ConnectionSeed,
+        ViolationRig::MakeNonce(3), ViolationRig::MakeNonce(4))};
+    std::vector<std::byte> sendStore(BUF), snap(wire::SNAPSHOT_MAX_BYTES);
+    SendBuffer send{MutableByteSpan{sendStore}, 0};
+    ReceiveCursor recv{0};
+    Channel ch{keys,
+               ERole::Client,
+               send,
+               recv,
+               Timestamp{},
+               MAX_FRAMES_PER_EPOCH,
+               MAX_BYTES_PER_EPOCH,
+               {},
+               std::uint16_t{2},
+               MutableByteSpan{snap},
+               std::uint32_t{1}};
+    const auto plain = GridBeginRaw(0, 0, 0, 16);
+    const auto ev = InjectOnce(ch, keys, ByteSpan{plain});
+    REQUIRE_FALSE(ev.has_value());
+    CHECK(ev.error().Disposition() == EDisposition::CloseConnection);
+    CHECK(ev.error().Proto() == EProtoError::UnexpectedMessage);
+}
+
+TEST_CASE_FIXTURE(
+    SodiumFixture,
+    "GridBegin gen=2 with baseline 1 is accepted after reconnect") {
+    static constexpr std::size_t BUF = ViolationRig::BUF_SIZE;
+    const ConnectionKeys keys{DeriveConnectionKeys(
+        DeriveSessionSecrets(ViolationRig::MakeKey(7)).ConnectionSeed,
+        ViolationRig::MakeNonce(3), ViolationRig::MakeNonce(4))};
+    std::vector<std::byte> sendStore(BUF), snap(wire::SNAPSHOT_MAX_BYTES);
+    SendBuffer send{MutableByteSpan{sendStore}, 0};
+    ReceiveCursor recv{0};
+    Channel ch{keys,
+               ERole::Client,
+               send,
+               recv,
+               Timestamp{},
+               MAX_FRAMES_PER_EPOCH,
+               MAX_BYTES_PER_EPOCH,
+               {},
+               std::uint16_t{2},
+               MutableByteSpan{snap},
+               std::uint32_t{1}};
+    // gen=2 > baseline=1: the channel accepts the GridBegin.
+    const auto plain = GridBeginRaw(0, 2, 0, 16);
+    const auto ev = InjectOnce(ch, keys, ByteSpan{plain});
+    CHECK(ev.has_value());
 }
