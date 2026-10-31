@@ -1286,16 +1286,16 @@ GridResult<void> Grid::Resize(std::uint16_t newCols,
     // leaves a head at newCols-1 with no continuation — blank those cells
     // on every screen line and every scrollback line.
     if (newCols < Cols_) {
+        // CopyCells() above initialised these cells; the analyzer does not
+        // model the callee and reports Width as uninitialized (FP).
+        // NOLINTBEGIN(clang-analyzer-core.UndefinedBinaryOperatorResult)
         for (std::uint16_t r = 0; r < newRows; ++r) {
-            // CopyCells() above initialised these cells; the analyzer does not
-            // model the callee and reports Width as uninitialized.
-            if (MainLines_[r].Cells[newCols - 1].Width ==
-                2)  // NOLINT(clang-analyzer-core.UndefinedBinaryOperatorResult)
+            if (MainLines_[r].Cells[newCols - 1].Width == 2)
                 BlankCell(MainLines_[r].Cells[newCols - 1]);
-            if (AltLines_[r].Cells[newCols - 1].Width ==
-                2)  // NOLINT(clang-analyzer-core.UndefinedBinaryOperatorResult)
+            if (AltLines_[r].Cells[newCols - 1].Width == 2)
                 BlankCell(AltLines_[r].Cells[newCols - 1]);
         }
+        // NOLINTEND(clang-analyzer-core.UndefinedBinaryOperatorResult)
         if (HistoryLines_) {
             for (std::uint32_t i = 0; i < HistorySize_; ++i) {
                 Cell& hcell = HistoryLines_[i].Cells[newCols - 1];
