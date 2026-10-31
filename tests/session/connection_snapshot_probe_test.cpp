@@ -310,11 +310,13 @@ TEST_CASE_FIXTURE(
 
 // ── VPROBE b2 ────────────────────────────────────────────────────────────────
 //
-// After SupplySnapshot({}, ...) the session must not be wedged: a subsequent
-// Write must eventually deliver a Deliver event to the client.
+// SupplySnapshot(size=0) must be rejected (wire layer rejects TotalLen==0):
+// the session stays in AwaitSnapshot and NeedsSnapshot is re-emitted.  A
+// subsequent valid supply must bring the session live.
 
 TEST_CASE_FIXTURE(SodiumFixture,
-                  "empty SupplySnapshot does not wedge the session") {
+                  "empty SupplySnapshot is rejected: NeedsSnapshot re-emitted, "
+                  "valid supply brings session live") {
     Rig r;
     {
         Conn c1(r, true, PROTOCOL_VERSION_GRID);
@@ -324,19 +326,37 @@ TEST_CASE_FIXTURE(SodiumFixture,
     const std::vector<std::byte> chunk(200, std::byte{0xBB});
     for (int i = 0; i < 6; ++i) std::ignore = r.agent.Write(ByteSpan{chunk});
     Conn c2(r, true, PROTOCOL_VERSION_GRID);
-    bool supplied = false;
-    for (int i = 0; i < 100; ++i) {
+    int needsCount = 0;
+    bool emptySupplied = false;
+    bool validSupplied = false;
+    std::vector<std::byte> snap(10, std::byte{0x11});
+    for (int i = 0; i < 150; ++i) {
         const auto b = c2.Log.size();
         c2.Step(false);
         bool needs = false;
         for (auto k = b; k < c2.Log.size(); ++k)
             needs |= c2.Log[k].Name == "NeedsSnapshot";
-        if (needs && !supplied) {
-            supplied = true;
-            c2.ac.SupplySnapshot(START, ByteSpan{}, 0, 0);
+        if (needs) {
+            ++needsCount;
+            if (!emptySupplied) {
+                // First NeedsSnapshot: supply empty — must be rejected.
+                emptySupplied = true;
+                c2.ac.SupplySnapshot(START, ByteSpan{}, 0, 0);
+            } else if (!validSupplied) {
+                // Second NeedsSnapshot (re-emitted after rejection): supply
+                // valid.
+                validSupplied = true;
+                c2.ac.SupplySnapshot(START, ByteSpan{snap}, 0, 0);
+            }
         }
     }
-    MESSAGE("after empty supply: " << c2.Dump());
+    MESSAGE("after empty+valid supply: " << c2.Dump());
+    // Must have seen NeedsSnapshot at least twice: once before the empty
+    // supply and once after the rejection re-armed it.
+    CHECK(needsCount >= 2);
+    CHECK(emptySupplied);
+    CHECK(validSupplied);
+    // Session must now be live: a subsequent Write delivers to the client.
     std::ignore = r.agent.Write(ByteSpan{chunk}.first(10));
     int delivered = 0;
     for (int i = 0; i < 100; ++i) {
@@ -350,7 +370,7 @@ TEST_CASE_FIXTURE(SodiumFixture,
         if (auto* sf = std::get_if<SendFrame>(&*ec))
             REQUIRE(Feed(c2.ac, r.sp, sf->Written));
     }
-    MESSAGE("Deliver events after empty snapshot: " << delivered);
+    MESSAGE("Deliver events after valid snapshot: " << delivered);
     CHECK(delivered > 0);
 }
 
@@ -434,4 +454,67 @@ TEST_CASE_FIXTURE(
         MESSAGE("write " << i << " -> " << (w ? int(*w) : -1)
                          << " accepts=" << r.agent.AcceptsWrites());
     }
+}
+
+// ── Item 1: RESIZE_WAIT_TIMEOUT
+// ───────────────────────────────────────────────
+//
+// If the client never sends a post-Resume Resize, WaitForResize_ must be
+// cleared after RESIZE_WAIT_TIMEOUT (2 s) and NeedsSnapshot emitted using the
+// last known size.  Before the fix, PumpAwaitSnapshot returned Idle forever.
+
+TEST_CASE_FIXTURE(SodiumFixture,
+                  "NeedsSnapshot emits after RESIZE_WAIT_TIMEOUT "
+                  "when no Resize arrives") {
+    Rig r;
+    // First connection: tell the agent the terminal is 24×80 so LastKnownSize
+    // is populated and WaitForResize_ will be set on reconnect.
+    {
+        Conn c1(r, true, PROTOCOL_VERSION_GRID);
+        c1.cc.QueueResize(ResizeMessage{.Rows = 24, .Cols = 80});
+        for (int i = 0; i < 40; ++i) c1.Step();
+        c1.ac.Close(START);
+    }
+    // Write enough data to force path B.
+    const std::vector<std::byte> chunk(200, std::byte{0xBB});
+    for (int i = 0; i < 6; ++i) std::ignore = r.agent.Write(ByteSpan{chunk});
+
+    // Second connection: client does NOT send a Resize.
+    AgentConnection ac{MutableByteSpan{r.sp.AgentFrames}, START,
+                       PROTOCOL_VERSION_GRID};
+    ClientConnection cc{r.client,
+                        MakeNonce(++r.nonces),
+                        MutableByteSpan{r.sp.ClientFrames},
+                        START,
+                        true,
+                        PROTOCOL_VERSION_GRID,
+                        MutableByteSpan{r.sp.SnapshotBuf}};
+    REQUIRE(DriveToLive(ac, cc, r.agent, r.sp, START, r.nonces));
+
+    // At t=0 (WaitForResize_ active): pumping yields Idle, not NeedsSnapshot.
+    {
+        auto e = PumpAgent(ac, r.sp, START);
+        REQUIRE(e.has_value());
+        CHECK(std::holds_alternative<Idle>(*e));
+    }
+
+    // NextDeadline must be set (resize-wait deadline is in ~2s).
+    CHECK(ac.NextDeadline().IsSet());
+
+    // At t=RESIZE_WAIT_TIMEOUT: WaitForResize_ expires, NeedsSnapshot fires.
+    const Timestamp after = START + RESIZE_WAIT_TIMEOUT;
+    bool gotNeeds = false;
+    for (int i = 0; i < 32 && !gotNeeds; ++i) {
+        auto e = PumpAgent(ac, r.sp, after);
+        REQUIRE(e.has_value());
+        if (std::holds_alternative<NeedsSnapshot>(*e)) {
+            gotNeeds = true;
+            const auto& ns = std::get<NeedsSnapshot>(*e);
+            CHECK(ns.Rows == 24);
+            CHECK(ns.Cols == 80);
+        } else if (const auto* sf = std::get_if<SendFrame>(&*e)) {
+            REQUIRE(Feed(cc, r.sp, sf->Written));
+        }
+    }
+    CHECK(gotNeeds);
 }

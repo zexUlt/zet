@@ -242,6 +242,11 @@ public:
                         std::uint32_t scrollbackLen,
                         std::uint8_t flags) noexcept;
 
+    /// Returns the earlier of the base deadline and any AwaitSnapshot deadline
+    /// (RESIZE_WAIT_TIMEOUT).  Shadows ConnectionBase so callers that hold an
+    /// AgentConnection directly see the resize-wait deadline.
+    [[nodiscard]] Deadline NextDeadline() const noexcept;
+
 private:
     enum class EStage : std::uint8_t {
         AwaitHello,
@@ -287,6 +292,10 @@ private:
     /// issuing NeedsSnapshot, so the dimensions carried by NeedsSnapshot
     /// reflect the current terminal rather than the stale one. §9 item (a).
     bool WaitForResize_{false};
+    /// Cleared once: deadline for WaitForResize_ (START + RESIZE_WAIT_TIMEOUT).
+    /// Once expired, WaitForResize_ is cleared so NeedsSnapshot fires with the
+    /// last known size.  std::nullopt when WaitForResize_ is false.
+    std::optional<Timestamp> ResizeWaitDeadline_{};
     std::optional<ResumeAttempt> Attempt_;
     std::optional<SessionHandle> Handle_;
     std::optional<DirectionFrames> Current_;

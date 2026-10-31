@@ -60,6 +60,16 @@ Deadline ConnectionBase::NextDeadline() const noexcept {
     return Deadline{Started_ + HANDSHAKE_TIMEOUT};
 }
 
+// ── AgentConnection ────────────────────────────────────────────────────
+
+Deadline AgentConnection::NextDeadline() const noexcept {
+    return Earliest(
+        ConnectionBase::NextDeadline(),
+        ResizeWaitDeadline_ ? Deadline{*ResizeWaitDeadline_} : Deadline{});
+}
+
+// ── ConnectionBase ─────────────────────────────────────────────────────
+
 SessionError ConnectionBase::Fail(SessionError error) noexcept {
     if (!Failed_) {
         Failed_ = error;
@@ -446,6 +456,9 @@ ConnectionResult AgentConnection::PumpResume(Timestamp now, MutableByteSpan out,
         // Wait for the client's post-Resume Resize before reporting dimensions
         // in NeedsSnapshot, unless the terminal size is not yet known.  §9 (a).
         WaitForResize_ = Handle_->LastKnownSize().has_value();
+        if (WaitForResize_) {
+            ResizeWaitDeadline_ = now + RESIZE_WAIT_TIMEOUT;
+        }
         SnapshotReminderSent_ = false;
         return Idle{};
     }
@@ -500,6 +513,7 @@ ConnectionResult AgentConnection::PumpAwaitSnapshot(
             // Client sent its post-Resume Resize: unblock NeedsSnapshot and
             // re-arm the reminder so it carries the fresh dimensions.  §9 (a).
             WaitForResize_ = false;
+            ResizeWaitDeadline_.reset();
             SnapshotReminderSent_ = false;
             return Resized{.Size = resize->Resize};
         }
@@ -517,8 +531,14 @@ ConnectionResult AgentConnection::PumpAwaitSnapshot(
     }
     // Suppress NeedsSnapshot until the client's post-Resume Resize arrives so
     // the reported dimensions reflect the current terminal.  §9 (a).
+    // After RESIZE_WAIT_TIMEOUT, give up waiting and use the last known size.
     if (WaitForResize_) {
-        return Idle{};
+        if (ResizeWaitDeadline_ && now >= *ResizeWaitDeadline_) {
+            WaitForResize_ = false;
+            ResizeWaitDeadline_.reset();
+        } else {
+            return Idle{};
+        }
     }
     // Return NeedsSnapshot on the first idle pump so the caller learns a
     // snapshot is required.  Subsequent idle pumps return Idle to avoid a
@@ -546,9 +566,12 @@ void AgentConnection::SupplySnapshot([[maybe_unused]] Timestamp now,
     if (!Handle_->IsCurrent()) {
         return;
     }
-    // Reject oversize snapshots without changing state — caller can retry.
-    // A uint32 truncation here would silently corrupt the wire message. §9.
-    if (snapshot.size() > wire::SNAPSHOT_MAX_BYTES) {
+    // Reject empty or oversize snapshots without changing state — caller can
+    // retry. The wire layer rejects total_len == 0 (§7), so supplying an
+    // empty snapshot would produce an unsendable GridBegin; keeping the
+    // session in AwaitSnapshot is the consistent behaviour. §9.
+    if (snapshot.empty() || snapshot.size() > wire::SNAPSHOT_MAX_BYTES) {
+        SnapshotReminderSent_ = false;  // re-arm NeedsSnapshot for the caller
         return;
     }
     // Clear the ring and open a new output generation, then queue the snapshot
@@ -723,9 +746,16 @@ ConnectionResult ClientConnection::SendResume(Timestamp now,
     if (!sealed) {
         return Refuse(SessionError{sealed.error()});
     }
+    // Seed AgentStreamGen_ from the session's current stream gen so that a
+    // GridBegin with gen ≤ Session_.StreamGen() is rejected on reconnect.
+    // Without this, every new Channel starts at 0 and would accept a forged
+    // or replayed GridBegin from a previous generation. §9 item (4).
+    const std::uint32_t baseline =
+        NegotiatedVersion_ >= wire::PROTOCOL_VERSION_GRID ? Session_.StreamGen()
+                                                          : 0;
     Channel_.emplace(std::move(frames), Handle_->Output(), Handle_->Input(),
-                     now, Handle_->Liveness(), NegotiatedVersion_,
-                     SnapshotBuf_);
+                     now, Handle_->Liveness(), NegotiatedVersion_, SnapshotBuf_,
+                     baseline);
     if (PendingResize_) {
         Channel_->QueueResize(*PendingResize_);
         PendingResize_.reset();
