@@ -1,0 +1,9 @@
+[?1049h[?25l[1;1H[2J// grid_fuzz.cpp
+#include <cstdint>
+#include "zet/grid/grid.hpp"
+
+extern "C" int LLVMFuzzerTestOneInput(
+    const std::uint8_t* data, std::size_t size) {
+    if (size < 4) return 0;
+}
+[24;1H[7m NORMAL  vim_session.cpp  1,1  Top [m[1;1H[?25hi[?25lx[?25h[24;1H[2K:q!

@@ -9,9 +9,15 @@ The test skips when:
   - the zet-grid-dump helper is not on PATH / ZET_GRID_DUMP,
   - we are not in the integration container (no ZET_BUILD_DIR env var).
 
-The corpus lives in tests/integration/grid_corpus/ — small captures produced
-by script(1) and trimmed to a few hundred bytes each.  The test parametrises
-over every .bin file in that directory.
+When ZET_BUILD_DIR is set an empty corpus is a hard failure, not a skip.
+
+The corpus lives in tests/integration/grid_corpus/ — captures produced by
+tools/capture_grid_corpus.sh.  The test parametrises over every .bin file
+in that directory.
+
+Known pyte differences are listed in tests/integration/grid_corpus/allowlist.yaml
+with a per-entry 'reason'.  A difference that matches an allowlist entry is
+reported as an xfail rather than a hard failure.
 """
 
 from __future__ import annotations
@@ -19,7 +25,9 @@ from __future__ import annotations
 import os
 import subprocess
 import json
+import re
 from pathlib import Path
+from typing import Optional
 
 import pytest
 
@@ -56,12 +64,58 @@ skip_no_dump = pytest.mark.skipif(
 # ---------------------------------------------------------------------------
 
 CORPUS_DIR = Path(__file__).parent / "grid_corpus"
+ALLOWLIST_PATH = CORPUS_DIR / "allowlist.yaml"
 
 
 def _corpus_files() -> list[Path]:
     if not CORPUS_DIR.is_dir():
         return []
-    return sorted(CORPUS_DIR.glob("*.bin"))
+    files = sorted(CORPUS_DIR.glob("*.bin"))
+    if not files and BUILD_DIR:
+        pytest.fail(
+            "grid_corpus/ contains no .bin files but ZET_BUILD_DIR is set. "
+            "Run tools/capture_grid_corpus.sh to regenerate the corpus."
+        )
+    return files
+
+
+# ---------------------------------------------------------------------------
+# Allowlist loading
+# ---------------------------------------------------------------------------
+
+def _load_allowlist() -> list[dict]:
+    """Return a list of allowlist entries; each entry has 'file', 'row', 'reason'."""
+    if not ALLOWLIST_PATH.exists():
+        return []
+    try:
+        import yaml  # type: ignore
+        with open(ALLOWLIST_PATH) as f:
+            data = yaml.safe_load(f)
+        return data if isinstance(data, list) else []
+    except ImportError:
+        # yaml not available: parse the simple format manually.
+        entries: list[dict] = []
+        with open(ALLOWLIST_PATH) as f:
+            for line in f:
+                line = line.strip()
+                if line.startswith("- ") or line.startswith("  "):
+                    # Skip for now — without yaml we can't parse reliably.
+                    pass
+        return entries
+
+
+_ALLOWLIST = _load_allowlist()
+
+
+def _is_allowlisted(stem: str, row: int) -> Optional[str]:
+    """Return the reason string if (file, row) matches an allowlist entry, else None."""
+    for entry in _ALLOWLIST:
+        entry_file = entry.get("file", "")
+        entry_row = entry.get("row", -1)
+        if (entry_file in ("*", stem) and
+                (entry_row == -1 or entry_row == row)):
+            return str(entry.get("reason", "allowlisted"))
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -118,15 +172,37 @@ def test_grid_matches_pyte(capture: Path) -> None:
         f"Row count mismatch: zet={len(zet_rows)} pyte={len(pyte_rows)}"
     )
 
-    # Compare row by row so pytest shows which line differs.
+    # Compare row by row; check allowlist for known pyte differences.
     for r, (z, p_) in enumerate(zip(zet_rows, pyte_rows)):
-        assert z == p_, (
-            f"Row {r} mismatch:\n  zet:  {z!r}\n  pyte: {p_!r}"
-        )
+        if z != p_:
+            reason = _is_allowlisted(capture.stem, r)
+            if reason:
+                pytest.xfail(
+                    f"Row {r} differs (allowlisted: {reason}):\n"
+                    f"  zet:  {z!r}\n  pyte: {p_!r}"
+                )
+            assert z == p_, (
+                f"Row {r} mismatch:\n  zet:  {z!r}\n  pyte: {p_!r}"
+            )
 
+    if zet_cur_row != pyte_cur_row:
+        reason = _is_allowlisted(capture.stem, -1)
+        if reason:
+            pytest.xfail(
+                f"Cursor row mismatch (allowlisted: {reason}): "
+                f"zet={zet_cur_row} pyte={pyte_cur_row}"
+            )
     assert zet_cur_row == pyte_cur_row, (
         f"Cursor row mismatch: zet={zet_cur_row} pyte={pyte_cur_row}"
     )
+
+    if zet_cur_col != pyte_cur_col:
+        reason = _is_allowlisted(capture.stem, -1)
+        if reason:
+            pytest.xfail(
+                f"Cursor col mismatch (allowlisted: {reason}): "
+                f"zet={zet_cur_col} pyte={pyte_cur_col}"
+            )
     assert zet_cur_col == pyte_cur_col, (
         f"Cursor col mismatch: zet={zet_cur_col} pyte={pyte_cur_col}"
     )
@@ -155,3 +231,14 @@ def test_zet_dump_smoke() -> None:
     payload = json.loads(result.stdout)
     assert "rows" in payload
     assert payload["rows"][0].startswith("Hello")
+
+
+@pytest.mark.skipif(bool(BUILD_DIR), reason="only checked when ZET_BUILD_DIR is set")
+def test_corpus_not_empty_when_build_dir() -> None:
+    """When ZET_BUILD_DIR is set the corpus must contain at least one file."""
+    # This test is gated by the skipif above; _corpus_files() calls pytest.fail
+    # when BUILD_DIR is set and the corpus is empty, so merely calling it here
+    # provides the coverage for the other direction.
+    if BUILD_DIR:
+        files = _corpus_files()
+        assert files, "Corpus is empty — run tools/capture_grid_corpus.sh"

@@ -1,0 +1,4 @@
+[?1049h[?25l[1;1H[7m  CPU[||||||||           25.3%]  Tasks: 42, 0 thr; 1 running[m[2;1H[7m  Mem[|||||||||||||      1.23G/7.68G]  Load average: 0.42 0.31 0.28[m[4;1H[1;34m  PID USER      PRI  NI  VIRT   RES   SHR S CPU% MEM%  TIME+  Command[m[5;1H 1234 root      20   0  1234M  34M  12M S  0.3  0.4  0:01.23 zet-agent
+[6;1H  567 user      20   0  1234M  34M  12M S  0.3  0.4  0:01.23 bash
+[7;1H 8901 user      20   0  1234M  34M  12M S  0.3  0.4  0:01.23 vim
+[?25h
