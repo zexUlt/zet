@@ -82,9 +82,9 @@ struct Conn {
             Log.push_back({"client-err"});
             return false;
         }
-        if (const auto* snap_ev = std::get_if<ApplySnapshot>(&*ec)) {
+        if (const auto* snapEv = std::get_if<ApplySnapshot>(&*ec)) {
             Log.push_back({"client:ApplySnapshot"});
-            Cc.ConfirmApply(snap_ev->StreamGen);
+            Cc.ConfirmApply(snapEv->StreamGen);
         }
         if (const auto* sf = std::get_if<SendFrame>(&*ec)) {
             if (!Feed(Ac, R.Sp, sf->Written)) {
@@ -126,10 +126,10 @@ TEST_CASE_FIXTURE(SodiumFixture,
     Rig r;
     {
         Conn c1(r, true, PROTOCOL_VERSION_GRID);
-        c1.cc.QueueResize(ResizeMessage{.Rows = 24, .Cols = 80});
+        c1.Cc.QueueResize(ResizeMessage{.Rows = 24, .Cols = 80});
         for (int i = 0; i < 40; ++i) c1.Step();
         MESSAGE("conn1: " << c1.Dump());
-        c1.ac.Close(START);
+        c1.Ac.Close(START);
     }
     const std::vector<std::byte> chunk(200, std::byte{0xBB});
     for (int i = 0; i < 6; ++i) std::ignore = r.Agent.Write(ByteSpan{chunk});
@@ -163,9 +163,9 @@ TEST_CASE_FIXTURE(SodiumFixture,
     Rig r;
     {
         Conn c1(r, true, PROTOCOL_VERSION_GRID);
-        c1.cc.QueueResize(ResizeMessage{.Rows = 24, .Cols = 80});
+        c1.Cc.QueueResize(ResizeMessage{.Rows = 24, .Cols = 80});
         for (int i = 0; i < 40; ++i) c1.Step();
-        c1.ac.Close(START);
+        c1.Ac.Close(START);
     }
     const std::vector<std::byte> chunk(200, std::byte{0xBB});
     for (int i = 0; i < 6; ++i) std::ignore = r.Agent.Write(ByteSpan{chunk});
@@ -261,7 +261,7 @@ TEST_CASE_FIXTURE(
         {
             Conn c1(r, true, PROTOCOL_VERSION_GRID);
             for (int i = 0; i < 30; ++i) c1.Step();
-            c1.ac.Close(START);
+            c1.Ac.Close(START);
         }
         const std::vector<std::byte> chunk(200, std::byte{0xBB});
         for (int i = 0; i < 6; ++i)
@@ -324,7 +324,7 @@ TEST_CASE_FIXTURE(SodiumFixture,
     {
         Conn c1(r, true, PROTOCOL_VERSION_GRID);
         for (int i = 0; i < 30; ++i) c1.Step();
-        c1.ac.Close(START);
+        c1.Ac.Close(START);
     }
     const std::vector<std::byte> chunk(200, std::byte{0xBB});
     for (int i = 0; i < 6; ++i) std::ignore = r.Agent.Write(ByteSpan{chunk});
@@ -389,7 +389,7 @@ TEST_CASE_FIXTURE(
         {
             Conn c1(r, true, PROTOCOL_VERSION_GRID);
             for (int i = 0; i < 30; ++i) c1.Step();
-            c1.ac.Close(START);
+            c1.Ac.Close(START);
         }
         const std::vector<std::byte> chunk(200, std::byte{0xBB});
         for (int i = 0; i < 6; ++i)
@@ -422,7 +422,7 @@ TEST_CASE_FIXTURE(
     {
         Conn c1(r, false, PROTOCOL_VERSION_GRID);
         for (int i = 0; i < 30; ++i) c1.Step();
-        c1.ac.Close(START);
+        c1.Ac.Close(START);
     }
     const std::vector<std::byte> chunk(200, std::byte{0xBB});
     for (int i = 0; i < 6; ++i) std::ignore = r.Agent.Write(ByteSpan{chunk});
@@ -449,7 +449,7 @@ TEST_CASE_FIXTURE(
     {
         Conn c1(r, true, PROTOCOL_VERSION_GRID);
         for (int i = 0; i < 30; ++i) c1.Step();
-        c1.ac.Close(START);
+        c1.Ac.Close(START);
     }
     const std::vector<std::byte> chunk(300, std::byte{0xBB});
     for (int i = 0; i < 4; ++i) {
@@ -474,9 +474,9 @@ TEST_CASE_FIXTURE(SodiumFixture,
     // is populated and WaitForResize_ will be set on reconnect.
     {
         Conn c1(r, true, PROTOCOL_VERSION_GRID);
-        c1.cc.QueueResize(ResizeMessage{.Rows = 24, .Cols = 80});
+        c1.Cc.QueueResize(ResizeMessage{.Rows = 24, .Cols = 80});
         for (int i = 0; i < 40; ++i) c1.Step();
-        c1.ac.Close(START);
+        c1.Ac.Close(START);
     }
     // Write enough data to force path B.
     const std::vector<std::byte> chunk(200, std::byte{0xBB});
@@ -535,9 +535,9 @@ TEST_CASE_FIXTURE(SodiumFixture,
     // First connection: populate last known size and disconnect.
     {
         Conn c1(r, true, PROTOCOL_VERSION_GRID);
-        c1.cc.QueueResize(ResizeMessage{.Rows = 24, .Cols = 80});
+        c1.Cc.QueueResize(ResizeMessage{.Rows = 24, .Cols = 80});
         for (int i = 0; i < 40; ++i) c1.Step();
-        c1.ac.Close(START);
+        c1.Ac.Close(START);
     }
     const std::vector<std::byte> chunk(200, std::byte{0xBB});
     for (int i = 0; i < 6; ++i) std::ignore = r.Agent.Write(ByteSpan{chunk});
