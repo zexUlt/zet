@@ -281,6 +281,12 @@ private:
     /// busy-loop: the first call informs the caller a snapshot is needed;
     /// subsequent calls return Idle until the snapshot is supplied. §9.
     bool SnapshotReminderSent_{false};
+    /// True when entering AwaitSnapshot with a non-null LastKnownSize: the
+    /// caller sent a terminal size on the *previous* connection.  We wait for
+    /// the client to send its post-Resume Resize (which may differ) before
+    /// issuing NeedsSnapshot, so the dimensions carried by NeedsSnapshot
+    /// reflect the current terminal rather than the stale one. §9 item (a).
+    bool WaitForResize_{false};
     std::optional<ResumeAttempt> Attempt_;
     std::optional<SessionHandle> Handle_;
     std::optional<DirectionFrames> Current_;

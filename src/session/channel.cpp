@@ -203,6 +203,11 @@ ChannelResult<IncomingEvent> Channel::Receive(
             // ─────────────────────────────────
 
         case wire::EMessageType::GridBegin: {
+            // v1 channels have no grid protocol: treat as unrecognised. §9.
+            if (Version_ < wire::PROTOCOL_VERSION_GRID) {
+                return std::unexpected(
+                    SessionError{EProtoError::UnexpectedMessage});
+            }
             // Client side only; agent should never receive this direction.
             if (Role_ != ERole::Client) {
                 break;
@@ -245,6 +250,10 @@ ChannelResult<IncomingEvent> Channel::Receive(
         }
 
         case wire::EMessageType::GridChunk: {
+            if (Version_ < wire::PROTOCOL_VERSION_GRID) {
+                return std::unexpected(
+                    SessionError{EProtoError::UnexpectedMessage});
+            }
             if (Role_ != ERole::Client) {
                 break;
             }
@@ -282,6 +291,10 @@ ChannelResult<IncomingEvent> Channel::Receive(
         }
 
         case wire::EMessageType::GridEnd: {
+            if (Version_ < wire::PROTOCOL_VERSION_GRID) {
+                return std::unexpected(
+                    SessionError{EProtoError::UnexpectedMessage});
+            }
             if (Role_ != ERole::Client) {
                 break;
             }
@@ -315,6 +328,10 @@ ChannelResult<IncomingEvent> Channel::Receive(
         }
 
         case wire::EMessageType::GridApplied: {
+            if (Version_ < wire::PROTOCOL_VERSION_GRID) {
+                return std::unexpected(
+                    SessionError{EProtoError::UnexpectedMessage});
+            }
             // Agent side only.
             if (Role_ != ERole::Agent) {
                 break;
@@ -711,6 +728,12 @@ void Channel::StartGrid(ByteSpan snapshot, std::uint8_t flags,
     }
     if (GridEmitting_.has_value() || GridAwaitingApplied_) {
         // Emission already in progress — caller error, ignore.
+        return;
+    }
+    // A zero-byte snapshot means the terminal is empty: skip the grid wire
+    // protocol entirely and just clear the suppression flag so Data can flow.
+    if (snapshot.empty()) {
+        AwaitingSnapshotSupply_ = false;
         return;
     }
     GridEmitting_.emplace();

@@ -443,16 +443,25 @@ ConnectionResult AgentConnection::PumpResume(Timestamp now, MutableByteSpan out,
         // waiting for SupplySnapshot to clear the ring. §9 ADR-030.
         Channel_->SuppressDataUntilGrid();
         Stage_ = EStage::AwaitSnapshot;
-        const auto size = Handle_->LastKnownSize();
-        return NeedsSnapshot{
-            .Rows = size ? size->Rows : std::uint16_t{0},
-            .Cols = size ? size->Cols : std::uint16_t{0},
-        };
+        // Wait for the client's post-Resume Resize before reporting dimensions
+        // in NeedsSnapshot, unless the terminal size is not yet known.  §9 (a).
+        WaitForResize_ = Handle_->LastKnownSize().has_value();
+        SnapshotReminderSent_ = false;
+        return Idle{};
     }
 
     // Path A: byte-identical replay from what the client reports receiving.
     if (auto attached = Handle_->Attach(resume->ClientReceiveOffset);
         !attached) {
+        // For a v2 non-capable client whose session ended with overflow: report
+        // the overflow so the caller can tell the user why the session is gone.
+        // §9 defect (1): a reaped session must still notify the peer once.
+        if (attached.error() == ESessionError::SessionReaped) {
+            if (const auto end = Handle_->EndedWith();
+                end && end->Kind == wire::ESessionEndKind::Overflow) {
+                return SessionOverflowed{};
+            }
+        }
         return Refuse(SessionError{attached.error()});
     }
     Channel_.emplace(std::move(chosen), Handle_->Output(), Handle_->Input(),
@@ -488,8 +497,9 @@ ConnectionResult AgentConnection::PumpAwaitSnapshot(
         }
         if (const auto* resize = std::get_if<DeliveredResize>(&*event)) {
             Handle_->ReportResize(resize->Resize);
-            // A new Resize updates the terminal size; re-arm the reminder so
-            // the caller sees NeedsSnapshot with the fresh dimensions. §9.
+            // Client sent its post-Resume Resize: unblock NeedsSnapshot and
+            // re-arm the reminder so it carries the fresh dimensions.  §9 (a).
+            WaitForResize_ = false;
             SnapshotReminderSent_ = false;
             return Resized{.Size = resize->Resize};
         }
@@ -504,6 +514,11 @@ ConnectionResult AgentConnection::PumpAwaitSnapshot(
     }
     if (*written > 0) {
         return SendFrame{.Written = *written};
+    }
+    // Suppress NeedsSnapshot until the client's post-Resume Resize arrives so
+    // the reported dimensions reflect the current terminal.  §9 (a).
+    if (WaitForResize_) {
+        return Idle{};
     }
     // Return NeedsSnapshot on the first idle pump so the caller learns a
     // snapshot is required.  Subsequent idle pumps return Idle to avoid a
@@ -529,6 +544,11 @@ void AgentConnection::SupplySnapshot([[maybe_unused]] Timestamp now,
     // A superseded connection must not call NewGeneration (which advances the
     // ring) on behalf of a session whose newer owner did not ask for it.
     if (!Handle_->IsCurrent()) {
+        return;
+    }
+    // Reject oversize snapshots without changing state — caller can retry.
+    // A uint32 truncation here would silently corrupt the wire message. §9.
+    if (snapshot.size() > wire::SNAPSHOT_MAX_BYTES) {
         return;
     }
     // Clear the ring and open a new output generation, then queue the snapshot
