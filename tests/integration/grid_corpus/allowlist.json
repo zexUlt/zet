@@ -1,0 +1,109 @@
+[
+  {
+    "comment": "scroll_region_synthetic: pyte does not implement SU/SD within scroll regions",
+    "file": "scroll_region_synthetic",
+    "row": 2,
+    "reason": "pyte ignores SU/SD; zet correctly applies scroll-up then scroll-down within the DECSTBM region"
+  },
+  {
+    "file": "scroll_region_synthetic",
+    "row": 3,
+    "reason": "pyte ignores SU/SD; zet correctly applies scroll-up then scroll-down within the DECSTBM region"
+  },
+  {
+    "file": "scroll_region_synthetic",
+    "row": 4,
+    "reason": "pyte ignores SU/SD; zet correctly applies scroll-up then scroll-down within the DECSTBM region"
+  },
+  {
+    "file": "scroll_region_synthetic",
+    "row": 5,
+    "reason": "pyte ignores SU/SD; zet correctly applies scroll-up then scroll-down within the DECSTBM region"
+  },
+  {
+    "file": "scroll_region_synthetic",
+    "row": 6,
+    "reason": "pyte ignores SU/SD; zet correctly applies scroll-up then scroll-down within the DECSTBM region"
+  },
+  {
+    "file": "scroll_region_synthetic",
+    "row": 7,
+    "reason": "pyte ignores SU/SD; zet correctly applies scroll-up then scroll-down within the DECSTBM region"
+  },
+  {
+    "file": "scroll_region_synthetic",
+    "row": 8,
+    "reason": "pyte ignores SU/SD; zet correctly applies scroll-up then scroll-down within the DECSTBM region"
+  },
+  {
+    "file": "scroll_region_synthetic",
+    "row": 9,
+    "reason": "pyte ignores SU/SD; zet correctly applies scroll-up then scroll-down within the DECSTBM region"
+  },
+  {
+    "file": "scroll_region_synthetic",
+    "row": 10,
+    "reason": "pyte ignores SU/SD; zet correctly applies scroll-up then scroll-down within the DECSTBM region"
+  },
+  {
+    "file": "scroll_region_synthetic",
+    "row": 11,
+    "reason": "pyte ignores SU/SD; zet correctly applies scroll-up then scroll-down within the DECSTBM region"
+  },
+  {
+    "file": "scroll_region_synthetic",
+    "row": 12,
+    "reason": "pyte ignores SU/SD; zet correctly applies scroll-up then scroll-down within the DECSTBM region"
+  },
+  {
+    "file": "scroll_region_synthetic",
+    "row": 13,
+    "reason": "pyte ignores SU/SD; zet correctly applies scroll-up then scroll-down within the DECSTBM region"
+  },
+  {
+    "file": "scroll_region_synthetic",
+    "row": 14,
+    "reason": "pyte ignores SU/SD; zet correctly applies scroll-up then scroll-down within the DECSTBM region"
+  },
+  {
+    "file": "scroll_region_synthetic",
+    "row": 15,
+    "reason": "pyte ignores SU/SD; zet correctly applies scroll-up then scroll-down within the DECSTBM region"
+  },
+  {
+    "file": "scroll_region_synthetic",
+    "row": 16,
+    "reason": "pyte ignores SU/SD; zet correctly applies scroll-up then scroll-down within the DECSTBM region"
+  },
+  {
+    "file": "scroll_region_synthetic",
+    "row": 17,
+    "reason": "pyte ignores SU/SD; zet correctly applies scroll-up then scroll-down within the DECSTBM region"
+  },
+  {
+    "file": "scroll_region_synthetic",
+    "row": 18,
+    "reason": "pyte ignores SU/SD; zet correctly applies scroll-up then scroll-down within the DECSTBM region"
+  },
+  {
+    "file": "scroll_region_synthetic",
+    "row": -1,
+    "reason": "cursor row differs because pyte ignores SU/SD and leaves cursor at row 19 (last written), while zet correctly tracks cursor through scroll operations"
+  },
+  {
+    "comment": "vim_session: pyte.Screen does not save/restore main-screen content on ?1049h/?1049l",
+    "file": "vim_session",
+    "row": 21,
+    "reason": "pyte.Screen uses a single buffer and does not restore main-screen content on alt-screen exit (?1049l); pyte shows the scrolled vim status text, zet correctly shows the empty main screen that was saved on alt-screen entry"
+  },
+  {
+    "file": "vim_session",
+    "row": 22,
+    "reason": "pyte.Screen uses a single buffer and does not restore main-screen content on alt-screen exit (?1049l); pyte shows the vim 'written' message, zet correctly shows the empty main screen"
+  },
+  {
+    "file": "vim_session",
+    "row": -1,
+    "reason": "pyte.Screen does not restore the saved cursor position on alt-screen exit (?1049l); pyte cursor stays at the alt-screen position (row 23), zet restores the main-screen cursor (row 0)"
+  }
+]

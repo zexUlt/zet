@@ -1217,6 +1217,28 @@ GridResult<void> Grid::Resize(std::uint16_t newCols,
     truncateCellsUsed(MainLines_, oldRows);
     truncateCellsUsed(AltLines_, oldRows);
 
+    // D1 (pre-copy): blank any wide-head cell at the new last column on the
+    // OLD buffers.  CopyCells will carry the blanked cells into the new buffer,
+    // so no suppression of the static analyser is needed — the old cells are
+    // already initialised.  Scrollback uses the circular-buffer index (src)
+    // rather than the sequential index used after the swap.
+    if (newCols < Cols_) {
+        for (std::uint16_t r = 0; r < oldRows; ++r) {
+            if (MainLines_[r].Cells[newCols - 1].Width == 2)
+                BlankCell(MainLines_[r].Cells[newCols - 1]);
+            if (AltLines_[r].Cells[newCols - 1].Width == 2)
+                BlankCell(AltLines_[r].Cells[newCols - 1]);
+        }
+        if (HistoryLines_) {
+            for (std::uint32_t i = 0; i < HistorySize_; ++i) {
+                const std::uint32_t src =
+                    (HistoryStart_ + i) % ScrollbackLimit_;
+                Cell& hcell = HistoryLines_[src].Cells[newCols - 1];
+                if (hcell.Width == 2) BlankCell(hcell);
+            }
+        }
+    }
+
     // When shrinking rows, push the rows that fall off the top of the
     // main screen into scrollback before swapping the line arrays.
     if (newRows < oldRows && !IsAltScreen()) {
@@ -1280,28 +1302,6 @@ GridResult<void> Grid::Resize(std::uint16_t newCols,
         HistoryCells_ = newHistCellsArena;
         HistoryLines_ = newHistLines;
         HistoryStart_ = 0;
-    }
-
-    // D1: after a column shrink a wide char spanning the old/new boundary
-    // leaves a head at newCols-1 with no continuation — blank those cells
-    // on every screen line and every scrollback line.
-    if (newCols < Cols_) {
-        // CopyCells() above initialised these cells; the analyzer does not
-        // model the callee and reports Width as uninitialized (FP).
-        // NOLINTBEGIN(clang-analyzer-core.UndefinedBinaryOperatorResult)
-        for (std::uint16_t r = 0; r < newRows; ++r) {
-            if (MainLines_[r].Cells[newCols - 1].Width == 2)
-                BlankCell(MainLines_[r].Cells[newCols - 1]);
-            if (AltLines_[r].Cells[newCols - 1].Width == 2)
-                BlankCell(AltLines_[r].Cells[newCols - 1]);
-        }
-        // NOLINTEND(clang-analyzer-core.UndefinedBinaryOperatorResult)
-        if (HistoryLines_) {
-            for (std::uint32_t i = 0; i < HistorySize_; ++i) {
-                Cell& hcell = HistoryLines_[i].Cells[newCols - 1];
-                if (hcell.Width == 2) BlankCell(hcell);
-            }
-        }
     }
 
     // Add new tab stops for any columns that didn't exist before.

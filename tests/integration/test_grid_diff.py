@@ -15,9 +15,9 @@ The corpus lives in tests/integration/grid_corpus/ — captures produced by
 tools/capture_grid_corpus.sh.  The test parametrises over every .bin file
 in that directory.
 
-Known pyte differences are listed in tests/integration/grid_corpus/allowlist.yaml
-with a per-entry 'reason'.  A difference that matches an allowlist entry is
-reported as an xfail rather than a hard failure.
+Known pyte differences are listed in tests/integration/grid_corpus/allowlist.json
+(stdlib json, no extra dependency).  A difference that matches an allowlist entry
+is reported as an xfail rather than a hard failure.
 """
 
 from __future__ import annotations
@@ -64,7 +64,7 @@ skip_no_dump = pytest.mark.skipif(
 # ---------------------------------------------------------------------------
 
 CORPUS_DIR = Path(__file__).parent / "grid_corpus"
-ALLOWLIST_PATH = CORPUS_DIR / "allowlist.yaml"
+ALLOWLIST_PATH = CORPUS_DIR / "allowlist.json"
 
 
 def _corpus_files() -> list[Path]:
@@ -87,21 +87,9 @@ def _load_allowlist() -> list[dict]:
     """Return a list of allowlist entries; each entry has 'file', 'row', 'reason'."""
     if not ALLOWLIST_PATH.exists():
         return []
-    try:
-        import yaml  # type: ignore
-        with open(ALLOWLIST_PATH) as f:
-            data = yaml.safe_load(f)
-        return data if isinstance(data, list) else []
-    except ImportError:
-        # yaml not available: parse the simple format manually.
-        entries: list[dict] = []
-        with open(ALLOWLIST_PATH) as f:
-            for line in f:
-                line = line.strip()
-                if line.startswith("- ") or line.startswith("  "):
-                    # Skip for now — without yaml we can't parse reliably.
-                    pass
-        return entries
+    with open(ALLOWLIST_PATH) as f:
+        data = json.load(f)
+    return data if isinstance(data, list) else []
 
 
 _ALLOWLIST = _load_allowlist()

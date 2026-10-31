@@ -1,3 +1,1 @@
-[0m[01;34mbin[0m   [01;34mbuild[0m  [01;34mdocs[0m  [01;34mfuzz[0m  [01;34msrc[0m
-[01;34mtools[0m  [01;34mtests[0m  CMakeLists.txt  [01;32mCMakePresets.json[0m  README.md
-[01;32mzet-agent[0m  [01;32mzet-muxd[0m  [01;32mzet[0m
+CMakeLists.txt  README.md  [0m[01;34mbin[0m  [01;32mbuild.sh[0m  [01;34mdocs[0m  [01;34msrc[0m

@@ -1,15 +1,11 @@
 # Pyte: pure Python VT100 terminal emulator used as a reference in
 # tests/integration/test_grid_diff.py (design.md §13, §16).
-# PyYAML: used by test_grid_diff.py to load the allowlist of known pyte
-# differences (tests/integration/grid_corpus/allowlist.yaml).
+# The allowlist of known pyte differences uses stdlib json — no extra dep.
 #
 # Regenerate hashes:
-#   pip download --no-deps pyte==0.8.0 wcwidth==0.9.4 PyYAML==6.0.2 -d /tmp/pyte-dl
+#   pip download --no-deps pyte==0.8.0 wcwidth==0.9.4 -d /tmp/pyte-dl
 #   pip hash /tmp/pyte-dl/*.whl
 pyte==0.8.0 \
     --hash=sha256:dd16d25e4cd27642cbbe94f9e8eaa1c59b9389ce0943e971dd4786f4e52daee0
 wcwidth==0.9.4 \
     --hash=sha256:901eace6d2dd25ebb917d0ce5db18e5c537e1504c905cf32f0d006c12098b05d
-PyYAML==6.0.2 \
-    --hash=sha256:0833f8694549e586547b576dcfaba4a6b55b9e96098b36cdc7ebefe667dfed48 \
-    --hash=sha256:8b9c7197f7cb2738065c481a0461e50ad02f18c78cd75775628afb4d7137fb3b
