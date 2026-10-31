@@ -1,0 +1,206 @@
+#!/usr/bin/env python3
+"""Generate Unicode 16.0.0 width tables for zet_grid.
+
+Reads EastAsianWidth.txt and DerivedCoreProperties.txt from unicode.org
+and writes src/grid/unicode_tables.cpp.
+
+Usage:
+    python3 tools/gen_unicode_width.py
+    # Downloads from unicode.org; requires network access.
+    # Output is already checked into the repo. Re-run only to update to
+    # a new Unicode version (update UNICODE_VERSION below).
+
+The tables implement the wcwidth(3) contract used by zet_grid:
+    -1   control characters (C0, DEL, C1 except CSI)
+     0   non-spacing (Mn, Me) and format (Cf) marks, BOM
+     1   most characters
+     2   East Asian Wide (W) and Fullwidth (F)
+
+Refs:
+    https://www.unicode.org/reports/tr11/   East Asian Width
+    https://unicode.org/reports/tr44/       Unicode Character Database
+"""
+
+import hashlib
+import sys
+import urllib.request
+from typing import Iterator
+
+UNICODE_VERSION = "16.0.0"
+BASE_URL = f"https://www.unicode.org/Public/{UNICODE_VERSION}/ucd/"
+EAW_URL = BASE_URL + "EastAsianWidth.txt"
+DCP_URL = BASE_URL + "DerivedCoreProperties.txt"
+DC_URL  = BASE_URL + "extracted/DerivedGeneralCategory.txt"
+
+# SHA-256 hashes pinned for Unicode 16.0.0 (computed from the canonical
+# unicode.org files; re-verify if UNICODE_VERSION is bumped).
+HASHES: dict[str, str] = {
+    EAW_URL: "43adc76c0686a42cb370764eb8cfe2b2"
+             "a45b10b855e5572a2db4a0eecce15d5b",
+    DCP_URL: "39d35161f2954497f69e08bdb9e70149"
+             "3f476a3d30222de20028feda36c1dabd",
+    DC_URL:  "7676ab755a41ef82108460238569e60a"
+             "d65c191ddafe61b36c6765ec1353f293",
+}
+
+OUTPUT = "src/grid/unicode_tables.cpp"
+
+
+def fetch(url: str) -> list[str]:
+    print(f"  fetching {url}", file=sys.stderr)
+    with urllib.request.urlopen(url, timeout=30) as resp:
+        data = resp.read()
+    digest = hashlib.sha256(data).hexdigest()
+    expected = HASHES.get(url)
+    if expected and digest != expected:
+        raise ValueError(
+            f"SHA-256 mismatch for {url}\n"
+            f"  got:      {digest}\n"
+            f"  expected: {expected}\n"
+            "Update HASHES in gen_unicode_width.py if you intentionally "
+            "updated the Unicode version."
+        )
+    return data.decode("utf-8").splitlines()
+
+
+def parse_ranges(lines: list[str], filter_fn) -> list[tuple[int, int]]:
+    """Return sorted list of (start, end) ranges where filter_fn(fields) is True."""
+    ranges: list[tuple[int, int]] = []
+    for line in lines:
+        line = line.split("#")[0].strip()
+        if not line:
+            continue
+        semi = line.find(";")
+        if semi < 0:
+            continue
+        cp_field = line[:semi].strip()
+        rest = line[semi + 1:].strip()
+        if ".." in cp_field:
+            lo_s, hi_s = cp_field.split("..")
+            lo, hi = int(lo_s, 16), int(hi_s, 16)
+        else:
+            lo = hi = int(cp_field, 16)
+        if filter_fn(rest):
+            ranges.append((lo, hi))
+    return merge(sorted(ranges))
+
+
+def merge(ranges: list[tuple[int, int]]) -> list[tuple[int, int]]:
+    out: list[tuple[int, int]] = []
+    for lo, hi in ranges:
+        if out and lo <= out[-1][1] + 1:
+            out[-1] = (out[-1][0], max(out[-1][1], hi))
+        else:
+            out.append((lo, hi))
+    return out
+
+
+def emit_table(name: str, ranges: list[tuple[int, int]]) -> Iterator[str]:
+    yield f"static constexpr Range {name}[] = {{"
+    for lo, hi in ranges:
+        yield f"    {{0x{lo:04X}, 0x{hi:04X}}},"
+    yield "};"
+
+
+def subtract_ranges(a: list[tuple[int, int]],
+                    b: list[tuple[int, int]]) -> list[tuple[int, int]]:
+    """Remove all code points in b from a."""
+    result: list[tuple[int, int]] = []
+    bi = 0
+    for lo, hi in a:
+        while bi < len(b) and b[bi][1] < lo:
+            bi += 1
+        cur = lo
+        i = bi
+        while i < len(b) and b[i][0] <= hi:
+            if cur < b[i][0]:
+                result.append((cur, b[i][0] - 1))
+            cur = b[i][1] + 1
+            i += 1
+        if cur <= hi:
+            result.append((cur, hi))
+    return result
+
+
+def main() -> None:
+    print("Generating Unicode width tables...", file=sys.stderr)
+
+    eaw_lines = fetch(EAW_URL)
+    dcp_lines = fetch(DCP_URL)
+    dc_lines = fetch(DC_URL)
+
+    # Wide: W or F (Fullwidth)
+    wide = parse_ranges(eaw_lines, lambda f: f.split()[0] in ("W", "F"))
+
+    # Zero-width: Default_Ignorable_Code_Point + combining marks (Mn, Me).
+    # Subtract EAW Wide characters so that Hangul Fillers (U+115F, U+1160)
+    # and other W-class Mn/Me characters are classified as Wide (width 2),
+    # not Zero-width (width 0).
+    default_ignorable = parse_ranges(
+        dcp_lines, lambda f: "Default_Ignorable_Code_Point" in f)
+    mn_me = parse_ranges(dc_lines, lambda f: f.split(";")[0].strip() in ("Mn", "Me"))
+    zero_width_raw = merge(sorted(default_ignorable + mn_me))
+    zero_width = subtract_ranges(zero_width_raw, wide)
+
+    # Write output
+    lines = [
+        "// AUTO-GENERATED by tools/gen_unicode_width.py — DO NOT EDIT.",
+        f"// Unicode {UNICODE_VERSION}.",
+        "// Re-generate: python3 tools/gen_unicode_width.py",
+        "",
+        "#include \"zet/grid/unicode.hpp\"",
+        "",
+        "#include <cstddef>",
+        "",
+        "namespace zet::grid {",
+        "",
+        "struct Range {",
+        "    char32_t Lo;",
+        "    char32_t Hi;",
+        "};",
+        "",
+        "// East Asian Width W (Wide) and F (Fullwidth) — width 2.",
+        "// Source: EastAsianWidth.txt, Unicode 16.0.0.",
+        *emit_table("WIDE", wide),
+        "",
+        "// Zero-width: combining marks (Mn, Me), Default_Ignorable, etc.",
+        "// EAW Wide characters are excluded so Hangul Fillers stay width 2.",
+        "// Source: DerivedCoreProperties.txt + DerivedGeneralCategory.txt.",
+        *emit_table("ZERO_WIDTH", zero_width),
+        "",
+        "// Binary search over a sorted range table.",
+        "static bool InRanges(const Range* table, std::size_t n,",
+        "                     char32_t cp) noexcept {",
+        "    std::size_t lo = 0, hi = n;",
+        "    while (lo < hi) {",
+        "        const std::size_t mid = lo + (hi - lo) / 2;",
+        "        if (cp < table[mid].Lo)      hi = mid;",
+        "        else if (cp > table[mid].Hi) lo = mid + 1;",
+        "        else return true;",
+        "    }",
+        "    return false;",
+        "}",
+        "",
+        "int Wcwidth(char32_t cp) noexcept {",
+        "    // C0 controls and DEL",
+        "    if (cp < 0x20 || cp == 0x7F) return -1;",
+        "    // C1 controls (8-bit, rare in UTF-8 terminals)",
+        "    if (cp >= 0x80 && cp < 0xA0) return -1;",
+        "    // Zero-width (combining marks, default-ignorable, etc.)",
+        "    if (InRanges(ZERO_WIDTH, sizeof(ZERO_WIDTH)/sizeof(*ZERO_WIDTH), cp))",
+        "        return 0;",
+        "    // Wide / Fullwidth",
+        "    if (InRanges(WIDE, sizeof(WIDE)/sizeof(*WIDE), cp))",
+        "        return 2;",
+        "    return 1;",
+        "}",
+        "",
+        "}  // namespace zet::grid",
+    ]
+    with open(OUTPUT, "w") as f:
+        f.write("\n".join(lines) + "\n")
+    print(f"Wrote {OUTPUT}", file=sys.stderr)
+
+
+if __name__ == "__main__":
+    main()

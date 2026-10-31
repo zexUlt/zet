@@ -60,7 +60,9 @@ def pytest_collection_modifyitems(config, items):
         reason = "the suite starts sshd and needs root: run it through tools/integration.sh"
     if reason:
         for item in items:
-            item.add_marker(pytest.mark.skip(reason=reason))
+            # test_grid_diff.py runs without sshd — only skip e2e/mux tests.
+            if "test_grid_diff" not in item.nodeid:
+                item.add_marker(pytest.mark.skip(reason=reason))
 
 
 @pytest.fixture(scope="session")

@@ -217,7 +217,11 @@ jobs:
             cmake --preset musl-dev >/dev/null &&
             files=$(find src tests -name "*.cpp" ! -name "*_kqueue.cpp" ! -name "*_macos.cpp" | sort)
             [ -n "$files" ] || { echo "no sources"; exit 0; }
-            clang-tidy -p build/musl-dev --warnings-as-errors="*" $files
+            # One clang-tidy per file, as many at once as the runner has
+            # cores: a single invocation walks the files one after another.
+            # xargs exits non-zero if any of them does.
+            printf "%s\n" $files |
+              xargs -P "$(nproc)" -n 1 clang-tidy -p build/musl-dev --quiet --warnings-as-errors="*"
           '
 
 

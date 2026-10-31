@@ -26,5 +26,7 @@ export ZET_DOCKER_ARGS="--cap-add=NET_ADMIN"
 exec "$root/tools/in_alpine.sh" "
 cmake --preset $preset >/dev/null &&
 cmake --build --preset $preset &&
-ZET_BUILD_DIR=/src/build/$preset python3 -m pytest -p no:cacheprovider -v tests/integration $pytest_args
+python3 -m venv --system-site-packages /tmp/zet-venv &&
+/tmp/zet-venv/bin/pip install --require-hashes -r /src/tools/pyte-requirements.txt &&
+ZET_BUILD_DIR=/src/build/$preset /tmp/zet-venv/bin/python -m pytest -p no:cacheprovider -v tests/integration $pytest_args
 "

@@ -1,0 +1,5 @@
+# Tests keep the naming rules and leave the static analyser to the product
+# code: on doctest's macro-heavy files it costs most of the tidy job and has
+# not found anything there that the sanitizers do not.
+InheritParentConfig: true
+Checks: '-clang-analyzer-*'

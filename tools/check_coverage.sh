@@ -19,6 +19,7 @@ readonly LINE_COVERAGE_THRESHOLD_PERCENT=90
 readonly GATED_TARGETS=(
     "zet_wire:src/wire"
     "zet_session:src/session"
+    "zet_grid:src/grid"
 )
 
 root=$(cd "$(dirname "$0")/.." && pwd)
