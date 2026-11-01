@@ -1654,3 +1654,62 @@ TEST_CASE_FIXTURE(SodiumFixture,
     }
     CHECK(finalApply);
 }
+
+// ── 2e: version guard alone — HelloGridCapable_=true but ver=1 keeps path A ──
+//
+// gridCapable = (NegotiatedVersion_ >= PROTOCOL_VERSION_GRID &&
+// HelloGridCapable_) Removing the version check (mutation) would make
+// gridCapable=true here, incorrectly enabling path B for a v1 peer that
+// declared grid-capable.
+
+TEST_CASE_FIXTURE(SodiumFixture,
+                  "v1 ceiling with HelloGridCapable=true keeps path A "
+                  "(version guard alone)") {
+    Rig r;
+    // First connection: capable v2 → switches ring to Resync mode.
+    Reconnect(r, true, wire::PROTOCOL_VERSION_GRID);
+    // Overflow the ring so the cost check would choose path B if gridCapable.
+    const std::vector<std::byte> chunk(200, std::byte{0xAA});
+    for (int i = 0; i < 6; ++i) {
+        std::ignore = r.Agent.Write(ByteSpan{chunk});
+    }
+    // Second connection: HelloGridCapable_=true but ceiling=v1.
+    // NegotiatedVersion_ = min(1, 1) = 1 < PROTOCOL_VERSION_GRID(2).
+    // gridCapable = false → path A required.
+    const auto res = Reconnect(r, /*capable=*/true, wire::PROTOCOL_VERSION_MIN);
+    MESSAGE("v1-ceiling capable=true reconnect: " << res);
+    CHECK(res == "no-snapshot");
+}
+
+// ── 2f: ShouldReportOverflow_ resets per-connection — non-capable→capable
+// ─────
+//
+// SetGridInfo sets ShouldReportOverflow_ = (ver>=2 && !gridCapable) each
+// connection.  Mutation: never reset to false.
+// Scenario: non-capable v2 first (sets ShouldReportOverflow_=true, Reap mode),
+// capable v2 second (must reset ShouldReportOverflow_=false, Resync mode).
+// Without the reset, overflow after the capable connection would produce
+// SessionEnd Overflow instead of NeedsSnapshot.
+
+TEST_CASE_FIXTURE(
+    SodiumFixture,
+    "ShouldReportOverflow_ resets to false on capable connection after "
+    "non-capable (non-capable→capable ordering)") {
+    Rig r;
+    // First: non-capable v2 → ShouldReportOverflow_=true, ring stays Reap.
+    Reconnect(r, false, wire::PROTOCOL_VERSION_GRID);
+    // Second: capable v2 → ShouldReportOverflow_=false, ring enters Resync.
+    Reconnect(r, true, wire::PROTOCOL_VERSION_GRID);
+    // Overflow the ring.
+    const std::vector<std::byte> chunk(200, std::byte{0xBB});
+    for (int i = 0; i < 6; ++i) {
+        std::ignore = r.Agent.Write(ByteSpan{chunk});
+    }
+    // Reconnect capable: must get NeedsSnapshot (grid path), not Overflow.
+    const auto res = Reconnect(r, true, wire::PROTOCOL_VERSION_GRID);
+    MESSAGE("after non-capable→capable overflow: " << res);
+    // Session must be alive and requesting a snapshot (not reaped with
+    // Overflow).
+    CHECK(res == "NeedsSnapshot");
+    CHECK(r.Agent.State() != ESessionState::Reaped);
+}
