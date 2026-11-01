@@ -226,6 +226,11 @@ public:
     /// carries it.
     void Close(Timestamp now) noexcept;
 
+    /// Test-only: direct access to the live channel. Undefined behaviour if
+    /// the connection is not live (Channel_ is empty). Only call from test
+    /// harnesses after the connection reaches Stage::Live.
+    [[nodiscard]] Channel& ProbeChannel() noexcept { return *Channel_; }
+
     /// Whether this connection carries the session — live and not superseded
     /// — and has sent it SessionEnd. A client closes its end once it has
     /// that, so a close seen when this is true is the client saying it holds
@@ -300,6 +305,10 @@ private:
     /// caller has not supplied a snapshot by SUPPLY_SNAPSHOT_TIMEOUT the
     /// connection is closed (CloseConnection; session stays alive).  §9.
     std::optional<Timestamp> SupplySnapshotDeadline_{};
+    /// Set when StartGrid succeeds (GridEnd queued); cleared when GridApplied
+    /// is received.  If the client does not confirm within GRID_APPLIED_TIMEOUT
+    /// the connection is closed (CloseConnection; session stays alive).  §9.
+    std::optional<Timestamp> GridAppliedDeadline_{};
     std::optional<ResumeAttempt> Attempt_;
     std::optional<SessionHandle> Handle_;
     std::optional<DirectionFrames> Current_;

@@ -74,6 +74,12 @@ inline constexpr Duration RESIZE_WAIT_TIMEOUT = std::chrono::seconds{2};
 /// connection can try again; the session itself is not reaped.
 inline constexpr Duration SUPPLY_SNAPSHOT_TIMEOUT = std::chrono::seconds{30};
 
+/// Path B (§9 ADR-030): how long to wait for GridApplied from the client after
+/// GridEnd has been sent.  If the client does not confirm (or deny) the
+/// snapshot within this window the connection is closed so that a new
+/// connection can try again; the session itself is not reaped.
+inline constexpr Duration GRID_APPLIED_TIMEOUT = std::chrono::seconds{30};
+
 /// Path B cost estimate: approximate scrollback contribution in bytes. §9.
 inline constexpr std::uint32_t SNAPSHOT_SCROLLBACK_BYTES = 512U * 1024U;
 
