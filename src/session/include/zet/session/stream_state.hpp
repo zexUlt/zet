@@ -91,6 +91,10 @@ public:
     /// session that reaps on overflow always says yes: the shell must not
     /// block on a client that may never return, and the Write that crosses
     /// DisconnectMax is what ends it.
+    ///
+    /// In Resync mode (ring overflowed, path B pending) this also returns
+    /// true, and Write returns bytes.size() rather than the bytes stored: the
+    /// caller has already fed those bytes to the grid, so they are not lost.
     [[nodiscard]] bool AcceptsWrites() const noexcept;
 
     [[nodiscard]] ESessionState State() const noexcept { return State_; }
