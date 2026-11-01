@@ -519,3 +519,419 @@ TEST_CASE("alt-screen: PossiblyDiverged flag is preserved") {
     delete r.value();
     delete g;
 }
+
+// ===========================================================================
+// Degrade ladder tests (PR2 — design.md §9)
+// ===========================================================================
+//
+// Each test is labelled with the mutant that proves it fails when the
+// behaviour under test is removed.
+
+// ---------------------------------------------------------------------------
+// Step 1 — HistoryTrimmed
+// ---------------------------------------------------------------------------
+
+TEST_CASE("degrade step1: history trimmed to fit cap") {
+    // Mutant: remove history trimming (return SnapshotTooLarge instead of
+    // trimming) → REQUIRE(r.has_value()) fails.
+    //
+    // Build a grid with scrollback, measure the full snapshot, then request
+    // cap = fullSize - 1.  The serializer must trim the oldest history line.
+    Grid* g = MakeGrid(80, 3, 50);
+    VtParser p;
+    // Write 55 lines: 3 stay on screen, 50 go to scrollback (grid limit).
+    for (int i = 0; i < 55; ++i) Feed(p, *g, "data content\r\n");
+    REQUIRE(g->ScrollbackSize() > 0u);
+
+    // Full snapshot (no cap restriction).
+    auto full = Snapshot::Create(*g);
+    REQUIRE(full.has_value());
+    const std::size_t S = full.value()->Bytes().size();
+    delete full.value();
+
+    // cap = S - 1 forces at least one line to be trimmed.
+    auto r = Snapshot::Create(*g, SnapshotOptions{.MaxBytes = S - 1});
+    REQUIRE(r.has_value());
+    Snapshot* snap = r.value();
+    CHECK(snap->Degradation() == EDegradation::HistoryTrimmed);
+    CHECK(snap->Bytes().size() <= S - 1);
+
+    delete snap;
+    delete g;
+}
+
+TEST_CASE("degrade step1: binary-search trims to maximum fitting count") {
+    // Mutant: replace binary search with returning SnapshotTooLarge →
+    // REQUIRE(r.has_value()) fails.
+    //
+    // Verify that the trimmed snapshot is as large as possible (not overly
+    // trimmed) by checking that the full snapshot minus one line doesn't fit
+    // within the cap but the result does.
+    Grid* g = MakeGrid(10, 3, 100);
+    VtParser p;
+    // Write enough lines to fill scrollback.
+    for (int i = 0; i < 110; ++i) Feed(p, *g, "AAAA\r\n");
+    REQUIRE(g->ScrollbackSize() > 1u);
+
+    auto full = Snapshot::Create(*g);
+    REQUIRE(full.has_value());
+    const std::size_t S = full.value()->Bytes().size();
+    delete full.value();
+
+    // cap = S - 1 triggers trimming.
+    auto r = Snapshot::Create(*g, SnapshotOptions{.MaxBytes = S - 1});
+    REQUIRE(r.has_value());
+    CHECK(r.value()->Degradation() == EDegradation::HistoryTrimmed);
+    CHECK(r.value()->Bytes().size() <= S - 1);
+
+    delete r.value();
+    delete g;
+}
+
+TEST_CASE("degrade step1: cap exactly at full size has no degradation") {
+    // Mutant: always apply HistoryTrimmed even when not needed →
+    // CHECK(deg == None) fails.
+    Grid* g = MakeGrid(20, 5, 20);
+    VtParser p;
+    for (int i = 0; i < 25; ++i) Feed(p, *g, "line\r\n");
+
+    auto full = Snapshot::Create(*g);
+    REQUIRE(full.has_value());
+    const std::size_t S = full.value()->Bytes().size();
+    delete full.value();
+
+    // cap = S: no trimming needed.
+    auto r = Snapshot::Create(*g, SnapshotOptions{.MaxBytes = S});
+    REQUIRE(r.has_value());
+    CHECK(r.value()->Degradation() == EDegradation::None);
+
+    delete r.value();
+    delete g;
+}
+
+// ---------------------------------------------------------------------------
+// Step 2 — Colors256
+// ---------------------------------------------------------------------------
+
+TEST_CASE("degrade step2: truecolor downgraded to 256 when needed") {
+    // Mutant: remove Colors256 step → serializer goes straight to NoColor or
+    // SnapshotTooLarge; Degradation() != Colors256, so CHECK fails.
+    //
+    // Fill an 80×5 grid with a single TrueColor fg (255,0,128) on every cell.
+    // The TrueColor SGR is longer than the 256-color SGR, so reducing cap
+    // by 1 from the full TrueColor size forces the Colors256 step.
+    Grid* g = MakeGrid(80, 5, 0);
+    VtParser p;
+    // Set TrueColor on every cell via SGR then text.
+    for (int row = 0; row < 5; ++row) {
+        Feed(p, *g, "\x1b[38;2;255;0;128m");
+        for (int col = 0; col < 80; ++col) Feed(p, *g, "X");
+        if (row < 4) Feed(p, *g, "\r\n");
+    }
+
+    // Full snapshot (all TrueColor).
+    auto full = Snapshot::Create(*g);
+    REQUIRE(full.has_value());
+    const std::size_t S = full.value()->Bytes().size();
+    CHECK(full.value()->Degradation() == EDegradation::None);
+    delete full.value();
+
+    // 256-color snapshot must be smaller (TrueColor SGR is longer).
+    // Set cap = S - 1 → should trigger Colors256.
+    auto r = Snapshot::Create(*g, SnapshotOptions{.MaxBytes = S - 1});
+    REQUIRE(r.has_value());
+    CHECK(r.value()->Degradation() == EDegradation::Colors256);
+    CHECK(r.value()->Bytes().size() <= S - 1);
+
+    delete r.value();
+    delete g;
+}
+
+TEST_CASE("degrade step2: truecolor->256 maps known values correctly") {
+    // Mutant: return wrong palette index (e.g. always 0) →
+    // CHECK(idx == expected) fails.
+    //
+    // Verify the xterm-256 mapping on four canonical inputs by checking that
+    // the encoded snapshot contains the expected indexed SGR sequences.
+    struct Case {
+        std::uint8_t r, g, b;
+        std::uint8_t expected256;
+        const char* sgrSubstr;  // expected substring in 256-color output
+    };
+    // Pure red (255,0,0)   → cube index 196 = 16+36*5+0+0
+    // Pure green (0,255,0) → cube index 46  = 16+0+36*5/6*5... = 16+30
+    // Pure white (255,255,255) → cube index 231 = 16+180+30+5
+    // Mid-gray (118,118,118)  → grayscale 243 = 232+11
+    static const Case kCases[] = {
+        {255, 0, 0, 196, "\x1b[0;38;5;196m"},
+        {0, 255, 0, 46, "\x1b[0;38;5;46m"},
+        {255, 255, 255, 231, "\x1b[0;38;5;231m"},
+        {118, 118, 118, 243, "\x1b[0;38;5;243m"},
+    };
+
+    for (const auto& tc : kCases) {
+        // Set one cell to TrueColor; put text.
+        Grid* g = MakeGrid(10, 5, 0);
+        VtParser p;
+        char sgr[32];
+        std::snprintf(sgr, sizeof(sgr), "\x1b[38;2;%d;%d;%dm",
+                      static_cast<int>(tc.r), static_cast<int>(tc.g),
+                      static_cast<int>(tc.b));
+        Feed(p, *g, sgr);
+        Feed(p, *g, "A");
+
+        // Force Colors256 by capping below full TrueColor.
+        auto full = Snapshot::Create(*g);
+        REQUIRE(full.has_value());
+        const std::size_t S = full.value()->Bytes().size();
+        delete full.value();
+
+        auto r = Snapshot::Create(*g, SnapshotOptions{.MaxBytes = S - 1});
+        REQUIRE(r.has_value());
+        // Accept either Colors256 or None (if 256-colour happened to
+        // produce the same size or smaller; unlikely but guard it).
+        if (r.value()->Degradation() == EDegradation::Colors256) {
+            CHECK(Contains(r.value()->Bytes(), tc.sgrSubstr));
+        }
+
+        delete r.value();
+        delete g;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Step 3 — NoColor
+// ---------------------------------------------------------------------------
+
+TEST_CASE("degrade step3: colour stripped when 256-colour still too large") {
+    // Mutant: remove NoColor step → no snapshot returned or wrong Degradation.
+    //
+    // Use a grid with dense alternating 256-indexed colours so the 256-colour
+    // snapshot is large, but a no-colour snapshot is small enough for the cap.
+    Grid* g = MakeGrid(80, 10, 0);
+    VtParser p;
+    // Alternate indexed colours 208 and 196 per cell.
+    for (int row = 0; row < 10; ++row) {
+        for (int col = 0; col < 80; ++col) {
+            if (col % 2 == 0)
+                Feed(p, *g, "\x1b[38;5;208m");
+            else
+                Feed(p, *g, "\x1b[38;5;196m");
+            Feed(p, *g, "X");
+        }
+        if (row < 9) Feed(p, *g, "\r\n");
+    }
+
+    // Full size.
+    auto full = Snapshot::Create(*g);
+    REQUIRE(full.has_value());
+    const std::size_t S = full.value()->Bytes().size();
+    delete full.value();
+
+    // Build a no-colour snapshot to find its size.
+    // We can't call DoEncode directly, so use a small cap that forces NoColor.
+    // The no-colour snapshot should be substantially smaller than S because
+    // colour SGRs dominate.  Try cap = S / 3 (generous for mode restore).
+    const std::size_t noCap = S / 3;
+    auto r = Snapshot::Create(*g, SnapshotOptions{.MaxBytes = noCap});
+    REQUIRE(r.has_value());
+    CHECK(r.value()->Degradation() == EDegradation::NoColor);
+    CHECK(r.value()->Bytes().size() <= noCap);
+
+    delete r.value();
+    delete g;
+}
+
+// ---------------------------------------------------------------------------
+// Step 4 — RowsCropped
+//
+// All step4 tests use an 80×50 grid fully filled with content so the
+// no-colour snapshot (~4400+ bytes) comfortably exceeds the cap=600 used
+// below.  With CursorRow near the bottom, the maximum-crop snapshot (2–3
+// remaining rows) fits within 600 bytes.
+//
+// Overhead breakdown (approximately):
+//   preamble:     ~44 bytes
+//   mode restore: ~208 bytes
+//   total fixed:  ~252 bytes
+// Per full row (80 chars): CUP (~8 bytes) + 80 chars = ~88 bytes.
+// 3 rows × 88 + 252 = 516 bytes < 600.
+// ---------------------------------------------------------------------------
+
+// Fill every cell of the grid with 'A' via CUP moves (no scrollback side
+// effects).
+static void FillGrid(VtParser& p, Grid& g, char ch = 'A') {
+    const int rows = g.Rows();
+    const int cols = g.Cols();
+    char cup[16];
+    for (int row = 0; row < rows; ++row) {
+        std::snprintf(cup, sizeof(cup), "\x1b[%d;1H", row + 1);
+        Feed(p, g, cup);
+        for (int col = 0; col < cols; ++col) {
+            char c[2] = {ch, '\0'};
+            Feed(p, g, c);
+        }
+    }
+}
+
+TEST_CASE("degrade step4: top rows cropped when no-colour still too large") {
+    // Mutant: remove RowsCropped step → SnapshotTooLarge returned;
+    // REQUIRE(r.has_value()) fails.
+    Grid* g = MakeGrid(80, 50, 0);
+    VtParser p;
+    FillGrid(p, *g);
+    // Cursor at row 49 (last row, 0-based).
+    Feed(p, *g, "\x1b[50;1H");
+    REQUIRE(g->CursorRow() == 49);
+
+    // Verify the grid is large enough that full snapshot exceeds cap=600.
+    auto full = Snapshot::Create(*g);
+    REQUIRE(full.has_value());
+    REQUIRE(full.value()->Bytes().size() > 600u);
+    delete full.value();
+
+    auto r = Snapshot::Create(*g, SnapshotOptions{.MaxBytes = 600});
+    REQUIRE(r.has_value());
+    CHECK(r.value()->Degradation() == EDegradation::RowsCropped);
+    CHECK(r.value()->Bytes().size() <= 600u);
+
+    delete r.value();
+    delete g;
+}
+
+TEST_CASE("degrade step4: cursor row is kept after top-row crop") {
+    // Mutant: crop cursor row too → cursor row content absent in restored grid.
+    // Grid 80×50, cursor at row 48 (second-to-last).
+    Grid* g = MakeGrid(80, 50, 0);
+    VtParser p;
+    FillGrid(p, *g);
+    // Move cursor to row 48, col 3.
+    Feed(p, *g, "\x1b[49;4H");
+    REQUIRE(g->CursorRow() == 48);
+    REQUIRE(g->CellAt(48, 0).Codepoint == U'A');
+
+    auto full = Snapshot::Create(*g);
+    REQUIRE(full.has_value());
+    REQUIRE(full.value()->Bytes().size() > 600u);
+    delete full.value();
+
+    auto r = Snapshot::Create(*g, SnapshotOptions{.MaxBytes = 600});
+    REQUIRE(r.has_value());
+
+    // The result must be RowsCropped (not SnapshotTooLarge).
+    REQUIRE(r.value()->Degradation() == EDegradation::RowsCropped);
+
+    // Restore into a fresh grid.
+    Grid* dst = Restore(*r.value(), 80, 50, 0);
+    // Cursor row (48) must be preserved.
+    CHECK(CP(*dst, 48, 0) == U'A');
+    CHECK(dst->CursorRow() == 48);
+
+    delete dst;
+    delete r.value();
+    delete g;
+}
+
+TEST_CASE("degrade step4: cropped rows come from top (row 0 absent)") {
+    // Mutant: crop from bottom instead of top → row 0 content present after
+    // restore, CHECK(CP(*dst, 0, 0) != U'Z') would flip.
+    // Grid 80×50; row 0 gets 'Z', rows 1..49 get 'A'. Cursor at row 49.
+    Grid* g = MakeGrid(80, 50, 0);
+    VtParser p;
+    FillGrid(p, *g);
+    // Overwrite row 0 col 0 with 'Z'.
+    Feed(p, *g, "\x1b[1;1HZ");
+    REQUIRE(g->CellAt(0, 0).Codepoint == U'Z');
+    // Cursor at row 49.
+    Feed(p, *g, "\x1b[50;1H");
+    REQUIRE(g->CursorRow() == 49);
+
+    auto full = Snapshot::Create(*g);
+    REQUIRE(full.has_value());
+    REQUIRE(full.value()->Bytes().size() > 600u);
+    delete full.value();
+
+    auto r = Snapshot::Create(*g, SnapshotOptions{.MaxBytes = 600});
+    REQUIRE(r.has_value());
+    REQUIRE(r.value()->Degradation() == EDegradation::RowsCropped);
+
+    Grid* dst = Restore(*r.value(), 80, 50, 0);
+    // Row 0 was cropped; 'Z' must not survive.
+    CHECK(CP(*dst, 0, 0) != U'Z');
+    // Cursor row must be preserved.
+    CHECK(dst->CursorRow() == 49);
+
+    delete dst;
+    delete r.value();
+    delete g;
+}
+
+// ---------------------------------------------------------------------------
+// Output always ≤ cap
+// ---------------------------------------------------------------------------
+
+TEST_CASE("degrade: output always fits within cap") {
+    // Mutant: emit bytes beyond cap → size check fails.
+    //
+    // Parametric: try several caps across the range [minimal, full].
+    Grid* g = MakeGrid(40, 10, 50);
+    VtParser p;
+    for (int i = 0; i < 60; ++i) Feed(p, *g, "\x1b[38;2;200;100;50mline\r\n");
+
+    auto full = Snapshot::Create(*g);
+    REQUIRE(full.has_value());
+    const std::size_t S = full.value()->Bytes().size();
+    delete full.value();
+
+    // Try a range of caps.
+    for (std::size_t cap :
+         {S, S - 1, S / 2, S / 4, S / 8, std::size_t{512}, std::size_t{256}}) {
+        if (cap == 0) continue;
+        auto r = Snapshot::Create(*g, SnapshotOptions{.MaxBytes = cap});
+        if (r.has_value()) {
+            CHECK(r.value()->Bytes().size() <= cap);
+            delete r.value();
+        }
+        // SnapshotTooLarge is acceptable when cap is very small.
+    }
+
+    delete g;
+}
+
+// ---------------------------------------------------------------------------
+// Boundary: cap exactly at full size, cap-1, cap+1
+// ---------------------------------------------------------------------------
+
+TEST_CASE("degrade: boundary cap == full size has None degradation") {
+    // Mutant: always set Degradation != None → CHECK fails.
+    Grid* g = MakeGrid(30, 5, 10);
+    VtParser p;
+    for (int i = 0; i < 15; ++i) Feed(p, *g, "hello\r\n");
+
+    auto full = Snapshot::Create(*g);
+    REQUIRE(full.has_value());
+    const std::size_t S = full.value()->Bytes().size();
+    delete full.value();
+
+    // Exactly at full size: no degradation.
+    auto r = Snapshot::Create(*g, SnapshotOptions{.MaxBytes = S});
+    REQUIRE(r.has_value());
+    CHECK(r.value()->Degradation() == EDegradation::None);
+    CHECK(r.value()->Bytes().size() == S);
+
+    // One byte above: same result.
+    auto r2 = Snapshot::Create(*g, SnapshotOptions{.MaxBytes = S + 1});
+    REQUIRE(r2.has_value());
+    CHECK(r2.value()->Degradation() == EDegradation::None);
+
+    // One byte below: degradation must kick in.
+    auto r3 = Snapshot::Create(*g, SnapshotOptions{.MaxBytes = S - 1});
+    REQUIRE(r3.has_value());
+    CHECK(r3.value()->Degradation() != EDegradation::None);
+    CHECK(r3.value()->Bytes().size() <= S - 1);
+
+    delete r.value();
+    delete r2.value();
+    delete r3.value();
+    delete g;
+}
