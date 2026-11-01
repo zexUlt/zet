@@ -43,6 +43,9 @@
 //  09 gg           StartGrid     — Agent.StartGrid(kFixedSnap, 0, gg, 0)
 //  0A gg           QueueGridApplied — Client.QueueGridApplied(gg)
 //  0B              SuppressDataUntilGrid — Agent.SuppressDataUntilGrid()
+//  0C              NewGeneration — Agent.SendBuffer.NewGeneration() (path B
+//                                  ring reset); P2 Base-monotonicity is
+//                                  exempted for this step
 //
 // Properties (each violation → __builtin_trap())
 // -----------------------------------------------
@@ -239,10 +242,13 @@ struct StreamRecord {
 }
 
 // Check all monotonicity and bounds properties.
+// generationReset: a NewGeneration op was just executed; Base resets to 0
+// legitimately, so P2 (Base monotonicity) is skipped for this step.
 void CheckProperties(const Snapshot& before, const SendBuffer& clientSend,
                      const SendBuffer& agentSend,
                      const ReceiveCursor& clientRecv,
-                     const ReceiveCursor& agentRecv) noexcept {
+                     const ReceiveCursor& agentRecv,
+                     bool generationReset = false) noexcept {
     // P1: recv_offset never decreases.
     if (clientRecv.RecvOffset() < before.ClientRecvOffset) {
         __builtin_trap();
@@ -250,14 +256,16 @@ void CheckProperties(const Snapshot& before, const SendBuffer& clientSend,
     if (agentRecv.RecvOffset() < before.AgentRecvOffset) {
         __builtin_trap();
     }
-    // P2: SendBuffer.Base() never decreases.
-    if (clientSend.Base() < before.ClientSendBase) {
-        __builtin_trap();
+    // P2: SendBuffer.Base() never decreases (except after NewGeneration).
+    if (!generationReset) {
+        if (clientSend.Base() < before.ClientSendBase) {
+            __builtin_trap();
+        }
+        if (agentSend.Base() < before.AgentSendBase) {
+            __builtin_trap();
+        }
     }
-    if (agentSend.Base() < before.AgentSendBase) {
-        __builtin_trap();
-    }
-    // P3: Base <= SendNext <= End.
+    // P3: Base <= SendNext <= End (always, even after NewGeneration).
     if (clientSend.SendNext() < clientSend.Base() ||
         clientSend.SendNext() > clientSend.End()) {
         __builtin_trap();
@@ -613,6 +621,16 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data,
             case 0x0B: {
                 agentChan.SuppressDataUntilGrid();
                 break;
+            }
+            // ── 0C: NewGeneration ──────────────────────────────────────────
+            case 0x0C: {
+                // Simulate path B ring reset. Base/SendNext/End reset to 0;
+                // P2 monotonicity is exempted for this one step.
+                agentSendBuf.NewGeneration();
+                CheckProperties(before, clientSendBuf, agentSendBuf,
+                                clientRecvCursor, agentRecvCursor,
+                                /*generationReset=*/true);
+                continue;
             }
             default:
                 break;
