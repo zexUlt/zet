@@ -313,6 +313,13 @@ void Grid::PutChar(char32_t cp, int width) noexcept {
     if (width == 2 && CursorCol_ + 1 < Cols_) {
         Cell& cont =
             CellAt(CursorRow_, static_cast<std::uint16_t>(CursorCol_ + 1));
+        // D2b: if the cell being overwritten with the continuation slot is
+        // itself a wide head, its old tail at CursorCol_+2 would become an
+        // orphaned Width==0 cell (no preceding Width==2).  Blank it first.
+        if (cont.Width == 2 &&
+            static_cast<std::uint16_t>(CursorCol_ + 2) < Cols_)
+            BlankCell(
+                CellAt(CursorRow_, static_cast<std::uint16_t>(CursorCol_ + 2)));
         cont = Cell{};
         cont.Width = 0;
     }
