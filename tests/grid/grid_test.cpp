@@ -862,6 +862,31 @@ TEST_CASE("IL/DL outside scroll region does not crash") {
 // Wide-char pairing: overwriting a continuation cell breaks the wide char
 // ---------------------------------------------------------------------------
 
+TEST_CASE(
+    "Wide char at col+1 is a wide head: continuation write must blank its old "
+    "tail") {
+    // Regression for fuzz crash ab9c0caa: write 中 at (0,0), 中 at (0,2),
+    // CR, write a narrow char at (0,0) (blanks (0,1)), then write 中 at (0,1).
+    // The continuation slot (0,2) was itself a wide head; its old tail at
+    // (0,3) must be blanked before (0,2) becomes Width==0, or invariant 6
+    // (no orphaned continuation) fires.
+    Grid* g = MakeGrid(10, 4);
+    VtParser p;
+    Feed(p, *g, "\xe4\xb8\xad");  // 中 at (0,0): (0,0)=wide, (0,1)=cont
+    Feed(p, *g, "\xe4\xb8\xad");  // 中 at (0,2): (0,2)=wide, (0,3)=cont
+    Feed(p, *g, "\r");            // CR → col=0
+    Feed(p, *g, "X");             // narrow 'X' at (0,0): D2 blanks (0,1)
+    // Cursor is now at col=1. Write another 中 here.
+    // Before fix: (0,2) gets Width==0 (continuation) but (0,3) keeps
+    // Width==0 → orphaned continuation → invariant 6 violation.
+    // After fix: D2b blanks (0,3) before turning (0,2) into a continuation.
+    Feed(p, *g, "\xe4\xb8\xad");  // 中 at (0,1): (0,1)=wide, (0,2)=cont
+    CHECK(g->CellAt(0, 1).Width == 2);
+    CHECK(g->CellAt(0, 2).Width == 0);
+    CHECK(g->CellAt(0, 3).Width != 0);  // must NOT be an orphaned continuation
+    delete g;
+}
+
 TEST_CASE("Narrow char at continuation cell breaks wide-char pair") {
     // Regression for fuzz crash: write wide char (中 U+4E2D, width=2) at col 0
     // → col 1 gets Width=0. Then CUP to col 1 and write a narrow char → the
