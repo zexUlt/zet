@@ -36,8 +36,8 @@ struct LiveRig {
 //
 // Works for both Rig and LiveRig (uppercase field names required in both).
 
-template <class R>
-void ForceB(R& r, Timestamp now = START) {
+template <class TR>
+void ForceB(TR& r, Timestamp now = START) {
     AgentConnection ac{MutableByteSpan{r.Sp.AgentFrames}, now,
                        PROTOCOL_VERSION_GRID};
     ClientConnection cc{r.Client,
@@ -75,91 +75,91 @@ void ForceB(R& r, Timestamp now = START) {
 // ── Link: connection pair with an integrated step-and-collect loop ────────
 
 struct Link {
-    template <class R>
-    Link(R& r, Timestamp now)
-        : ac{MutableByteSpan{r.Sp.AgentFrames}, now, PROTOCOL_VERSION_GRID},
-          cc{r.Client,
+    template <class TR>
+    Link(TR& r, Timestamp now)
+        : Ac{MutableByteSpan{r.Sp.AgentFrames}, now, PROTOCOL_VERSION_GRID},
+          Cc{r.Client,
              MakeNonce(++r.Nonces),
              MutableByteSpan{r.Sp.ClientFrames},
              now,
              true,
              PROTOCOL_VERSION_GRID,
              MutableByteSpan{r.Sp.SnapshotBuf}} {}
-    AgentConnection ac;
-    ClientConnection cc;
-    int needs = 0, applies = 0, agentFramesAfterSupply = 0,
-        clientFramesAfterApply = 0;
-    bool supplied = false, agentErr = false, clientErr = false;
-    std::vector<std::byte> applied, delivered;
-    std::optional<SessionError> aerr, cerr;
-    std::optional<std::uint32_t> appliedGen;
+    AgentConnection Ac;
+    ClientConnection Cc;
+    int Needs = 0, Applies = 0, AgentFramesAfterSupply = 0,
+        ClientFramesAfterApply = 0;
+    bool Supplied = false, AgentErr = false, ClientErr = false;
+    std::vector<std::byte> Applied, Delivered;
+    std::optional<SessionError> Aerr, Cerr;
+    std::optional<std::uint32_t> AppliedGen;
     // Options
-    const std::vector<std::byte>* snap = nullptr;
-    bool supply = true;
-    int cutAgentAfter =
+    const std::vector<std::byte>* Snap = nullptr;
+    bool Supply = true;
+    int CutAgentAfter =
         -1;  // stop feeding agent→client after N frames post-supply
-    enum Mode { Confirm, Deny, Nothing } mode = Confirm;
-    bool dropClientAfterApply = false;
-    bool cut = false;
+    enum EMode { Confirm, Deny, Nothing } Mode = Confirm;
+    bool DropClientAfterApply = false;
+    bool Cut = false;
 
-    template <class R>
-    void Step(R& r, Timestamp now) {
-        if (!agentErr) {
-            auto ea = PumpAgent(ac, r.Sp, now);
+    template <class TR>
+    void Step(TR& r, Timestamp now) {
+        if (!AgentErr) {
+            auto ea = PumpAgent(Ac, r.Sp, now);
             if (!ea) {
-                agentErr = true;
-                aerr = ea.error();
+                AgentErr = true;
+                Aerr = ea.error();
             } else if (auto* ns = std::get_if<NeedsSession>(&*ea)) {
-                ac.Route(r.Agent.Ref(), MakeNonce(++r.Nonces));
+                Ac.Route(r.Agent.Ref(), MakeNonce(++r.Nonces));
             } else if (std::holds_alternative<NeedsSnapshot>(*ea)) {
-                ++needs;
-                if (supply && snap) {
-                    ac.SupplySnapshot(now, ByteSpan{*snap}, 0, 0);
-                    supplied = true;
+                ++Needs;
+                if (Supply && Snap) {
+                    Ac.SupplySnapshot(now, ByteSpan{*Snap}, 0, 0);
+                    Supplied = true;
                 }
             } else if (auto* sf = std::get_if<SendFrame>(&*ea)) {
                 bool feed = true;
-                if (supplied) {
-                    ++agentFramesAfterSupply;
-                    if (cutAgentAfter >= 0 &&
-                        agentFramesAfterSupply > cutAgentAfter) {
+                if (Supplied) {
+                    ++AgentFramesAfterSupply;
+                    if (CutAgentAfter >= 0 &&
+                        AgentFramesAfterSupply > CutAgentAfter) {
                         feed = false;
-                        cut = true;
+                        Cut = true;
                     }
                 }
-                if (feed && !clientErr) {
-                    if (!Feed(cc, r.Sp, sf->Written)) {
-                        clientErr = true;
+                if (feed && !ClientErr) {
+                    if (!Feed(Cc, r.Sp, sf->Written)) {
+                        ClientErr = true;
                     }
                 }
             }
         }
-        if (!clientErr) {
-            auto ec = PumpClient(cc, r.Sp, now);
+        if (!ClientErr) {
+            auto ec = PumpClient(Cc, r.Sp, now);
             if (!ec) {
-                clientErr = true;
-                cerr = ec.error();
+                ClientErr = true;
+                Cerr = ec.error();
                 return;
             }
             if (auto* as = std::get_if<ApplySnapshot>(&*ec)) {
-                ++applies;
-                applied.assign(as->Bytes.begin(), as->Bytes.end());
-                appliedGen = as->StreamGen;
-                if (mode == Confirm) {
-                    cc.ConfirmApply(as->StreamGen);
-                } else if (mode == Deny) {
-                    cc.DenyApply(as->StreamGen);
+                ++Applies;
+                Applied.assign(as->Bytes.begin(), as->Bytes.end());
+                AppliedGen = as->StreamGen;
+                if (Mode == Confirm) {
+                    Cc.ConfirmApply(as->StreamGen);
+                } else if (Mode == Deny) {
+                    Cc.DenyApply(as->StreamGen);
                 }
             } else if (auto* d = std::get_if<Deliver>(&*ec)) {
-                delivered.insert(delivered.end(), d->Bytes.begin(),
+                Delivered.insert(Delivered.end(), d->Bytes.begin(),
                                  d->Bytes.end());
             } else if (auto* sf = std::get_if<SendFrame>(&*ec)) {
-                if (appliedGen) {
-                    ++clientFramesAfterApply;
+                if (AppliedGen) {
+                    ++ClientFramesAfterApply;
                 }
-                if (!(dropClientAfterApply && appliedGen) && !agentErr) {
-                    if (!Feed(ac, r.Sp, sf->Written)) {
-                        agentErr = true;
+                if (!(DropClientAfterApply && AppliedGen) && !AgentErr) {
+                    if (!Feed(Ac, r.Sp, sf->Written)) {
+                        AgentErr = true;
                     }
                 }
             }
@@ -177,27 +177,27 @@ TEST_CASE_FIXTURE(
     Rig r;
     ForceB(r);
     Link l(r, START);
-    REQUIRE(DriveToLive(l.ac, l.cc, r.Agent, r.Sp, START, r.Nonces));
+    REQUIRE(DriveToLive(l.Ac, l.Cc, r.Agent, r.Sp, START, r.Nonces));
     for (int i = 0; i < 5; ++i) {
-        auto e = PumpAgent(l.ac, r.Sp, START);
+        auto e = PumpAgent(l.Ac, r.Sp, START);
         REQUIRE(e.has_value());
         CHECK(std::holds_alternative<Idle>(*e));
     }
-    const auto dl = l.ac.NextDeadline();
+    const auto dl = l.Ac.NextDeadline();
     REQUIRE(dl.IsSet());
     MESSAGE("deadline-from-start ns=" << (dl.At() - START).count());
     CHECK(dl.At() == START + RESIZE_WAIT_TIMEOUT);
     // just before: still Idle
-    auto e1 = PumpAgent(l.ac, r.Sp, START + RESIZE_WAIT_TIMEOUT - 1ns);
+    auto e1 = PumpAgent(l.Ac, r.Sp, START + RESIZE_WAIT_TIMEOUT - 1ns);
     REQUIRE(e1.has_value());
     CHECK(std::holds_alternative<Idle>(*e1));
     // at expiry: NeedsSnapshot fires with the size from ForceB (24×80)
-    auto e2 = PumpAgent(l.ac, r.Sp, START + RESIZE_WAIT_TIMEOUT);
+    auto e2 = PumpAgent(l.Ac, r.Sp, START + RESIZE_WAIT_TIMEOUT);
     REQUIRE(e2.has_value());
     REQUIRE(std::holds_alternative<NeedsSnapshot>(*e2));
     CHECK(std::get<NeedsSnapshot>(*e2).Rows == 24);
     CHECK(std::get<NeedsSnapshot>(*e2).Cols == 80);
-    MESSAGE("after expiry deadline set=" << l.ac.NextDeadline().IsSet());
+    MESSAGE("after expiry deadline set=" << l.Ac.NextDeadline().IsSet());
 }
 
 // ── PROBE1b: SupplySnapshot wait is bounded (SUPPLY_SNAPSHOT_TIMEOUT) ────────
@@ -206,23 +206,23 @@ TEST_CASE_FIXTURE(SodiumFixture, "PROBE1b SupplySnapshot wait is bounded") {
     LiveRig r;
     ForceB(r);
     Link l(r, START);
-    l.supply = false;
-    REQUIRE(DriveToLive(l.ac, l.cc, r.Agent, r.Sp, START, r.Nonces));
-    l.cc.QueueResize(ResizeMessage{.Rows = 24, .Cols = 80});
+    l.Supply = false;
+    REQUIRE(DriveToLive(l.Ac, l.Cc, r.Agent, r.Sp, START, r.Nonces));
+    l.Cc.QueueResize(ResizeMessage{.Rows = 24, .Cols = 80});
     Timestamp now = START;
     // 2 h simulated, 0.5 s ticks; SUPPLY_SNAPSHOT_TIMEOUT (30 s) must fire.
-    for (int i = 0; i < 2 * 3600 * 2 && !l.agentErr && !l.clientErr; ++i) {
+    for (int i = 0; i < 2 * 3600 * 2 && !l.AgentErr && !l.ClientErr; ++i) {
         now = now + std::chrono::milliseconds{500};
         l.Step(r, now);
     }
     MESSAGE("after 2h: needs="
-            << l.needs << " agentErr=" << l.agentErr
-            << " clientErr=" << l.clientErr << " agent.IsLive=" << l.ac.IsLive()
-            << " nextDeadlineSet=" << l.ac.NextDeadline().IsSet());
-    if (l.aerr) {
-        MESSAGE("agent err: " << l.aerr->Description());
+            << l.Needs << " agentErr=" << l.AgentErr
+            << " clientErr=" << l.ClientErr << " agent.IsLive=" << l.Ac.IsLive()
+            << " nextDeadlineSet=" << l.Ac.NextDeadline().IsSet());
+    if (l.Aerr) {
+        MESSAGE("agent err: " << l.Aerr->Description());
     }
-    CHECK(l.agentErr);                                // connection must close
+    CHECK(l.AgentErr);                                // connection must close
     CHECK(r.Agent.State() != ESessionState::Reaped);  // session must survive
 }
 
@@ -237,36 +237,36 @@ TEST_CASE_FIXTURE(SodiumFixture,
     const auto g0 = r.Client.StreamGen();
     {
         Link l(r, START);
-        l.snap = &snap;
-        l.mode = Link::Deny;
-        REQUIRE(DriveToLive(l.ac, l.cc, r.Agent, r.Sp, START, r.Nonces));
-        l.cc.QueueResize(ResizeMessage{.Rows = 24, .Cols = 80});
+        l.Snap = &snap;
+        l.Mode = Link::Deny;
+        REQUIRE(DriveToLive(l.Ac, l.Cc, r.Agent, r.Sp, START, r.Nonces));
+        l.Cc.QueueResize(ResizeMessage{.Rows = 24, .Cols = 80});
         for (int i = 0; i < 80; ++i) {
             l.Step(r, START);
         }
-        REQUIRE(l.applies == 1);
+        REQUIRE(l.Applies == 1);
         const std::vector<std::byte> z(8, std::byte{0x5A});
         std::ignore = r.Agent.Write(ByteSpan{z});
         for (int i = 0; i < 80; ++i) {
             l.Step(r, START);
         }
-        MESSAGE("after Deny: delivered=" << l.delivered.size()
+        MESSAGE("after Deny: delivered=" << l.Delivered.size()
                                          << " gen=" << r.Client.StreamGen()
                                          << " g0=" << g0);
         CHECK(
-            l.delivered.empty());  // agent still awaiting GridApplied → no data
+            l.Delivered.empty());  // agent still awaiting GridApplied → no data
         CHECK(r.Client.StreamGen() == g0);
-        l.ac.Close(START);
+        l.Ac.Close(START);
     }
     Link l2(r, START);
-    l2.supply = false;
-    REQUIRE(DriveToLive(l2.ac, l2.cc, r.Agent, r.Sp, START, r.Nonces));
-    l2.cc.QueueResize(ResizeMessage{.Rows = 24, .Cols = 80});
+    l2.Supply = false;
+    REQUIRE(DriveToLive(l2.Ac, l2.Cc, r.Agent, r.Sp, START, r.Nonces));
+    l2.Cc.QueueResize(ResizeMessage{.Rows = 24, .Cols = 80});
     for (int i = 0; i < 40; ++i) {
         l2.Step(r, START);
     }
-    MESSAGE("reconnect after Deny: needs=" << l2.needs);
-    CHECK(l2.needs >= 1);  // old gen carried → path B again
+    MESSAGE("reconnect after Deny: needs=" << l2.Needs);
+    CHECK(l2.Needs >= 1);  // old gen carried → path B again
 }
 
 // ── PROBE2b: Confirm sends GridApplied, next Resume takes path A
@@ -280,36 +280,36 @@ TEST_CASE_FIXTURE(SodiumFixture,
     const std::vector<std::byte> snap(16, std::byte{0x11});
     {
         Link l(r, START);
-        l.snap = &snap;
-        l.mode = Link::Nothing;
-        REQUIRE(DriveToLive(l.ac, l.cc, r.Agent, r.Sp, START, r.Nonces));
-        l.cc.QueueResize(ResizeMessage{.Rows = 24, .Cols = 80});
+        l.Snap = &snap;
+        l.Mode = Link::Nothing;
+        REQUIRE(DriveToLive(l.Ac, l.Cc, r.Agent, r.Sp, START, r.Nonces));
+        l.Cc.QueueResize(ResizeMessage{.Rows = 24, .Cols = 80});
         for (int i = 0; i < 80; ++i) {
             l.Step(r, START);
         }
-        REQUIRE(l.applies == 1);
+        REQUIRE(l.Applies == 1);
         const std::vector<std::byte> z(8, std::byte{0x5A});
         std::ignore = r.Agent.Write(ByteSpan{z});
         for (int i = 0; i < 80; ++i) {
             l.Step(r, START);
         }
-        CHECK(l.delivered.empty());  // not confirmed → agent suppresses data
+        CHECK(l.Delivered.empty());  // not confirmed → agent suppresses data
         CHECK(r.Client.StreamGen() == 0);
-        l.cc.ConfirmApply(*l.appliedGen);
-        CHECK(r.Client.StreamGen() == *l.appliedGen);
+        l.Cc.ConfirmApply(*l.AppliedGen);
+        CHECK(r.Client.StreamGen() == *l.AppliedGen);
         for (int i = 0; i < 80; ++i) {
             l.Step(r, START);
         }
-        CHECK(l.delivered.size() == 8);
-        l.ac.Close(START);
+        CHECK(l.Delivered.size() == 8);
+        l.Ac.Close(START);
     }
     Link l2(r, START);
-    l2.supply = false;
-    REQUIRE(DriveToLive(l2.ac, l2.cc, r.Agent, r.Sp, START, r.Nonces));
+    l2.Supply = false;
+    REQUIRE(DriveToLive(l2.Ac, l2.Cc, r.Agent, r.Sp, START, r.Nonces));
     for (int i = 0; i < 40; ++i) {
         l2.Step(r, START);
     }
-    CHECK(l2.needs == 0);
+    CHECK(l2.Needs == 0);
 }
 
 // ── PROBE2c: late ConfirmApply from superseded connection must not regress
@@ -323,35 +323,35 @@ TEST_CASE_FIXTURE(SodiumFixture,
     const std::vector<std::byte> snap(16, std::byte{0x11});
     std::optional<Link> a;
     a.emplace(r, START);
-    a->snap = &snap;
-    a->mode = Link::Nothing;
-    REQUIRE(DriveToLive(a->ac, a->cc, r.Agent, r.Sp, START, r.Nonces));
-    a->cc.QueueResize(ResizeMessage{.Rows = 24, .Cols = 80});
+    a->Snap = &snap;
+    a->Mode = Link::Nothing;
+    REQUIRE(DriveToLive(a->Ac, a->Cc, r.Agent, r.Sp, START, r.Nonces));
+    a->Cc.QueueResize(ResizeMessage{.Rows = 24, .Cols = 80});
     for (int i = 0; i < 80; ++i) {
         a->Step(r, START);
     }
-    REQUIRE(a->applies == 1);
-    const auto genA = *a->appliedGen;
-    a->ac.Close(START);
+    REQUIRE(a->Applies == 1);
+    const auto genA = *a->AppliedGen;
+    a->Ac.Close(START);
     // second path-B round on a new connection, confirmed
     const std::vector<std::byte> chunk(200, std::byte{0xBB});
     for (int i = 0; i < 6; ++i) {
         std::ignore = r.Agent.Write(ByteSpan{chunk});
     }
     Link b(r, START);
-    b.snap = &snap;
-    b.mode = Link::Confirm;
+    b.Snap = &snap;
+    b.Mode = Link::Confirm;
     for (int i = 0; i < 200; ++i) {
         b.Step(r, START);
     }
-    b.cc.QueueResize(ResizeMessage{.Rows = 24, .Cols = 80});
+    b.Cc.QueueResize(ResizeMessage{.Rows = 24, .Cols = 80});
     for (int i = 0; i < 200; ++i) {
         b.Step(r, START);
     }
-    REQUIRE(b.applies == 1);
+    REQUIRE(b.Applies == 1);
     const auto genB = r.Client.StreamGen();
     MESSAGE("genA=" << genA << " genB=" << genB);
-    a->cc.ConfirmApply(genA);  // stale connection — must be ignored
+    a->Cc.ConfirmApply(genA);  // stale connection — must be ignored
     MESSAGE("StreamGen after stale confirm=" << r.Client.StreamGen());
     CHECK(r.Client.StreamGen() == genB);
 }
@@ -426,46 +426,46 @@ void CutCase(int cutAfter, bool confirm, bool dropGridApplied) {
     }
     {
         Link l(r, START);
-        l.snap = &snap;
-        l.cutAgentAfter = cutAfter;
-        l.mode = confirm ? Link::Confirm : Link::Nothing;
-        l.dropClientAfterApply = dropGridApplied;
-        REQUIRE(DriveToLive(l.ac, l.cc, r.Agent, r.Sp, START, r.Nonces));
-        l.cc.QueueResize(ResizeMessage{.Rows = 24, .Cols = 80});
+        l.Snap = &snap;
+        l.CutAgentAfter = cutAfter;
+        l.Mode = confirm ? Link::Confirm : Link::Nothing;
+        l.DropClientAfterApply = dropGridApplied;
+        REQUIRE(DriveToLive(l.Ac, l.Cc, r.Agent, r.Sp, START, r.Nonces));
+        l.Cc.QueueResize(ResizeMessage{.Rows = 24, .Cols = 80});
         for (int i = 0; i < 200; ++i) {
             l.Step(r, START);
         }
-        MESSAGE("cut after " << cutAfter << " frames: applies=" << l.applies
-                             << " agentFrames=" << l.agentFramesAfterSupply);
-        l.ac.Close(START);
+        MESSAGE("cut after " << cutAfter << " frames: applies=" << l.Applies
+                             << " agentFrames=" << l.AgentFramesAfterSupply);
+        l.Ac.Close(START);
     }
     const std::uint32_t gen1 = r.Client.StreamGen();
     const std::vector<std::byte> post(10, std::byte{0x77});
     std::ignore = r.Agent.Write(ByteSpan{post});
     Link l2(r, START);
-    l2.snap = &snap;
-    l2.mode = Link::Confirm;
-    l2.cc.QueueResize(ResizeMessage{.Rows = 24, .Cols = 80});
+    l2.Snap = &snap;
+    l2.Mode = Link::Confirm;
+    l2.Cc.QueueResize(ResizeMessage{.Rows = 24, .Cols = 80});
     for (int i = 0; i < 300; ++i) {
         l2.Step(r, START);
     }
     MESSAGE("reconnect: needs="
-            << l2.needs << " applies=" << l2.applies << " gen1=" << gen1
+            << l2.Needs << " applies=" << l2.Applies << " gen1=" << gen1
             << " gen2=" << r.Client.StreamGen()
-            << " delivered=" << l2.delivered.size() << " cerr=" << l2.clientErr
-            << " aerr=" << l2.agentErr);
-    CHECK_FALSE(l2.clientErr);
-    CHECK_FALSE(l2.agentErr);
-    const bool gotSnapshot = l2.applies == 1;
+            << " delivered=" << l2.Delivered.size() << " cerr=" << l2.ClientErr
+            << " aerr=" << l2.AgentErr);
+    CHECK_FALSE(l2.ClientErr);
+    CHECK_FALSE(l2.AgentErr);
+    const bool gotSnapshot = l2.Applies == 1;
     if (gotSnapshot) {
-        CHECK(l2.applied == snap);
+        CHECK(l2.Applied == snap);
     }
     // Either a fresh snapshot arrived or (confirmed locally) path A continues;
     // the 10 post-bytes arrive exactly once in either case.
     if (gotSnapshot) {
-        CHECK(l2.delivered.empty());
+        CHECK(l2.Delivered.empty());
     } else {
-        CHECK(l2.delivered == post);
+        CHECK(l2.Delivered == post);
     }
     CHECK(r.Client.StreamGen() >= 1);
 }
@@ -496,29 +496,29 @@ TEST_CASE_FIXTURE(SodiumFixture,
     Rig r;
     ForceB(r);
     Link l(r, START);
-    l.supply = false;
-    REQUIRE(DriveToLive(l.ac, l.cc, r.Agent, r.Sp, START, r.Nonces));
-    l.cc.QueueResize(ResizeMessage{.Rows = 24, .Cols = 80});
+    l.Supply = false;
+    REQUIRE(DriveToLive(l.Ac, l.Cc, r.Agent, r.Sp, START, r.Nonces));
+    l.Cc.QueueResize(ResizeMessage{.Rows = 24, .Cols = 80});
     for (int i = 0; i < 40; ++i) {
         l.Step(r, START);
     }
-    CHECK(l.needs == 1);
+    CHECK(l.Needs == 1);
     std::vector<std::byte> empty;
-    l.ac.SupplySnapshot(START, ByteSpan{empty}, 0, 0);
+    l.Ac.SupplySnapshot(START, ByteSpan{empty}, 0, 0);
     for (int i = 0; i < 40; ++i) {
         l.Step(r, START);
     }
-    MESSAGE("needs after empty supply=" << l.needs
-                                        << " IsLive=" << l.ac.IsLive());
-    CHECK(l.needs == 2);
-    CHECK_FALSE(l.agentErr);
+    MESSAGE("needs after empty supply=" << l.Needs
+                                        << " IsLive=" << l.Ac.IsLive());
+    CHECK(l.Needs == 2);
+    CHECK_FALSE(l.AgentErr);
     // oversize
     std::vector<std::byte> big(wire::SNAPSHOT_MAX_BYTES + 1);
-    l.ac.SupplySnapshot(START, ByteSpan{big}, 0, 0);
+    l.Ac.SupplySnapshot(START, ByteSpan{big}, 0, 0);
     for (int i = 0; i < 40; ++i) {
         l.Step(r, START);
     }
-    CHECK(l.needs == 3);
+    CHECK(l.Needs == 3);
 }
 
 // ── PROBE8: Write contract in Resync past overflow
@@ -548,18 +548,148 @@ TEST_CASE_FIXTURE(SodiumFixture,
     // generation.  Write a distinct marker to verify new-generation delivery.
     const std::vector<std::byte> snap(16, std::byte{0x11});
     Link l(r, START);
-    l.snap = &snap;
-    l.mode = Link::Confirm;
+    l.Snap = &snap;
+    l.Mode = Link::Confirm;
     for (int i = 0; i < 60; ++i) l.Step(r, START);
-    l.cc.QueueResize(ResizeMessage{.Rows = 24, .Cols = 80});
+    l.Cc.QueueResize(ResizeMessage{.Rows = 24, .Cols = 80});
     for (int i = 0; i < 100; ++i) l.Step(r, START);
-    REQUIRE(l.applies == 1);
+    REQUIRE(l.Applies == 1);
 
     const std::vector<std::byte> marker(12, std::byte{0xAA});
     auto wm = r.Agent.Write(ByteSpan{marker});
     REQUIRE(wm.has_value());
     CHECK(*wm == marker.size());
     for (int i = 0; i < 100; ++i) l.Step(r, START);
-    MESSAGE("post-snapshot marker: delivered=" << l.delivered.size());
-    CHECK(l.delivered == marker);  // only the 0xAA marker; no 0x33 bytes
+    MESSAGE("post-snapshot marker: delivered=" << l.Delivered.size());
+    CHECK(l.Delivered == marker);  // only the 0xAA marker; no 0x33 bytes
+}
+
+// ── R4-2: stream_gen ahead of session_gen is MalformedField ──────────────────
+
+TEST_CASE_FIXTURE(
+    SodiumFixture,
+    "R4-2 Resume stream_gen ahead of session_gen is MalformedField") {
+    for (int ahead = 0; ahead < 2; ++ahead) {
+        Rig r;
+        r.Client.ProbeSetStreamGen(ahead ? 5u : 0u);
+        Link l(r, START);
+        l.Supply = false;
+        for (int i = 0; i < 60; ++i) {
+            l.Step(r, START);
+        }
+        MESSAGE("ahead=" << ahead << " AgentErr=" << l.AgentErr
+                         << " IsLive=" << l.Ac.IsLive()
+                         << (l.Aerr
+                                 ? " err=" + std::string(l.Aerr->Description())
+                                 : std::string{}));
+        if (ahead != 0) {
+            REQUIRE(l.AgentErr);
+            REQUIRE(l.Aerr.has_value());
+            CHECK(l.Aerr->Disposition() == EDisposition::CloseConnection);
+            REQUIRE(l.Aerr->Proto().has_value());
+            CHECK(*l.Aerr->Proto() == EProtoError::MalformedField);
+            CHECK_FALSE(l.Ac.IsLive());
+        } else {
+            CHECK_FALSE(l.AgentErr);
+            CHECK(l.Ac.IsLive());
+        }
+    }
+}
+
+// ── R4-3: replayed GridBegin gen <= client StreamGen is rejected
+// ──────────────
+
+TEST_CASE_FIXTURE(SodiumFixture,
+                  "R4-3 replayed GridBegin gen<=client StreamGen is rejected") {
+    Rig r;
+    ForceB(r);
+    const std::vector<std::byte> snap(16, std::byte{0x11});
+    {
+        Link l(r, START);
+        l.Snap = &snap;
+        l.Mode = Link::Confirm;
+        REQUIRE(DriveToLive(l.Ac, l.Cc, r.Agent, r.Sp, START, r.Nonces));
+        l.Cc.QueueResize(ResizeMessage{.Rows = 24, .Cols = 80});
+        for (int i = 0; i < 100; ++i) {
+            l.Step(r, START);
+        }
+        REQUIRE(l.Applies == 1);
+        l.Ac.Close(START);
+    }
+    REQUIRE(r.Client.StreamGen() == 1);
+    Link l2(r, START);
+    REQUIRE(DriveToLive(l2.Ac, l2.Cc, r.Agent, r.Sp, START, r.Nonces));
+    for (int i = 0; i < 20; ++i) {
+        l2.Step(r, START);
+    }
+    REQUIRE(l2.Ac.IsLive());
+    // Directly call StartGrid with gen=1. The client's channel was seeded with
+    // agentStreamGen=Session_.StreamGen()=1, so gen=1 <= baseline=1 →
+    // UnexpectedMessage on the client side.
+    std::ignore = l2.Ac.ProbeChannel().StartGrid(ByteSpan{snap}, 0, 1, 0);
+    for (int i = 0; i < 40; ++i) {
+        l2.Step(r, START);
+    }
+    MESSAGE("ClientErr=" << l2.ClientErr << " Applies=" << l2.Applies);
+    CHECK(l2.ClientErr);
+    CHECK(l2.Applies == 0);
+}
+
+// ── R4-6: partial-fill Resync Write returns bytes.size(), not partial count ──
+
+TEST_CASE_FIXTURE(SodiumFixture,
+                  "R4-6 partial-fill Resync Write returns bytes.size() not "
+                  "partial count") {
+    Rig r;
+    // Establish a grid-capable connection (sets Resync overflow mode) then
+    // drop.
+    {
+        AgentConnection ac{MutableByteSpan{r.Sp.AgentFrames}, START,
+                           PROTOCOL_VERSION_GRID};
+        ClientConnection cc{r.Client,
+                            MakeNonce(++r.Nonces),
+                            MutableByteSpan{r.Sp.ClientFrames},
+                            START,
+                            true,
+                            PROTOCOL_VERSION_GRID,
+                            MutableByteSpan{r.Sp.SnapshotBuf}};
+        REQUIRE(DriveToLive(ac, cc, r.Agent, r.Sp, START, r.Nonces));
+        cc.QueueResize(ResizeMessage{.Rows = 24, .Cols = 80});
+        for (int i = 0; i < 10; ++i) {
+            auto ea = PumpAgent(ac, r.Sp, START);
+            if (!ea) break;
+            if (auto* sf = std::get_if<SendFrame>(&*ea))
+                std::ignore = Feed(cc, r.Sp, sf->Written);
+            auto ec = PumpClient(cc, r.Sp, START);
+            if (!ec) break;
+            if (auto* sf = std::get_if<SendFrame>(&*ec))
+                std::ignore = Feed(ac, r.Sp, sf->Written);
+        }
+        ac.Close(START);  // agent enters Detached/Resync
+    }
+    // DisconnectMax=512 (TinyLimits). Write 300 bytes: fits in ring.
+    const std::vector<std::byte> first(300, std::byte{0xCC});
+    auto w1 = r.Agent.Write(ByteSpan{first});
+    REQUIRE(w1.has_value());
+    CHECK(*w1 == first.size());  // fits completely
+    CHECK(r.Agent.AcceptsWrites());
+
+    // Write 300 more: only 212 bytes of room remain; triggers partial-fill
+    // path. Before the fix: returned 212. After: returns 300 (bytes.size()).
+    const std::vector<std::byte> second(300, std::byte{0xDD});
+    auto w2 = r.Agent.Write(ByteSpan{second});
+    REQUIRE(w2.has_value());
+    MESSAGE("partial-fill Write returned " << *w2 << " expected "
+                                           << second.size());
+    CHECK(*w2 == second.size());
+    // Ring is now overflowed; AcceptsWrites stays true so PTY loop keeps
+    // draining.
+    CHECK(r.Agent.AcceptsWrites());
+
+    // Subsequent writes hit the ring_overflowed fast path: also return
+    // bytes.size().
+    const std::vector<std::byte> third(400, std::byte{0xEE});
+    auto w3 = r.Agent.Write(ByteSpan{third});
+    REQUIRE(w3.has_value());
+    CHECK(*w3 == third.size());
 }
