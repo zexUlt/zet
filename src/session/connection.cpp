@@ -64,11 +64,12 @@ Deadline ConnectionBase::NextDeadline() const noexcept {
 
 Deadline AgentConnection::NextDeadline() const noexcept {
     return Earliest(
-        Earliest(
-            ConnectionBase::NextDeadline(),
-            ResizeWaitDeadline_ ? Deadline{*ResizeWaitDeadline_} : Deadline{}),
-        SupplySnapshotDeadline_ ? Deadline{*SupplySnapshotDeadline_}
-                                : Deadline{});
+        Earliest(Earliest(ConnectionBase::NextDeadline(),
+                          ResizeWaitDeadline_ ? Deadline{*ResizeWaitDeadline_}
+                                              : Deadline{}),
+                 SupplySnapshotDeadline_ ? Deadline{*SupplySnapshotDeadline_}
+                                         : Deadline{}),
+        GridAppliedDeadline_ ? Deadline{*GridAppliedDeadline_} : Deadline{});
 }
 
 // ── ConnectionBase ─────────────────────────────────────────────────────
@@ -228,6 +229,12 @@ ConnectionResult AgentConnection::Pump(Timestamp now, MutableByteSpan out,
             if (!Handle_->IsCurrent()) {
                 return Refuse(ESessionError::Superseded);
             }
+            // GridApplied deadline: if the client has not confirmed the
+            // snapshot within GRID_APPLIED_TIMEOUT, close the connection so a
+            // new one can retry. The session is not reaped.
+            if (GridAppliedDeadline_ && now >= *GridAppliedDeadline_) {
+                return Refuse(ESessionError::HandshakeTimeout);
+            }
             QueueEnd();
             auto result = PumpLive(
                 now, out, scratch, [] {},
@@ -237,6 +244,13 @@ ConnectionResult AgentConnection::Pump(Timestamp now, MutableByteSpan out,
                     // already enforces this. Nothing to do here.
                     return std::nullopt;
                 });
+            // Clear the GridApplied deadline once the channel is no longer
+            // waiting for GridApplied (i.e., the client confirmed or the grid
+            // emission completed). Channel::GridInFlight() is false once
+            // GridApplied has been received and processed. §9.
+            if (Channel_ && !Channel_->GridInFlight()) {
+                GridAppliedDeadline_.reset();
+            }
             // Keep LastKnownSize_ in the session up to date for the next
             // reconnect's path A/B cost comparison.
             if (result) {
@@ -564,8 +578,7 @@ ConnectionResult AgentConnection::PumpAwaitSnapshot(
     return Idle{};
 }
 
-void AgentConnection::SupplySnapshot([[maybe_unused]] Timestamp now,
-                                     ByteSpan snapshot,
+void AgentConnection::SupplySnapshot(Timestamp now, ByteSpan snapshot,
                                      std::uint32_t scrollbackLen,
                                      std::uint8_t flags) noexcept {
     if (Stage_ != EStage::AwaitSnapshot || !Channel_ || !Handle_) {
@@ -588,7 +601,14 @@ void AgentConnection::SupplySnapshot([[maybe_unused]] Timestamp now,
     // for emission. Everything sent after this point is in the new generation.
     Handle_->NewGeneration();
     SupplySnapshotDeadline_.reset();
-    Channel_->StartGrid(snapshot, flags, Handle_->SessionGen(), scrollbackLen);
+    // snapshot is non-empty and within SNAPSHOT_MAX_BYTES (checked above), role
+    // is Agent, and NewGeneration() just cleared any prior grid — so this call
+    // always succeeds. The nodiscard return is intentionally ignored here.
+    std::ignore = Channel_->StartGrid(snapshot, flags, Handle_->SessionGen(),
+                                      scrollbackLen);
+    // Arm the GridApplied deadline: if the client does not confirm within
+    // GRID_APPLIED_TIMEOUT, the connection is closed so a new one can retry.
+    GridAppliedDeadline_ = now + GRID_APPLIED_TIMEOUT;
     Stage_ = EStage::Live;
     QueueEnd();
 }

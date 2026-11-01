@@ -490,7 +490,7 @@ TEST_CASE_FIXTURE(
     // Simulate the state after NewGeneration(): SendBuf is empty (Base=End=0).
     // Call StartGrid to begin emission — this is what SupplySnapshot does.
     const std::vector<std::byte> snap(32, std::byte{0xCC});
-    rig.Agent.StartGrid(ByteSpan{snap}, 0, 1, 0);
+    std::ignore = rig.Agent.StartGrid(ByteSpan{snap}, 0, 1, 0);
 
     // The client now sends a Data frame with piggybacked ack=50.  This is a
     // stale ack from the previous generation: the new SendBuf has End=0, so
@@ -523,7 +523,7 @@ TEST_CASE_FIXTURE(SodiumFixture,
     // sent (GridEmitting_ cleared, GridAwaitingApplied_ = true). Only then
     // does the wrong-gen check (MalformedField) become reachable.
     const std::vector<std::byte> snap(32, std::byte{0xCC});
-    rig.Agent.StartGrid(ByteSpan{snap}, 0, 1, 0);
+    std::ignore = rig.Agent.StartGrid(ByteSpan{snap}, 0, 1, 0);
     static constexpr std::size_t OUT_SIZE = wire::HEADER_SIZE + wire::MAX_FRAME;
     std::vector<std::byte> out(OUT_SIZE);
     std::vector<std::byte> scratch(Channel::POLL_SCRATCH_SIZE);
@@ -554,7 +554,7 @@ TEST_CASE_FIXTURE(SodiumFixture,
     const std::vector<std::byte> snap(32, std::byte{0xCC});
     const std::vector<std::byte> junk(200, std::byte{1});
     std::ignore = rig.AgentSendBuf.Append(ByteSpan{junk});
-    rig.Agent.StartGrid(ByteSpan{snap}, 0, 1, 0);
+    std::ignore = rig.Agent.StartGrid(ByteSpan{snap}, 0, 1, 0);
     for (std::uint64_t ack : {50ull, 1000ull}) {
         const auto plain = DataWithAck(ack, 4);
         const auto ev = rig.InjectToAgent(ByteSpan{plain});

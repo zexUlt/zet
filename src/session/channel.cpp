@@ -724,22 +724,22 @@ ChannelResult<std::size_t> Channel::SealInto(MutableByteSpan out,
     return *result;
 }
 
-void Channel::StartGrid(ByteSpan snapshot, std::uint8_t flags,
+bool Channel::StartGrid(ByteSpan snapshot, std::uint8_t flags,
                         std::uint32_t streamGen,
                         std::uint32_t scrollbackLen) noexcept {
     if (Role_ != ERole::Agent) {
-        return;
+        return false;
     }
     if (GridEmitting_.has_value() || GridAwaitingApplied_) {
         // Emission already in progress — caller error, ignore.
-        return;
+        return false;
     }
     // Reject empty and oversize snapshots: total_len==0 is a wire violation
     // (§7), and total_len>SNAPSHOT_MAX_BYTES cannot fit in a GridBegin frame.
     // AgentConnection::SupplySnapshot guards the same condition, but Channel
     // also guards it so the invariant holds regardless of the call path.
     if (snapshot.empty() || snapshot.size() > wire::SNAPSHOT_MAX_BYTES) {
-        return;
+        return false;
     }
     GridEmitting_.emplace();
     // Guard acks from the start of emission, not just after GridEnd is sent.
@@ -755,6 +755,7 @@ void Channel::StartGrid(ByteSpan snapshot, std::uint8_t flags,
     GridEmitting_->Flags = flags;
     GridEmitting_->BytesSent = 0;
     GridEmitting_->BeginSent = false;
+    return true;
 }
 
 void Channel::QueueGridApplied(std::uint32_t streamGen) noexcept {

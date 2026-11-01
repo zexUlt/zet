@@ -291,7 +291,7 @@ TEST_CASE_FIXTURE(SodiumFixture,
                   "UnexpectedMessage") {
     ViolationRig rig;
     const std::vector<std::byte> snap(32, std::byte{0xCC});
-    rig.Agent.StartGrid(ByteSpan{snap}, 0, 1, 0);
+    std::ignore = rig.Agent.StartGrid(ByteSpan{snap}, 0, 1, 0);
     const auto plain = GridAppliedRaw(99);
     const auto ev = rig.InjectToAgent(ByteSpan{plain});
     MESSAGE(
@@ -307,7 +307,7 @@ TEST_CASE_FIXTURE(SodiumFixture,
     const std::vector<std::byte> snap(32, std::byte{0xCC});
     const std::vector<std::byte> junk(200, std::byte{1});
     std::ignore = rig.AgentSendBuf.Append(ByteSpan{junk});
-    rig.Agent.StartGrid(ByteSpan{snap}, 0, 1, 0);
+    std::ignore = rig.Agent.StartGrid(ByteSpan{snap}, 0, 1, 0);
     for (std::uint64_t ack : {50ull, 1000ull}) {
         const auto plain = DataWithAck(ack, 4);
         const auto ev = rig.InjectToAgent(ByteSpan{plain});

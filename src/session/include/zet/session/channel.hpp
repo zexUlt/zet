@@ -258,12 +258,13 @@ public:
     /// session_gen from NewGeneration(); `scrollbackLen` and `flags` come
     /// from the grid serializer. §9.
     ///
-    /// No-op if not the agent role or if a grid emission is already in
-    /// progress. Poll will send GridBegin → GridChunk* → GridEnd on
-    /// subsequent calls.
-    void StartGrid(ByteSpan snapshot, std::uint8_t flags,
-                   std::uint32_t streamGen,
-                   std::uint32_t scrollbackLen) noexcept;
+    /// Returns true when the grid emission was started, false when it was
+    /// rejected (wrong role, emission already in progress, empty snapshot, or
+    /// snapshot exceeds SNAPSHOT_MAX_BYTES). Poll will send
+    /// GridBegin → GridChunk* → GridEnd on subsequent calls.
+    [[nodiscard]] bool StartGrid(ByteSpan snapshot, std::uint8_t flags,
+                                 std::uint32_t streamGen,
+                                 std::uint32_t scrollbackLen) noexcept;
 
     /// True once GridEnd has been sent and the channel is waiting for
     /// GridApplied from the client.

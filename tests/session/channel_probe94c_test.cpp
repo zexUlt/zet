@@ -162,22 +162,27 @@ TEST_CASE_FIXTURE(SodiumFixture, "PROBE7c GridBegin total_len==0 on the wire") {
     MESSAGE("err proto=" << int(*ev.error().Proto()));
 }
 
-// ── PROBE7d: Channel::StartGrid(empty) is a no-op ────────────────────────────
+// ── PROBE7d: Channel::StartGrid(empty) returns false and is a no-op ──────────
 
 TEST_CASE_FIXTURE(SodiumFixture,
-                  "PROBE7d Channel::StartGrid(empty) behaviour") {
+                  "PROBE7d Channel::StartGrid(empty) returns false, no grid "
+                  "emission started") {
     ViolationRig rig;
     rig.Agent.SuppressDataUntilGrid();
     const std::vector<std::byte> junk(20, std::byte{1});
     std::ignore = rig.AgentSendBuf.Append(ByteSpan{junk});
-    rig.Agent.StartGrid(ByteSpan{}, 0, 1, 0);
-    MESSAGE("GridInFlight after empty StartGrid=" << rig.Agent.GridInFlight());
+    const bool started = rig.Agent.StartGrid(ByteSpan{}, 0, 1, 0);
+    MESSAGE("StartGrid(empty) returned=" << started << " GridInFlight="
+                                         << rig.Agent.GridInFlight());
+    // empty snapshot must be rejected: no emission started
+    CHECK_FALSE(started);
+    CHECK_FALSE(rig.Agent.GridInFlight());
+    // Poll should produce no grid frames (AwaitingSnapshotSupply_ still set)
     std::array<std::byte, wire::HEADER_SIZE + wire::MAX_FRAME> out{};
     std::array<std::byte, Channel::POLL_SCRATCH_SIZE> scr{};
     auto n =
         rig.Agent.Poll(Timestamp{}, MutableByteSpan{out}, MutableByteSpan{scr});
-    MESSAGE(
-        "Poll n="
-        << (n ? *n : 0)
-        << " (data flows with no snapshot sent: empty StartGrid is a no-op)");
+    REQUIRE(n.has_value());
+    MESSAGE("Poll after rejected StartGrid n=" << *n);
+    CHECK(*n == 0);  // no data: AwaitingSnapshotSupply_ suppresses output
 }
