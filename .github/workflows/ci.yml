@@ -509,14 +509,14 @@ jobs:
     name: macos
     needs: changes
     if: needs.changes.outputs.macos == 'true'
-    runs-on: macos-14
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
 
       - name: Install the toolchain
         run: brew install libsodium ninja llvm
 
-      # Homebrew's LLVM rather than the runner's Xcode: macos-14 ships Apple
+      # Homebrew's LLVM rather than the runner's Xcode: the macOS runners ship Apple
       # clang 15, and zet needs clang 20 or newer (CMakeLists.txt).
       - name: Build and test
         run: |
