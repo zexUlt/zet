@@ -940,6 +940,7 @@ TEST_CASE_FIXTURE(
     // Drive until the fresh agent either closes the connection (fix: violation
     // detected) or goes Live (bug: stream_gen silently accepted).
     bool gotCloseConnection = false;
+    bool gotMalformedField = false;
     bool gotLive = false;
     for (int i = 0; i < 200; ++i) {
         auto ea = ac2.Pump(START, MutableByteSpan{sp.Out},
@@ -947,6 +948,9 @@ TEST_CASE_FIXTURE(
         if (!ea) {
             if (ea.error().Disposition() == EDisposition::CloseConnection) {
                 gotCloseConnection = true;
+                if (ea.error().Proto() == EProtoError::MalformedField) {
+                    gotMalformedField = true;
+                }
             }
             break;
         }
@@ -970,8 +974,10 @@ TEST_CASE_FIXTURE(
             REQUIRE(Feed(ac2, sp, sf->Written));
         }
     }
-    // With fix: violation detected → CloseConnection; session must not go Live.
+    // With fix: violation detected → CloseConnection(MalformedField); must not
+    // go Live.
     CHECK(gotCloseConnection);
+    CHECK(gotMalformedField);
     CHECK_FALSE(gotLive);
 }
 
