@@ -603,8 +603,9 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data,
                     std::byte{0x47}, std::byte{0x52}, std::byte{0x49},
                     std::byte{0x44}, std::byte{0x01}, std::byte{0x02},
                     std::byte{0x03}, std::byte{0x04}};
-                agentChan.StartGrid(ByteSpan{kSnap}, 0,
-                                    static_cast<std::uint32_t>(*genByte), 0);
+                std::ignore = agentChan.StartGrid(
+                    ByteSpan{kSnap}, 0, static_cast<std::uint32_t>(*genByte),
+                    0);
                 break;
             }
             // ── 0A: QueueGridApplied ──────────────────────────────────────
