@@ -789,9 +789,10 @@ void ClientConnection::ConfirmApply(std::uint32_t gen) noexcept {
     if (Channel_) {
         Channel_->QueueGridApplied(gen);
     }
-    if (Handle_) {
-        Handle_->SetStreamGen(gen);
+    if (!Handle_ || !Handle_->IsCurrent()) {
+        return;
     }
+    Handle_->SetStreamGen(gen);
 }
 
 void ClientConnection::DenyApply(std::uint32_t gen) noexcept {
