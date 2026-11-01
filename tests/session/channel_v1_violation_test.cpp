@@ -281,7 +281,9 @@ TEST_CASE_FIXTURE(SodiumFixture,
     const auto ev = rig.InjectToAgent(ByteSpan{plain});
     MESSAGE(
         "GridApplied(99) with nothing awaited: has_value=" << ev.has_value());
-    CHECK_FALSE(ev.has_value());
+    REQUIRE_FALSE(ev.has_value());
+    CHECK(ev.error().Disposition() == EDisposition::CloseConnection);
+    CHECK(ev.error().Proto() == EProtoError::UnexpectedMessage);
 }
 
 TEST_CASE_FIXTURE(SodiumFixture,
@@ -294,7 +296,9 @@ TEST_CASE_FIXTURE(SodiumFixture,
     const auto ev = rig.InjectToAgent(ByteSpan{plain});
     MESSAGE(
         "GridApplied(99) when awaiting gen 1: has_value=" << ev.has_value());
-    CHECK_FALSE(ev.has_value());
+    REQUIRE_FALSE(ev.has_value());
+    CHECK(ev.error().Disposition() == EDisposition::CloseConnection);
+    CHECK(ev.error().Proto() == EProtoError::UnexpectedMessage);
 }
 
 TEST_CASE_FIXTURE(SodiumFixture,
