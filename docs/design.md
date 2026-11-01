@@ -512,8 +512,10 @@ Rune в снимке санируется: запрещены C0/C1 (0x00–0x1F
 | `SCROLLBACK_LIMIT` | 1000 | Настраивается `--scrollback N` |
 | `GROUND_WAIT_TIMEOUT` | 5 с / 1 МБ | Force-reset к Ground, `grid_possibly_diverged = true` |
 | `RESIZE_WAIT_TIMEOUT` | 2 с | Если `Resize` не пришёл — использовать `last_known_size` |
+| `SUPPLY_SNAPSHOT_TIMEOUT` | 30 с | Снимок не поставлен вовремя — закрыть соединение, сессия выживает |
+| `GRID_APPLIED_TIMEOUT` | 30 с | GridApplied не получен после отправки GridEnd — закрыть соединение, сессия выживает |
 | `PROTOCOL_VERSION_MIN` | 1 | ver=1: нет Grid, overflow = тихий реап (CloseConnection без SessionEnd(kind=2)) |
-| `PROTOCOL_VERSION_MAX` | 2 | ver=2: Resume + stream_gen, GridBegin/Chunk/End/Applied, GRID_CAPABLE |
+| `PROTOCOL_VERSION_MAX` | 2 (trunk держит 1 до подключения агента/клиента, ADR 035) | Константа в коде `PROTOCOL_VERSION_GRID = 2`; передаётся в рукопожатие только когда сессионный слой готов |
 
 **Хранение (nm-gate совместимость).** `zet_grid` не использует `std::vector` для основных структур данных: рост вектора тянет `__throw_length_error`, а nm-гейт запрещает `__cxa_throw` в `zet_grid`. Ячейки экрана и кольцевой буфер истории — **фиксированные арены**, выделяемые через `new(std::nothrow)` при создании Grid с фактическим размером; нет side-table, нет `ExtCell`. Все аллокации возвращают `expected<…, GridError>` при сбое; нет `abort`, нет `terminate`.
 
