@@ -613,6 +613,10 @@ void AgentConnection::SupplySnapshot(Timestamp now, ByteSpan snapshot,
     QueueEnd();
 }
 
+bool AgentConnection::GridEmissionDone() const noexcept {
+    return Channel_.has_value() && Channel_->GridEmissionDone();
+}
+
 ConnectionResult AgentConnection::Refuse(SessionError error) noexcept {
     const SessionError failed = Fail(error);
     // Only an authenticated peer gets this far with KillSession: anything
