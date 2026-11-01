@@ -145,6 +145,7 @@ TEST_CASE_FIXTURE(SodiumFixture,
         if (needs) supplied = true;
     }
     MESSAGE("conn2: " << c2.Dump());
+    REQUIRE(supplied);
     for (auto& e : c2.Log)
         if (e.Name == "NeedsSnapshot") {
             CHECK(e.R == 50);
@@ -175,6 +176,7 @@ TEST_CASE_FIXTURE(SodiumFixture,
     MESSAGE("conn2 (no supply): " << c2.Dump());
     const auto dl = c2.Ac.NextDeadline();
     MESSAGE("NextDeadline set=" << (dl.IsSet()));
+    CHECK(dl.IsSet());
 }
 
 // ── VPROBE a3 ────────────────────────────────────────────────────────────────
@@ -503,6 +505,7 @@ TEST_CASE_FIXTURE(SodiumFixture,
 
     // NextDeadline must be set (resize-wait deadline is in ~2s).
     CHECK(ac.NextDeadline().IsSet());
+    CHECK(ac.NextDeadline().At() == START + RESIZE_WAIT_TIMEOUT);
 
     // At t=RESIZE_WAIT_TIMEOUT: WaitForResize_ expires, NeedsSnapshot fires.
     const Timestamp after = START + RESIZE_WAIT_TIMEOUT;
