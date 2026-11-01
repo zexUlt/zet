@@ -315,3 +315,47 @@ TEST_CASE_FIXTURE(SodiumFixture,
         CHECK(rig.AgentSendBuf.Base() == 0);
     }
 }
+
+// ── PROBE2h: v1 guard fires FIRST, before GridAwaitingApplied_ check ─────────
+//
+// State: GridEmitting_=null, GridAwaitingApplied_=true (GridEnd already sent).
+// Without the v1 guard the GridApplied handler would succeed (emission-active
+// guard is false; only GridAwaitingApplied_ matters now).  The v1 guard must
+// therefore be the first check.
+TEST_CASE_FIXTURE(SodiumFixture,
+                  "v1: GridApplied to agent after GridEnd is UnexpectedMessage "
+                  "(v1 guard fires before GridAwaitingApplied_ check)") {
+    ViolationRig rig;
+    const std::vector<std::byte> snap(32, std::byte{0xDD});
+    // StartGrid doesn't check version; sets GridEmitting_ +
+    // GridAwaitingApplied_.
+    REQUIRE(rig.Agent.StartGrid(ByteSpan{snap}, 0, 1, 0));
+    REQUIRE(rig.Agent.GridInFlight());
+    // Poll the agent until it returns 0 bytes: GridBegin + GridChunk + GridEnd
+    // have all been emitted, GridEmitting_ is now null.
+    std::vector<std::byte> frameBuf(wire::HEADER_SIZE + wire::MAX_FRAME);
+    std::vector<std::byte> scratch(Channel::POLL_SCRATCH_SIZE);
+    bool emittingCleared = false;
+    for (int i = 0; i < 50; ++i) {
+        auto r = rig.Agent.Poll(Timestamp{}, MutableByteSpan{frameBuf},
+                                MutableByteSpan{scratch});
+        REQUIRE(r.has_value());
+        if (*r == 0) {
+            emittingCleared = true;
+            break;
+        }
+    }
+    MESSAGE("emittingCleared=" << emittingCleared
+                               << " GridInFlight=" << rig.Agent.GridInFlight());
+    REQUIRE(emittingCleared);           // GridEnd was emitted
+    REQUIRE(rig.Agent.GridInFlight());  // GridAwaitingApplied_ still set
+    // At this point: GridEmitting_=null, GridAwaitingApplied_=true.
+    // Without v1 guard: !true || false = false → GridApplied would succeed.
+    // With v1 guard: Version_ < PROTOCOL_VERSION_GRID → UnexpectedMessage.
+    const auto plain = GridAppliedRaw(1);
+    const auto ev = rig.InjectToAgent(ByteSpan{plain});
+    MESSAGE("GridApplied after GridEnd on v1: has_value=" << ev.has_value());
+    REQUIRE_FALSE(ev.has_value());
+    CHECK(ev.error().Disposition() == EDisposition::CloseConnection);
+    CHECK(ev.error().Proto() == EProtoError::UnexpectedMessage);
+}
