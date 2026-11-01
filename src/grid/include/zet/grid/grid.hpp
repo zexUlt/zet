@@ -17,6 +17,9 @@ enum class EGridError : std::uint8_t {
     SizeTooLarge,
     /// Scrollback limit exceeds implementation max (effectively 2^31).
     ScrollbackTooLarge,
+    /// Full-fidelity snapshot exceeds maxBytes (design.md §9).
+    /// Apply the degrade ladder (PR2) to reduce size before retrying.
+    SnapshotTooLarge,
 };
 
 template <typename TValue>

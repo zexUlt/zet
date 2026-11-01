@@ -40,4 +40,7 @@ inline constexpr std::uint16_t DEFAULT_TAB_INTERVAL = 8;
 /// Guards against pathological scrollbackLimit × cols × sizeof(Cell) products.
 inline constexpr std::size_t MAX_SCROLLBACK_BYTES = 128UL * 1024 * 1024;
 
+/// Maximum encoded snapshot size (design.md §9, Snapshot serializer).
+inline constexpr std::size_t SNAPSHOT_MAX_BYTES = 4UL * 1024 * 1024;
+
 }  // namespace zet::grid
