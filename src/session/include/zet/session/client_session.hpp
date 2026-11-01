@@ -97,6 +97,11 @@ public:
         return StreamGen_;
     }
 
+    /// Test-only: override StreamGen_ directly so a Resume can be sent with
+    /// an arbitrary stream_gen without going through a full path-B round.
+    /// Only call this from test harnesses.
+    void ProbeSetStreamGen(std::uint32_t gen) noexcept { StreamGen_ = gen; }
+
 private:
     friend class ClientSessionHandle;
     friend class ClientResumeAttempt;
