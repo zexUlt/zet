@@ -569,15 +569,20 @@ void VtParser::DispatchCsi(char32_t final, Grid& grid) noexcept {
     if (PrivateMarker_ != 0) {
         // DECSET/DECRST are only valid for '?' (0x3F) private marker.
         if (PrivateMarker_ == '?' && static_cast<std::uint8_t>(final) == 'h') {
-            // DECSET
-            for (std::size_t i = 0; i < nparams; ++i)
+            // DECSET — skip params 4 (DECSCLM) and 20 (undefined private):
+            // IRM and LNM are ANSI modes set by non-private SM/RM (D6).
+            for (std::size_t i = 0; i < nparams; ++i) {
+                if (params[i] == 4 || params[i] == 20) continue;
                 grid.SetMode(params[i], true);
+            }
             return;
         }
         if (PrivateMarker_ == '?' && static_cast<std::uint8_t>(final) == 'l') {
-            // DECRST
-            for (std::size_t i = 0; i < nparams; ++i)
+            // DECRST — same exclusions as DECSET above.
+            for (std::size_t i = 0; i < nparams; ++i) {
+                if (params[i] == 4 || params[i] == 20) continue;
                 grid.SetMode(params[i], false);
+            }
             return;
         }
         ++UnknownSeqCount_;
