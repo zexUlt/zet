@@ -42,15 +42,19 @@ SessionResult<std::size_t> StreamState::Write(ByteSpan bytes) noexcept {
         if (Overflow_ == EDetachedOverflow::Resync) {
             if (room == 0) {
                 // Ring is full: set the flag that forces path B on reconnect.
+                // Consume and drop the full input (return bytes.size()) so the
+                // PTY loop does not retain stale bytes into the new generation.
                 Output_.SetRingOverflowed();
-                return 0;
+                return bytes.size();
             }
             // Partial fill: write what fits, then set the flag so the
             // next AcceptsWrites call sees RingOverflowed and stays true.
-            // The PTY loop will keep draining even though no more bytes fit.
-            auto written = Output_.Append(bytes.first(room));
+            // Consume and drop the full input (return bytes.size()) so the
+            // PTY loop does not retain the unfitted tail into the new
+            // generation.
+            std::ignore = Output_.Append(bytes.first(room));
             Output_.SetRingOverflowed();
-            return written;
+            return bytes.size();
         }
     }
     return Output_.Append(bytes.first(std::min(bytes.size(), room)));

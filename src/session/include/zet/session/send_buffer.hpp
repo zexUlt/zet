@@ -108,7 +108,8 @@ public:
 
     /// Mark the ring as overflowed in Resync detach mode. Called by
     /// StreamState once the ring fills in a GRID_CAPABLE (ver=2) session.
-    /// Invariant: ring_overflowed ⇒ AcceptsWrites = false.
+    /// Invariant: ring_overflowed ⇒ AcceptsWrites = true, Write consumes full
+    /// length.
     void SetRingOverflowed() noexcept { RingOverflowed_ = true; }
 
     /// True when the ring overflowed in Resync mode; path B is mandatory on

@@ -207,9 +207,11 @@ TEST_CASE_FIXTURE(
     CHECK_FALSE(state.AcceptsWrites());  // full but not overflowed yet
 
     // One more Write with room=0 triggers SetRingOverflowed.
+    // Returns bytes.size() (1) so the PTY loop discards it rather than
+    // retrying the same byte into the new generation after path-B reconnect.
     const auto overflow = state.Write(ByteSpan{Bytes(1)});
     REQUIRE(overflow.has_value());
-    CHECK(*overflow == 0);
+    CHECK(*overflow == 1);
     CHECK(state.Output().RingOverflowed());
 
     // BUG: returned false before the fix — PTY loop stops reading and the
@@ -234,9 +236,11 @@ TEST_CASE_FIXTURE(
     REQUIRE(state.Write(ByteSpan{Bytes(DISCONNECT_MAX - 1)}) ==
             DISCONNECT_MAX - 1);
     // Partial fill: 1 byte fits, then ring_overflowed is set.
+    // Returns bytes.size() (2), not the partial count (1), so the PTY loop
+    // discards the full input rather than retrying the unfitted tail.
     const auto first = state.Write(ByteSpan{Bytes(2)});
     REQUIRE(first.has_value());
-    CHECK(*first == 1);  // only 1 byte fit before overflow
+    CHECK(*first == 2);  // full bytes.size() returned, not partial count
     REQUIRE(state.Output().RingOverflowed());
 
     // Subsequent Write: ring is full, ring_overflowed is already set.
