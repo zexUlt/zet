@@ -31,6 +31,9 @@
 #include "zet/core/log.hpp"
 #include "zet/core/version.hpp"
 #include "zet/crypto/crypto.hpp"
+#include "zet/grid/grid.hpp"
+#include "zet/grid/snapshot.hpp"
+#include "zet/grid/vt_parser.hpp"
 #include "zet/io/clock.hpp"
 #include "zet/io/daemon.hpp"
 #include "zet/io/fd.hpp"
@@ -85,6 +88,14 @@ constexpr io::WindowSize INITIAL_SIZE{.Rows = 24, .Cols = 80};
 
 /// TERM for the shell when the client sent none.
 constexpr std::string_view DEFAULT_TERM = "xterm-256color";
+
+/// Maximum time waiting for the VT parser to reach Ground before forcing a
+/// reset and snapshotting with grid_possibly_diverged=true. §9 ADR-030.
+constexpr Duration GROUND_WAIT_TIMEOUT = 5s;
+
+/// Maximum pty bytes processed while waiting for Ground — complements the
+/// time limit above (whichever fires first). §9 ADR-030.
+constexpr std::size_t GROUND_WAIT_BYTES = 1U * 1024U * 1024U;
 
 constexpr std::size_t EVENTS_PER_WAIT = 32;
 
@@ -378,6 +389,9 @@ struct Connection {
     /// What AgentConnection::DeliveredEnd said at the last Pump: the read
     /// that sees the close comes after it.
     bool DeliveredEnd{false};
+    /// Grid snapshot borrowed by SupplySnapshot; kept alive until the
+    /// connection closes so the GridBegin…GridEnd sequence can read it.
+    std::unique_ptr<grid::Snapshot> Snap;
 };
 
 wire::SessionEndMessage EndOf(const io::ExitStatus& status) noexcept {
@@ -414,6 +428,7 @@ public:
 private:
     [[nodiscard]] bool Start() noexcept;
     void MovePtyOutput() noexcept;
+    void TrySupplySnapshot(Timestamp now) noexcept;
     void Pump(Connection& connection, Timestamp now) noexcept;
     void DropClosed(Timestamp now) noexcept;
     [[nodiscard]] bool UpdateInterest() noexcept;
@@ -442,6 +457,32 @@ private:
     std::optional<app::Registration> ListenerWatch_;
     std::vector<HandedOver> HandedOver_;
 
+    // ── Grid: tracks the terminal state across reconnects. §9 ADR-030. ────
+
+    /// The terminal grid; created in Start() at INITIAL_SIZE.
+    std::unique_ptr<grid::Grid> Grid_;
+    /// VT parser: feeds raw pty bytes into Grid_.
+    grid::VtParser Parser_;
+
+    /// How many bytes of PtyRead_[0..PtyTo_] have been fed to the parser.
+    /// Advances with PtyTo_; reset to 0 when PtyFrom_/PtyTo_ are reset.
+    std::size_t GridFed_{0};
+    /// Total pty bytes fed to the grid across all reads (monotone).
+    std::size_t TotalGridBytes_{0};
+
+    /// Pending ground-wait: set when Pump returns NeedsSnapshot, cleared
+    /// once a snapshot is supplied or the requesting connection closes.
+    struct SnapWait {
+        Connection* Conn;
+        Timestamp Deadline;    ///< now + GROUND_WAIT_TIMEOUT
+        std::size_t BytesCap;  ///< TotalGridBytes_ at which to force-reset
+        std::uint16_t Rows;
+        std::uint16_t Cols;
+    };
+    std::optional<SnapWait> SnapWait_;
+
+    // ── Pty ─────────────────────────────────────────────────────────────────
+
     io::Child Child_;
     std::optional<app::Registration> PtyWatch_;
     std::optional<io::ExitStatus> ChildStatus_;
@@ -467,6 +508,14 @@ bool Agent::Start() noexcept {
             return false;
         }
     }
+    // Create the grid at the pty's initial size. §9 ADR-030.
+    auto g = grid::Grid::Create(INITIAL_SIZE.Cols, INITIAL_SIZE.Rows);
+    if (!g) {
+        Log(log::ELevel::Error, "cannot create the grid");
+        return false;
+    }
+    Grid_.reset(*g);
+
     const ShellCommand shell{ShellEnvironment_};
     auto child = io::Spawn(shell.Spec());
     if (!child) {
@@ -503,6 +552,7 @@ int Agent::Run() noexcept {
             Mux_->OnTimer(Poller_, now);
         }
         MovePtyOutput();
+        TrySupplySnapshot(now);
         if (ChildStatus_ && PtyEnded_ && PtyFrom_ == PtyTo_ &&
             !Session_.HasEnded()) {
             Session_.End(EndOf(*ChildStatus_));
@@ -536,12 +586,22 @@ int Agent::Run() noexcept {
 }
 
 void Agent::MovePtyOutput() noexcept {
+    // Feed all bytes the grid has not yet seen — before the session write, so
+    // the grid always tracks the full terminal output regardless of what the
+    // session buffers or drops in Resync mode. §9 ADR-030.
+    if (Grid_ && GridFed_ < PtyTo_) {
+        const std::size_t newBytes = PtyTo_ - GridFed_;
+        Parser_.Feed(PtyRead_.data() + GridFed_, newBytes, *Grid_);
+        GridFed_ = PtyTo_;
+        TotalGridBytes_ += newBytes;
+    }
+
     while (PtyFrom_ < PtyTo_ && Session_.AcceptsWrites()) {
         const auto taken = Session_.Write(
             ByteSpan{PtyRead_}.subspan(PtyFrom_, PtyTo_ - PtyFrom_));
         if (!taken || *taken == 0) {
             // An overflow while detached reaps the session; the top of the
-            // loop sees it.
+            // loop sees it. The grid has already seen these bytes above.
             return;
         }
         PtyFrom_ += *taken;
@@ -549,7 +609,71 @@ void Agent::MovePtyOutput() noexcept {
     if (PtyFrom_ == PtyTo_) {
         PtyFrom_ = 0;
         PtyTo_ = 0;
+        GridFed_ = 0;
     }
+}
+
+void Agent::TrySupplySnapshot(Timestamp now) noexcept {
+    if (!SnapWait_ || !Grid_) {
+        return;
+    }
+
+    // Check if the requesting connection is still alive.
+    Connection* conn = SnapWait_->Conn;
+    bool alive = false;
+    for (auto& c : Connections_) {
+        if (c.get() == conn && !c->Closing) {
+            alive = true;
+            break;
+        }
+    }
+    if (!alive) {
+        SnapWait_.reset();
+        return;
+    }
+
+    // Check whether the parser has reached Ground, or the timeout expired.
+    const bool inGround = (Parser_.State() == grid::EParserState::Ground);
+    const bool timeExpired = (now >= SnapWait_->Deadline);
+    const bool bytesExpired = (TotalGridBytes_ >= SnapWait_->BytesCap);
+    if (!inGround && !timeExpired && !bytesExpired) {
+        return;  // still waiting
+    }
+
+    if (!inGround) {
+        // Force-reset to Ground and mark the snapshot as potentially
+        // diverged — the terminal may render remaining DCS/OSC bytes as
+        // ordinary text. §9 ADR-030.
+        Parser_.Reset();
+        Grid_->SetPossiblyDiverged(true);
+        Log(log::ELevel::Debug, "grid ground-wait expired; snapshot diverged");
+    }
+
+    // Resize the grid to the dimensions the client reported, if they differ.
+    if (Grid_->Cols() != SnapWait_->Cols || Grid_->Rows() != SnapWait_->Rows) {
+        static_cast<void>(Grid_->Resize(SnapWait_->Cols, SnapWait_->Rows));
+    }
+
+    auto snap = grid::Snapshot::Create(*Grid_);
+    if (!snap) {
+        // Allocation failure or size limit: close the connection so a new
+        // attempt can be made. The session itself is not reaped.
+        Log(log::ELevel::Warn, "grid snapshot create failed");
+        conn->Closing = true;
+        SnapWait_.reset();
+        return;
+    }
+
+    grid::Snapshot* snapPtr = *snap;
+    const std::uint8_t flags = snapPtr->PossiblyDiverged() ? 1u : 0u;
+    conn->Link.SupplySnapshot(
+        now, snapPtr->Bytes(),
+        static_cast<std::uint32_t>(snapPtr->ScrollbackLen()), flags);
+    conn->Snap.reset(snapPtr);  // keep alive until the connection closes
+    SnapWait_.reset();
+    // Clear the diverged flag: the snapshot records the parser's state at the
+    // time it was taken; subsequent output starts clean.
+    Grid_->SetPossiblyDiverged(false);
 }
 
 void Agent::Pump(Connection& connection, Timestamp now) noexcept {
@@ -590,12 +714,28 @@ void Agent::Pump(Connection& connection, Timestamp now) noexcept {
             }
         } else if (const auto* resized =
                        std::get_if<session::Resized>(&event)) {
-            static_cast<void>(
-                io::Resize(Child_.Master.Get(),
-                           io::WindowSize{.Rows = resized->Size.Rows,
-                                          .Cols = resized->Size.Cols,
-                                          .XPixels = resized->Size.XPixel,
-                                          .YPixels = resized->Size.YPixel}));
+            const io::WindowSize ws{.Rows = resized->Size.Rows,
+                                    .Cols = resized->Size.Cols,
+                                    .XPixels = resized->Size.XPixel,
+                                    .YPixels = resized->Size.YPixel};
+            static_cast<void>(io::Resize(Child_.Master.Get(), ws));
+            // Keep the grid in sync so snapshot dimensions are current. §9.
+            if (Grid_) {
+                static_cast<void>(Grid_->Resize(ws.Cols, ws.Rows));
+            }
+        } else if (const auto* ns =
+                       std::get_if<session::NeedsSnapshot>(&event)) {
+            // Start ground-wait: the caller supplies a snapshot once the
+            // parser is in Ground or the timeout expires. §9 ADR-030.
+            SnapWait_ = SnapWait{
+                .Conn = &connection,
+                .Deadline = now + GROUND_WAIT_TIMEOUT,
+                .BytesCap = TotalGridBytes_ + GROUND_WAIT_BYTES,
+                .Rows = ns->Rows,
+                .Cols = ns->Cols,
+            };
+            Log(log::ELevel::Debug, "NeedsSnapshot: waiting for parser Ground");
+            return;  // stop pumping until TrySupplySnapshot fires
         } else if (std::holds_alternative<session::Idle>(event)) {
             return;
         }
@@ -648,6 +788,9 @@ Deadline Agent::NextDeadline() const noexcept {
     Deadline next = Session_.NextDeadline();
     if (Mux_) {
         next = Earliest(next, Mux_->NextDeadline());
+    }
+    if (SnapWait_) {
+        next = Earliest(next, Deadline{SnapWait_->Deadline});
     }
     for (const auto& connection : Connections_) {
         next = Earliest(next, connection->Link.NextDeadline());
