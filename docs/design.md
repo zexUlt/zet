@@ -439,7 +439,7 @@ K_master --"zet-sess"--> { R, K_auth, K_conn_seed[0] }
 - **Backpressure вместо потери данных.** Достигли `RESEND_BUFFER_MAX` (4 МиБ по умолчанию) — снимаем `EPOLLIN` с master pty, шелл блокируется на записи. Это естественное давление вверх по течению. ET вместо этого при живом сокете выбрасывает старое из буфера (`src/base/BackedWriter.cpp:37-40`), молча делая будущее восстановление невозможным: `recover` затем кидает «Client is too far behind server» (`:113`).
 - **В отключённом состоянии** буферизуем до `DISCONNECT_BUFFER_MAX` (16 МиБ). После заполнения агент выставляет флаг `ring_overflowed = true` на сессии, продолжает читать из pty и обновлять `zet_grid`, но ring больше не принимает байты. `ring_overflowed` сбрасывается только при установке нового поколения (начале пути B). При ver=1 overflow = тихий реап: агент закрывает соединение (`CloseConnection`), `SessionEnd(kind=2)` не отправляется (вид 2 валиден только при ver=2). При ver=2 без `GRID_CAPABLE` — `SessionEnd(kind=2)`, сессия умирает. При ver=2 + `GRID_CAPABLE` сессия остаётся живой — при реконнекте выбирается путь B. Молчаливая порча потока запрещена.
 
-  **Состояния StreamState.** До M6 сессия в отключённом состоянии могла быть `Reap` (истёк orphan-таймаут) или `Backpressure` (ring наполнен, pty заблокирован). M6 добавляет третье состояние: **`Resync`** — ring переполнен (`ring_overflowed = true`), pty продолжает читать, grid обновляется, но replay невозможен; при следующем реконнекте агент обязан выбрать путь B вне зависимости от стоимости. `SendBuffer` в состоянии `Resync` не принимает новых байт (invariant: `ring_overflowed ⇒ AcceptsWrites = false`). `ReceiveCursor` продолжает работать — input-поток (client→agent) не прерывается.
+  **Состояния StreamState.** До M6 сессия в отключённом состоянии могла быть `Reap` (истёк orphan-таймаут) или `Backpressure` (ring наполнен, pty заблокирован). M6 добавляет третье состояние: **`Resync`** — ring переполнен (`ring_overflowed = true`), pty продолжает читать, grid обновляется, но replay невозможен; при следующем реконнекте агент обязан выбрать путь B вне зависимости от стоимости. В состоянии `Resync` после переполнения `AcceptsWrites` остаётся `true`, а `Write` потребляет и отбрасывает байты (возвращает полную длину): вызывающий код уже передал их в grid. `ReceiveCursor` продолжает работать — input-поток (client→agent) не прерывается.
 
   **Инварианты SendBuffer/ReceiveCursor при M6:** output offsets никогда не перезапускаются автоматически — только агент явно инкрементирует `session_gen` и очищает ring (путь B). `ReceiveCursor.offset` монотонен и не зависит от пути (A или B). Проверка `ring_overflowed` происходит **до** выбора пути и до `Attach`/`ResetSendNext`.
 
@@ -512,8 +512,10 @@ Rune в снимке санируется: запрещены C0/C1 (0x00–0x1F
 | `SCROLLBACK_LIMIT` | 1000 | Настраивается `--scrollback N` |
 | `GROUND_WAIT_TIMEOUT` | 5 с / 1 МБ | Force-reset к Ground, `grid_possibly_diverged = true` |
 | `RESIZE_WAIT_TIMEOUT` | 2 с | Если `Resize` не пришёл — использовать `last_known_size` |
+| `SUPPLY_SNAPSHOT_TIMEOUT` | 30 с | Снимок не поставлен вовремя — закрыть соединение, сессия выживает |
+| `GRID_APPLIED_TIMEOUT` | 30 с | GridApplied не получен после отправки GridEnd — закрыть соединение, сессия выживает |
 | `PROTOCOL_VERSION_MIN` | 1 | ver=1: нет Grid, overflow = тихий реап (CloseConnection без SessionEnd(kind=2)) |
-| `PROTOCOL_VERSION_MAX` | 2 | ver=2: Resume + stream_gen, GridBegin/Chunk/End/Applied, GRID_CAPABLE |
+| `PROTOCOL_VERSION_MAX` | 2 (trunk держит 1 до подключения агента/клиента, ADR 035) | Константа в коде `PROTOCOL_VERSION_GRID = 2`; передаётся в рукопожатие только когда сессионный слой готов |
 
 **Хранение (nm-gate совместимость).** `zet_grid` не использует `std::vector` для основных структур данных: рост вектора тянет `__throw_length_error`, а nm-гейт запрещает `__cxa_throw` в `zet_grid`. Ячейки экрана и кольцевой буфер истории — **фиксированные арены**, выделяемые через `new(std::nothrow)` при создании Grid с фактическим размером; нет side-table, нет `ExtCell`. Все аллокации возвращают `expected<…, GridError>` при сбое; нет `abort`, нет `terminate`.
 

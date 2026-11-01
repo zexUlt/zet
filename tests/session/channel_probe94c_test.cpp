@@ -1,0 +1,258 @@
+// Channel-level verifier probes for PR 94.
+//
+// ViolationRig is defined inline here (same logic as grid_violation_test.cpp)
+// rather than via #include to avoid duplicate TEST_CASE registrations.
+
+#include "zet/session/channel.hpp"
+
+#include <doctest/doctest.h>
+
+#include <array>
+#include <cstddef>
+#include <cstdint>
+#include <vector>
+
+#include "zet/core/byte_writer.hpp"
+#include "zet/core/bytes.hpp"
+#include "zet/core/time.hpp"
+#include "zet/crypto/crypto.hpp"
+#include "zet/session/channel_error.hpp"
+#include "zet/session/limits.hpp"
+#include "zet/session/receive_cursor.hpp"
+#include "zet/session/send_buffer.hpp"
+#include "zet/wire/frame.hpp"
+#include "zet/wire/key_schedule.hpp"
+#include "zet/wire/limits.hpp"
+#include "zet/wire/message.hpp"
+#include "zet/wire/sealed_frame.hpp"
+
+namespace {
+
+using namespace zet;
+using namespace zet::session;
+using namespace zet::wire;
+
+struct SodiumFixture {
+    SodiumFixture() { REQUIRE(crypto::Init()); }
+};
+
+// ── ViolationRig (local copy; mirrors grid_violation_test.cpp) ────────────
+
+struct ViolationRig {
+    static constexpr std::size_t BUF_SIZE = RESEND_BUFFER_MAX;
+
+    explicit ViolationRig()
+        : Keys{DeriveConnectionKeys(
+              DeriveSessionSecrets(MakeKey(1)).ConnectionSeed, MakeNonce(1),
+              MakeNonce(2))},
+          ClientSendStore(BUF_SIZE),
+          AgentSendStore(BUF_SIZE),
+          ClientSendBuf{MutableByteSpan{ClientSendStore}, 0},
+          AgentSendBuf{MutableByteSpan{AgentSendStore}, 0},
+          ClientRecv{0},
+          AgentRecv{0},
+          ClientSnapshotStore(wire::SNAPSHOT_MAX_BYTES, std::byte{}),
+          Client{Keys,
+                 ERole::Client,
+                 ClientSendBuf,
+                 ClientRecv,
+                 Timestamp{},
+                 MAX_FRAMES_PER_EPOCH,
+                 MAX_BYTES_PER_EPOCH,
+                 {},
+                 2,
+                 MutableByteSpan{ClientSnapshotStore}},
+          Agent{Keys,
+                ERole::Agent,
+                AgentSendBuf,
+                AgentRecv,
+                Timestamp{},
+                MAX_FRAMES_PER_EPOCH,
+                MAX_BYTES_PER_EPOCH,
+                {},
+                2},
+          ClientInjector{CloneKey(Keys.ServerToClient),
+                         Keys.SaltServerToClient},
+          AgentInjector{CloneKey(Keys.ClientToServer),
+                        Keys.SaltClientToServer} {}
+
+    static crypto::Key MakeKey(std::uint8_t seed) {
+        crypto::KeyBytes b{};
+        for (std::size_t i = 0; i < b.size(); ++i) {
+            b[i] = static_cast<std::byte>(seed + static_cast<std::uint8_t>(i));
+        }
+        return crypto::Key{b};
+    }
+
+    static HandshakeNonce MakeNonce(std::uint8_t seed) {
+        HandshakeNonce n{};
+        for (std::size_t i = 0; i < n.size(); ++i) {
+            n[i] =
+                static_cast<std::byte>(seed * 7 + static_cast<std::uint8_t>(i));
+        }
+        return n;
+    }
+
+    static crypto::Key CloneKey(const crypto::Key& src) noexcept {
+        crypto::Key copy;
+        copy.Expose() = src.Expose();
+        return copy;
+    }
+
+    ChannelResult<IncomingEvent> InjectToClient(ByteSpan plain) {
+        return Inject(Client, ClientInjector, plain, OpenScratch);
+    }
+    ChannelResult<IncomingEvent> InjectToAgent(ByteSpan plain) {
+        return Inject(Agent, AgentInjector, plain, OpenScratch);
+    }
+
+    ConnectionKeys Keys;
+    std::vector<std::byte> ClientSendStore;
+    std::vector<std::byte> AgentSendStore;
+    SendBuffer ClientSendBuf;
+    SendBuffer AgentSendBuf;
+    ReceiveCursor ClientRecv;
+    ReceiveCursor AgentRecv;
+    std::vector<std::byte> ClientSnapshotStore;
+    Channel Client;
+    Channel Agent;
+    FrameSealer ClientInjector;
+    FrameSealer AgentInjector;
+    std::vector<std::byte> OpenScratch{wire::MAX_FRAME, std::byte{}};
+
+private:
+    static ChannelResult<IncomingEvent> Inject(
+        Channel& ch, FrameSealer& sealer, ByteSpan plain,
+        std::vector<std::byte>& scratch) {
+        std::vector<std::byte> frame(HEADER_SIZE + plain.size() +
+                                     crypto::TAG_SIZE);
+        const auto sealed = sealer.Seal(MutableByteSpan{frame}, plain);
+        REQUIRE(sealed.has_value());
+        const auto view = ReadFrame(ByteSpan{frame}.first(*sealed), MAX_FRAME);
+        REQUIRE(view.has_value());
+        return ch.Receive(Timestamp{}, *view, MutableByteSpan{scratch});
+    }
+};
+
+/// Build a GridBegin plaintext with a zero total_len (wire violation, §7).
+std::vector<std::byte> GridBeginRaw(std::uint8_t flags, std::uint32_t streamGen,
+                                    std::uint32_t scrollbackLen,
+                                    std::uint32_t totalLen) {
+    std::vector<std::byte> plain(14);
+    ByteWriter w{MutableByteSpan{plain}};
+    REQUIRE(w.WriteU8(static_cast<std::uint8_t>(EMessageType::GridBegin)));
+    REQUIRE(w.WriteU8(flags));
+    REQUIRE(w.WriteU32BE(streamGen));
+    REQUIRE(w.WriteU32BE(scrollbackLen));
+    REQUIRE(w.WriteU32BE(totalLen));
+    return plain;
+}
+
+}  // namespace
+
+// ── PROBE7c: GridBegin with total_len == 0 is a wire violation
+// ────────────────
+
+TEST_CASE_FIXTURE(SodiumFixture, "PROBE7c GridBegin total_len==0 on the wire") {
+    ViolationRig rig;
+    const auto plain = GridBeginRaw(0, 1, 0, 0);
+    const auto ev = rig.InjectToClient(ByteSpan{plain});
+    MESSAGE("GridBegin total_len=0 -> has_value=" << ev.has_value());
+    REQUIRE_FALSE(ev.has_value());
+    MESSAGE("err proto=" << int(*ev.error().Proto()));
+}
+
+// ── PROBE7d: Channel::StartGrid(empty) returns false and is a no-op ──────────
+
+TEST_CASE_FIXTURE(SodiumFixture,
+                  "PROBE7d Channel::StartGrid(empty) returns false, no grid "
+                  "emission started") {
+    ViolationRig rig;
+    rig.Agent.SuppressDataUntilGrid();
+    const std::vector<std::byte> junk(20, std::byte{1});
+    std::ignore = rig.AgentSendBuf.Append(ByteSpan{junk});
+    const bool started = rig.Agent.StartGrid(ByteSpan{}, 0, 1, 0);
+    MESSAGE("StartGrid(empty) returned=" << started << " GridInFlight="
+                                         << rig.Agent.GridInFlight());
+    // empty snapshot must be rejected: no emission started
+    CHECK_FALSE(started);
+    CHECK_FALSE(rig.Agent.GridInFlight());
+    // Poll should produce no grid frames (AwaitingSnapshotSupply_ still set)
+    std::array<std::byte, wire::HEADER_SIZE + wire::MAX_FRAME> out{};
+    std::array<std::byte, Channel::POLL_SCRATCH_SIZE> scr{};
+    auto n =
+        rig.Agent.Poll(Timestamp{}, MutableByteSpan{out}, MutableByteSpan{scr});
+    REQUIRE(n.has_value());
+    MESSAGE("Poll after rejected StartGrid n=" << *n);
+    CHECK(*n == 0);  // no data: AwaitingSnapshotSupply_ suppresses output
+}
+
+// ── PROBE7e: StartGrid oversize snapshot returns false and is a no-op
+// ─────────
+
+TEST_CASE_FIXTURE(SodiumFixture,
+                  "PROBE7e Channel::StartGrid(oversize) returns false, no grid "
+                  "emission started") {
+    ViolationRig rig;
+    // Create a snapshot one byte larger than SNAPSHOT_MAX_BYTES.
+    const std::vector<std::byte> big(wire::SNAPSHOT_MAX_BYTES + 1,
+                                     std::byte{0xBB});
+    const bool started = rig.Agent.StartGrid(ByteSpan{big}, 0, 1, 0);
+    MESSAGE("StartGrid(oversize) returned=" << started << " GridInFlight="
+                                            << rig.Agent.GridInFlight());
+    // Oversize snapshot must be rejected: no emission started.
+    CHECK_FALSE(started);
+    CHECK_FALSE(rig.Agent.GridInFlight());
+}
+
+// ── PROBE7f: GridApplied while grid still emitting is a protocol violation ───
+
+TEST_CASE_FIXTURE(
+    SodiumFixture,
+    "PROBE7f GridApplied while GridEmitting_ active is violation") {
+    ViolationRig rig;  // v2 channels (version=2)
+    const std::vector<std::byte> snap(32, std::byte{0xAA});
+    // StartGrid: sets GridEmitting_ AND GridAwaitingApplied_=true.
+    const bool started = rig.Agent.StartGrid(ByteSpan{snap}, 0, 1, 0);
+    REQUIRE(started);
+    REQUIRE(rig.Agent.GridInFlight());
+    // Build and inject a GridApplied(1) while GridEmitting_ is still active
+    // (GridEnd has not been sent yet).
+    std::vector<std::byte> plain(5);
+    ByteWriter w{MutableByteSpan{plain}};
+    REQUIRE(
+        w.WriteU8(static_cast<std::uint8_t>(wire::EMessageType::GridApplied)));
+    REQUIRE(w.WriteU32BE(1));
+    const auto ev = rig.InjectToAgent(ByteSpan{plain});
+    MESSAGE("GridApplied while emitting: has_value=" << ev.has_value());
+    REQUIRE_FALSE(ev.has_value());
+    CHECK(ev.error().Disposition() == EDisposition::CloseConnection);
+    CHECK(ev.error().Proto() == EProtoError::UnexpectedMessage);
+}
+
+// ── PROBE7g: standalone Ack skipped while GridAwaitingApplied_ is set
+// ─────────
+
+TEST_CASE_FIXTURE(SodiumFixture,
+                  "PROBE7g standalone Ack ignored while GridAwaitingApplied_, "
+                  "Base unchanged") {
+    ViolationRig rig;  // v2 channels
+    const std::vector<std::byte> snap(32, std::byte{0x77});
+    // Do NOT append to AgentSendBuf so End()==0; Ack(1) without the guard would
+    // cause AckBeyondSent (1 > 0), catching the absent guard as a protocol
+    // error. StartGrid sets GridAwaitingApplied_=true immediately.
+    REQUIRE(rig.Agent.StartGrid(ByteSpan{snap}, 0, 1, 0));
+    REQUIRE(rig.Agent.GridInFlight());
+    // Build standalone Ack(1): must be skipped while GridAwaitingApplied_ set.
+    std::vector<std::byte> plain(1 + sizeof(std::uint64_t));
+    ByteWriter w{MutableByteSpan{plain}};
+    REQUIRE(w.WriteU8(static_cast<std::uint8_t>(wire::EMessageType::Ack)));
+    REQUIRE(w.WriteU64BE(1));
+    const auto ev = rig.InjectToAgent(ByteSpan{plain});
+    MESSAGE("Ack while GridAwaitingApplied_: has_value="
+            << ev.has_value() << " base=" << rig.AgentSendBuf.Base());
+    // Guard active: no error, Ack silently skipped.
+    REQUIRE(ev.has_value());
+    CHECK(std::holds_alternative<DeliveredNothing>(*ev));
+    CHECK(rig.AgentSendBuf.Base() == 0);
+}

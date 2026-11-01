@@ -119,4 +119,16 @@ void SendBuffer::AdvanceSendNext(std::size_t count) noexcept {
     SendNext_ = (next > End_) ? End_ : next;
 }
 
+void SendBuffer::NewGeneration() noexcept {
+    // Open a new output generation (§9 ADR-030): the pty stream restarts at
+    // absolute offset 0 in the new epoch. Base, End, SendNext all reset to 0.
+    // RingOverflowed is cleared; SessionGen is bumped so the agent can embed
+    // it in GridBegin and the client can echo it in GridApplied / Resume.
+    ++SessionGen_;
+    Base_ = 0;
+    End_ = 0;
+    SendNext_ = 0;
+    RingOverflowed_ = false;
+}
+
 }  // namespace zet::session

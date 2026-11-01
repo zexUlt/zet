@@ -152,7 +152,8 @@ class ClientHandshake {
 public:
     ClientHandshake(SessionId id, crypto::Key auth, crypto::Key connectionSeed,
                     HandshakeNonce clientNonce, const NonceMemory& seen,
-                    std::uint16_t ceiling = PROTOCOL_VERSION_MAX) noexcept;
+                    std::uint16_t ceiling = PROTOCOL_VERSION_MAX,
+                    bool gridCapable = false) noexcept;
 
     ClientHandshake(const ClientHandshake&) = delete;
     ClientHandshake& operator=(const ClientHandshake&) = delete;
@@ -205,6 +206,7 @@ private:
     std::uint64_t PeerReceiveOffset_{0};
     std::uint16_t Version_{0};
     std::uint16_t Ceiling_{PROTOCOL_VERSION_MAX};
+    bool GridCapable_{false};
     EStage Stage_{EStage::Fresh};
 };
 

@@ -101,6 +101,11 @@ constexpr int SIGNAL_STATUS_BASE = 128;
 constexpr int USAGE_STATUS = 2;
 constexpr int FAILURE_STATUS = 255;
 constexpr int EXEC_FAILED_STATUS = 127;
+/// SessionEnd kind=2: ring overflowed, client lacked GRID_CAPABLE (§7).
+/// 70 is EX_SOFTWARE (sysexits.h): an error in the protocol layer, not in the
+/// remote command.  Distinct from 128+n (signal) so scripts can tell them
+/// apart.
+constexpr int OVERFLOW_STATUS = 70;
 
 constexpr std::string_view DEFAULT_AGENT = "zet-agent";
 
@@ -111,6 +116,10 @@ constexpr std::string_view LOST_NOTICE =
     "zet: connection lost, reconnecting\u2026 (Enter ~ . to quit)\r\n";
 constexpr std::string_view REGAINED_NOTICE = "zet: reconnected\r\n";
 constexpr std::string_view ESCAPE_NOTICE = "zet: closed by ~.\r\n";
+/// Printed when the agent sends SessionEnd kind=2 (\u00a77): the ring
+/// overflowed while the client did not have GRID_CAPABLE.
+constexpr std::string_view OVERFLOW_NOTICE =
+    "zet: session output overflowed \u2014 reconnect to resume\r\n";
 
 constexpr std::string_view USAGE =
     "usage: zet [--agent PATH] [--ssh-arg ARG]... HOST\n"
@@ -961,9 +970,17 @@ int Client::Run() noexcept {
             Pump(now);
         }
         if (Ended_) {
-            const int status = Ended_->Kind == wire::ESessionEndKind::Exited
-                                   ? Ended_->Value
-                                   : SIGNAL_STATUS_BASE + Ended_->Value;
+            int status;
+            if (Ended_->Kind == wire::ESessionEndKind::Exited) {
+                status = Ended_->Value;
+            } else if (Ended_->Kind == wire::ESessionEndKind::Overflow) {
+                // §7: ring overflowed, client lacked GRID_CAPABLE.  Print a
+                // message then return OVERFLOW_STATUS so scripts can detect it.
+                Notice(OVERFLOW_NOTICE);
+                status = OVERFLOW_STATUS;
+            } else {
+                status = SIGNAL_STATUS_BASE + Ended_->Value;
+            }
             return Finish(status);
         }
         if (Escaped_) {
@@ -1054,6 +1071,12 @@ void Client::Pump(Timestamp now) noexcept {
             }
         } else if (const auto* ended = std::get_if<session::Ended>(&event)) {
             Ended_ = ended->End;
+            return;
+        } else if (std::holds_alternative<session::SessionOverflowed>(event)) {
+            // Agent killed the session because the ring overflowed and this
+            // client does not have GRID_CAPABLE (ver=2 only, §7). Record it
+            // as a distinct end kind so the Run loop exits without retrying.
+            Ended_ = {.Kind = wire::ESessionEndKind::Overflow, .Value = 0};
             return;
         } else if (std::holds_alternative<session::Idle>(event)) {
             break;

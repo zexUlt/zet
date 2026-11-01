@@ -40,15 +40,23 @@
 //  06 rr cc        QueueResize   — Client.QueueResize({rr+1, cc+1, 0, 0})
 //  07 dd           AdvanceTime   — now += dd * 100 ms
 //  08 kk vv        QueueSessionEnd — Agent.QueueSessionEnd({kk % 2, vv})
+//  09 gg           StartGrid     — Agent.StartGrid(kFixedSnap, 0, gg, 0)
+//  0A gg           QueueGridApplied — Client.QueueGridApplied(gg)
+//  0B              SuppressDataUntilGrid — Agent.SuppressDataUntilGrid()
+//  0C              NewGeneration — Agent.SendBuffer.NewGeneration() (path B
+//                                  ring reset); P2 Base-monotonicity is
+//                                  exempted for this step
 //
 // Properties (each violation → __builtin_trap())
 // -----------------------------------------------
-//  P1  recv_offset never decreases (ReceiveCursor)
+//  P1  recv_offset never decreases (ReceiveCursor), except on
+//      DeliveredGridSnapshot which intentionally resets it to 0 (§9).
 //  P2  SendBuffer.Base() never decreases
 //  P3  SendBuffer.Base() <= SendBuffer.SendNext() <= SendBuffer.End()
 //  P4  Every byte delivered at absolute offset O equals what was first
 //      delivered there (append-only, no rewrite), and DeliveredData::Offset
-//      is the recv_offset the delivery started at.
+//      is the recv_offset the delivery started at.  After a grid snapshot
+//      the record is reset (new generation starts at offset 0).
 //  P5  SendBuffer.Size() <= SendBuffer.Capacity()
 //  P6  Receive() never returns KillSession: a Channel only ever closes its
 //      connection, and killing the session is the layer above's call.
@@ -56,6 +64,7 @@
 //  P8  Operation budget: at most MAX_OPS steps for any input length.
 //  P9  The agent sends SessionEnd only with its SendBuffer empty: nothing
 //      unsent and nothing unacknowledged (§9).
+// P10  After DeliveredGridSnapshot RecvCursor is exactly 0 (§9).
 
 #include <algorithm>
 #include <array>
@@ -233,10 +242,13 @@ struct StreamRecord {
 }
 
 // Check all monotonicity and bounds properties.
+// generationReset: a NewGeneration op was just executed; Base resets to 0
+// legitimately, so P2 (Base monotonicity) is skipped for this step.
 void CheckProperties(const Snapshot& before, const SendBuffer& clientSend,
                      const SendBuffer& agentSend,
                      const ReceiveCursor& clientRecv,
-                     const ReceiveCursor& agentRecv) noexcept {
+                     const ReceiveCursor& agentRecv,
+                     bool generationReset = false) noexcept {
     // P1: recv_offset never decreases.
     if (clientRecv.RecvOffset() < before.ClientRecvOffset) {
         __builtin_trap();
@@ -244,14 +256,16 @@ void CheckProperties(const Snapshot& before, const SendBuffer& clientSend,
     if (agentRecv.RecvOffset() < before.AgentRecvOffset) {
         __builtin_trap();
     }
-    // P2: SendBuffer.Base() never decreases.
-    if (clientSend.Base() < before.ClientSendBase) {
-        __builtin_trap();
+    // P2: SendBuffer.Base() never decreases (except after NewGeneration).
+    if (!generationReset) {
+        if (clientSend.Base() < before.ClientSendBase) {
+            __builtin_trap();
+        }
+        if (agentSend.Base() < before.AgentSendBase) {
+            __builtin_trap();
+        }
     }
-    if (agentSend.Base() < before.AgentSendBase) {
-        __builtin_trap();
-    }
-    // P3: Base <= SendNext <= End.
+    // P3: Base <= SendNext <= End (always, even after NewGeneration).
     if (clientSend.SendNext() < clientSend.Base() ||
         clientSend.SendNext() > clientSend.End()) {
         __builtin_trap();
@@ -270,15 +284,16 @@ void CheckProperties(const Snapshot& before, const SendBuffer& clientSend,
 }
 
 // Process a ChannelResult from Receive() and apply property checks.
-void HandleReceiveResult(const ChannelResult<IncomingEvent>& result,
-                         StreamRecord& rec, std::uint64_t oldRecvOffset,
-                         const ReceiveCursor& cursor) noexcept {
+// Returns true if a DeliveredGridSnapshot was received (RecvCursor reset to 0).
+[[nodiscard]] bool HandleReceiveResult(
+    const ChannelResult<IncomingEvent>& result, StreamRecord& rec,
+    std::uint64_t oldRecvOffset, const ReceiveCursor& cursor) noexcept {
     if (!result) {
         // P6.
         if (result.error().Disposition() == zet::EDisposition::KillSession) {
             __builtin_trap();
         }
-        return;
+        return false;
     }
 
     if (std::holds_alternative<DeliveredData>(*result)) {
@@ -294,25 +309,38 @@ void HandleReceiveResult(const ChannelResult<IncomingEvent>& result,
         if (cursor.RecvOffset() != rec.RecvEnd) {
             __builtin_trap();
         }
+    } else if (std::holds_alternative<DeliveredGridSnapshot>(*result)) {
+        // P10: RecvCursor must be exactly 0 after a grid snapshot (§9).
+        if (cursor.RecvOffset() != 0) {
+            __builtin_trap();
+        }
+        // New generation: discard the old stream record.
+        rec = StreamRecord{};
+        return true;
     }
+    // DeliveredResize, DeliveredSessionEnd, DeliveredGridApplied,
+    // DeliveredNothing: no stream-record or cursor invariants to check.
+    return false;
 }
 
 // Perform one inject: seal `plain` and call Receive() on `chan`.
-void DoInject(Timestamp now, InjectSealer& injector, Channel& chan,
-              ByteSpan plain, StreamRecord& rec, const ReceiveCursor& cursor,
-              std::vector<std::byte>& scratch) noexcept {
+// Returns true if a DeliveredGridSnapshot was received (RecvCursor reset to 0).
+[[nodiscard]] bool DoInject(Timestamp now, InjectSealer& injector,
+                            Channel& chan, ByteSpan plain, StreamRecord& rec,
+                            const ReceiveCursor& cursor,
+                            std::vector<std::byte>& scratch) noexcept {
     const std::uint64_t oldRecvOffset = cursor.RecvOffset();
     const auto frame = injector.Seal(plain);
     if (!frame) {
         // Seal failed (e.g., epochs exhausted): skip this inject, no state
         // changed.
-        return;
+        return false;
     }
     if (scratch.size() < wire::MAX_FRAME) {
         scratch.resize(wire::MAX_FRAME);
     }
     const auto result = chan.Receive(now, *frame, MutableByteSpan{scratch});
-    HandleReceiveResult(result, rec, oldRecvOffset, cursor);
+    return HandleReceiveResult(result, rec, oldRecvOffset, cursor);
 }
 
 }  // namespace
@@ -401,9 +429,9 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data,
         const std::uint8_t op = static_cast<std::uint8_t>(*opByte & 0x0FU);
 
         // Snapshot before the operation for monotonicity checks (P1–P3, P5).
-        const Snapshot before{clientRecvCursor.RecvOffset(),
-                              agentRecvCursor.RecvOffset(),
-                              clientSendBuf.Base(), agentSendBuf.Base()};
+        Snapshot before{clientRecvCursor.RecvOffset(),
+                        agentRecvCursor.RecvOffset(), clientSendBuf.Base(),
+                        agentSendBuf.Base()};
 
         switch (op) {
             // ── 00: AppendClient ─────────────────────────────────────────
@@ -496,8 +524,11 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data,
                 if (!payload) {
                     break;
                 }
-                DoInject(now, s2cInject, clientChan, *payload, clientRecvRec,
-                         clientRecvCursor, recvScratch);
+                if (DoInject(now, s2cInject, clientChan, *payload,
+                             clientRecvRec, clientRecvCursor, recvScratch)) {
+                    // P1 carve-out: DeliveredGridSnapshot reset cursor to 0.
+                    before.ClientRecvOffset = 0;
+                }
                 break;
             }
             // ── 05: InjectToAgent ────────────────────────────────────────
@@ -513,8 +544,11 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data,
                 if (!payload) {
                     break;
                 }
-                DoInject(now, c2sInject, agentChan, *payload, agentRecvRec,
-                         agentRecvCursor, recvScratch);
+                if (DoInject(now, c2sInject, agentChan, *payload, agentRecvRec,
+                             agentRecvCursor, recvScratch)) {
+                    // P1 carve-out: DeliveredGridSnapshot reset cursor to 0.
+                    before.AgentRecvOffset = 0;
+                }
                 break;
             }
             // ── 06: QueueResize ──────────────────────────────────────────
@@ -556,6 +590,48 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data,
                     .Value = *valueByte,
                 });
                 break;
+            }
+            // ── 09: StartGrid ─────────────────────────────────────────────
+            case 0x09: {
+                const auto genByte = reader.ReadU8();
+                if (!genByte) {
+                    break;
+                }
+                // Fixed 8-byte snapshot; borrowed by Channel until
+                // GridEmissionDone().
+                static const std::array<std::byte, 8> kSnap{
+                    std::byte{0x47}, std::byte{0x52}, std::byte{0x49},
+                    std::byte{0x44}, std::byte{0x01}, std::byte{0x02},
+                    std::byte{0x03}, std::byte{0x04}};
+                std::ignore = agentChan.StartGrid(
+                    ByteSpan{kSnap}, 0, static_cast<std::uint32_t>(*genByte),
+                    0);
+                break;
+            }
+            // ── 0A: QueueGridApplied ──────────────────────────────────────
+            case 0x0A: {
+                const auto genByte = reader.ReadU8();
+                if (!genByte) {
+                    break;
+                }
+                clientChan.QueueGridApplied(
+                    static_cast<std::uint32_t>(*genByte));
+                break;
+            }
+            // ── 0B: SuppressDataUntilGrid ─────────────────────────────────
+            case 0x0B: {
+                agentChan.SuppressDataUntilGrid();
+                break;
+            }
+            // ── 0C: NewGeneration ──────────────────────────────────────────
+            case 0x0C: {
+                // Simulate path B ring reset. Base/SendNext/End reset to 0;
+                // P2 monotonicity is exempted for this one step.
+                agentSendBuf.NewGeneration();
+                CheckProperties(before, clientSendBuf, agentSendBuf,
+                                clientRecvCursor, agentRecvCursor,
+                                /*generationReset=*/true);
+                continue;
             }
             default:
                 break;

@@ -345,8 +345,10 @@ TEST_CASE("version negotiation takes the lower maximum, never equality") {
     REQUIRE(grid.has_value());
     CHECK(*grid == PROTOCOL_VERSION_GRID);
 
-    // Peer min exceeds our max → VersionMismatch.
-    const auto ahead = NegotiateVersion(PROTOCOL_VERSION_GRID, 9);
+    // Peer min exceeds our max → VersionMismatch. Use PROTOCOL_VERSION_GRID+1
+    // as peer min; PROTOCOL_VERSION_GRID is now our maximum, so only values
+    // strictly above it trigger a mismatch. §7.
+    const auto ahead = NegotiateVersion(PROTOCOL_VERSION_GRID + 1, 9);
     REQUIRE_FALSE(ahead.has_value());
     CHECK(ahead.error().Error() == EProtoError::VersionMismatch);
     CHECK(ahead.error().Disposition() == EDisposition::CloseConnection);
