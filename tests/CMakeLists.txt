@@ -67,6 +67,7 @@ if(ZET_HAVE_IO)
     target_sources(zet_tests PRIVATE
         client/deliver_test.cpp
         client/escape_test.cpp
+        client/snapshot_client_test.cpp
         io/clock_test.cpp
         io/fd_test.cpp
         io/poller_test.cpp

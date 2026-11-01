@@ -41,6 +41,7 @@
 #include "zet/session/client_session.hpp"
 #include "zet/session/connection.hpp"
 #include "zet/session/limits.hpp"
+#include "zet/wire/limits.hpp"
 #include "zet/wire/probe.hpp"
 
 extern char** environ;
@@ -120,6 +121,11 @@ constexpr std::string_view ESCAPE_NOTICE = "zet: closed by ~.\r\n";
 /// overflowed while the client did not have GRID_CAPABLE.
 constexpr std::string_view OVERFLOW_NOTICE =
     "zet: session output overflowed \u2014 reconnect to resume\r\n";
+/// Printed (via Notice) after a grid snapshot replaces missed output on
+/// path B reconnect (ver=2, \u00a79).  On stderr so the user knows the screen
+/// was restored from a snapshot rather than a byte-identical replay.
+constexpr std::string_view SNAPSHOT_RESTORE_NOTICE =
+    "zet: screen restored, output during the cut skipped\r\n";
 
 constexpr std::string_view USAGE =
     "usage: zet [--agent PATH] [--ssh-arg ARG]... HOST\n"
@@ -395,11 +401,11 @@ std::string DeliveryCommand() {
     return "exec /bin/sh -c " + Quoted(INSTALLER_SCRIPT);
 }
 
-/// Writes all of `bytes` to the non-blocking pipe `fd`, using poll() to wait
-/// when the kernel buffer is full.  Returns false on a real write error or if
-/// `until` is reached before all bytes are sent.
-[[nodiscard]] bool WriteAllPipe(int fd, ByteSpan bytes,
-                                Timestamp until) noexcept {
+}  // namespace
+
+// Defined at zet::client scope (outside the anonymous namespace) so tests can
+// call it without a separate symbol.  WriteAllPipe (below) is a thin wrapper.
+bool TryWriteSnapshot(int fd, ByteSpan bytes, Timestamp until) noexcept {
     std::size_t sent = 0;
     while (sent < bytes.size()) {
         const Timestamp now = io::MonotonicNow();
@@ -420,6 +426,14 @@ std::string DeliveryCommand() {
         sent += *wr;
     }
     return true;
+}
+
+namespace {
+
+/// Thin wrapper so delivery code keeps its original call site.
+[[nodiscard]] bool WriteAllPipe(int fd, ByteSpan bytes,
+                                Timestamp until) noexcept {
+    return client::TryWriteSnapshot(fd, bytes, until);
 }
 
 /// Returns true when the agent binary for `arch` is simply absent from
@@ -865,6 +879,7 @@ public:
                                            .Now = io::MonotonicNow(),
                                            .Limits = options.Limits}),
           Frames_(session::CONNECTION_FRAME_STORAGE),
+          SnapshotBuf_(wire::SNAPSHOT_MAX_BYTES),
           SocketOut_(options.Limits.ResendMax + SOCKET_OUTPUT_SLACK),
           Stdout_(STDOUT_QUEUE_MAX),
           StdinWatch_(STDIN_FILENO, STDIN_TOKEN),
@@ -923,6 +938,10 @@ private:
     io::UniqueFd Socket_;
     std::optional<app::Registration> SocketWatch_;
     std::vector<std::byte> Frames_;
+    /// Receive buffer for incoming grid snapshots (§9 path B).  Owned here so
+    /// that each ClientConnection has a stable buffer for the lifetime of the
+    /// Client.  SNAPSHOT_MAX_BYTES (4 MiB); not used at v1.
+    std::vector<std::byte> SnapshotBuf_;
     std::optional<session::ClientConnection> Connection_;
     app::ByteQueue SocketOut_;
 
@@ -1072,6 +1091,23 @@ void Client::Pump(Timestamp now) noexcept {
         } else if (const auto* ended = std::get_if<session::Ended>(&event)) {
             Ended_ = ended->End;
             return;
+        } else if (const auto* snap =
+                       std::get_if<session::ApplySnapshot>(&event)) {
+            // Path B (ver=2, §9): a grid snapshot replaces missed output.
+            // Discard any buffered output from the previous connection — it is
+            // already reflected in the snapshot — then render the snapshot to
+            // the local terminal.  Flush timeout mirrors the final-flush path.
+            Stdout_.Consume(Stdout_.Size());
+            const Timestamp until = io::MonotonicNow() + FLUSH_TIMEOUT;
+            if (TryWriteSnapshot(STDOUT_FILENO, snap->Bytes, until)) {
+                Connection_->ConfirmApply(snap->StreamGen);
+                Notice(SNAPSHOT_RESTORE_NOTICE);
+            } else {
+                // Write failed (terminal went away or timed out).  Deny so
+                // the agent knows the client will need the snapshot again on
+                // the next reconnect.
+                Connection_->DenyApply(snap->StreamGen);
+            }
         } else if (std::holds_alternative<session::SessionOverflowed>(event)) {
             // Agent killed the session because the ring overflowed and this
             // client does not have GRID_CAPABLE (ver=2 only, §7). Record it
@@ -1132,8 +1168,14 @@ void Client::FinishConnecting(Timestamp now) noexcept {
         Drop(now);
         return;
     }
+    // gridCapable=true: advertise GRID_CAPABLE so the agent can choose path B
+    // on reconnect (ver=2 only; at v1 the flag is sent but has no effect).
+    // SnapshotBuf_ gives the connection a place to reassemble incoming chunks.
     Connection_.emplace(Session_, RandomNonce<wire::HandshakeNonce>(),
-                        MutableByteSpan{Frames_}, now);
+                        MutableByteSpan{Frames_}, now,
+                        /*gridCapable=*/true,
+                        /*ceiling=*/wire::PROTOCOL_VERSION_MAX,
+                        MutableByteSpan{SnapshotBuf_});
     if (Size_) {
         Connection_->QueueResize(*Size_);
     }
