@@ -186,3 +186,73 @@ TEST_CASE_FIXTURE(SodiumFixture,
     MESSAGE("Poll after rejected StartGrid n=" << *n);
     CHECK(*n == 0);  // no data: AwaitingSnapshotSupply_ suppresses output
 }
+
+// ── PROBE7e: StartGrid oversize snapshot returns false and is a no-op
+// ─────────
+
+TEST_CASE_FIXTURE(SodiumFixture,
+                  "PROBE7e Channel::StartGrid(oversize) returns false, no grid "
+                  "emission started") {
+    ViolationRig rig;
+    // Create a snapshot one byte larger than SNAPSHOT_MAX_BYTES.
+    const std::vector<std::byte> big(wire::SNAPSHOT_MAX_BYTES + 1,
+                                     std::byte{0xBB});
+    const bool started = rig.Agent.StartGrid(ByteSpan{big}, 0, 1, 0);
+    MESSAGE("StartGrid(oversize) returned=" << started << " GridInFlight="
+                                            << rig.Agent.GridInFlight());
+    // Oversize snapshot must be rejected: no emission started.
+    CHECK_FALSE(started);
+    CHECK_FALSE(rig.Agent.GridInFlight());
+}
+
+// ── PROBE7f: GridApplied while grid still emitting is a protocol violation ───
+
+TEST_CASE_FIXTURE(
+    SodiumFixture,
+    "PROBE7f GridApplied while GridEmitting_ active is violation") {
+    ViolationRig rig;  // v2 channels (version=2)
+    const std::vector<std::byte> snap(32, std::byte{0xAA});
+    // StartGrid: sets GridEmitting_ AND GridAwaitingApplied_=true.
+    const bool started = rig.Agent.StartGrid(ByteSpan{snap}, 0, 1, 0);
+    REQUIRE(started);
+    REQUIRE(rig.Agent.GridInFlight());
+    // Build and inject a GridApplied(1) while GridEmitting_ is still active
+    // (GridEnd has not been sent yet).
+    std::vector<std::byte> plain(5);
+    ByteWriter w{MutableByteSpan{plain}};
+    REQUIRE(
+        w.WriteU8(static_cast<std::uint8_t>(wire::EMessageType::GridApplied)));
+    REQUIRE(w.WriteU32BE(1));
+    const auto ev = rig.InjectToAgent(ByteSpan{plain});
+    MESSAGE("GridApplied while emitting: has_value=" << ev.has_value());
+    REQUIRE_FALSE(ev.has_value());
+    CHECK(ev.error().Disposition() == EDisposition::CloseConnection);
+    CHECK(ev.error().Proto() == EProtoError::UnexpectedMessage);
+}
+
+// ── PROBE7g: standalone Ack skipped while GridAwaitingApplied_ is set
+// ─────────
+
+TEST_CASE_FIXTURE(SodiumFixture,
+                  "PROBE7g standalone Ack ignored while GridAwaitingApplied_, "
+                  "Base unchanged") {
+    ViolationRig rig;  // v2 channels
+    const std::vector<std::byte> snap(32, std::byte{0x77});
+    // Do NOT append to AgentSendBuf so End()==0; Ack(1) without the guard would
+    // cause AckBeyondSent (1 > 0), catching the absent guard as a protocol
+    // error. StartGrid sets GridAwaitingApplied_=true immediately.
+    REQUIRE(rig.Agent.StartGrid(ByteSpan{snap}, 0, 1, 0));
+    REQUIRE(rig.Agent.GridInFlight());
+    // Build standalone Ack(1): must be skipped while GridAwaitingApplied_ set.
+    std::vector<std::byte> plain(1 + sizeof(std::uint64_t));
+    ByteWriter w{MutableByteSpan{plain}};
+    REQUIRE(w.WriteU8(static_cast<std::uint8_t>(wire::EMessageType::Ack)));
+    REQUIRE(w.WriteU64BE(1));
+    const auto ev = rig.InjectToAgent(ByteSpan{plain});
+    MESSAGE("Ack while GridAwaitingApplied_: has_value="
+            << ev.has_value() << " base=" << rig.AgentSendBuf.Base());
+    // Guard active: no error, Ack silently skipped.
+    REQUIRE(ev.has_value());
+    CHECK(std::holds_alternative<DeliveredNothing>(*ev));
+    CHECK(rig.AgentSendBuf.Base() == 0);
+}
