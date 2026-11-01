@@ -693,3 +693,63 @@ TEST_CASE_FIXTURE(SodiumFixture,
     REQUIRE(w3.has_value());
     CHECK(*w3 == third.size());
 }
+
+// ── R4-4: GRID_APPLIED_TIMEOUT fires when client never calls ConfirmApply ────
+
+TEST_CASE_FIXTURE(
+    SodiumFixture,
+    "R4-4 GRID_APPLIED_TIMEOUT closes connection, session survives") {
+    LiveRig r;
+    ForceB(r);
+    const std::vector<std::byte> snap(16, std::byte{0x22});
+    Link l(r, START);
+    l.Snap = &snap;
+    l.Mode = Link::Nothing;  // client receives ApplySnapshot but never confirms
+    REQUIRE(DriveToLive(l.Ac, l.Cc, r.Agent, r.Sp, START, r.Nonces));
+    l.Cc.QueueResize(ResizeMessage{.Rows = 24, .Cols = 80});
+    // Step with 0.5s ticks; GRID_APPLIED_TIMEOUT (30 s) must fire within 2 h.
+    Timestamp now = START;
+    for (int i = 0; i < 2 * 3600 * 2 && !l.AgentErr && !l.ClientErr; ++i) {
+        now = now + std::chrono::milliseconds{500};
+        l.Step(r, now);
+    }
+    MESSAGE("R4-4: applies=" << l.Applies << " agentErr=" << l.AgentErr
+                             << " clientErr=" << l.ClientErr
+                             << " state=" << static_cast<int>(r.Agent.State()));
+    if (l.Aerr) {
+        MESSAGE("agent err: " << l.Aerr->Description());
+    }
+    CHECK(l.Applies >= 1);                            // snapshot was delivered
+    CHECK(l.AgentErr);                                // connection must close
+    CHECK(r.Agent.State() != ESessionState::Reaped);  // session must survive
+}
+
+// ── PROBE2g: ConfirmApply with wrong gen is silently ignored ─────────────────
+
+TEST_CASE_FIXTURE(SodiumFixture,
+                  "PROBE2g ConfirmApply wrong gen is silently ignored, "
+                  "StreamGen unchanged") {
+    Rig r;
+    ForceB(r);
+    const std::vector<std::byte> snap(16, std::byte{0x33});
+    Link l(r, START);
+    l.Snap = &snap;
+    l.Mode = Link::Nothing;  // we handle ConfirmApply manually below
+    REQUIRE(DriveToLive(l.Ac, l.Cc, r.Agent, r.Sp, START, r.Nonces));
+    l.Cc.QueueResize(ResizeMessage{.Rows = 24, .Cols = 80});
+    for (int i = 0; i < 100; ++i) {
+        l.Step(r, START);
+    }
+    REQUIRE(l.Applies == 1);
+    REQUIRE(l.AppliedGen.has_value());
+    const auto correct = *l.AppliedGen;
+    const std::uint32_t wrong = correct + 1;
+    // Confirm with the wrong gen: guard must discard it.
+    l.Cc.ConfirmApply(wrong);
+    MESSAGE("PROBE2g: correct=" << correct << " wrong=" << wrong
+                                << " StreamGen=" << r.Client.StreamGen());
+    CHECK(r.Client.StreamGen() == 0);  // no advance: wrong gen was rejected
+    // Now confirm with the correct gen to verify the guard is the cause.
+    l.Cc.ConfirmApply(correct);
+    CHECK(r.Client.StreamGen() == correct);
+}
