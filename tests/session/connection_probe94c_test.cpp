@@ -538,6 +538,28 @@ TEST_CASE_FIXTURE(SodiumFixture,
             << w.has_value() << " n=" << (w ? *w : 0)
             << " AcceptsWrites=" << r.Agent.AcceptsWrites());
     CHECK(w.has_value());
+    // coordinator decision: Write consumes in Resync, returns full length;
+    // the probe's original *w == 0 contradicted the design.
     CHECK(*w == more.size());        // consumes and drops: returns full length
     CHECK(r.Agent.AcceptsWrites());  // stays true; caller loop is safe
+
+    // After path B, the 0x33 bytes are consumed/dropped and NOT retained by
+    // the caller.  Only bytes written AFTER GridApplied appear in the new
+    // generation.  Write a distinct marker to verify new-generation delivery.
+    const std::vector<std::byte> snap(16, std::byte{0x11});
+    Link l(r, START);
+    l.snap = &snap;
+    l.mode = Link::Confirm;
+    for (int i = 0; i < 60; ++i) l.Step(r, START);
+    l.cc.QueueResize(ResizeMessage{.Rows = 24, .Cols = 80});
+    for (int i = 0; i < 100; ++i) l.Step(r, START);
+    REQUIRE(l.applies == 1);
+
+    const std::vector<std::byte> marker(12, std::byte{0xAA});
+    auto wm = r.Agent.Write(ByteSpan{marker});
+    REQUIRE(wm.has_value());
+    CHECK(*wm == marker.size());
+    for (int i = 0; i < 100; ++i) l.Step(r, START);
+    MESSAGE("post-snapshot marker: delivered=" << l.delivered.size());
+    CHECK(l.delivered == marker);  // only the 0xAA marker; no 0x33 bytes
 }
