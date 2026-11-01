@@ -68,6 +68,12 @@ inline constexpr Duration PEER_SILENCE_TIMEOUT = std::chrono::seconds{15};
 /// Resume before using the last known terminal size for the grid snapshot.
 inline constexpr Duration RESIZE_WAIT_TIMEOUT = std::chrono::seconds{2};
 
+/// Path B (§9 ADR-030): how long to wait for the caller to supply a grid
+/// snapshot via SupplySnapshot after NeedsSnapshot has been raised.  If the
+/// caller does not supply one in time the connection is closed so that a new
+/// connection can try again; the session itself is not reaped.
+inline constexpr Duration SUPPLY_SNAPSHOT_TIMEOUT = std::chrono::seconds{30};
+
 /// Path B cost estimate: approximate scrollback contribution in bytes. §9.
 inline constexpr std::uint32_t SNAPSHOT_SCROLLBACK_BYTES = 512U * 1024U;
 

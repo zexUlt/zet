@@ -64,8 +64,11 @@ Deadline ConnectionBase::NextDeadline() const noexcept {
 
 Deadline AgentConnection::NextDeadline() const noexcept {
     return Earliest(
-        ConnectionBase::NextDeadline(),
-        ResizeWaitDeadline_ ? Deadline{*ResizeWaitDeadline_} : Deadline{});
+        Earliest(
+            ConnectionBase::NextDeadline(),
+            ResizeWaitDeadline_ ? Deadline{*ResizeWaitDeadline_} : Deadline{}),
+        SupplySnapshotDeadline_ ? Deadline{*SupplySnapshotDeadline_}
+                                : Deadline{});
 }
 
 // ── ConnectionBase ─────────────────────────────────────────────────────
@@ -453,6 +456,7 @@ ConnectionResult AgentConnection::PumpResume(Timestamp now, MutableByteSpan out,
         // waiting for SupplySnapshot to clear the ring. §9 ADR-030.
         Channel_->SuppressDataUntilGrid();
         Stage_ = EStage::AwaitSnapshot;
+        SupplySnapshotDeadline_ = now + SUPPLY_SNAPSHOT_TIMEOUT;
         // Wait for the client's post-Resume Resize before reporting dimensions
         // in NeedsSnapshot, unless the terminal size is not yet known.  §9 (a).
         WaitForResize_ = Handle_->LastKnownSize().has_value();
@@ -493,6 +497,12 @@ ConnectionResult AgentConnection::PumpResume(Timestamp now, MutableByteSpan out,
 
 ConnectionResult AgentConnection::PumpAwaitSnapshot(
     Timestamp now, MutableByteSpan out, MutableByteSpan scratch) noexcept {
+    // Close the connection if the caller has not supplied a snapshot within
+    // SUPPLY_SNAPSHOT_TIMEOUT.  The session is not reaped; a fresh connection
+    // can try again.  §9 ADR-030.
+    if (SupplySnapshotDeadline_ && now >= *SupplySnapshotDeadline_) {
+        return Refuse(SessionError{ESessionError::HandshakeTimeout});
+    }
     // Process one incoming frame (Resize, keyboard Data, Ping/Pong, Ack), but
     // do not poll — no output goes out until SupplySnapshot clears the ring
     // and starts the grid emission. §9 ADR-030.
@@ -577,6 +587,7 @@ void AgentConnection::SupplySnapshot([[maybe_unused]] Timestamp now,
     // Clear the ring and open a new output generation, then queue the snapshot
     // for emission. Everything sent after this point is in the new generation.
     Handle_->NewGeneration();
+    SupplySnapshotDeadline_.reset();
     Channel_->StartGrid(snapshot, flags, Handle_->SessionGen(), scrollbackLen);
     Stage_ = EStage::Live;
     QueueEnd();

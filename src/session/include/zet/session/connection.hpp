@@ -296,6 +296,10 @@ private:
     /// Once expired, WaitForResize_ is cleared so NeedsSnapshot fires with the
     /// last known size.  std::nullopt when WaitForResize_ is false.
     std::optional<Timestamp> ResizeWaitDeadline_{};
+    /// Set on path-B entry; cleared when SupplySnapshot succeeds.  If the
+    /// caller has not supplied a snapshot by SUPPLY_SNAPSHOT_TIMEOUT the
+    /// connection is closed (CloseConnection; session stays alive).  §9.
+    std::optional<Timestamp> SupplySnapshotDeadline_{};
     std::optional<ResumeAttempt> Attempt_;
     std::optional<SessionHandle> Handle_;
     std::optional<DirectionFrames> Current_;
