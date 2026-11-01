@@ -734,6 +734,13 @@ void Channel::StartGrid(ByteSpan snapshot, std::uint8_t flags,
         // Emission already in progress — caller error, ignore.
         return;
     }
+    // Reject empty and oversize snapshots: total_len==0 is a wire violation
+    // (§7), and total_len>SNAPSHOT_MAX_BYTES cannot fit in a GridBegin frame.
+    // AgentConnection::SupplySnapshot guards the same condition, but Channel
+    // also guards it so the invariant holds regardless of the call path.
+    if (snapshot.empty() || snapshot.size() > wire::SNAPSHOT_MAX_BYTES) {
+        return;
+    }
     GridEmitting_.emplace();
     // Guard acks from the start of emission, not just after GridEnd is sent.
     // NewGeneration() has already cleared SendBuf (End=0); any piggybacked ack
