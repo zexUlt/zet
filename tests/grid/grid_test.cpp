@@ -335,7 +335,8 @@ TEST_CASE("Alt screen switch preserves main screen content") {
     CHECK(g->IsAltScreen());
     CHECK(CP(*g, 0, 0) == 0);  // alt screen is blank
 
-    Feed(p, *g, "Alt");
+    // xterm leaves the cursor in place on entry; home it as an app would.
+    Feed(p, *g, "\x1b[HAlt");
     CHECK(CP(*g, 0, 0) == U'A');
 
     Feed(p, *g, "\x1b[?1049l");  // leave alt
@@ -344,20 +345,23 @@ TEST_CASE("Alt screen switch preserves main screen content") {
     delete g;
 }
 
-TEST_CASE("Alt screen entry under DECOM homes into the scroll region") {
-    // Mutant: CursorRow_ = 0 under DECOM leaves the cursor above the region.
+TEST_CASE("Alt screen entry does not move the cursor, also under DECOM") {
+    // xterm: ?1049h is CursorSave, switch, ClearScreen; none moves the cursor.
+    // Mutant: CursorRow_ = 0 on entry leaves a DECOM cursor above the region.
     Grid* g = MakeGrid(10, 10);
     VtParser p;
     Feed(p, *g, "\x1b[5;8r");  // region rows 5-8 (1-based)
     Feed(p, *g, "\x1b[?6h");   // DECOM on: cursor to region top
-    REQUIRE(g->CursorRow() == 4);
     Feed(p, *g, "\x1b[3;4H");  // region row 3, col 4 -> absolute row 6
     REQUIRE(g->CursorRow() == 6);
+    REQUIRE(g->CursorCol() == 3);
 
     Feed(p, *g, "\x1b[?1049h");
     CHECK(g->IsAltScreen());
-    CHECK(g->CursorRow() == g->ScrollTop());
-    CHECK(g->CursorCol() == 0);
+    CHECK(g->CursorRow() == 6);
+    CHECK(g->CursorCol() == 3);
+    CHECK(g->CursorRow() >= g->ScrollTop());
+    CHECK(g->CursorRow() <= g->ScrollBot());
 
     Feed(p, *g, "\x1b[?1049l");  // restore lands inside the region too
     CHECK(g->CursorRow() == 6);
@@ -365,12 +369,17 @@ TEST_CASE("Alt screen entry under DECOM homes into the scroll region") {
     delete g;
 }
 
-TEST_CASE("Alt screen entry without DECOM still homes to row 0") {
+TEST_CASE("Alt screen entry without DECOM keeps the cursor and resets wrap") {
     Grid* g = MakeGrid(10, 10);
     VtParser p;
-    Feed(p, *g, "\x1b[5;8r\x1b[7;3H\x1b[?1049h");
-    CHECK(g->CursorRow() == 0);
-    CHECK(g->CursorCol() == 0);
+    Feed(p, *g, "\x1b[7;3H\x1b[?1049h");
+    CHECK(g->CursorRow() == 6);
+    CHECK(g->CursorCol() == 2);
+    Feed(p, *g, "\x1b[?1049l\x1b[1;10Hx");  // pending wrap on main
+    REQUIRE(g->PendingWrap());
+    Feed(p, *g, "\x1b[?47h");  // ?47 behaves the same; ClearScreen resets wrap
+    CHECK_FALSE(g->PendingWrap());
+    CHECK(g->CursorCol() == 9);
     delete g;
 }
 
@@ -1490,8 +1499,9 @@ TEST_CASE("Alt-screen preserves colours on switch and restore") {
     Feed(p, *g, "\x1b[?1049h");
     CHECK(CP(*g, 0, 0) == 0);  // alt screen is blank
 
-    // Write blue 'B' on alt screen.
-    Feed(p, *g, "\x1b[34mB");
+    // Write blue 'B' on alt screen (home first: entry does not move the
+    // cursor).
+    Feed(p, *g, "\x1b[H\x1b[34mB");
     CHECK(CP(*g, 0, 0) == 'B');
     CHECK(g->CellAt(0, 0).FgKind == EColorKind::Indexed);
 

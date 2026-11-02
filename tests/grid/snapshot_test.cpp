@@ -490,9 +490,9 @@ TEST_CASE("alt-screen: no history in alt-screen snapshot") {
     // wrong.
     Grid* g = MakeGrid(40, 10, 20);
     VtParser p;
-    Feed(p, *g, "main line\r\n");  // some main content
-    Feed(p, *g, "\x1b[?1049h");    // enter alt screen
-    Feed(p, *g, "alt line");
+    Feed(p, *g, "main line\r\n");   // some main content
+    Feed(p, *g, "\x1b[?1049h");     // enter alt screen
+    Feed(p, *g, "\x1b[Halt line");  // entry does not move the cursor
 
     REQUIRE(g->IsAltScreen());
 
@@ -535,7 +535,7 @@ TEST_CASE("D1: alt-screen snapshot preserves main screen and history") {
     REQUIRE(g->ScrollbackSize() >= 2u);
     // Enter alt screen and write something.
     Feed(p, *g, "\x1b[?1049h");
-    Feed(p, *g, "ALT");
+    Feed(p, *g, "\x1b[HALT");  // entry does not move the cursor
     REQUIRE(g->IsAltScreen());
 
     auto r = Snapshot::Create(*g);

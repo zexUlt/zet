@@ -1182,13 +1182,10 @@ void Grid::SwitchAltScreen(bool enter) noexcept {
         SaveCursor();
         Modes_ |= ModeFlag(EMode::AltScreen);
         for (std::uint16_t r = 0; r < Rows_; ++r) ClearLine(AltLines_[r]);
-        // Home is CUP 1;1, which under DECOM is the top of the scroll region.
-        // Row 0 would leave the cursor above the region, a place DECOM
-        // coordinates cannot address. (xterm does not move the cursor on
-        // ?1049h at all, charproc.c srm_OPT_ALTBUF_CURSOR; this keeps zet's
-        // existing home-on-entry and only fixes where home is.)
-        CursorRow_ = ModeSet(EMode::Decom) ? ScrollTop_ : 0;
-        CursorCol_ = 0;
+        // xterm moves nothing on ?1049h/?47: CursorSave, switch buffers,
+        // ClearScreen, and ClearScreen only resets the pending wrap (xterm
+        // charproc.c srm_OPT_ALTBUF_CURSOR, misc.c ClearScreen). The cursor
+        // therefore stays where it was, which under DECOM is inside the region.
         PendingWrap_ = false;
     } else {
         Modes_ &= ~ModeFlag(EMode::AltScreen);
