@@ -1,21 +1,27 @@
-/// Agent wiring tests: GridPump unit tests + session-level integration.
+/// Agent wiring tests: GridPump unit tests + real-agent integration tests.
 ///
 /// Each test kills one specific mutation of the agent wiring code.
-/// Tests 1–7 and 9 use GridPump directly (requires ZET_HAVE_AGENT since
-/// zet_agent_loop links zet::io).  Test 8 is a session-level integration test.
+/// Tests 1–7 and 9–11 use GridPump directly (requires ZET_HAVE_AGENT since
+/// zet_agent_loop links zet::io).  Tests 8 and IA use session-level or
+/// full-agent integration.
 ///
-/// Mutations targeted (letter matches coordinator feedback):
-///   (a) skip feeding the grid          → test 1
-///   (b) feed twice                     → test 2
-///   (c) no grid resize on Resized      → test 3
-///   (d) ignore NeedsSnapshot           → test 4
-///   (e) empty snapshot                 → test 5
-///   (f) skip/never-timeout Ground wait → test 6
+/// Mutations targeted:
+///   (a) skip feeding the grid                     → test 1
+///   (b) feed twice                                → test 2
+///   (c) no grid resize on Resized                 → test 3
+///   (d) ignore NeedsSnapshot                      → test 4
+///   (e) empty snapshot                            → test 5
+///   (f) skip/never-timeout Ground wait            → test 6
 ///   (g) snapshot at grid size, not requested size → test 7
-///   (h) retain bytes after overflow    → test 8
-///   (i) no ReleaseSnapshot             → test 9
+///   (h) retain bytes after overflow               → test 8
+///   (i) no ReleaseSnapshot                        → test 9
+///   (j) byte cap not checked in TryBuild          → test 10
+///   (k) 0×0 uses 80×24 instead of actual size    → test 11
+///   (M1) FeedBytes not called in MovePtyOutput    → test IA
+///   (M2) GridFed_ not advanced in MovePtyOutput   → test IA
 
 #include "grid_pump.hpp"
+#include "pump_test_api.hpp"
 
 #include "../session/grid_path_helpers.hpp"
 
@@ -24,13 +30,20 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <future>
 #include <memory>
 #include <vector>
+
+#include <poll.h>
+#include <unistd.h>
 
 #include "zet/core/bytes.hpp"
 #include "zet/core/time.hpp"
 #include "zet/grid/grid.hpp"
 #include "zet/grid/vt_parser.hpp"
+#include "zet/io/clock.hpp"
+#include "zet/io/fd.hpp"
+#include "zet/io/tcp.hpp"
 #include "zet/session/connection.hpp"
 #include "zet/session/limits.hpp"
 
@@ -78,6 +91,84 @@ bool ConnectAndClose(Rig& r) {
     }
     ac.Close(START);
     return true;
+}
+
+// ── TCP helpers for full-agent integration tests ───────────────────────────
+
+/// Connect a non-blocking TCP socket to 127.0.0.1:port; returns invalid fd on
+/// any failure.
+io::UniqueFd TcpConnect(std::uint16_t port) {
+    auto addrs = io::Resolve("127.0.0.1", port);
+    if (!addrs || addrs->Count == 0) {
+        return io::UniqueFd{};
+    }
+    auto fd = io::StartConnect(addrs->Items[0]);
+    if (!fd) {
+        return io::UniqueFd{};
+    }
+    pollfd pf{.fd = fd->Get(), .events = POLLOUT, .revents = 0};
+    if (::poll(&pf, 1, 3000) <= 0) {
+        return io::UniqueFd{};
+    }
+    if (!io::FinishConnect(fd->Get())) {
+        return io::UniqueFd{};
+    }
+    return std::move(*fd);
+}
+
+/// Pump a ClientConnection over a non-blocking TCP socket until it returns a
+/// non-SendFrame / non-Idle event or the timeout elapses.
+std::optional<ConnectionEvent> DriveCC(
+    int fd, ClientConnection& cc,
+    std::array<std::byte, CONNECTION_OUT_SIZE>& out,
+    std::array<std::byte, CONNECTION_SCRATCH_SIZE>& scratch,
+    int timeoutMs = 200) {
+    const auto deadline =
+        std::chrono::steady_clock::now() + std::chrono::milliseconds{timeoutMs};
+    while (std::chrono::steady_clock::now() < deadline) {
+        int remaining = static_cast<int>(
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                deadline - std::chrono::steady_clock::now())
+                .count());
+        if (remaining <= 0) {
+            break;
+        }
+        pollfd pf{.fd = fd, .events = POLLIN, .revents = 0};
+        ::poll(&pf, 1, std::min(remaining, 10));
+        if (pf.revents & POLLIN) {
+            std::array<std::byte, 65536> buf{};
+            auto n = io::ReadSome(fd, MutableByteSpan{buf});
+            if (n && *n > 0) {
+                (void)cc.OnBytes(ByteSpan{buf}.first(*n));
+            }
+        }
+        auto r = cc.Pump(io::MonotonicNow(), MutableByteSpan{out},
+                         MutableByteSpan{scratch});
+        if (!r) {
+            return std::nullopt;
+        }
+        if (const auto* sf = std::get_if<SendFrame>(&*r)) {
+            auto bytes = ByteSpan{out.data(), sf->Written};
+            while (!bytes.empty()) {
+                auto w = io::WriteSome(fd, bytes);
+                if (!w) {
+                    if (w.error().WouldBlock()) {
+                        pollfd wpf{.fd = fd, .events = POLLOUT, .revents = 0};
+                        ::poll(&wpf, 1, 10);
+                        continue;
+                    }
+                    return std::nullopt;
+                }
+                bytes = bytes.subspan(*w);
+            }
+            continue;
+        }
+        if (std::holds_alternative<Idle>(*r)) {
+            continue;
+        }
+        return *r;
+    }
+    return std::nullopt;
 }
 
 }  // namespace
@@ -310,4 +401,189 @@ TEST_CASE_FIXTURE(SodiumFixture,
 
     p->ReleaseSnapshot();
     CHECK_FALSE(p->HasSnapshot());
+}
+
+// ── Test 10: 1 MiB byte cap fires ground-wait ─────────────────────────────
+//
+// BREAK (j): remove bytesExpired check in TryBuild → build never fires while
+// parser stays non-Ground even after the byte cap is hit.
+
+TEST_CASE_FIXTURE(SodiumFixture,
+                  "1 MiB byte cap fires ground-wait when parser non-Ground") {
+    auto p = MakePump();
+    p->FeedBytes(&ESC_BYTE, 1);
+    REQUIRE(p->ParserState() != EParserState::Ground);
+
+    auto immediate = p->OnNeedsSnapshot(24, 80, START);
+    CHECK_FALSE(immediate.has_value());
+    CHECK(p->HasPendingSnap());
+
+    const std::vector<std::byte> filler(GROUND_WAIT_BYTES, std::byte{0x00});
+    p->FeedBytes(filler.data(), filler.size());
+
+    const Timestamp far = START + std::chrono::hours{1};
+    auto r = p->TryBuild(far);
+    REQUIRE(r.has_value());
+    REQUIRE(r->has_value());
+    p->ReleaseSnapshot();
+}
+
+// ── Test 11: OnNeedsSnapshot(0,0) on non-80×24 grid uses actual size ───────
+//
+// BREAK (k): hard-code 80 and 24 for targetCols/targetRows → snapshot always
+// at 80×24 even when the grid is 40×10.
+
+TEST_CASE_FIXTURE(SodiumFixture,
+                  "OnNeedsSnapshot(0,0) on non-80x24 grid uses actual size") {
+    auto p = MakePump(40, 10);
+    auto ready = p->OnNeedsSnapshot(0, 0, START);
+    REQUIRE(ready.has_value());
+
+    auto ref = GridPump::Create(40, 10);
+    REQUIRE(ref.has_value());
+    auto refReady = (*ref)->OnNeedsSnapshot(0, 0, START);
+    REQUIRE(refReady.has_value());
+
+    const std::vector<std::byte> got{ready->Bytes.begin(), ready->Bytes.end()};
+    const std::vector<std::byte> want{refReady->Bytes.begin(),
+                                      refReady->Bytes.end()};
+    CHECK(got == want);
+    p->ReleaseSnapshot();
+}
+
+// ── Test IA: pty bytes reach the grid exactly once (integration) ───────────
+//
+// Drives the real Agent pump loop over TCP + a pipe.  Overflows the ring to
+// force path B, then compares the delivered snapshot bytes with a reference
+// GridPump fed the same data.
+//
+// BREAK M1: remove FeedBytes call in MovePtyOutput → grid is blank; snapshot
+//   bytes differ from reference.
+// BREAK M2: use GridFed_=0 instead of GridFed_=PtyTo_ → bytes fed twice;
+//   cursor further right than expected.
+
+TEST_CASE_FIXTURE(SodiumFixture, "IA: pty bytes reach the grid exactly once") {
+    using namespace agent;
+    using namespace wire;
+    constexpr std::uint8_t key = 71;
+    const auto lim = TinyLimits();
+
+    auto ptyPipe = io::MakePipe();
+    REQUIRE(ptyPipe.has_value());
+    auto listener = io::ListenTcp(0);
+    REQUIRE(listener.has_value());
+    const auto port = listener->Port;
+
+    auto fut = std::async(std::launch::async, [&] {
+        return RunAgentForTest(AgentTestConfig{
+            .Secrets = DeriveSessionSecrets(MakeKey(key)),
+            .Limits = lim,
+            .Listen = std::move(*listener),
+            .PtyReadFd = std::move(ptyPipe->Read),
+            .Ceiling = PROTOCOL_VERSION_GRID,
+            .GiveUpAfter = std::chrono::seconds{3},
+        });
+    });
+
+    // One ClientSession is reused across both connections (stream state
+    // persists).
+    std::vector<std::byte> cs(lim.DisconnectMax + 256);
+    ClientSession sess{DeriveSessionSecrets(MakeKey(key)),
+                       SessionStreams{.Storage = MutableByteSpan{cs},
+                                      .Now = io::MonotonicNow(),
+                                      .Limits = lim}};
+    std::uint64_t nonces = 0;
+
+    // ── First connection: GRID_CAPABLE Live → sets Resync overflow policy.
+    {
+        auto sock1 = TcpConnect(port);
+        REQUIRE(sock1.Get() != -1);
+        std::array<std::byte, CONNECTION_FRAME_STORAGE> frames{};
+        std::array<std::byte, CONNECTION_OUT_SIZE> out{};
+        std::array<std::byte, CONNECTION_SCRATCH_SIZE> scratch{};
+        std::vector<std::byte> snapBuf(wire::SNAPSHOT_MAX_BYTES);
+        ClientConnection cc1{sess,
+                             MakeNonce(++nonces),
+                             MutableByteSpan{frames},
+                             io::MonotonicNow(),
+                             /*capable=*/true,
+                             PROTOCOL_VERSION_GRID,
+                             MutableByteSpan{snapBuf}};
+        const int fd1 = sock1.Get();
+        const auto dl =
+            std::chrono::steady_clock::now() + std::chrono::seconds{3};
+        while (!cc1.IsLive() && std::chrono::steady_clock::now() < dl) {
+            DriveCC(fd1, cc1, out, scratch, 50);
+        }
+        REQUIRE(cc1.IsLive());
+    }  // sock1 goes out of scope here → closed → agent detaches →
+       // DETACHED+Resync
+
+    // Wait for the agent to process the close and transition to DETACHED+Resync
+    // before writing PTY bytes.  If we write first, MovePtyOutput runs before
+    // DropClosed in the same loop iteration, so the ring fills while still Live
+    // and RingOverflowed is never set.
+    ::usleep(100'000);
+
+    // ── Write >DisconnectMax PTY bytes so the ring overflows to Resync mode.
+    const std::vector<std::byte> ptyData(600, std::byte{'A'});
+    {
+        ByteSpan remaining{ptyData.data(), ptyData.size()};
+        while (!remaining.empty()) {
+            auto w = io::WriteSome(ptyPipe->Write.Get(), remaining);
+            REQUIRE(w.has_value());
+            remaining = remaining.subspan(*w);
+        }
+    }
+    ::usleep(100'000);
+
+    // ── Second connection: GRID_CAPABLE → NeedsSnapshot fires, agent builds
+    // snapshot from the 600 'A' bytes and sends GridBegin/Chunk/End.
+    std::vector<std::byte> gotSnap;
+    {
+        auto sock2 = TcpConnect(port);
+        REQUIRE(sock2.Get() != -1);
+        std::array<std::byte, CONNECTION_FRAME_STORAGE> frames{};
+        std::array<std::byte, CONNECTION_OUT_SIZE> out{};
+        std::array<std::byte, CONNECTION_SCRATCH_SIZE> scratch{};
+        std::vector<std::byte> snapBuf(wire::SNAPSHOT_MAX_BYTES);
+        ClientConnection cc2{sess,
+                             MakeNonce(++nonces),
+                             MutableByteSpan{frames},
+                             io::MonotonicNow(),
+                             /*capable=*/true,
+                             PROTOCOL_VERSION_GRID,
+                             MutableByteSpan{snapBuf}};
+        cc2.QueueResize(ResizeMessage{.Rows = 24, .Cols = 80});
+        const int fd2 = sock2.Get();
+        const auto dl =
+            std::chrono::steady_clock::now() + std::chrono::seconds{3};
+        while (gotSnap.empty() && std::chrono::steady_clock::now() < dl) {
+            auto ev = DriveCC(fd2, cc2, out, scratch, 200);
+            if (ev) {
+                if (const auto* as = std::get_if<ApplySnapshot>(&*ev)) {
+                    gotSnap.assign(
+                        snapBuf.begin(),
+                        snapBuf.begin() +
+                            static_cast<std::ptrdiff_t>(as->Bytes.size()));
+                }
+            }
+        }
+    }  // sock2 closed here
+
+    ptyPipe->Write.Reset();  // Close write end → agent sees pty EOF
+    fut.wait();
+
+    REQUIRE_FALSE(gotSnap.empty());
+
+    // Reference: GridPump at 80×24 fed the same 600 'A' bytes.
+    auto refPump = GridPump::Create(80, 24);
+    REQUIRE(refPump.has_value());
+    (*refPump)->FeedBytes(ptyData.data(), ptyData.size());
+    auto refReady = (*refPump)->OnNeedsSnapshot(24, 80, START);
+    REQUIRE(refReady.has_value());
+    const std::vector<std::byte> want{refReady->Bytes.begin(),
+                                      refReady->Bytes.end()};
+
+    CHECK(gotSnap == want);
 }

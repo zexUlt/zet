@@ -2,6 +2,7 @@
 
 #include "grid_pump.hpp"
 #include "mux_link.hpp"
+#include "pump_test_api.hpp"
 
 #include <fcntl.h>
 #include <poll.h>
@@ -359,11 +360,12 @@ private:
 /// One TCP connection and what it has not written yet.
 struct Connection {
     Connection(io::UniqueFd socket, std::uint64_t token, Timestamp now,
-               std::size_t outputLimit)
+               std::size_t outputLimit,
+               std::uint16_t ceiling = wire::PROTOCOL_VERSION_MAX)
         : Socket(std::move(socket)),
           Watch(Socket.Get(), token),
           Frames(session::CONNECTION_FRAME_STORAGE),
-          Link(MutableByteSpan{Frames}, now),
+          Link(MutableByteSpan{Frames}, now, ceiling),
           Output(outputLimit) {}
 
     io::UniqueFd Socket;
@@ -431,6 +433,11 @@ private:
     [[nodiscard]] int Hangup() noexcept;
     [[nodiscard]] Connection* Find(std::uint64_t token) noexcept;
 
+    friend int RunAgentForTestImpl(AgentTestConfig cfg) noexcept;
+    [[nodiscard]] bool StartForTest(io::UniqueFd ptyFd,
+                                    std::uint16_t ceiling) noexcept;
+    [[nodiscard]] int RunLoop(std::optional<Timestamp> giveUpAt) noexcept;
+
     Config Config_;
     /// What the client asked the shell's environment to have (§4).
     wire::BootstrapEnvironment ShellEnvironment_;
@@ -472,6 +479,8 @@ private:
     std::uint64_t NextToken_{FIRST_CONNECTION_TOKEN};
     bool EndDelivered_{false};
     bool Terminating_{false};
+    /// Non-zero only in tests: ceiling passed to every accepted connection.
+    std::uint16_t TestCeiling_{0};
 
     std::array<std::byte, session::CONNECTION_OUT_SIZE> Out_{};
     std::array<std::byte, session::CONNECTION_SCRATCH_SIZE> Scratch_{};
@@ -515,9 +524,16 @@ int Agent::Run() noexcept {
     if (!Start()) {
         return FAILURE_STATUS;
     }
+    return RunLoop(std::nullopt);
+}
+
+int Agent::RunLoop(std::optional<Timestamp> giveUpAt) noexcept {
     std::array<io::PollEvent, EVENTS_PER_WAIT> events{};
     for (;;) {
         const Timestamp now = io::MonotonicNow();
+        if (giveUpAt && now >= *giveUpAt) {
+            return FAILURE_STATUS;
+        }
         Session_.OnTimer(now);
         if (Session_.State() == session::ESessionState::Reaped ||
             Terminating_) {
@@ -549,7 +565,10 @@ int Agent::Run() noexcept {
         if (!UpdateInterest()) {
             return Hangup();
         }
-        const auto ready = Poller_.Wait(events, NextDeadline(), now);
+        const Deadline waitDeadline =
+            giveUpAt ? Earliest(NextDeadline(), Deadline(*giveUpAt))
+                     : NextDeadline();
+        const auto ready = Poller_.Wait(events, waitDeadline, now);
         if (!ready) {
             Log(log::ELevel::Error, "the poller failed");
             return Hangup();
@@ -558,6 +577,21 @@ int Agent::Run() noexcept {
             Handle(events[i]);
         }
     }
+}
+
+bool Agent::StartForTest(io::UniqueFd ptyFd, std::uint16_t ceiling) noexcept {
+    TestCeiling_ = ceiling;
+    auto gp = GridPump::Create(INITIAL_SIZE.Cols, INITIAL_SIZE.Rows);
+    if (!gp) {
+        return false;
+    }
+    GridPump_ = std::move(*gp);
+    Child_.Master = std::move(ptyFd);
+    // Pre-set ChildStatus_ so Hangup() skips kill/waitpid.
+    ChildStatus_ = io::ExitStatus{};
+    PtyWatch_.emplace(Child_.Master.Get(), PTY_TOKEN);
+    // Registrations are added on the first UpdateInterest() call in RunLoop.
+    return true;
 }
 
 void Agent::MovePtyOutput() noexcept {
@@ -697,15 +731,23 @@ void Agent::Pump(Connection& connection, Timestamp now) noexcept {
             // Arm ground-wait; supply immediately if parser is already in
             // Ground — no need to wait for the next loop iteration. §9 ADR-030.
             SnapWaitConn_ = &connection;
+            bool suppliedInline = false;
             if (GridPump_) {
                 if (auto ready =
                         GridPump_->OnNeedsSnapshot(ns->Rows, ns->Cols, now)) {
                     connection.Link.SupplySnapshot(
                         now, ready->Bytes, ready->ScrollbackLen, ready->Flags);
                     PtyFrom_ = PtyTo_;
+                    suppliedInline = true;
                 }
             }
-            return;  // stop pumping until TrySupplySnapshot tracks emission
+            // When the snapshot was supplied inline the connection is now Live;
+            // fall through so Channel_->Poll() generates grid frames into
+            // Output before UpdateInterest runs.  When it was not (parser not
+            // in Ground), stop here — TrySupplySnapshot will drive emission.
+            if (!suppliedInline) {
+                return;
+            }
         } else if (std::holds_alternative<session::Idle>(event)) {
             return;
         }
@@ -737,8 +779,10 @@ bool Agent::UpdateInterest() noexcept {
         Mux_->UpdateInterest(Poller_, io::MonotonicNow());
     }
     if (PtyWatch_) {
-        const bool read =
-            !PtyEnded_ && PtyFrom_ == PtyTo_ && Session_.AcceptsWrites();
+        // Always watch for pty data/EOF while the buffer is drained; not
+        // gated on AcceptsWrites so a pty POLLHUP is never missed when the
+        // last client disconnects before the shell exits.
+        const bool read = !PtyEnded_ && PtyFrom_ == PtyTo_;
         // Once the shell has gone, nothing reads what we write to it.
         const bool write = !PtyInput_.Empty() && !ChildStatus_;
         ok = static_cast<bool>(PtyWatch_->Want(Poller_, read, write)) && ok;
@@ -836,9 +880,11 @@ void Agent::AcceptAll() noexcept {
             Log(log::ELevel::Warn, "too many connections; refusing one");
             continue;
         }
+        const std::uint16_t ceiling =
+            TestCeiling_ ? TestCeiling_ : wire::PROTOCOL_VERSION_MAX;
         Connections_.push_back(std::make_unique<Connection>(
             std::move(*socket), NextToken_++, io::MonotonicNow(),
-            Config_.Limits.ResendMax + SOCKET_OUTPUT_SLACK));
+            Config_.Limits.ResendMax + SOCKET_OUTPUT_SLACK, ceiling));
         Log(log::ELevel::Info, "connection accepted");
     }
 }
@@ -990,7 +1036,34 @@ int Agent::Hangup() noexcept {
     return 0;
 }
 
+// Defined inside the anonymous namespace so it can access Agent's private
+// members via the friend declaration, Config, Bootstrapped, and FAILURE_STATUS.
+int RunAgentForTestImpl(AgentTestConfig cfg) noexcept {
+    auto maybePoller = io::Poller::Create();
+    if (!maybePoller) {
+        return FAILURE_STATUS;
+    }
+    Config config;
+    config.Limits = cfg.Limits;
+    Bootstrapped bootstrapped;
+    bootstrapped.Result.Secrets = std::move(cfg.Secrets);
+    bootstrapped.Listener = std::move(cfg.Listen);
+    auto agentObj = std::make_unique<Agent>(
+        std::move(config), std::move(bootstrapped), std::move(*maybePoller));
+    if (!agentObj->StartForTest(std::move(cfg.PtyReadFd), cfg.Ceiling)) {
+        return FAILURE_STATUS;
+    }
+    const std::optional<Timestamp> giveUpAt =
+        cfg.GiveUpAfter ? std::optional{io::MonotonicNow() + *cfg.GiveUpAfter}
+                        : std::nullopt;
+    return agentObj->RunLoop(giveUpAt);
+}
+
 }  // namespace
+
+int RunAgentForTest(AgentTestConfig config) noexcept {
+    return RunAgentForTestImpl(std::move(config));
+}
 
 int Main(std::span<char*> args) noexcept {
     auto config = ReadConfig(args);

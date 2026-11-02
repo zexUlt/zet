@@ -90,7 +90,10 @@ GridPump::DoBuild() noexcept {
     if (SnapWait_->Cols != 0 && SnapWait_->Rows != 0 &&
         (Grid_->Cols() != SnapWait_->Cols ||
          Grid_->Rows() != SnapWait_->Rows)) {
-        static_cast<void>(Grid_->Resize(SnapWait_->Cols, SnapWait_->Rows));
+        if (auto r = Grid_->Resize(SnapWait_->Cols, SnapWait_->Rows); !r) {
+            SnapWait_.reset();
+            return std::unexpected(r.error());
+        }
     }
 
     auto snap = grid::Snapshot::Create(*Grid_);
