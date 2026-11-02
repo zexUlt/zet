@@ -58,18 +58,6 @@ constexpr auto STALL = 3500ms;
 // send.
 constexpr std::size_t STREAM_BYTES = 32 * 1024 * 1024;
 
-/// Runs `Fn` when it goes out of scope.
-template <typename TFn>
-struct Cleanup {
-    explicit Cleanup(TFn fn) : Fn(std::move(fn)) {}
-    Cleanup(const Cleanup&) = delete;
-    Cleanup& operator=(const Cleanup&) = delete;
-    Cleanup(Cleanup&&) = delete;
-    Cleanup& operator=(Cleanup&&) = delete;
-    ~Cleanup() { Fn(); }
-    TFn Fn;
-};
-
 struct SodiumFixture {
     SodiumFixture() {
         REQUIRE(crypto::Init());
@@ -187,130 +175,227 @@ private:
     }
 };
 
+/// The client under test on its own thread, against a loopback listener, with
+/// the agent session behind it. Nobody reads the stdout pipe until the test
+/// does. Every way the client could be waiting is closed on destruction, so a
+/// failed REQUIRE cannot hang the suite.
+class Rig {
+public:
+    Rig()
+        : Limits{ShortLiveness()},
+          Storage(Limits.ResendMax + 256),
+          Session{wire::DeriveSessionSecrets(MakeKey(KEY_SEED)),
+                  SessionStreams{.Storage = MutableByteSpan{Storage},
+                                 .Now = io::MonotonicNow(),
+                                 .Limits = AgentLimits(Limits)}} {
+        auto listener = io::ListenTcp(0);
+        REQUIRE(listener.has_value());
+        Listener = std::move(*listener);
+        auto addresses = io::Resolve("127.0.0.1", Listener.Port);
+        REQUIRE(addresses.has_value());
+        auto stdoutPipe = io::MakePipe();
+        REQUIRE(stdoutPipe.has_value());
+        Out = std::move(*stdoutPipe);
+        auto stderrPipe = io::MakePipe();
+        REQUIRE(stderrPipe.has_value());
+        Err = std::move(*stderrPipe);
+
+        client::SessionTestConfig config{
+            .Secrets = wire::DeriveSessionSecrets(MakeKey(KEY_SEED)),
+            .Limits = Limits,
+            .Addresses = *addresses,
+            .StdoutFd = Out.Write.Get(),
+            .StderrFd = Err.Write.Get(),
+            .NoticesInline = false,
+            .Ceiling = wire::PROTOCOL_VERSION_MAX,
+            .GiveUpAfter = 5s,
+        };
+        Result = std::async(
+            std::launch::async, [config = std::move(config)]() mutable {
+                return client::RunSessionForTest(std::move(config));
+            });
+    }
+
+    Rig(const Rig&) = delete;
+    Rig& operator=(const Rig&) = delete;
+    Rig(Rig&&) = delete;
+    Rig& operator=(Rig&&) = delete;
+
+    ~Rig() {
+        Out.Read.Reset();
+        Listener.Socket.Reset();
+        if (Peer) {
+            Peer->Fd.Reset();
+        }
+        if (Result.valid()) {
+            Result.wait();
+        }
+    }
+
+    /// The test's own agent end does not judge the client's silence: a loaded
+    /// runner may starve the client for longer than the short timeout, and
+    /// that is not what is under test.
+    static SessionLimits AgentLimits(SessionLimits limits) {
+        limits.Liveness.PeerSilenceTimeout = Duration::zero();
+        return limits;
+    }
+
+    /// The client's next connection, accepted into `Peer`.
+    void Accept() {
+        pollfd lfd{.fd = Listener.Socket.Get(), .events = POLLIN, .revents = 0};
+        REQUIRE(::poll(&lfd, 1, 3000) > 0);
+        auto accepted = io::Accept(Listener.Socket.Get());
+        REQUIRE(accepted.has_value());
+        Peer.emplace(std::move(*accepted));
+    }
+
+    /// Whether the client has made a connection nobody accepted yet.
+    [[nodiscard]] bool Knocking(int waitMs = 0) {
+        pollfd lfd{.fd = Listener.Socket.Get(), .events = POLLIN, .revents = 0};
+        return ::poll(&lfd, 1, waitMs) > 0;
+    }
+
+    /// Steps the peer until it is live, in at most `within`.
+    [[nodiscard]] bool UntilLive(std::chrono::milliseconds within) {
+        const auto by = Clock::now() + within;
+        while (!Peer->Ac.IsLive() && Clock::now() < by) {
+            if (!Peer->Step(Session, Nonces)) {
+                return false;
+            }
+            ::usleep(200);
+        }
+        return Peer->Ac.IsLive();
+    }
+
+    /// Steps the peer for `how long`; false if the connection failed.
+    [[nodiscard]] bool Stall(std::chrono::milliseconds howLong) {
+        const auto end = Clock::now() + howLong;
+        while (Clock::now() < end) {
+            if (!Peer->Step(Session, Nonces)) {
+                return false;
+            }
+            ::usleep(200);
+        }
+        return true;
+    }
+
+    /// Reads the stdout pipe, stepping the peer, until `want` bytes are in
+    /// `Received` or a minute is up.
+    void Drain(std::size_t want) {
+        std::array<std::byte, 65536> buf{};
+        const auto until = Clock::now() + 60s;
+        while (Received.size() < want && Clock::now() < until) {
+            REQUIRE(Peer->Step(Session, Nonces));
+            const auto n = io::ReadSome(Out.Read.Get(), MutableByteSpan{buf});
+            if (n && *n > 0) {
+                Received.insert(Received.end(), buf.begin(),
+                                buf.begin() + static_cast<std::ptrdiff_t>(*n));
+            } else {
+                ::usleep(200);
+            }
+        }
+    }
+
+    /// Ends the session, waits for the client to exit and returns its status.
+    int Finish() {
+        Session.End({.Kind = wire::ESessionEndKind::Exited, .Value = 0});
+        const auto endBy = Clock::now() + 5s;
+        while (!Peer->Ac.DeliveredEnd() && Clock::now() < endBy) {
+            static_cast<void>(Peer->Step(Session, Nonces));
+            ::usleep(200);
+        }
+        REQUIRE(Result.wait_for(5s) == std::future_status::ready);
+        return Result.get().Status;
+    }
+
+    /// What the client wrote to stderr, once it has exited.
+    std::string Notices() {
+        std::string notices;
+        std::array<char, 4096> text{};
+        Err.Write.Reset();
+        for (;;) {
+            const auto n = ::read(Err.Read.Get(), text.data(), text.size());
+            if (n <= 0) {
+                break;
+            }
+            notices.append(text.data(), static_cast<std::size_t>(n));
+        }
+        return notices;
+    }
+
+    SessionLimits Limits;
+    std::vector<std::byte> Storage;
+    AgentSession Session;
+    std::uint64_t Nonces = 0;
+    io::Listener Listener;
+    io::Pipe Out;
+    io::Pipe Err;
+    std::future<client::SessionTestResult> Result;
+    std::optional<AgentPeer> Peer;
+    std::vector<std::byte> Received;
+};
+
+std::size_t CountOf(std::string_view haystack, std::string_view needle) {
+    std::size_t count = 0;
+    for (auto at = haystack.find(needle); at != std::string_view::npos;
+         at = haystack.find(needle, at + needle.size())) {
+        ++count;
+    }
+    return count;
+}
+
 }  // namespace
 
 TEST_CASE_FIXTURE(
     SodiumFixture,
     "a client that stops reading for its terminal is not cut for silence") {
-    const SessionLimits limits = ShortLiveness();
-    // The test's own agent end does not judge the client's silence: a loaded
-    // runner may starve the client for longer than the short timeout, and
-    // that is not what is under test.
-    SessionLimits agentLimits = limits;
-    agentLimits.Liveness.PeerSilenceTimeout = Duration::zero();
-    std::vector<std::byte> storage(limits.ResendMax + 256);
-    AgentSession session{wire::DeriveSessionSecrets(MakeKey(KEY_SEED)),
-                         SessionStreams{.Storage = MutableByteSpan{storage},
-                                        .Now = io::MonotonicNow(),
-                                        .Limits = agentLimits}};
-    std::uint64_t nonces = 0;
-
-    auto listener = io::ListenTcp(0);
-    REQUIRE(listener.has_value());
-    auto addresses = io::Resolve("127.0.0.1", listener->Port);
-    REQUIRE(addresses.has_value());
-    auto out = io::MakePipe();
-    REQUIRE(out.has_value());
-    auto err = io::MakePipe();
-    REQUIRE(err.has_value());
-
-    client::SessionTestConfig config{
-        .Secrets = wire::DeriveSessionSecrets(MakeKey(KEY_SEED)),
-        .Limits = limits,
-        .Addresses = *addresses,
-        .StdoutFd = out->Write.Get(),
-        .StderrFd = err->Write.Get(),
-        .NoticesInline = false,
-        .Ceiling = wire::PROTOCOL_VERSION_MAX,
-        .GiveUpAfter = 5s,
-    };
-    auto result =
-        std::async(std::launch::async, [config = std::move(config)]() mutable {
-            return client::RunSessionForTest(std::move(config));
-        });
-
-    // A failed REQUIRE must not leave the client waiting on a socket nobody
-    // answers: closing every way it could wait lets the future finish.
-    std::optional<AgentPeer> peer;
-    const Cleanup cleanup{[&]() {
-        out->Read.Reset();
-        listener->Socket.Reset();
-        if (peer) {
-            peer->Fd.Reset();
-        }
-        if (result.valid()) {
-            result.wait();
-        }
-    }};
-
-    pollfd lfd{.fd = listener->Socket.Get(), .events = POLLIN, .revents = 0};
-    REQUIRE(::poll(&lfd, 1, 3000) > 0);
-    auto accepted = io::Accept(listener->Socket.Get());
-    REQUIRE(accepted.has_value());
-    peer.emplace(std::move(*accepted));
-
-    const auto liveBy = Clock::now() + 3s;
-    while (!peer->Ac.IsLive() && Clock::now() < liveBy) {
-        REQUIRE(peer->Step(session, nonces));
-        ::usleep(200);
-    }
-    REQUIRE(peer->Ac.IsLive());
+    Rig rig;
+    rig.Accept();
+    REQUIRE(rig.UntilLive(3s));
 
     // The terminal does not drain: nobody reads the stdout pipe.
     const auto stream = Pattern(STREAM_BYTES);
-    const auto written = session.Write(ByteSpan{stream});
+    const auto written = rig.Session.Write(ByteSpan{stream});
     REQUIRE(written.has_value());
     REQUIRE(*written == stream.size());
 
-    bool alive = true;
-    const auto stallEnd = Clock::now() + STALL;
-    while (Clock::now() < stallEnd && alive) {
-        alive = peer->Step(session, nonces);
-        ::usleep(200);
-    }
-    REQUIRE(alive);
+    REQUIRE(rig.Stall(STALL));
     // The stall is real: the client is not taking bytes off the socket.
-    CHECK(peer->Backlogged());
+    CHECK(rig.Peer->Backlogged());
     // The path was never cut and the client did not look for a new one.
-    CHECK(::poll(&lfd, 1, 0) == 0);
+    CHECK_FALSE(rig.Knocking());
 
     // The terminal comes back.
-    std::vector<std::byte> received;
-    received.reserve(stream.size());
-    std::array<std::byte, 65536> buf{};
-    const auto until = Clock::now() + 60s;
-    while (received.size() < stream.size() && Clock::now() < until) {
-        REQUIRE(peer->Step(session, nonces));
-        const auto n = io::ReadSome(out->Read.Get(), MutableByteSpan{buf});
-        if (n && *n > 0) {
-            received.insert(received.end(), buf.begin(),
-                            buf.begin() + static_cast<std::ptrdiff_t>(*n));
-        } else {
-            ::usleep(200);
-        }
-    }
-    CHECK(received.size() == stream.size());
-    CHECK(received == stream);
+    rig.Drain(stream.size());
+    CHECK(rig.Received.size() == stream.size());
+    CHECK(rig.Received == stream);
 
-    session.End({.Kind = wire::ESessionEndKind::Exited, .Value = 0});
-    const auto endBy = Clock::now() + 5s;
-    while (!peer->Ac.DeliveredEnd() && Clock::now() < endBy) {
-        static_cast<void>(peer->Step(session, nonces));
-        ::usleep(200);
-    }
-    REQUIRE(result.wait_for(5s) == std::future_status::ready);
-    CHECK(result.get().Status == 0);
+    CHECK(rig.Finish() == 0);
+    CHECK(rig.Notices().find(LOST_PREFIX) == std::string::npos);
+}
 
-    std::string notices;
-    std::array<char, 4096> text{};
-    out->Write.Reset();
-    err->Write.Reset();
-    for (;;) {
-        const auto n = ::read(err->Read.Get(), text.data(), text.size());
-        if (n <= 0) {
-            break;
-        }
-        notices.append(text.data(), static_cast<std::size_t>(n));
-    }
-    CHECK(notices.find(LOST_PREFIX) == std::string::npos);
+TEST_CASE_FIXTURE(
+    SodiumFixture,
+    "a reconnect completes its handshake while the terminal is full") {
+    Rig rig;
+    rig.Accept();
+    REQUIRE(rig.UntilLive(3s));
+    const auto stream = Pattern(STREAM_BYTES);
+    REQUIRE(rig.Session.Write(ByteSpan{stream}).has_value());
+    REQUIRE(rig.Stall(STALL));
+    REQUIRE(rig.Peer->Backlogged());
+
+    // The path dies under a client that is not reading. It finds out by
+    // writing: a keepalive into a closed socket is refused.
+    rig.Peer->Fd.Reset();
+    rig.Peer.reset();
+    REQUIRE(rig.Knocking(5000));
+    rig.Accept();
+    // The terminal is still full; the handshake must not wait for it.
+    REQUIRE(rig.UntilLive(3s));
+
+    rig.Drain(stream.size());
+    CHECK(rig.Received == stream);
+    CHECK(rig.Finish() == 0);
+    CHECK(CountOf(rig.Notices(), LOST_PREFIX) == 1);
 }

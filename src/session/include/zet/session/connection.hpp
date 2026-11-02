@@ -146,8 +146,9 @@ public:
     /// Says whether the caller is reading the socket: false while it holds
     /// back because its own consumer is full, true again when it resumes. The
     /// peer-silence timer is suspended while the gate is closed and restarts
-    /// at `now` on reopening (Channel::SetReadGate, §9). Before the connection
-    /// is live there is no silence timer, and the call changes nothing.
+    /// at `now` on reopening (Channel::SetReadGate, §9). A call before
+    /// the connection is live is dropped, there being no silence timer yet;
+    /// the caller applies it again on its next pass.
     void SetReadGate(bool open, Timestamp now) noexcept;
 
 protected:
