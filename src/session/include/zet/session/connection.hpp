@@ -247,6 +247,11 @@ public:
                         std::uint32_t scrollbackLen,
                         std::uint8_t flags) noexcept;
 
+    /// True once GridEnd has been sent and the channel is waiting for
+    /// GridApplied from the client.  At this point snapshot bytes passed to
+    /// SupplySnapshot are no longer needed. §9 ADR-030.
+    [[nodiscard]] bool GridEmissionDone() const noexcept;
+
     /// Returns the earlier of the base deadline and any AwaitSnapshot deadline
     /// (RESIZE_WAIT_TIMEOUT).  Shadows ConnectionBase so callers that hold an
     /// AgentConnection directly see the resize-wait deadline.
