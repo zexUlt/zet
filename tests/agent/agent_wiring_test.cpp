@@ -219,30 +219,39 @@ private:
                 Closed = true;
             }
         }
+        // Everything this turn produces goes out in one write, so a Resume and
+        // the Resize queued behind it reach the agent in one read — as they do
+        // when a real client's socket is not drained between its frames.
+        std::vector<std::byte> outgoing;
+        const auto flush = [&] {
+            ByteSpan bytes{outgoing};
+            while (!bytes.empty()) {
+                auto w = io::WriteSome(Sock_.Get(), bytes);
+                if (!w) {
+                    if (w.error().WouldBlock()) {
+                        pollfd wpf{
+                            .fd = Sock_.Get(), .events = POLLOUT, .revents = 0};
+                        ::poll(&wpf, 1, 10);
+                        continue;
+                    }
+                    Closed = true;
+                    return;
+                }
+                bytes = bytes.subspan(*w);
+            }
+        };
         for (;;) {
             auto r = Cc_.Pump(io::MonotonicNow(), MutableByteSpan{Out_},
                               MutableByteSpan{Scratch_});
             if (!r) {
                 Failed = true;
+                flush();
                 return;
             }
             if (const auto* sf = std::get_if<SendFrame>(&*r)) {
-                auto bytes = ByteSpan{Out_.data(), sf->Written};
-                while (!bytes.empty()) {
-                    auto w = io::WriteSome(Sock_.Get(), bytes);
-                    if (!w) {
-                        if (w.error().WouldBlock()) {
-                            pollfd wpf{.fd = Sock_.Get(),
-                                       .events = POLLOUT,
-                                       .revents = 0};
-                            ::poll(&wpf, 1, 10);
-                            continue;
-                        }
-                        Closed = true;
-                        return;
-                    }
-                    bytes = bytes.subspan(*w);
-                }
+                outgoing.insert(
+                    outgoing.end(), Out_.begin(),
+                    Out_.begin() + static_cast<std::ptrdiff_t>(sf->Written));
                 continue;
             }
             if (const auto* d = std::get_if<Deliver>(&*r)) {
@@ -255,6 +264,7 @@ private:
                 Cc_.ConfirmApply(as->StreamGen);
                 continue;
             }
+            flush();
             return;  // Idle or an event the tests do not care about.
         }
     }
@@ -340,17 +350,13 @@ public:
         return Seen;
     }
 
-    /// Waits for `client` to receive a snapshot, nudging the agent loop now and
-    /// then (see Nudge).
+    /// Waits for `client` to receive a snapshot.
     bool AwaitSnapshot(TestClient& client, int ms = 10000) {
         const auto end =
             std::chrono::steady_clock::now() + std::chrono::milliseconds{ms};
         while (client.Snapshots.empty() && !client.Failed && !client.Closed &&
                std::chrono::steady_clock::now() < end) {
             client.Run(200);
-            if (client.Snapshots.empty()) {
-                Nudge();
-            }
         }
         return !client.Snapshots.empty();
     }
@@ -369,15 +375,6 @@ public:
     }
 
     ClientSession& Session() { return Sess_; }
-
-    /// Gives the agent loop one more turn: it accepts and drops a connection.
-    /// A frame that arrives in the same read as the one before it is left
-    /// buffered when AgentConnection returns Idle on a stage change, and is
-    /// only looked at on the loop's next turn.
-    void Nudge() {
-        std::ignore = TcpConnect(Port);
-        SleepMs(50);
-    }
 
     /// What the shell prints.
     void PtyPrints(const std::vector<std::byte>& data) {
@@ -398,7 +395,6 @@ private:
             return;
         }
         Stopped_ = true;
-        Nudge();  // one full turn first: it may still have work to finish
         Stop_ = true;
         std::ignore = TcpConnect(Port);
         Fut_.wait();
@@ -788,7 +784,6 @@ TEST_CASE_FIXTURE(SodiumFixture,
     auto c2 = rig.Connect();
     c2->QueueResize(24, 80);
     c2->Run(300);
-    rig.Nudge();  // the agent has now seen the client's Resize
     c2->Run(200);
     REQUIRE(c2->Snapshots.empty());  // parser is inside the escape
 
@@ -839,6 +834,31 @@ TEST_CASE_FIXTURE(SodiumFixture,
     rig.PtyPrints(Bytes("Z"));
     c2->Run(500);
     CHECK(c2->Delivered == Bytes("Z"));
+}
+
+// ── Agent: a reconnect snapshot does not wait out RESIZE_WAIT_TIMEOUT ───────
+//
+// The client's Resize follows its Resume, usually in the same read.  The agent
+// must take it off the buffer on the same turn; if it does not, NeedsSnapshot
+// waits for RESIZE_WAIT_TIMEOUT (2 s) with nothing to wake the loop.
+//
+// Kills: PumpResume returning Idle after the path-B stage change.
+
+TEST_CASE_FIXTURE(SodiumFixture,
+                  "Agent: a reconnect snapshot does not wait out "
+                  "RESIZE_WAIT_TIMEOUT") {
+    AgentRig rig{77};
+    rig.ConnectAndDrop(24, 80);
+    SleepMs(300);
+    rig.PtyPrints(std::vector<std::byte>(OVERFLOW_BYTES, std::byte{'A'}));
+    SleepMs(300);
+
+    auto c = rig.Connect();
+    c->QueueResize(24, 80);
+    const auto start = std::chrono::steady_clock::now();
+    REQUIRE(rig.AwaitSnapshot(*c));
+    CHECK(std::chrono::steady_clock::now() - start <
+          std::chrono::milliseconds{1500});
 }
 
 // ── Agent: a second snapshot cycle succeeds and frees the first ────────────

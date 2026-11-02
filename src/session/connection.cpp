@@ -478,6 +478,14 @@ ConnectionResult AgentConnection::PumpResume(Timestamp now, MutableByteSpan out,
             ResizeWaitDeadline_ = now + RESIZE_WAIT_TIMEOUT;
         }
         SnapshotReminderSent_ = false;
+        // Straight on, as path A does, when the read that carried the Resume
+        // carried more: the post-Resume Resize is already in Frames_, and an
+        // Idle here would leave it there until another byte arrives or
+        // RESIZE_WAIT_TIMEOUT expires.  With nothing buffered the first
+        // NeedsSnapshot stays with the next Pump, as before.
+        if (Frames_.Buffered() > 0) {
+            return PumpAwaitSnapshot(now, out, scratch);
+        }
         return Idle{};
     }
 
