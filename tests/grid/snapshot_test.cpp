@@ -389,6 +389,33 @@ TEST_CASE("round-trip: history keeps the BCE blank left by a wide overwrite") {
     delete src;
 }
 
+TEST_CASE("round-trip: history does not depend on Line::CellsUsed") {
+    // The encoder reads the extent of a history line from its cells. Mutant:
+    // EncodeHistory stops at Line::CellsUsed, which is wrong here on purpose.
+    Grid* src = MakeGrid(10, 2, 5);
+    VtParser p;
+    Feed(p, *src, "\x1b[41mab\x1b[0m cd\n\n\n");
+    REQUIRE(src->ScrollbackSize() >= 1u);
+    for (std::uint32_t i = 0; i < src->ScrollbackSize(); ++i)
+        const_cast<Line*>(src->ScrollbackLine(i))->CellsUsed = 0;
+
+    auto r = Snapshot::Create(*src);
+    REQUIRE(r.has_value());
+    Grid* dst = Restore(*r.value(), 10, 2, 5);
+
+    REQUIRE(dst->ScrollbackSize() == src->ScrollbackSize());
+    const Line* hl = dst->ScrollbackLine(0);
+    REQUIRE(hl != nullptr);
+    CHECK(hl->Cells[0].Codepoint == U'a');
+    CHECK(hl->Cells[0].BgKind == EColorKind::Indexed);
+    CHECK(hl->Cells[3].Codepoint == U'c');
+    CHECK(hl->Cells[4].Codepoint == U'd');
+
+    delete dst;
+    delete r.value();
+    delete src;
+}
+
 TEST_CASE("round-trip: scroll region is reproduced") {
     // Mutant: omit DECSTBM in mode restore → scroll region at default 1;rows.
     Grid* src = MakeGrid(40, 20, 0);
