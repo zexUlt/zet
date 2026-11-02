@@ -161,11 +161,11 @@ void Compare(Diff& d, const Grid& a, const Grid& b, bool screens = true) {
 // Build, snapshot, restore, compare; then feed `after` to both and compare
 // again.
 void Probe(const char* name, int cols, int rows, int sb, std::string_view input,
-           std::string_view after = {}) {
+           std::string_view after = {}, std::size_t maxBytes = 0) {
     Grid* src = Mk(cols, rows, sb);
     VtParser sp;
     Feed(sp, *src, input);
-    auto snap = Snapshot::Create(*src);
+    auto snap = Snapshot::Create(*src, SnapshotOptions{.MaxBytes = maxBytes});
     REQUIRE(snap.has_value());
     Grid* dst = Mk(cols, rows, sb);
     VtParser dp;
@@ -189,6 +189,56 @@ void Probe(const char* name, int cols, int rows, int sb, std::string_view input,
     delete snap.value();
     delete src;
     delete dst;
+}
+
+// The degrade ladder must not touch a grid that fits: with the default cap,
+// with a cap of exactly the full size and with an oversized cap the bytes are
+// identical, nothing is degraded, and the snapshot round-trips.  `golden` is
+// the exact output of the full-fidelity encoder (PR #99) for the grid.
+void ExpectLadderInert(const char* name, int cols, int rows, int sb,
+                       std::string_view input, std::string_view golden,
+                       std::size_t goldenScrollbackLen) {
+    Grid* src = Mk(cols, rows, sb);
+    VtParser sp;
+    Feed(sp, *src, input);
+
+    auto base = Snapshot::Create(*src);
+    REQUIRE(base.has_value());
+    const auto baseBytes = base.value()->Bytes();
+    const std::string_view baseView{
+        reinterpret_cast<const char*>(baseBytes.data()), baseBytes.size()};
+    CHECK_MESSAGE(base.value()->Degradation() == EDegradation::None, name);
+    if (!golden.empty()) {
+        CHECK_MESSAGE(baseView == golden, name);
+        CHECK_MESSAGE(base.value()->ScrollbackLen() == goldenScrollbackLen,
+                      name);
+    }
+
+    for (std::size_t cap : {baseBytes.size(), baseBytes.size() + 1,
+                            std::size_t{16} * 1024 * 1024}) {
+        auto r = Snapshot::Create(*src, SnapshotOptions{.MaxBytes = cap});
+        REQUIRE(r.has_value());
+        const auto b = r.value()->Bytes();
+        CHECK_MESSAGE(r.value()->Degradation() == EDegradation::None, name);
+        CHECK_MESSAGE(std::string_view(reinterpret_cast<const char*>(b.data()),
+                                       b.size()) == baseView,
+                      name);
+        CHECK_MESSAGE(
+            r.value()->ScrollbackLen() == base.value()->ScrollbackLen(), name);
+        delete r.value();
+    }
+    // One byte under the full size must degrade (the ladder is live).
+    auto under = Snapshot::Create(
+        *src, SnapshotOptions{.MaxBytes = baseBytes.size() - 1});
+    if (under.has_value()) {
+        CHECK_MESSAGE(under.value()->Degradation() != EDegradation::None, name);
+        delete under.value();
+    }
+    delete base.value();
+    delete src;
+
+    // Round trip at exactly the full size.
+    Probe(name, cols, rows, sb, input, {}, baseBytes.size());
 }
 
 }  // namespace
@@ -565,3 +615,106 @@ TEST_CASE("P43 alt screen, no DECSC anywhere, main blank bottom") {
 }
 #pragma clang diagnostic pop
 // NOLINTEND
+
+// ---------------------------------------------------------------------------
+// Degrade ladder is inert when the grid fits the cap (byte-identical to the
+// full-fidelity encoder).
+// ---------------------------------------------------------------------------
+
+TEST_CASE("ladder inert: alt screen with main screen and history") {
+    // Golden: exact output of the PR #99 encoder.
+    static constexpr std::string_view GOLDEN =
+        "\030\033\134\033[!p\033[\0771049l\033[2J\033[H\033[\07725l\033[0m\033["
+        "2"
+        "J\033[H\033[1;1Hmain1\015\012main2\033[0m\033[2;6H\033[\0771049h\033["
+        "0m"
+        "\033[2J\033[H\033[\0772026h\033[2;1H "
+        "alt\033[0;1;31m!\033[0m\033[1;1H\033"
+        "7\033[0m\033[0;1;31m\033[1;4r\033[\0771l\033[\0777h\033[4l\033["
+        "20l\033["
+        "\0771000l\033[\0771002l\033[\0771003l\033[\0771005l\033[\0771006l\033["
+        "\077"
+        "1015l\033[\0772004l\033[\0771004l\033(B\033)B\017\033[3g\033[1;"
+        "1H\033H\033"
+        "[1;9H\033H\033[0 q\033[\0776l\033[2;6H\033[\07725h\033[\0772026l";
+    ExpectLadderInert("L-alt", 12, 4, 5,
+                      "main1\r\nmain2\x1b[?1049h\x1b[2;2Halt\x1b[1;31m!",
+                      GOLDEN, 86);
+}
+
+TEST_CASE("ladder inert: scrollback history") {
+    // Golden: exact output of the PR #99 encoder.
+    static constexpr std::string_view GOLDEN =
+        "\030\033\134\033[!p\033[\0771049l\033[2J\033[H\033["
+        "\07725lline1\015\012"
+        "line2\015\012line3\015\012\012\012\033[0m\033[2J\033[H\033[1;"
+        "1Hline4\015"
+        "\012line5\015\012line6\033[\0772026h\033[1;"
+        "1Hline4\015\012line5\015\012"
+        "line6\033[0m\033[1;1H\0337\033[0m\033[1;3r\033[\0771l\033[\0777h\033["
+        "4l"
+        "\033[20l\033[\0771000l\033[\0771002l\033[\0771003l\033[\0771005l\033["
+        "\077"
+        "1006l\033[\0771015l\033[\0772004l\033[\0771004l\033(B\033)B\017\033["
+        "3g\033"
+        "[1;1H\033H\033[1;9H\033H\033[0 "
+        "q\033[\0776l\033[3;6H\033[\07725h\033[\077"
+        "2026l";
+    ExpectLadderInert("L-hist", 10, 3, 5,
+                      "line1\r\nline2\r\nline3\r\nline4\r\nline5\r\nline6",
+                      GOLDEN, 87);
+}
+
+TEST_CASE("ladder inert: truecolor fg and bg") {
+    // Golden: exact output of the PR #99 encoder.
+    static constexpr std::string_view GOLDEN =
+        "\030\033\134\033[!p\033[\0771049l\033[2J\033[H\033[\07725l\033[0m\033["
+        "2"
+        "J\033[H\033[1;1H\033[0;38;2;10;200;30m\033[48;2;250;3;99mTC\033[0m "
+        "ok\033"
+        "[\0772026h\033[1;1H\033[0;38;2;10;200;30m\033[48;2;250;3;99mTC\033[0m "
+        "o"
+        "k\033[0m\033[1;1H\0337\033[0m\033[1;2r\033[\0771l\033[\0777h\033["
+        "4l\033"
+        "[20l\033[\0771000l\033[\0771002l\033[\0771003l\033[\0771005l\033["
+        "\07710"
+        "06l\033[\0771015l\033[\0772004l\033[\0771004l\033(B\033)B\017\033["
+        "3g\033"
+        "[1;1H\033H\033[1;9H\033H\033[0 "
+        "q\033[\0776l\033[1;6H\033[\07725h\033[\077"
+        "2026l";
+    ExpectLadderInert("L-true", 10, 2, 3,
+                      "\x1b[38;2;10;200;30;48;2;250;3;99mTC\x1b[0m ok", GOLDEN,
+                      89);
+}
+
+TEST_CASE(
+    "ladder inert: wide characters filling the row (pending wrap on a "
+    "continuation cell)") {
+    // Golden: exact output of the PR #99 encoder.
+    static constexpr std::string_view GOLDEN =
+        "\030\033\134\033[!p\033[\0771049l\033[2J\033[H\033[\07725l\033[0m\033["
+        "2"
+        "J\033[H\033[1;1Hab\344\270\255\346\226\207\033[\0772026h\033[1;"
+        "1Hab\344"
+        "\270\255\346\226\207\033[0m\033[1;1H\0337\033[0m\033[1;2r\033["
+        "\0771l\033"
+        "[\0777h\033[4l\033[20l\033[\0771000l\033[\0771002l\033[\0771003l\033["
+        "\077"
+        "1005l\033[\0771006l\033[\0771015l\033[\0772004l\033[\0771004l\033("
+        "B\033"
+        ")B\017\033[3g\033[1;1H\033H\033[0 "
+        "q\033[\0776l\033[1;5H\346\226\207\033"
+        "[\07725h\033[\0772026l";
+    ExpectLadderInert("L-wide", 6, 2, 3, "ab\xe4\xb8\xad\xe6\x96\x87", GOLDEN,
+                      53);
+}
+
+TEST_CASE("ladder inert: pending wrap, wide chars, history, truecolor, alt") {
+    ExpectLadderInert("L-mix", 7, 4, 20,
+                      "\x1b[38;2;9;8;7mhistory one\r\nhistory two\r\n"
+                      "\x1b[0mzz\xe4\xb8\xad\xe6\x96\x87\xe6\x96\x87"
+                      "\x1b[?1049h\x1b[48;2;1;2;3mALT\x1b[2;7Hxy",
+                      {}, 0);
+    ExpectLadderInert("L-wrap", 6, 3, 5, "abcdef\x1b[1;31mghijkl\r\nmn", {}, 0);
+}
