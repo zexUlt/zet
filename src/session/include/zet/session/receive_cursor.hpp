@@ -7,6 +7,21 @@
 
 namespace zet::session {
 
+/// When the cursor tells the peer it holds a byte, which is where the agent
+/// and the client part ways. The client writes what it receives to the
+/// terminal inside the same turn of its loop, so receipt is delivery. The
+/// agent's pty can refuse input for as long as the foreground program does
+/// not read it, and the agent must keep reading the socket meanwhile (the
+/// peer's Acks for our output travel in the same ordered stream behind that
+/// input), so it queues the bytes and acknowledges them once the pty has
+/// taken them. §9.
+enum class EInputAck : std::uint8_t {
+    /// AckOffset() follows RecvOffset().
+    OnReceipt,
+    /// AckOffset() follows MarkDelivered().
+    OnDelivery,
+};
+
 /// Tracks the receive offset of an incoming byte stream and slices duplicate
 /// or partially-overlapping Data frames down to the new tail.
 ///
@@ -22,7 +37,8 @@ public:
     /// `initialOffset` is 0 for the first connection of a session and
     /// c_recv_offset / s_recv_offset (from the Resume handshake) for a
     /// reconnect.  §9: offsets are absolute for the life of the session.
-    explicit ReceiveCursor(std::uint64_t initialOffset = 0) noexcept;
+    explicit ReceiveCursor(std::uint64_t initialOffset = 0,
+                           EInputAck ack = EInputAck::OnReceipt) noexcept;
 
     ReceiveCursor(const ReceiveCursor&) = default;
     ReceiveCursor& operator=(const ReceiveCursor&) = default;
@@ -52,16 +68,42 @@ public:
         return RecvOffset_;
     }
 
+    /// The offset the peer is told we hold, in Acks and in the Resume
+    /// handshake: everything below it is out of our hands and the peer may
+    /// forget it. Never above RecvOffset(). With OnReceipt it is RecvOffset();
+    /// with OnDelivery it trails by the bytes MarkDelivered() has not covered
+    /// yet. Duplicates are still cut at RecvOffset(), so a peer that resends
+    /// from AckOffset() after a reconnect does not deliver anything twice.
+    [[nodiscard]] std::uint64_t AckOffset() const noexcept {
+        return RecvOffset_ - Pending_;
+    }
+
+    /// Bytes received and handed to the caller that MarkDelivered() has not
+    /// covered. Always 0 with OnReceipt.
+    [[nodiscard]] std::uint64_t Pending() const noexcept { return Pending_; }
+
+    /// The caller is done with the next `count` bytes Receive() returned
+    /// (written to the pty, or discarded because the shell is gone).
+    /// OnDelivery only; a count past what is pending is clamped.
+    void MarkDelivered(std::uint64_t count) noexcept {
+        Pending_ -= count < Pending_ ? count : Pending_;
+    }
+
     /// Reset the cursor to `offset`. Used when path B (§9 ADR-030) opens a
     /// new output generation on the agent and the client applies the grid
     /// snapshot: the agent's output restarts at 0, so the client's receive
     /// cursor must also reset. The cursor is monotonic within a generation;
     /// Reset is the only exception, and it is always followed by a new
     /// GridApplied that tells the agent the client is ready.
-    void Reset(std::uint64_t offset = 0) noexcept { RecvOffset_ = offset; }
+    void Reset(std::uint64_t offset = 0) noexcept {
+        RecvOffset_ = offset;
+        Pending_ = 0;
+    }
 
 private:
     std::uint64_t RecvOffset_{0};
+    std::uint64_t Pending_{0};
+    EInputAck Ack_{EInputAck::OnReceipt};
 };
 
 }  // namespace zet::session

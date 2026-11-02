@@ -4,8 +4,9 @@
 
 namespace zet::session {
 
-ReceiveCursor::ReceiveCursor(std::uint64_t initialOffset) noexcept
-    : RecvOffset_(initialOffset) {}
+ReceiveCursor::ReceiveCursor(std::uint64_t initialOffset,
+                             EInputAck ack) noexcept
+    : RecvOffset_(initialOffset), Ack_(ack) {}
 
 SessionResult<ByteSpan> ReceiveCursor::Receive(std::uint64_t offset,
                                                ByteSpan bytes) noexcept {
@@ -36,6 +37,9 @@ SessionResult<ByteSpan> ReceiveCursor::Receive(std::uint64_t offset,
     const ByteSpan newBytes = bytes.subspan(static_cast<std::size_t>(skip));
 
     RecvOffset_ += static_cast<std::uint64_t>(newBytes.size());
+    if (Ack_ == EInputAck::OnDelivery) {
+        Pending_ += static_cast<std::uint64_t>(newBytes.size());
+    }
     return newBytes;
 }
 

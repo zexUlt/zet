@@ -78,6 +78,12 @@ public:
         }
         return result;
     }
+    /// The pty took (or the agent discarded) the next `count` bytes of the
+    /// client's input that a connection delivered. Only now are they
+    /// acknowledged; until then the client keeps them for the resend. §9.
+    void InputDelivered(std::uint64_t count) noexcept {
+        Streams_.Input().MarkDelivered(count);
+    }
     [[nodiscard]] bool AcceptsWrites() const noexcept {
         return Streams_.AcceptsWrites();
     }

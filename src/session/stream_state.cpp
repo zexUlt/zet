@@ -6,10 +6,10 @@
 
 namespace zet::session {
 
-StreamState::StreamState(SessionStreams streams,
-                         EDetachedOverflow overflow) noexcept
+StreamState::StreamState(SessionStreams streams, EDetachedOverflow overflow,
+                         EInputAck inputAck) noexcept
     : Output_(streams.Storage, 0),
-      Input_(0),
+      Input_(0, inputAck),
       Limits_(streams.Limits),
       Overflow_(overflow),
       DetachedSince_(streams.Now) {}

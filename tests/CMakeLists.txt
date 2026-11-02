@@ -37,6 +37,7 @@ add_executable(zet_tests
     session/receive_cursor_test.cpp
     session/reconnect_property_test.cpp
     session/channel_test.cpp
+    session/deferred_input_ack_test.cpp
     session/grid_violation_test.cpp
     session/grid_path_property_test.cpp
     session/connection_snapshot_probe_test.cpp

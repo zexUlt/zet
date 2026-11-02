@@ -31,7 +31,7 @@ AgentSession::AgentSession(wire::SessionSecrets secrets,
     : Id_(secrets.Id),
       Auth_(std::move(secrets.Auth)),
       Seed_(std::move(secrets.ConnectionSeed)),
-      Streams_(streams, EDetachedOverflow::Reap) {}
+      Streams_(streams, EDetachedOverflow::Reap, EInputAck::OnDelivery) {}
 
 SessionRef AgentSession::Ref() noexcept { return SessionRef{*this}; }
 
