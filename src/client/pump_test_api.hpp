@@ -23,7 +23,6 @@ struct SessionTestConfig {
     int StdoutFd{STDOUT_FILENO};
     int StderrFd{STDERR_FILENO};
     bool NoticesInline{false};
-    bool GridCapable{true};
     uint16_t Ceiling{wire::PROTOCOL_VERSION_GRID};
     /// How long to keep running after the connection drops (backoff + give-up).
     std::optional<Duration> GiveUpAfter{std::chrono::milliseconds{500}};

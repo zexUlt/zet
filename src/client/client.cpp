@@ -1114,8 +1114,9 @@ void Client::Pump(Timestamp now) noexcept {
             // terminal drains (no blocking write).  Inline notices already in
             // Stdout_ are preserved; the snapshot appends after them.
             if (!Stdout_.Append(snap->Bytes)) {
-                // Snapshot does not fit (> STDOUT_QUEUE_MAX).  Deny so the
-                // agent knows the client will need it again on reconnect.
+                // Snapshot does not fit (> STDOUT_QUEUE_MAX).  GridApplied is
+                // never sent, so the agent keeps the snapshot owed and offers
+                // it again on the next connection.
                 Connection_->DenyApply(snap->StreamGen);
                 Drop(now);
                 return;
@@ -1446,18 +1447,12 @@ int RunSessionForTestImpl(SessionTestConfig config) noexcept {
     // Tests have no real stdin; mark it ended so the poller never watches fd 0.
     clientObj->InEnded_ = true;
 
-    const int socketFd = config.Socket.Get();
-    if (config.Ceiling >= wire::PROTOCOL_VERSION_GRID) {
-        clientObj->SnapshotBuf_.resize(wire::SNAPSHOT_MAX_BYTES);
-    }
+    // Enter through FinishConnecting so the test runs the production setup:
+    // lazy snapshot buffer, GRID_CAPABLE, and the connection itself.
     clientObj->Socket_ = std::move(config.Socket);
-    clientObj->SocketWatch_.emplace(socketFd, SOCKET_TOKEN);
-    const Timestamp now = io::MonotonicNow();
-    clientObj->Connection_.emplace(
-        clientObj->Session_, RandomNonce<wire::HandshakeNonce>(),
-        MutableByteSpan{clientObj->Frames_}, now, config.GridCapable,
-        config.Ceiling, MutableByteSpan{clientObj->SnapshotBuf_});
-    clientObj->Link_ = Client::ELink::Up;
+    clientObj->SocketWatch_.emplace(clientObj->Socket_.Get(), SOCKET_TOKEN);
+    clientObj->Link_ = Client::ELink::Connecting;
+    clientObj->FinishConnecting(io::MonotonicNow());
 
     return clientObj->Run();
 }

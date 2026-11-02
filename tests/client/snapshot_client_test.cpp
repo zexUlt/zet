@@ -520,7 +520,6 @@ TEST_CASE_FIXTURE(SodiumFixture,
             .Limits = lim,
             .Socket = std::move(pair->Second),
             .StdoutFd = stdoutPipe->Write.Get(),
-            .GridCapable = false,
             .GiveUpAfter = 2s,
         });
     });
