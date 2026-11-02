@@ -548,6 +548,48 @@ TEST_CASE("Resize rejects out-of-range dimensions") {
     delete g;
 }
 
+TEST_CASE("Resize rejects screens whose arenas exceed the Create budget") {
+    // 4096 x 1024 is within MAX_COLS/MAX_ROWS but needs ~200 MB for both
+    // screen arenas; Create refuses it, so Resize must too.
+    Grid* g = MakeGrid(80, 24);
+    auto r = g->Resize(4096, 1024);
+    REQUIRE_FALSE(r.has_value());
+    CHECK(r.error() == EGridError::SizeTooLarge);
+    CHECK(g->Cols() == 80);
+    CHECK(g->Rows() == 24);
+
+    // The grid is still usable.
+    VtParser p;
+    Feed(p, *g, "Z");
+    CHECK(CP(*g, 0, 0) == U'Z');
+    delete g;
+}
+
+TEST_CASE("Resize screen cap boundary matches Create") {
+    // Both arenas together must stay strictly below MAX_SCROLLBACK_BYTES.
+    // With MAX_COLS x MAX_ROWS = 4096 x 1024 the budget is hit exactly
+    // (rejected); one row less is the largest accepted size for that width.
+    constexpr std::size_t kLimitCells =
+        MAX_SCROLLBACK_BYTES / (sizeof(Cell) * 2);
+    static_assert(std::size_t{MAX_COLS} * MAX_ROWS == kLimitCells);
+
+    Grid* g = MakeGrid(80, 24, 0);
+    CHECK(g->Resize(MAX_COLS, MAX_ROWS).error() == EGridError::SizeTooLarge);
+    CHECK(g->Cols() == 80);
+    CHECK(g->Rows() == 24);
+
+    REQUIRE(g->Resize(MAX_COLS, MAX_ROWS - 1).has_value());
+    CHECK(g->Cols() == MAX_COLS);
+    CHECK(g->Rows() == MAX_ROWS - 1);
+    delete g;
+
+    // Create applies the same boundary.
+    CHECK_FALSE(Grid::Create(MAX_COLS, MAX_ROWS, 0).has_value());
+    auto ok = Grid::Create(MAX_COLS, MAX_ROWS - 1, 0);
+    REQUIRE(ok.has_value());
+    delete ok.value();
+}
+
 // ---------------------------------------------------------------------------
 // Save / restore cursor
 // ---------------------------------------------------------------------------
