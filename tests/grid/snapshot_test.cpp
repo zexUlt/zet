@@ -364,6 +364,31 @@ TEST_CASE("round-trip: history line cleared with a BCE background keeps it") {
     delete src;
 }
 
+TEST_CASE("round-trip: history keeps the BCE blank left by a wide overwrite") {
+    // Seed wide_overwrite_bce_tail. Mutant: PutChar leaves CellsUsed short of
+    // the blanked tail, so EncodeHistory stops before its red background.
+    Grid* src = MakeGrid(6, 2, 5);
+    VtParser p;
+    Feed(p, *src,
+         "\x1b[1;4H\xe4\xb8\xad\x1b[1;1H\x1b[X\x1b[41m\x1b[1;3H"
+         "\xe4\xb8\xad\x1b[2;1H\n");
+    REQUIRE(src->ScrollbackSize() == 1u);
+
+    auto r = Snapshot::Create(*src);
+    REQUIRE(r.has_value());
+    Grid* dst = Restore(*r.value(), 6, 2, 5);
+
+    REQUIRE(dst->ScrollbackSize() == 1u);
+    const Line* hl = dst->ScrollbackLine(0);
+    REQUIRE(hl != nullptr);
+    CHECK(hl->Cells[4].BgKind == EColorKind::Indexed);
+    CHECK(hl->Cells[4].Bg[0] == 1);
+
+    delete dst;
+    delete r.value();
+    delete src;
+}
+
 TEST_CASE("round-trip: scroll region is reproduced") {
     // Mutant: omit DECSTBM in mode restore → scroll region at default 1;rows.
     Grid* src = MakeGrid(40, 20, 0);

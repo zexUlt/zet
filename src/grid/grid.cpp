@@ -330,13 +330,20 @@ void Grid::PutChar(char32_t cp, int width) noexcept {
         if (left.Width == 2) left.Width = 1;
     }
 
+    // One past the rightmost cell this print leaves non-blank. The blanks D2
+    // and D2b write carry the pen background, which makes them "used".
+    auto reach = static_cast<std::uint16_t>(CursorCol_ + width);
+
     // D2: if writing over a wide head, blank its continuation to prevent an
     // orphan continuation cell (width==0 with no preceding width==2).
     {
         Cell& cur = CellAt(CursorRow_, CursorCol_);
-        if (cur.Width == 2 && CursorCol_ + 1 < Cols_)
+        if (cur.Width == 2 && CursorCol_ + 1 < Cols_) {
             BlankCell(
                 CellAt(CursorRow_, static_cast<std::uint16_t>(CursorCol_ + 1)));
+            if (PenBgKind_ != EColorKind::Default && reach < CursorCol_ + 2)
+                reach = static_cast<std::uint16_t>(CursorCol_ + 2);
+        }
     }
 
     Cell& cell = CellAt(CursorRow_, CursorCol_);
@@ -351,14 +358,17 @@ void Grid::PutChar(char32_t cp, int width) noexcept {
         // itself a wide head, its old tail at CursorCol_+2 would become an
         // orphaned Width==0 cell (no preceding Width==2).  Blank it first.
         if (cont.Width == 2 &&
-            static_cast<std::uint16_t>(CursorCol_ + 2) < Cols_)
+            static_cast<std::uint16_t>(CursorCol_ + 2) < Cols_) {
             BlankCell(
                 CellAt(CursorRow_, static_cast<std::uint16_t>(CursorCol_ + 2)));
+            if (PenBgKind_ != EColorKind::Default)
+                reach = static_cast<std::uint16_t>(CursorCol_ + 3);
+        }
         cont = Cell{};
         cont.Width = 0;
     }
 
-    const std::uint16_t used = static_cast<std::uint16_t>(CursorCol_ + width);
+    const std::uint16_t used = reach;
     if (used > ActiveLine(CursorRow_).CellsUsed)
         ActiveLine(CursorRow_).CellsUsed = (used <= Cols_ ? used : Cols_);
 
