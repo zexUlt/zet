@@ -1,5 +1,6 @@
 add_library(zet_grid STATIC
     grid.cpp
+    snapshot.cpp
     unicode_tables.cpp
     vt_parser.cpp
 )

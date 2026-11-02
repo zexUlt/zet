@@ -17,6 +17,9 @@ enum class EGridError : std::uint8_t {
     SizeTooLarge,
     /// Scrollback limit exceeds implementation max (effectively 2^31).
     ScrollbackTooLarge,
+    /// Full-fidelity snapshot exceeds maxBytes (design.md §9).
+    /// Apply the degrade ladder (PR2) to reduce size before retrying.
+    SnapshotTooLarge,
 };
 
 template <typename TValue>
@@ -185,6 +188,17 @@ public:
     [[nodiscard]] const Cell& CellAt(std::uint16_t row,
                                      std::uint16_t col) const noexcept;
     [[nodiscard]] Cell& CellAt(std::uint16_t row, std::uint16_t col) noexcept;
+
+    /// Access a cell in the MAIN screen buffer (always main, even in alt mode).
+    /// row must be < Rows_, col must be < Cols_.  No bounds check.
+    [[nodiscard]] const Cell& MainCellAt(std::uint16_t row,
+                                         std::uint16_t col) const noexcept;
+    /// CellsUsed for a MAIN screen row (always main, even in alt mode).
+    [[nodiscard]] std::uint16_t MainRowCellsUsed(
+        std::uint16_t row) const noexcept;
+
+    /// True if column col is a tab stop in the grid's current tab-stop table.
+    [[nodiscard]] bool IsTabStop(std::uint16_t col) const noexcept;
 
     /// Access a scrollback line (0 = oldest, HistorySize_-1 = newest).
     [[nodiscard]] const Line* ScrollbackLine(std::uint32_t idx) const noexcept;
