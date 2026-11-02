@@ -7,6 +7,15 @@
 //
 // Two-pass encoding (D12): dry-run first to count bytes, then allocate
 // exactly that many bytes and write for real.  Never pins SNAPSHOT_MAX_BYTES.
+//
+// Degrade ladder (design.md §9), applied in order until the dry-run size
+// fits the cap.  At full colour with nothing trimmed the output is the
+// unchanged full-fidelity encoding.
+//   1. Trim scrollback history by line count (binary search on count).
+//   2. Downgrade TrueColor to the nearest xterm-256 palette colour.
+//   3. Strip all foreground/background colour.
+//   4. Crop screen rows from the top, then from the bottom; the cursor row
+//      is always kept.
 
 #include "zet/grid/snapshot.hpp"
 
@@ -93,6 +102,100 @@ struct EscWriter {
         }
     }
 };
+
+// ---------------------------------------------------------------------------
+// Colour mode (internal — controls how cells are emitted)
+// ---------------------------------------------------------------------------
+
+enum class EColorMode : std::uint8_t {
+    Full,        ///< Emit all colours exactly.
+    Indexed256,  ///< Downgrade TrueColor → nearest xterm-256 palette index.
+    None,        ///< Strip all foreground/background colour.
+};
+
+// ---------------------------------------------------------------------------
+// TrueColor → nearest xterm-256 palette index mapping
+// ---------------------------------------------------------------------------
+
+/// Map an RGB triple to the nearest index in the 256-colour xterm palette.
+///
+/// Considers both the 6×6×6 colour cube (indices 16–231) and the 24-step
+/// grayscale ramp (indices 232–255).  The system colours (0–15) are excluded
+/// because their exact RGB values are terminal-defined.
+static std::uint8_t TrueColorTo256(std::uint8_t r, std::uint8_t g,
+                                   std::uint8_t b) noexcept {
+    // 6×6×6 cube: step values per channel are {0, 95, 135, 175, 215, 255}.
+    static constexpr std::uint8_t CUBE_STEPS[6] = {0, 95, 135, 175, 215, 255};
+
+    // Find nearest cube index for a single channel value.
+    auto cubeIdx = [](std::uint8_t v) -> std::uint8_t {
+        std::uint8_t best = 0;
+        int bestDist = 255 * 255 + 1;
+        for (int i = 0; i < 6; ++i) {
+            int d = static_cast<int>(v) - static_cast<int>(CUBE_STEPS[i]);
+            if (d * d < bestDist) {
+                bestDist = d * d;
+                best = static_cast<std::uint8_t>(i);
+            }
+        }
+        return best;
+    };
+
+    const std::uint8_t ri = cubeIdx(r);
+    const std::uint8_t gi = cubeIdx(g);
+    const std::uint8_t bi = cubeIdx(b);
+    const std::uint8_t cubeColor =
+        static_cast<std::uint8_t>(16 + 36 * ri + 6 * gi + bi);
+
+    const int cr = CUBE_STEPS[ri];
+    const int cg = CUBE_STEPS[gi];
+    const int cb = CUBE_STEPS[bi];
+    const int cubeDist =
+        (cr - r) * (cr - r) + (cg - g) * (cg - g) + (cb - b) * (cb - b);
+
+    // Grayscale ramp 232..255: value(i) = 8 + 10*i.
+    const int gray = (static_cast<int>(r) + g + b) / 3;
+    const int grayIdxRaw = (gray - 8 + 5) / 10;  // round to nearest
+    const int grayIdx =
+        (grayIdxRaw < 0) ? 0 : (grayIdxRaw > 23 ? 23 : grayIdxRaw);
+    const int grayVal = 8 + 10 * grayIdx;
+    const std::uint8_t grayColor = static_cast<std::uint8_t>(232 + grayIdx);
+    const int grayDist = (grayVal - r) * (grayVal - r) +
+                         (grayVal - g) * (grayVal - g) +
+                         (grayVal - b) * (grayVal - b);
+
+    return (grayDist < cubeDist) ? grayColor : cubeColor;
+}
+
+// ---------------------------------------------------------------------------
+// Cell normalisation for colour modes
+// ---------------------------------------------------------------------------
+
+/// Return a copy of `c` with colour fields adjusted for the given mode.
+static Cell NormalizeCell(const Cell& c, EColorMode cm) noexcept {
+    if (cm == EColorMode::Full) return c;
+    Cell nc = c;
+    if (cm == EColorMode::Indexed256) {
+        if (c.FgKind == EColorKind::TrueColor) {
+            nc.FgKind = EColorKind::Indexed;
+            nc.Fg[0] = TrueColorTo256(c.Fg[0], c.Fg[1], c.Fg[2]);
+            nc.Fg[1] = 0;
+            nc.Fg[2] = 0;
+        }
+        if (c.BgKind == EColorKind::TrueColor) {
+            nc.BgKind = EColorKind::Indexed;
+            nc.Bg[0] = TrueColorTo256(c.Bg[0], c.Bg[1], c.Bg[2]);
+            nc.Bg[1] = 0;
+            nc.Bg[2] = 0;
+        }
+    } else {  // EColorMode::None
+        nc.FgKind = EColorKind::Default;
+        nc.BgKind = EColorKind::Default;
+        nc.Fg[0] = nc.Fg[1] = nc.Fg[2] = 0;
+        nc.Bg[0] = nc.Bg[1] = nc.Bg[2] = 0;
+    }
+    return nc;
+}
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -255,9 +358,11 @@ static void EmitAnsiMode(EscWriter& w, std::uint16_t ps, bool on) noexcept {
 // Encode history section (oldest→newest scrollback lines).
 // ---------------------------------------------------------------------------
 
-static void EncodeHistory(EscWriter& w, const Grid& g, Pen& pen) noexcept {
-    const std::uint32_t sz = g.ScrollbackSize();
-    for (std::uint32_t i = 0; i < sz; ++i) {
+static void EncodeHistory(EscWriter& w, const Grid& g, Pen& pen,
+                          std::uint32_t firstLine, std::uint32_t lineCount,
+                          EColorMode cm) noexcept {
+    const std::uint32_t end = firstLine + lineCount;
+    for (std::uint32_t i = firstLine; i < end; ++i) {
         const Line* line = g.ScrollbackLine(i);
         if (!line) continue;
 
@@ -270,7 +375,7 @@ static void EncodeHistory(EscWriter& w, const Grid& g, Pen& pen) noexcept {
                 continue;
             }  // skip continuation
 
-            EmitSgr(w, pen, c);
+            EmitSgr(w, pen, NormalizeCell(c, cm));
             char32_t cp = SanitizeCp(c.Codepoint);
             // D7: orphan head — valid wide char stored in a Width=1 slot.
             if (c.Width == 1 && cp != U' ' && cp != U'?' && Wcwidth(cp) == 2)
@@ -329,11 +434,12 @@ static std::uint16_t AltCellsUsedFn(const Grid& g, std::uint16_t r) noexcept {
 }
 
 static void EncodeAnyScreen(EscWriter& w, const Grid& g, Pen& pen,
-                            CellAtFn cellAt, CellsUsedFn cellsUsed) noexcept {
-    const std::uint16_t rows = g.Rows();
+                            CellAtFn cellAt, CellsUsedFn cellsUsed,
+                            std::uint16_t firstRow, std::uint16_t endRow,
+                            EColorMode cm) noexcept {
     std::int32_t lastRow = -1;  // -1 = none emitted yet
 
-    for (std::uint16_t row = 0; row < rows; ++row) {
+    for (std::uint16_t row = firstRow; row < endRow; ++row) {
         const std::uint16_t used = cellsUsed(g, row);
         if (used == 0) continue;
 
@@ -356,7 +462,7 @@ static void EncodeAnyScreen(EscWriter& w, const Grid& g, Pen& pen,
                 continue;
             }  // skip continuation
 
-            EmitSgr(w, pen, c);
+            EmitSgr(w, pen, NormalizeCell(c, cm));
             char32_t cp = SanitizeCp(c.Codepoint);
             // D7: orphan head — valid wide char stored in a Width=1 slot.
             if (c.Width == 1 && cp != U' ' && cp != U'?' && Wcwidth(cp) == 2)
@@ -406,7 +512,8 @@ static Cell SavedCursorCell(const SavedCursor& sc) noexcept {
     return c;
 }
 
-static void EncodeModeRestore(EscWriter& w, const Grid& g, Pen& pen) noexcept {
+static void EncodeModeRestore(EscWriter& w, const Grid& g, Pen& pen,
+                              EColorMode cm) noexcept {
     const bool isAlt = g.IsAltScreen();
     const SavedCursor& sc =
         isAlt ? g.SavedCursorAltState() : g.SavedCursorMainState();
@@ -414,7 +521,7 @@ static void EncodeModeRestore(EscWriter& w, const Grid& g, Pen& pen) noexcept {
     // 1. Reset pen, then set saved-cursor pen (for ESC 7 capture).
     pen = Pen{};
     w.WriteLiteral("\x1b[0m");
-    const Cell scCell = SavedCursorCell(sc);
+    const Cell scCell = NormalizeCell(SavedCursorCell(sc), cm);
     EmitSgr(w, pen, scCell);
 
     // 2. CUP to saved cursor position (absolute; DECOM not yet enabled). (D3)
@@ -432,7 +539,7 @@ static void EncodeModeRestore(EscWriter& w, const Grid& g, Pen& pen) noexcept {
     // 4. Reset pen, then set LIVE pen (D5: live pen, not saved cursor's pen).
     pen = Pen{};
     w.WriteLiteral("\x1b[0m");
-    const Cell liveCell = LivePenCell(g);
+    const Cell liveCell = NormalizeCell(LivePenCell(g), cm);
     EmitSgr(w, pen, liveCell);
 
     // 5. DECSTBM — scroll region (1-based).
@@ -541,7 +648,7 @@ static void EncodeModeRestore(EscWriter& w, const Grid& g, Pen& pen) noexcept {
 
         // D4b: emitCol already positions CUP at the wide-char lead if needed.
         const Cell& wc = g.CellAt(curRow, emitCol);
-        EmitSgr(w, pen, wc);
+        EmitSgr(w, pen, NormalizeCell(wc, cm));
         char32_t cp = SanitizeCp(wc.Codepoint);
         if (wc.Width == 1 && cp != U' ' && cp != U'?' && Wcwidth(cp) == 2)
             cp = U'\xFFFD';
@@ -549,7 +656,7 @@ static void EncodeModeRestore(EscWriter& w, const Grid& g, Pen& pen) noexcept {
 
         // Defect 3 fix: after the re-print, restore the live pen because
         // EmitSgr set pen to wc's attrs, which may differ from the live pen.
-        const Cell liveCell2 = LivePenCell(g);
+        const Cell liveCell2 = NormalizeCell(LivePenCell(g), cm);
         EmitSgr(w, pen, liveCell2);
 
         // Restore charset state if we temporarily switched to ASCII.
@@ -573,8 +680,22 @@ static void EncodeModeRestore(EscWriter& w, const Grid& g, Pen& pen) noexcept {
 // EncodeAll — single pass (used for both dry-run and real write).
 // ---------------------------------------------------------------------------
 
-static void EncodeAll(EscWriter& w, const Grid& grid,
+/// Parameters of one ladder step.  The default value is the full-fidelity
+/// encoding.
+struct EncodeParams {
+    std::uint32_t HistStart{0};  ///< first scrollback line to emit
+    std::uint32_t HistCount{0};  ///< number of scrollback lines to emit
+    EColorMode Color{EColorMode::Full};
+    std::uint16_t CropTop{0};  ///< screen rows omitted from the top
+    std::uint16_t CropBot{0};  ///< screen rows omitted from the bottom
+};
+
+static void EncodeAll(EscWriter& w, const Grid& grid, const EncodeParams& ep,
                       std::size_t& outScrollbackLen) noexcept {
+    const EColorMode cm = ep.Color;
+    const std::uint16_t firstRow = ep.CropTop;
+    const std::uint16_t endRow = static_cast<std::uint16_t>(
+        grid.Rows() > ep.CropBot ? grid.Rows() - ep.CropBot : 0u);
     const bool altScreen = grid.IsAltScreen();
     Pen pen{};
 
@@ -591,8 +712,8 @@ static void EncodeAll(EscWriter& w, const Grid& grid,
     // -----------------------------------------------------------------------
     // History section (main-screen scrollback).
     // -----------------------------------------------------------------------
-    if (grid.ScrollbackSize() > 0) {
-        EncodeHistory(w, grid, pen);
+    if (ep.HistCount > 0) {
+        EncodeHistory(w, grid, pen, ep.HistStart, ep.HistCount, cm);
         // Push history lines into target scrollback via Rows-1 LFs (D10).
         for (std::uint16_t i = 0; i + 1 < grid.Rows(); ++i) w.WriteByte('\n');
     }
@@ -610,7 +731,8 @@ static void EncodeAll(EscWriter& w, const Grid& grid,
     w.WriteLiteral("\x1b[0m");
     w.WriteLiteral("\x1b[2J\x1b[H");  // second clear
     pen = Pen{};
-    EncodeAnyScreen(w, grid, pen, MainCellAtFn, MainCellsUsedFn);
+    EncodeAnyScreen(w, grid, pen, MainCellAtFn, MainCellsUsedFn, firstRow,
+                    endRow, cm);
 
     // -----------------------------------------------------------------------
     // Alt screen switch (D1: enter alt only after main screen is done).
@@ -621,7 +743,7 @@ static void EncodeAll(EscWriter& w, const Grid& grid,
         // SavedCursor before issuing ?1049h, so the terminal records the
         // correct saved position for the future ?1049l restore.
         const SavedCursor& msc = grid.SavedCursorMainState();
-        const Cell mscCell = SavedCursorCell(msc);
+        const Cell mscCell = NormalizeCell(SavedCursorCell(msc), cm);
         pen = Pen{};
         w.WriteLiteral("\x1b[0m");
         EmitSgr(w, pen, mscCell);
@@ -649,10 +771,11 @@ static void EncodeAll(EscWriter& w, const Grid& grid,
     // -----------------------------------------------------------------------
     w.WriteLiteral("\x1b[?2026h");
     EncodeAnyScreen(w, grid, pen, altScreen ? AltCellAtFn : MainCellAtFn,
-                    altScreen ? AltCellsUsedFn : MainCellsUsedFn);
+                    altScreen ? AltCellsUsedFn : MainCellsUsedFn, firstRow,
+                    endRow, cm);
 
     // Mode restore + sync end (EncodeModeRestore ends with ?2026l).
-    EncodeModeRestore(w, grid, pen);
+    EncodeModeRestore(w, grid, pen, cm);
 }
 
 // ---------------------------------------------------------------------------
@@ -665,32 +788,108 @@ std::span<const std::byte> Snapshot::Bytes() const noexcept {
     return {Buf_, Len_};
 }
 
+/// Byte size of the encoding for `ep` (dry run, nothing is written).
+static std::size_t MeasureEncoding(const Grid& grid, const EncodeParams& ep,
+                                   std::size_t maxBytes) noexcept {
+    std::byte dummy;
+    EscWriter dry{&dummy, maxBytes, 0, false, /*DryRun=*/true};
+    std::size_t scrollbackLen = 0;
+    EncodeAll(dry, grid, ep, scrollbackLen);
+    return dry.Pos;
+}
+
 GridResult<Snapshot*> Snapshot::Create(const Grid& grid,
                                        SnapshotOptions opts) noexcept {
     std::size_t maxBytes = opts.MaxBytes;
     if (maxBytes == 0 || maxBytes > SNAPSHOT_MAX_BYTES)
         maxBytes = SNAPSHOT_MAX_BYTES;
 
-    // D12: two-pass — dry-run to measure, then allocate exactly the output
-    // size.
-    std::size_t scrollbackLen = 0;
-    std::size_t totalSize = 0;
-    {
-        std::byte dummy;
-        EscWriter dry{&dummy, maxBytes, 0, false, /*DryRun=*/true};
-        EncodeAll(dry, grid, scrollbackLen);
-        totalSize = dry.Pos;
-    }
-    if (totalSize > maxBytes)
-        return std::unexpected(EGridError::SnapshotTooLarge);
+    const std::uint32_t sz = grid.ScrollbackSize();
+    auto fits = [&](const EncodeParams& ep) noexcept {
+        return MeasureEncoding(grid, ep, maxBytes) <= maxBytes;
+    };
 
+    // Degrade ladder: the first step whose dry-run fits the cap is encoded.
+    EncodeParams chosen{.HistStart = 0, .HistCount = sz};
+    EDegradation deg = EDegradation::None;
+    bool found = fits(chosen);
+
+    // Step 1: trim history by count, keeping the newest lines.
+    if (!found && sz > 0) {
+        std::uint32_t lo = 0, hi = sz - 1;  // sz lines did not fit
+        while (lo < hi) {
+            const std::uint32_t mid = lo + (hi - lo + 1) / 2;
+            if (fits({.HistStart = sz - mid, .HistCount = mid}))
+                lo = mid;
+            else
+                hi = mid - 1;
+        }
+        chosen = {.HistStart = sz - lo, .HistCount = lo};
+        found = fits(chosen);  // lo == 0 can still be too large
+        if (found) deg = EDegradation::HistoryTrimmed;
+    }
+
+    // Steps 2 and 3: no history, then reduced colour.
+    if (!found) {
+        chosen = {
+            .HistStart = sz, .HistCount = 0, .Color = EColorMode::Indexed256};
+        found = fits(chosen);
+        if (found) deg = EDegradation::Colors256;
+    }
+    if (!found) {
+        chosen.Color = EColorMode::None;
+        found = fits(chosen);
+        if (found) deg = EDegradation::NoColor;
+    }
+
+    // Step 4: crop rows.  Phase A crops from the top (at most CursorRow rows,
+    // so the cursor row stays); phase B then crops from the bottom.
+    if (!found) {
+        const std::uint16_t curRow = grid.CursorRow();
+        std::uint16_t lo = 0, hi = curRow;
+        while (lo < hi) {
+            const std::uint16_t mid =
+                static_cast<std::uint16_t>(lo + (hi - lo) / 2);
+            chosen.CropTop = mid;
+            if (fits(chosen))
+                hi = mid;
+            else
+                lo = static_cast<std::uint16_t>(mid + 1);
+        }
+        chosen.CropTop = lo;
+        found = fits(chosen);
+
+        if (!found && grid.Rows() > static_cast<std::uint16_t>(curRow + 1u)) {
+            chosen.CropTop = curRow;
+            std::uint16_t blo = 1, bhi = static_cast<std::uint16_t>(
+                                       grid.Rows() - curRow - 1u);
+            while (blo < bhi) {
+                const std::uint16_t mid =
+                    static_cast<std::uint16_t>(blo + (bhi - blo) / 2);
+                chosen.CropBot = mid;
+                if (fits(chosen))
+                    bhi = mid;
+                else
+                    blo = static_cast<std::uint16_t>(mid + 1);
+            }
+            chosen.CropBot = blo;
+            found = fits(chosen);
+        }
+        if (found) deg = EDegradation::RowsCropped;
+    }
+
+    // Even the minimal snapshot exceeds the cap.
+    if (!found) return std::unexpected(EGridError::SnapshotTooLarge);
+
+    // D12: allocate exactly the measured size, then write for real.
+    const std::size_t totalSize = MeasureEncoding(grid, chosen, maxBytes);
     auto* buf = new (std::nothrow) std::byte[totalSize];
     if (!buf) return std::unexpected(EGridError::AllocationFailed);
 
     // Real write pass — totalSize was measured so overflow cannot occur.
     EscWriter w{buf, totalSize};
-    std::size_t sl2 = 0;
-    EncodeAll(w, grid, sl2);
+    std::size_t scrollbackLen = 0;
+    EncodeAll(w, grid, chosen, scrollbackLen);
 
     auto* snap = new (std::nothrow) Snapshot;
     if (!snap) {
@@ -701,6 +900,7 @@ GridResult<Snapshot*> Snapshot::Create(const Grid& grid,
     snap->Buf_ = buf;
     snap->Len_ = w.Pos;
     snap->ScrollbackLen_ = scrollbackLen;
+    snap->Degradation_ = deg;
     snap->PossiblyDiverged_ = grid.PossiblyDiverged();
     snap->AltScreen_ = grid.IsAltScreen();
     return snap;
