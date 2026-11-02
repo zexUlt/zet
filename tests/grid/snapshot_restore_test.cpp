@@ -840,21 +840,23 @@ TEST_CASE("D14: SGR reset before every ED clear in snapshot") {
     const std::string_view sv(reinterpret_cast<const char*>(by.data()),
                               by.size());
 
-    // Every \x1b[2J must be preceded (somewhere before it) by \x1b[0m.
-    // Scan each occurrence of \x1b[2J and verify the closest preceding SGR
-    // reset is \x1b[0m, not a colored SGR.
     const std::string_view clrSeq = "\x1b[2J";
     const std::string_view resetSeq = "\x1b[0m";
-    std::size_t pos = 0;
+    // The preamble clear (first \x1b[2J) follows DECSTR which resets the pen;
+    // it is exempt from the \x1b[0m requirement.  Skip it and check all later
+    // clears.
+    std::size_t pos = sv.find(clrSeq);
     int clrCount = 0;
+    if (pos != std::string_view::npos) {
+        ++clrCount;
+        pos += clrSeq.size();
+    }
     while ((pos = sv.find(clrSeq, pos)) != std::string_view::npos) {
         ++clrCount;
-        // Find the last \x1b[0m strictly before pos.
         const std::string_view prefix = sv.substr(0, pos);
         CHECK(prefix.rfind(resetSeq) != std::string_view::npos);
         pos += clrSeq.size();
     }
-    // There must be at least two clears (first preamble clear + second clear).
     CHECK(clrCount >= 2);
 
     delete snap.value();
