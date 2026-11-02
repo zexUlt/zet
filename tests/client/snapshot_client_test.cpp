@@ -405,8 +405,8 @@ public:
     }
 
     /// Ticks `link` and reads stdout until `done` or the deadline.
-    template <typename F>
-    [[nodiscard]] bool PumpUntil(AgentLink& link, F done,
+    template <typename TDone>
+    [[nodiscard]] bool PumpUntil(AgentLink& link, TDone done,
                                  std::chrono::milliseconds timeout = 5000ms,
                                  std::size_t readPerTick = SIZE_MAX) {
         const auto until = Clock::now() + timeout;
