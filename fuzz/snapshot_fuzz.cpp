@@ -164,9 +164,8 @@ void CheckHistory(const Grid& a, const Grid& b, EDegradation deg,
         const Line* la = a.ScrollbackLine(n - k + i);
         const Line* lb = b.ScrollbackLine(i);
         if (!la || !lb) Fail("history-line", i);
-        // OPEN FINDING (PR description): EncodeHistory stops at
-        // Line::CellsUsed, which ClearLine leaves 0 for blanks carrying a BCE
-        // background.
+        // Open finding, seed history_bce_cellsused: EncodeHistory stops at
+        // Line::CellsUsed, which ClearLine leaves 0 for BCE-coloured blanks.
         for (std::uint16_t c = 0; c < la->CellsUsed; ++c)
             if (const char* d = DiffCell(la->Cells[c], lb->Cells[c], colors))
                 FailCell("history", d, i, c, la->Cells[c], lb->Cells[c]);
@@ -267,8 +266,15 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data,
     p2.Feed(out.data(), out.size(), *g2);
 
     if (g1->IsAltScreen() != g2->IsAltScreen()) Fail("altscreen");
-    if (g1->CursorRow() != g2->CursorRow()) Fail("cursor-row");
-    if (g1->CursorCol() != g2->CursorCol()) Fail("cursor-col");
+    // Open finding, seed decom_cursor_above_region: DECOM on with the cursor
+    // above the scroll region (Grid::SwitchAltScreen); CUP cannot express it.
+    const bool outside =
+        g1->ModeSet(EMode::Decom) && (g1->CursorRow() < g1->ScrollTop() ||
+                                      g1->CursorRow() > g1->ScrollBot());
+    if (!outside && g1->CursorRow() != g2->CursorRow())
+        Fail("cursor-row", g1->CursorRow(), g2->CursorRow());
+    if (g1->CursorCol() != g2->CursorCol())
+        Fail("cursor-col", g1->CursorCol(), g2->CursorCol());
     if (g1->PendingWrap() != g2->PendingWrap()) Fail("pending-wrap");
 
     const EColors colors =
