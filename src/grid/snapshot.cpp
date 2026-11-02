@@ -34,6 +34,7 @@ struct EscWriter {
     bool Overflow{false};
 
     void WriteByte(std::uint8_t b) noexcept {
+        if (Overflow) return;
         if (Pos < Cap)
             Buf[Pos++] = static_cast<std::byte>(b);
         else
@@ -41,6 +42,7 @@ struct EscWriter {
     }
 
     void WriteBytes(const char* s, std::size_t n) noexcept {
+        if (Overflow) return;
         if (Pos + n <= Cap) {
             std::memcpy(Buf + Pos, s, n);
             Pos += n;
@@ -50,6 +52,7 @@ struct EscWriter {
     }
 
     void WriteLiteral(const char* s) noexcept {
+        if (Overflow) return;
         while (*s) WriteByte(static_cast<std::uint8_t>(*s++));
     }
 
@@ -141,7 +144,7 @@ static std::uint8_t TrueColorTo256(std::uint8_t r, std::uint8_t g,
 
     // Grayscale ramp 232..255: value(i) = 8 + 10*i.
     const int gray = (static_cast<int>(r) + g + b) / 3;
-    const int grayIdxRaw = (gray - 8) / 10;
+    const int grayIdxRaw = (gray - 8 + 5) / 10;  // round to nearest
     const int grayIdx =
         (grayIdxRaw < 0) ? 0 : (grayIdxRaw > 23 ? 23 : grayIdxRaw);
     const int grayVal = 8 + 10 * grayIdx;
