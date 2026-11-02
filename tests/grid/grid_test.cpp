@@ -539,6 +539,15 @@ TEST_CASE("Resize to zero is clamped to 1x1") {
     delete g;
 }
 
+TEST_CASE("Resize rejects out-of-range dimensions") {
+    Grid* g = MakeGrid(80, 24);
+    CHECK(g->Resize(MAX_COLS + 1, 24).error() == EGridError::SizeTooLarge);
+    CHECK(g->Resize(80, MAX_ROWS + 1).error() == EGridError::SizeTooLarge);
+    CHECK(g->Cols() == 80);
+    CHECK(g->Rows() == 24);
+    delete g;
+}
+
 // ---------------------------------------------------------------------------
 // Save / restore cursor
 // ---------------------------------------------------------------------------

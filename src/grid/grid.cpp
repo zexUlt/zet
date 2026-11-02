@@ -1178,8 +1178,8 @@ GridResult<void> Grid::Resize(std::uint16_t newCols,
                               std::uint16_t newRows) noexcept {
     if (newCols == 0) newCols = 1;
     if (newRows == 0) newRows = 1;
-    if (newCols > MAX_COLS) newCols = MAX_COLS;
-    if (newRows > MAX_ROWS) newRows = MAX_ROWS;
+    if (newCols > MAX_COLS || newRows > MAX_ROWS)
+        return std::unexpected(EGridError::SizeTooLarge);
 
     if (newCols == Cols_ && newRows == Rows_) return {};
 
