@@ -19,6 +19,21 @@
 ///   (k) 0×0 uses 80×24 instead of actual size    → test 11
 ///   (M1) FeedBytes not called in MovePtyOutput    → test IA
 ///   (M2) GridFed_ not advanced in MovePtyOutput   → test IA
+///   (M3) PtyFrom_=PtyTo_ removed in TrySupply     → no-op: Write() returns
+///        bytes.size() in Resync; always 0 at call site; see note below.
+///   (M4) PtyFrom_=PtyTo_ removed in inline supply → same, always 0.
+///   (M5) ReleaseSnapshot never called             → test IB
+///   (M6) Resized not forwarded to GridPump        → test IC
+///   (M7) pty resized when GridPump resize fails   → blocked on grid-resize-cap
+///        merging into m6-agent-wiring; see PR note.
+///   (M8) DoBuild resize failure propagated        → error handling in place;
+///        test blocked on grid-resize-cap (SizeTooLarge not in Resize yet).
+///
+/// Note on M3/M4: stream_state::Write() returns bytes.size() in Resync mode
+/// (see stream_state.cpp "so the PTY loop does not retain stale bytes").
+/// PtyFrom_ always catches up to PtyTo_ before TrySupplySnapshot or the
+/// inline supply runs, making the PtyFrom_=PtyTo_ assignments provably
+/// redundant. They are kept as defense-in-depth documentation.
 
 #include "grid_pump.hpp"
 #include "pump_test_api.hpp"
@@ -583,6 +598,270 @@ TEST_CASE_FIXTURE(SodiumFixture, "IA: pty bytes reach the grid exactly once") {
     REQUIRE(refPump.has_value());
     (*refPump)->FeedBytes(ptyData.data(), ptyData.size());
     auto refReady = (*refPump)->OnNeedsSnapshot(24, 80, START);
+    REQUIRE(refReady.has_value());
+    const std::vector<std::byte> want{refReady->Bytes.begin(),
+                                      refReady->Bytes.end()};
+
+    CHECK(gotSnap == want);
+}
+
+// ── Test IB: second snapshot cycle succeeds (ReleaseSnapshot is called) ──────
+//
+// BREAK M5: remove the GridEmissionDone/ReleaseSnapshot block in
+//   TrySupplySnapshot → GridPump::HasSnapshot() stays true after the first
+//   snapshot; TryBuild is never reached for the second NeedsSnapshot; the
+//   third client times out without a snapshot.
+TEST_CASE_FIXTURE(SodiumFixture, "IB: second snapshot cycle succeeds") {
+    using namespace agent;
+    using namespace wire;
+    constexpr std::uint8_t key = 72;
+    const auto lim = TinyLimits();
+
+    auto ptyPipe = io::MakePipe();
+    REQUIRE(ptyPipe.has_value());
+    auto listener = io::ListenTcp(0);
+    REQUIRE(listener.has_value());
+    const auto port = listener->Port;
+
+    auto fut = std::async(std::launch::async, [&] {
+        return RunAgentForTest(AgentTestConfig{
+            .Secrets = DeriveSessionSecrets(MakeKey(key)),
+            .Limits = lim,
+            .Listen = std::move(*listener),
+            .PtyReadFd = std::move(ptyPipe->Read),
+            .Ceiling = PROTOCOL_VERSION_GRID,
+            .GiveUpAfter = std::chrono::seconds{5},
+        });
+    });
+
+    std::vector<std::byte> cs(lim.DisconnectMax + 256);
+    ClientSession sess{DeriveSessionSecrets(MakeKey(key)),
+                       SessionStreams{.Storage = MutableByteSpan{cs},
+                                      .Now = io::MonotonicNow(),
+                                      .Limits = lim}};
+    std::uint64_t nonces = 0;
+
+    // Helper: connect, go live, close → leaves session in Detached.
+    auto connectAndClose = [&](std::uint16_t rows, std::uint16_t cols) {
+        auto sock = TcpConnect(port);
+        REQUIRE(sock.Get() != -1);
+        std::array<std::byte, CONNECTION_FRAME_STORAGE> frames{};
+        std::array<std::byte, CONNECTION_OUT_SIZE> out{};
+        std::array<std::byte, CONNECTION_SCRATCH_SIZE> scratch{};
+        std::vector<std::byte> snapBuf(wire::SNAPSHOT_MAX_BYTES);
+        ClientConnection cc{sess,
+                            MakeNonce(++nonces),
+                            MutableByteSpan{frames},
+                            io::MonotonicNow(),
+                            /*capable=*/true,
+                            PROTOCOL_VERSION_GRID,
+                            MutableByteSpan{snapBuf}};
+        cc.QueueResize(ResizeMessage{.Rows = rows, .Cols = cols});
+        const int fd = sock.Get();
+        const auto dl =
+            std::chrono::steady_clock::now() + std::chrono::seconds{3};
+        while (!cc.IsLive() && std::chrono::steady_clock::now() < dl) {
+            DriveCC(fd, cc, out, scratch, 50);
+        }
+        REQUIRE(cc.IsLive());
+        // sock closes here (goes out of scope) → agent detaches
+    };
+
+    // Helper: connect, collect snapshot, close → returns snapshot bytes.
+    auto connectGetSnap = [&](std::uint16_t rows,
+                              std::uint16_t cols) -> std::vector<std::byte> {
+        auto sock = TcpConnect(port);
+        REQUIRE(sock.Get() != -1);
+        std::array<std::byte, CONNECTION_FRAME_STORAGE> frames{};
+        std::array<std::byte, CONNECTION_OUT_SIZE> out{};
+        std::array<std::byte, CONNECTION_SCRATCH_SIZE> scratch{};
+        std::vector<std::byte> snapBuf(wire::SNAPSHOT_MAX_BYTES);
+        ClientConnection cc{sess,
+                            MakeNonce(++nonces),
+                            MutableByteSpan{frames},
+                            io::MonotonicNow(),
+                            /*capable=*/true,
+                            PROTOCOL_VERSION_GRID,
+                            MutableByteSpan{snapBuf}};
+        cc.QueueResize(ResizeMessage{.Rows = rows, .Cols = cols});
+        const int fd = sock.Get();
+        std::vector<std::byte> got;
+        const auto dl =
+            std::chrono::steady_clock::now() + std::chrono::seconds{3};
+        while (got.empty() && std::chrono::steady_clock::now() < dl) {
+            auto ev = DriveCC(fd, cc, out, scratch, 200);
+            if (ev) {
+                if (const auto* as = std::get_if<ApplySnapshot>(&*ev)) {
+                    got.assign(snapBuf.begin(),
+                               snapBuf.begin() + static_cast<std::ptrdiff_t>(
+                                                     as->Bytes.size()));
+                }
+            }
+        }
+        return got;
+    };
+
+    // Write helper.
+    auto writePty = [&](char fill, std::size_t n) {
+        const std::vector<std::byte> data(
+            n, std::byte(static_cast<unsigned char>(fill)));
+        ByteSpan remaining{data};
+        while (!remaining.empty()) {
+            auto w = io::WriteSome(ptyPipe->Write.Get(), remaining);
+            REQUIRE(w.has_value());
+            remaining = remaining.subspan(*w);
+        }
+    };
+
+    // ── Cycle 1: connect v1 (sets Resync mode), overflow, v2 gets snapshot ───
+    connectAndClose(24, 80);  // v1: sets Resync mode for next overflow
+    ::usleep(100'000);
+    writePty('A', 600);  // >DisconnectMax(512) → ring overflows
+    ::usleep(100'000);
+    auto snap1 = connectGetSnap(24, 80);  // v2: receives snapshot
+    REQUIRE_FALSE(snap1.empty());
+
+    // ── Cycle 2: requires ReleaseSnapshot to have been called after cycle 1 ──
+    // After snap1 v2 closes → NewGeneration() reset the ring.  Reconnect with
+    // a capable client to re-arm Resync mode, then overflow the new ring.
+    ::usleep(150'000);        // allow GridEmissionDone + ReleaseSnapshot
+    connectAndClose(24, 80);  // v3: re-arms Resync on the new generation
+    ::usleep(100'000);
+    writePty('B', 600);  // overflow new ring
+    ::usleep(100'000);
+    auto snap2 = connectGetSnap(24, 80);  // v4: must get snapshot
+
+    ptyPipe->Write.Reset();
+    fut.wait();
+
+    // If ReleaseSnapshot was never called, GridPump::HasSnapshot() stays true,
+    // TryBuild is skipped, and v4 never receives a snapshot (snap2 is empty).
+    CHECK_FALSE(snap2.empty());
+    // The two snapshots encode different pty content ('A' vs 'B').
+    CHECK(snap1 != snap2);
+}
+
+// ── Test IC: Resized is forwarded to GridPump ─────────────────────────────
+//
+// BREAK M6: remove the GridPump_->HandleResize call in Agent::Pump's Resized
+//   handler → grid stays at 80×24 while pty data is fed at 40-col; the
+//   snapshot layout differs from the reference at 40×10.
+TEST_CASE_FIXTURE(SodiumFixture, "IC: resize is forwarded to GridPump") {
+    using namespace agent;
+    using namespace wire;
+    constexpr std::uint8_t key = 73;
+    const auto lim = TinyLimits();
+
+    auto ptyPipe = io::MakePipe();
+    REQUIRE(ptyPipe.has_value());
+    auto listener = io::ListenTcp(0);
+    REQUIRE(listener.has_value());
+    const auto port = listener->Port;
+
+    auto fut = std::async(std::launch::async, [&] {
+        return RunAgentForTest(AgentTestConfig{
+            .Secrets = DeriveSessionSecrets(MakeKey(key)),
+            .Limits = lim,
+            .Listen = std::move(*listener),
+            .PtyReadFd = std::move(ptyPipe->Read),
+            .Ceiling = PROTOCOL_VERSION_GRID,
+            .GiveUpAfter = std::chrono::seconds{5},
+        });
+    });
+
+    std::vector<std::byte> cs(lim.DisconnectMax + 256);
+    ClientSession sess{DeriveSessionSecrets(MakeKey(key)),
+                       SessionStreams{.Storage = MutableByteSpan{cs},
+                                      .Now = io::MonotonicNow(),
+                                      .Limits = lim}};
+    std::uint64_t nonces = 0;
+
+    // ── v1: connect, go live at 40×10, then close ────────────────────────────
+    {
+        auto sock1 = TcpConnect(port);
+        REQUIRE(sock1.Get() != -1);
+        std::array<std::byte, CONNECTION_FRAME_STORAGE> frames{};
+        std::array<std::byte, CONNECTION_OUT_SIZE> out{};
+        std::array<std::byte, CONNECTION_SCRATCH_SIZE> scratch{};
+        std::vector<std::byte> snapBuf(wire::SNAPSHOT_MAX_BYTES);
+        ClientConnection cc1{sess,
+                             MakeNonce(++nonces),
+                             MutableByteSpan{frames},
+                             io::MonotonicNow(),
+                             /*capable=*/true,
+                             PROTOCOL_VERSION_GRID,
+                             MutableByteSpan{snapBuf}};
+        cc1.QueueResize(ResizeMessage{.Rows = 10, .Cols = 40});
+        const int fd1 = sock1.Get();
+        const auto dl =
+            std::chrono::steady_clock::now() + std::chrono::seconds{3};
+        while (!cc1.IsLive() && std::chrono::steady_clock::now() < dl) {
+            DriveCC(fd1, cc1, out, scratch, 50);
+        }
+        REQUIRE(cc1.IsLive());
+    }  // sock1 closes → agent detaches (Resync mode, v2 capable)
+    ::usleep(100'000);
+
+    // Write >DisconnectMax bytes to overflow the ring.
+    const std::vector<std::byte> ptyData(600, std::byte{'A'});
+    {
+        ByteSpan remaining{ptyData};
+        while (!remaining.empty()) {
+            auto w = io::WriteSome(ptyPipe->Write.Get(), remaining);
+            REQUIRE(w.has_value());
+            remaining = remaining.subspan(*w);
+        }
+    }
+    ::usleep(100'000);
+
+    // ── v2: reconnect at 40×10, collect snapshot ─────────────────────────────
+    std::vector<std::byte> gotSnap;
+    {
+        auto sock2 = TcpConnect(port);
+        REQUIRE(sock2.Get() != -1);
+        std::array<std::byte, CONNECTION_FRAME_STORAGE> frames{};
+        std::array<std::byte, CONNECTION_OUT_SIZE> out{};
+        std::array<std::byte, CONNECTION_SCRATCH_SIZE> scratch{};
+        std::vector<std::byte> snapBuf(wire::SNAPSHOT_MAX_BYTES);
+        ClientConnection cc2{sess,
+                             MakeNonce(++nonces),
+                             MutableByteSpan{frames},
+                             io::MonotonicNow(),
+                             /*capable=*/true,
+                             PROTOCOL_VERSION_GRID,
+                             MutableByteSpan{snapBuf}};
+        cc2.QueueResize(ResizeMessage{.Rows = 10, .Cols = 40});
+        const int fd2 = sock2.Get();
+        const auto dl =
+            std::chrono::steady_clock::now() + std::chrono::seconds{3};
+        while (gotSnap.empty() && std::chrono::steady_clock::now() < dl) {
+            auto ev = DriveCC(fd2, cc2, out, scratch, 200);
+            if (ev) {
+                if (const auto* as = std::get_if<ApplySnapshot>(&*ev)) {
+                    gotSnap.assign(
+                        snapBuf.begin(),
+                        snapBuf.begin() +
+                            static_cast<std::ptrdiff_t>(as->Bytes.size()));
+                }
+            }
+        }
+    }
+
+    ptyPipe->Write.Reset();
+    fut.wait();
+
+    REQUIRE_FALSE(gotSnap.empty());
+
+    // Reference: GridPump starting at 80×24 (agent's INITIAL_SIZE), resized
+    // to 40×10 before feeding bytes — matching the agent's path when
+    // HandleResize IS called.  Without the HandleResize call the agent grid
+    // stays at 80×24 while ptyData is fed, producing a different cell layout,
+    // so gotSnap != want.
+    auto refPump = GridPump::Create(80, 24);
+    REQUIRE(refPump.has_value());
+    REQUIRE((*refPump)->HandleResize(40, 10).has_value());
+    (*refPump)->FeedBytes(ptyData.data(), ptyData.size());
+    auto refReady = (*refPump)->OnNeedsSnapshot(10, 40, START);
     REQUIRE(refReady.has_value());
     const std::vector<std::byte> want{refReady->Bytes.begin(),
                                       refReady->Bytes.end()};

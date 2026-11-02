@@ -109,7 +109,7 @@ public:
     }
 
 private:
-    explicit GridPump(grid::Grid* grid) noexcept;
+    explicit GridPump(std::unique_ptr<grid::Grid> grid) noexcept;
 
     [[nodiscard]] grid::GridResult<std::optional<SnapReady>> DoBuild() noexcept;
 

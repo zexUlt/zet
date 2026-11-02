@@ -13,7 +13,8 @@
 
 namespace zet::agent {
 
-GridPump::GridPump(grid::Grid* grid) noexcept : Grid_(grid) {}
+GridPump::GridPump(std::unique_ptr<grid::Grid> grid) noexcept
+    : Grid_(std::move(grid)) {}
 
 GridPump::~GridPump() { delete Snap_; }
 
@@ -23,7 +24,9 @@ grid::GridResult<std::unique_ptr<GridPump>> GridPump::Create(
     if (!g) {
         return std::unexpected(g.error());
     }
-    return std::unique_ptr<GridPump>(new GridPump(*g));
+    auto owned = std::unique_ptr<grid::Grid>(*g);
+    // NOLINTNEXTLINE(clang-analyzer-cplusplus.NewDeleteLeaks)
+    return std::unique_ptr<GridPump>(new GridPump(std::move(owned)));
 }
 
 void GridPump::FeedBytes(const std::byte* data, std::size_t len) noexcept {
