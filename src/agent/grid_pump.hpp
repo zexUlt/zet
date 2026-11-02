@@ -73,10 +73,9 @@ public:
     /// while HasPendingSnap() is true.
     ///
     /// Returns:
-    ///   - unexpected(AllocationFailed / SnapshotTooLarge): close the
-    ///   connection.
-    ///     // FIXME: ladder PR (m6-snapshot-ladder) makes SnapshotTooLarge
-    ///     // impossible; remove this path when that lands.
+    ///   - unexpected(SizeTooLarge / AllocationFailed / SnapshotTooLarge):
+    ///     close the connection.  SnapshotTooLarge is what is left after the
+    ///     degrade ladder: not even one row fits the snapshot cap.
     ///   - optional{nullopt}: still waiting for parser Ground.
     ///   - optional{SnapReady}: snapshot built; call SupplySnapshot.
     [[nodiscard]] grid::GridResult<std::optional<SnapReady>> TryBuild(

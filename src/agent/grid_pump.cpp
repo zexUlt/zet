@@ -102,8 +102,6 @@ GridPump::DoBuild() noexcept {
     auto snap = grid::Snapshot::Create(*Grid_);
     if (!snap) {
         SnapWait_.reset();
-        // FIXME: ladder PR (m6-snapshot-ladder) makes SnapshotTooLarge
-        // impossible; remove this path when that lands.
         return std::unexpected(snap.error());
     }
 

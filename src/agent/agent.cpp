@@ -1056,7 +1056,11 @@ int RunAgentForTestImpl(AgentTestConfig cfg) noexcept {
     const std::optional<Timestamp> giveUpAt =
         cfg.GiveUpAfter ? std::optional{io::MonotonicNow() + *cfg.GiveUpAfter}
                         : std::nullopt;
-    return agentObj->RunLoop(giveUpAt);
+    const int status = agentObj->RunLoop(giveUpAt);
+    if (cfg.Inspect && agentObj->GridPump_) {
+        cfg.Inspect(*agentObj->GridPump_);
+    }
+    return status;
 }
 
 }  // namespace

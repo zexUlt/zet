@@ -1,8 +1,10 @@
 #pragma once
 
 #include <cstdint>
+#include <functional>
 #include <optional>
 
+#include "grid_pump.hpp"
 #include "zet/core/time.hpp"
 #include "zet/io/fd.hpp"
 #include "zet/io/tcp.hpp"
@@ -25,6 +27,9 @@ struct AgentTestConfig {
     std::uint16_t Ceiling{wire::PROTOCOL_VERSION_GRID};
     /// Maximum run time before the loop returns FAILURE_STATUS.
     std::optional<Duration> GiveUpAfter{std::chrono::milliseconds{2000}};
+    /// Called on the agent thread with the agent's GridPump after the loop
+    /// returns, so a test can read the grid the real pump built.
+    std::function<void(const GridPump&)> Inspect;
 };
 
 [[nodiscard]] int RunAgentForTest(AgentTestConfig config) noexcept;
