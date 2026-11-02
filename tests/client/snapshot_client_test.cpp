@@ -495,10 +495,10 @@ TEST_CASE_FIXTURE(SodiumFixture,
                   "SessionEnd{Overflow} exits OVERFLOW_STATUS (Client::Pump)") {
     // The overflow verdict reaches the client over the live channel.
     const SessionLimits lim = TinyLimits();
-    constexpr std::uint8_t KEY_SEED = 45;
+    constexpr std::uint8_t keySeed = 45;
     std::vector<std::byte> agentStorage(lim.DisconnectMax + 256);
     AgentSession agentSession{
-        DeriveSessionSecrets(MakeKey(KEY_SEED)),
+        DeriveSessionSecrets(MakeKey(keySeed)),
         SessionStreams{.Storage = MutableByteSpan{agentStorage},
                        .Now = io::MonotonicNow(),
                        .Limits = lim}};
@@ -516,7 +516,7 @@ TEST_CASE_FIXTURE(SodiumFixture,
 
     auto fut = std::async(std::launch::async, [&] {
         return client::RunSessionForTest(client::SessionTestConfig{
-            .Secrets = DeriveSessionSecrets(MakeKey(KEY_SEED)),
+            .Secrets = DeriveSessionSecrets(MakeKey(keySeed)),
             .Limits = lim,
             .Socket = std::move(pair->Second),
             .StdoutFd = stdoutPipe->Write.Get(),
