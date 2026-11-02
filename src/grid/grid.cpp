@@ -7,15 +7,23 @@ namespace zet::grid {
 
 namespace {
 
-// Both screen arenas (main + alt) together must be strictly less than the
-// scrollback budget.  Prevents Create(MAX_COLS, MAX_ROWS, ...) which needs
-// 2 x 64 MiB = 128 MiB for screens alone, leaving nothing for history and
-// hitting the practical memory ceiling.  Shared by Allocate and Resize so a
-// peer-driven resize cannot exceed what Create would accept.
-constexpr bool ScreenArenasFit(std::uint16_t cols,
-                               std::uint16_t rows) noexcept {
-    const std::size_t screenCells = static_cast<std::size_t>(cols) * rows;
-    return screenCells * sizeof(Cell) * 2 < MAX_SCROLLBACK_BYTES;
+// Clamps a requested screen size to what a grid may hold: 0 becomes 1, cols
+// goes to MAX_COLS, rows goes to min(MAX_ROWS, MAX_SCREEN_CELLS / cols).
+// Oversize requests are clamped, never rejected (design.md §9).
+struct ScreenSize {
+    std::uint16_t Cols;
+    std::uint16_t Rows;
+};
+
+constexpr ScreenSize ClampScreenSize(std::uint16_t cols,
+                                     std::uint16_t rows) noexcept {
+    if (cols == 0) cols = 1;
+    if (rows == 0) rows = 1;
+    if (cols > MAX_COLS) cols = MAX_COLS;
+    const std::size_t maxRows = std::min<std::size_t>(
+        MAX_ROWS, MAX_SCREEN_CELLS / static_cast<std::size_t>(cols));
+    if (rows > maxRows) rows = static_cast<std::uint16_t>(maxRows);
+    return {cols, rows};
 }
 
 }  // namespace
@@ -26,15 +34,14 @@ constexpr bool ScreenArenasFit(std::uint16_t cols,
 
 GridResult<Grid*> Grid::Create(std::uint16_t cols, std::uint16_t rows,
                                std::uint32_t scrollbackLimit) noexcept {
-    if (cols == 0 || cols > MAX_COLS || rows == 0 || rows > MAX_ROWS)
-        return std::unexpected(EGridError::SizeTooLarge);
     if (scrollbackLimit > 0x7FFF'FFFF)
         return std::unexpected(EGridError::ScrollbackTooLarge);
 
     Grid* g = new (std::nothrow) Grid;
     if (!g) return std::unexpected(EGridError::AllocationFailed);
 
-    if (!g->Allocate(cols, rows, scrollbackLimit)) {
+    const ScreenSize size = ClampScreenSize(cols, rows);
+    if (!g->Allocate(size.Cols, size.Rows, scrollbackLimit)) {
         delete g;
         return std::unexpected(EGridError::AllocationFailed);
     }
@@ -49,7 +56,6 @@ bool Grid::Allocate(std::uint16_t cols, std::uint16_t rows,
     ScrollBot_ = static_cast<std::uint16_t>(rows - 1);
 
     const std::size_t screenCells = static_cast<std::size_t>(cols) * rows;
-    if (!ScreenArenasFit(cols, rows)) return false;
     MainCells_ = new (std::nothrow) Cell[screenCells]{};
     AltCells_ = new (std::nothrow) Cell[screenCells]{};
     MainLines_ = new (std::nothrow) Line[rows]{};
@@ -1187,12 +1193,9 @@ void Grid::SwitchAltScreen(bool enter) noexcept {
 
 GridResult<void> Grid::Resize(std::uint16_t newCols,
                               std::uint16_t newRows) noexcept {
-    if (newCols == 0) newCols = 1;
-    if (newRows == 0) newRows = 1;
-    if (newCols > MAX_COLS || newRows > MAX_ROWS)
-        return std::unexpected(EGridError::SizeTooLarge);
-    if (!ScreenArenasFit(newCols, newRows))
-        return std::unexpected(EGridError::SizeTooLarge);
+    const ScreenSize size = ClampScreenSize(newCols, newRows);
+    newCols = size.Cols;
+    newRows = size.Rows;
 
     if (newCols == Cols_ && newRows == Rows_) return {};
 
