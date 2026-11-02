@@ -86,6 +86,7 @@ endif()
 
 if(ZET_HAVE_AGENT)
     target_sources(zet_tests PRIVATE
+        agent/agent_wiring_test.cpp
         io/activation_test.cpp
         io/daemon_test.cpp
         io/fake_pty.cpp
@@ -106,6 +107,7 @@ if(ZET_HAVE_AGENT)
     target_compile_definitions(zet_tests PRIVATE
         ZET_PTY_ECHO_PATH="$<TARGET_FILE:zet_pty_echo>"
     )
+    target_link_libraries(zet_tests PRIVATE zet_agent_loop)
 endif()
 
 include(${doctest_SOURCE_DIR}/scripts/cmake/doctest.cmake)
