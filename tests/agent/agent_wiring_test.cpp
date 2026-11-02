@@ -353,6 +353,15 @@ public:
 
     ClientSession& Session() { return Sess_; }
 
+    /// Gives the agent loop one more turn: it accepts and drops a connection.
+    /// A frame that arrives in the same read as the one before it is left
+    /// buffered when AgentConnection returns Idle on a stage change, and is
+    /// only looked at on the loop's next turn.
+    void Nudge() {
+        std::ignore = TcpConnect(Port);
+        SleepMs(50);
+    }
+
     /// What the shell prints.
     void PtyPrints(const std::vector<std::byte>& data) {
         ByteSpan remaining{data};
@@ -748,7 +757,9 @@ TEST_CASE_FIXTURE(SodiumFixture,
 
     auto c2 = rig.Connect();
     c2->QueueResize(24, 80);
-    c2->Run(500);
+    c2->Run(300);
+    rig.Nudge();  // the agent has now seen the client's Resize
+    c2->Run(200);
     REQUIRE(c2->Snapshots.empty());  // parser is inside the escape
 
     const auto rest = Bytes("[HQ");  // CSI H, then a printable
