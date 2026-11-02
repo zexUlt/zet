@@ -339,6 +339,31 @@ TEST_CASE("round-trip: history lines are reproduced") {
     delete dst;
 }
 
+TEST_CASE("round-trip: history line cleared with a BCE background keeps it") {
+    // Seed history_bce_cellsused. Mutant: ClearLine leaves CellsUsed = 0, so
+    // EncodeHistory stops at column 0 and the restored line is default.
+    Grid* src = MakeGrid(10, 3, 10);
+    VtParser p;
+    Feed(p, *src, "\x1b[42m\n\n\n\n\n");
+    REQUIRE(src->ScrollbackSize() >= 2u);
+
+    auto r = Snapshot::Create(*src);
+    REQUIRE(r.has_value());
+    Grid* dst = Restore(*r.value(), 10, 3, 10);
+
+    REQUIRE(dst->ScrollbackSize() == src->ScrollbackSize());
+    const Line* hl = dst->ScrollbackLine(dst->ScrollbackSize() - 1);
+    REQUIRE(hl != nullptr);
+    for (std::uint16_t c = 0; c < 10; ++c) {
+        CHECK(hl->Cells[c].BgKind == EColorKind::Indexed);
+        CHECK(hl->Cells[c].Bg[0] == 2);
+    }
+
+    delete dst;
+    delete r.value();
+    delete src;
+}
+
 TEST_CASE("round-trip: scroll region is reproduced") {
     // Mutant: omit DECSTBM in mode restore → scroll region at default 1;rows.
     Grid* src = MakeGrid(40, 20, 0);
