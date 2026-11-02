@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <cstdint>
 #include <functional>
 #include <optional>
@@ -30,6 +31,10 @@ struct AgentTestConfig {
     /// Called on the agent thread with the agent's GridPump after the loop
     /// returns, so a test can read the grid the real pump built.
     std::function<void(const GridPump&)> Inspect;
+    /// When it reads true at the top of a loop turn the loop returns
+    /// FAILURE_STATUS, like GiveUpAfter.  The loop only looks when something
+    /// wakes it, so set it and then connect to Listen.Port.
+    const std::atomic<bool>* Stop{nullptr};
 };
 
 [[nodiscard]] int RunAgentForTest(AgentTestConfig config) noexcept;

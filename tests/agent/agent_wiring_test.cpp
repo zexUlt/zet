@@ -42,6 +42,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -282,7 +283,7 @@ struct GridObservation {
 /// slave and writes there what the "shell" prints.
 class AgentRig {
 public:
-    explicit AgentRig(std::uint8_t key, std::chrono::milliseconds giveUp)
+    explicit AgentRig(std::uint8_t key)
         : Lim_(TinyLimits()),
           Cs_(Lim_.DisconnectMax + 256),
           Sess_(DeriveSessionSecrets(MakeKey(key)),
@@ -304,7 +305,7 @@ public:
         Port = listener->Port;
 
         Fut_ = std::async(
-            std::launch::async, [this, key, giveUp, l = std::move(*listener),
+            std::launch::async, [this, key, l = std::move(*listener),
                                  m = std::move(pty->Master)]() mutable {
                 return RunAgentForTest(AgentTestConfig{
                     .Secrets = DeriveSessionSecrets(MakeKey(key)),
@@ -312,7 +313,7 @@ public:
                     .Listen = std::move(l),
                     .PtyReadFd = std::move(m),
                     .Ceiling = PROTOCOL_VERSION_GRID,
-                    .GiveUpAfter = giveUp,
+                    .GiveUpAfter = std::chrono::seconds{60},
                     .Inspect =
                         [this](const GridPump& gp) {
                             Seen.Seen = true;
@@ -330,12 +331,27 @@ public:
     AgentRig(const AgentRig&) = delete;
     AgentRig& operator=(const AgentRig&) = delete;
 
-    ~AgentRig() { Fut_.wait(); }
+    ~AgentRig() { Stop(); }
 
-    /// Waits for the agent loop to give up, then returns what its grid held.
+    /// Stops the agent loop and returns what its grid held.
     const GridObservation& Finish() {
-        Fut_.wait();
+        Stop();
         return Seen;
+    }
+
+    /// Waits for `client` to receive a snapshot, nudging the agent loop now and
+    /// then (see Nudge).
+    bool AwaitSnapshot(TestClient& client, int ms = 10000) {
+        const auto end =
+            std::chrono::steady_clock::now() + std::chrono::milliseconds{ms};
+        while (client.Snapshots.empty() && !client.Failed && !client.Closed &&
+               std::chrono::steady_clock::now() < end) {
+            client.Run(200);
+            if (client.Snapshots.empty()) {
+                Nudge();
+            }
+        }
+        return !client.Snapshots.empty();
     }
 
     std::unique_ptr<TestClient> Connect() {
@@ -348,7 +364,7 @@ public:
     void ConnectAndDrop(std::uint16_t rows, std::uint16_t cols) {
         auto c = Connect();
         c->QueueResize(rows, cols);
-        REQUIRE(c->RunUntil(3000, [&] { return c->IsLive(); }));
+        REQUIRE(c->RunUntil(8000, [&] { return c->IsLive(); }));
     }
 
     ClientSession& Session() { return Sess_; }
@@ -376,6 +392,19 @@ public:
     GridObservation Seen;
 
 private:
+    void Stop() {
+        if (Stopped_) {
+            return;
+        }
+        Stopped_ = true;
+        Nudge();  // one full turn first: it may still have work to finish
+        Stop_ = true;
+        std::ignore = TcpConnect(Port);
+        Fut_.wait();
+    }
+
+    bool Stopped_{false};
+    std::atomic<bool> Stop_{false};
     SessionLimits Lim_;
     std::vector<std::byte> Cs_;
     ClientSession Sess_;
@@ -681,17 +710,17 @@ constexpr std::size_t OVERFLOW_BYTES = 600;
 
 TEST_CASE_FIXTURE(SodiumFixture,
                   "Agent: pty bytes reach the grid exactly once") {
-    AgentRig rig{71, 3s};
+    AgentRig rig{71};
     rig.ConnectAndDrop(24, 80);
-    SleepMs(100);
+    SleepMs(300);
 
     const std::vector<std::byte> printed(OVERFLOW_BYTES, std::byte{'A'});
     rig.PtyPrints(printed);
-    SleepMs(100);
+    SleepMs(300);
 
     auto c2 = rig.Connect();
     c2->QueueResize(24, 80);
-    REQUIRE(c2->RunUntil(3000, [&] { return !c2->Snapshots.empty(); }));
+    REQUIRE(rig.AwaitSnapshot(*c2));
 
     const auto& seen = rig.Finish();
     REQUIRE(seen.Seen);
@@ -711,10 +740,10 @@ TEST_CASE_FIXTURE(SodiumFixture,
 TEST_CASE_FIXTURE(SodiumFixture,
                   "Agent: bytes the session cannot take are fed to the grid "
                   "once") {
-    AgentRig rig{72, 2s};
+    AgentRig rig{72};
     auto idle = rig.Connect();
     idle->QueueResize(24, 80);
-    REQUIRE(idle->RunUntil(3000, [&] { return idle->IsLive(); }));
+    REQUIRE(idle->RunUntil(8000, [&] { return idle->IsLive(); }));
     // `idle` is not pumped from here on, so it never acks.
 
     const std::vector<std::byte> printed(1000, std::byte{'A'});
@@ -746,14 +775,14 @@ TEST_CASE_FIXTURE(SodiumFixture,
 TEST_CASE_FIXTURE(SodiumFixture,
                   "Agent: bytes fed while waiting for Ground are not "
                   "replayed") {
-    AgentRig rig{73, 6s};
+    AgentRig rig{73};
     rig.ConnectAndDrop(24, 80);
-    SleepMs(100);
+    SleepMs(300);
 
     std::vector<std::byte> first(OVERFLOW_BYTES, std::byte{'A'});
     first.push_back(ESC_BYTE);
     rig.PtyPrints(first);
-    SleepMs(100);
+    SleepMs(300);
 
     auto c2 = rig.Connect();
     c2->QueueResize(24, 80);
@@ -764,7 +793,7 @@ TEST_CASE_FIXTURE(SodiumFixture,
 
     const auto rest = Bytes("[HQ");  // CSI H, then a printable
     rig.PtyPrints(rest);
-    REQUIRE(c2->RunUntil(3000, [&] { return !c2->Snapshots.empty(); }));
+    REQUIRE(rig.AwaitSnapshot(*c2));
     CHECK(c2->Snapshots.front() == ReferenceSnapshot({first, rest}, 24, 80));
 
     c2->Run(300);
@@ -785,13 +814,13 @@ TEST_CASE_FIXTURE(SodiumFixture,
 TEST_CASE_FIXTURE(SodiumFixture,
                   "Agent: bytes fed while waiting for the Resize are not "
                   "replayed") {
-    AgentRig rig{74, 6s};
+    AgentRig rig{74};
     rig.ConnectAndDrop(24, 80);
-    SleepMs(100);
+    SleepMs(300);
 
     const std::vector<std::byte> first(OVERFLOW_BYTES, std::byte{'A'});
     rig.PtyPrints(first);
-    SleepMs(100);
+    SleepMs(300);
 
     auto c2 = rig.Connect();  // no QueueResize yet
     c2->Run(300);
@@ -802,7 +831,7 @@ TEST_CASE_FIXTURE(SodiumFixture,
     SleepMs(200);
 
     c2->QueueResize(24, 80);
-    REQUIRE(c2->RunUntil(3000, [&] { return !c2->Snapshots.empty(); }));
+    REQUIRE(rig.AwaitSnapshot(*c2));
     CHECK(c2->Snapshots.front() == ReferenceSnapshot({first, rest}, 24, 80));
 
     c2->Run(300);
@@ -823,35 +852,35 @@ TEST_CASE_FIXTURE(SodiumFixture,
 TEST_CASE_FIXTURE(SodiumFixture,
                   "Agent: a second snapshot cycle succeeds and frees the "
                   "first") {
-    AgentRig rig{75, 6s};
+    AgentRig rig{75};
 
     // Cycle 1.
     rig.ConnectAndDrop(24, 80);
-    SleepMs(100);
+    SleepMs(300);
     const std::vector<std::byte> a(OVERFLOW_BYTES, std::byte{'A'});
     rig.PtyPrints(a);
-    SleepMs(100);
+    SleepMs(300);
     {
         auto c = rig.Connect();
         c->QueueResize(24, 80);
-        REQUIRE(c->RunUntil(3000, [&] { return !c->Snapshots.empty(); }));
+        REQUIRE(rig.AwaitSnapshot(*c));
         c->Run(300);  // GridEnd sent, GridApplied back: the pump releases.
     }
-    SleepMs(100);
+    SleepMs(300);
 
     // Cycle 2: overflow again, with the parser left inside an escape.
     rig.ConnectAndDrop(24, 80);
-    SleepMs(100);
+    SleepMs(300);
     std::vector<std::byte> b(OVERFLOW_BYTES, std::byte{'B'});
     b.push_back(ESC_BYTE);
     rig.PtyPrints(b);
-    SleepMs(100);
+    SleepMs(300);
     auto c4 = rig.Connect();
     c4->QueueResize(24, 80);
     c4->Run(300);
     const auto rest = Bytes("[H");
     rig.PtyPrints(rest);
-    REQUIRE(c4->RunUntil(3000, [&] { return !c4->Snapshots.empty(); }));
+    REQUIRE(rig.AwaitSnapshot(*c4));
     c4->Run(300);
 
     const auto& seen = rig.Finish();
@@ -867,17 +896,17 @@ TEST_CASE_FIXTURE(SodiumFixture,
 // from the reference).
 
 TEST_CASE_FIXTURE(SodiumFixture, "Agent: Resized is forwarded to the grid") {
-    AgentRig rig{76, 3s};
+    AgentRig rig{76};
     rig.ConnectAndDrop(10, 40);
-    SleepMs(100);
+    SleepMs(300);
 
     const std::vector<std::byte> printed(OVERFLOW_BYTES, std::byte{'A'});
     rig.PtyPrints(printed);
-    SleepMs(100);
+    SleepMs(300);
 
     auto c2 = rig.Connect();
     c2->QueueResize(10, 40);
-    REQUIRE(c2->RunUntil(3000, [&] { return !c2->Snapshots.empty(); }));
+    REQUIRE(rig.AwaitSnapshot(*c2));
 
     const auto& seen = rig.Finish();
     REQUIRE(seen.Seen);

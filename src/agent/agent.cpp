@@ -13,6 +13,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cerrno>
 #include <chrono>
 #include <cstddef>
@@ -481,6 +482,8 @@ private:
     bool Terminating_{false};
     /// Non-zero only in tests: ceiling passed to every accepted connection.
     std::uint16_t TestCeiling_{0};
+    /// Set only in tests: ends RunLoop when it reads true.
+    const std::atomic<bool>* TestStop_{nullptr};
 
     std::array<std::byte, session::CONNECTION_OUT_SIZE> Out_{};
     std::array<std::byte, session::CONNECTION_SCRATCH_SIZE> Scratch_{};
@@ -531,7 +534,8 @@ int Agent::RunLoop(std::optional<Timestamp> giveUpAt) noexcept {
     std::array<io::PollEvent, EVENTS_PER_WAIT> events{};
     for (;;) {
         const Timestamp now = io::MonotonicNow();
-        if (giveUpAt && now >= *giveUpAt) {
+        if ((giveUpAt && now >= *giveUpAt) ||
+            (TestStop_ && TestStop_->load())) {
             return FAILURE_STATUS;
         }
         Session_.OnTimer(now);
@@ -1053,6 +1057,7 @@ int RunAgentForTestImpl(AgentTestConfig cfg) noexcept {
     if (!agentObj->StartForTest(std::move(cfg.PtyReadFd), cfg.Ceiling)) {
         return FAILURE_STATUS;
     }
+    agentObj->TestStop_ = cfg.Stop;
     const std::optional<Timestamp> giveUpAt =
         cfg.GiveUpAfter ? std::optional{io::MonotonicNow() + *cfg.GiveUpAfter}
                         : std::nullopt;
