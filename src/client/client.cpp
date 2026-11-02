@@ -85,6 +85,12 @@ constexpr std::size_t STDOUT_QUEUE_MAX = 1024 * 1024;
 // and the gate would never open.
 static_assert(STDOUT_QUEUE_MAX >= session::CONNECTION_FRAME_STORAGE);
 
+/// A snapshot is queued whole, on top of whatever output is ahead of it: the
+/// read gate keeps that under STDOUT_QUEUE_MAX, and the wire caps the
+/// snapshot, so every legal one fits.
+constexpr std::size_t STDOUT_SNAPSHOT_CEILING =
+    STDOUT_QUEUE_MAX + wire::SNAPSHOT_MAX_BYTES;
+
 /// Sealed frames the socket has not taken yet, past the resend window.
 constexpr std::size_t SOCKET_OUTPUT_SLACK = 1024 * 1024;
 
@@ -907,7 +913,8 @@ private:
         Up,
     };
 
-    friend int RunSessionForTestImpl(SessionTestConfig config) noexcept;
+    friend SessionTestResult RunSessionForTestImpl(
+        SessionTestConfig config) noexcept;
 
     void FeedStdin() noexcept;
     void Pump(Timestamp now) noexcept;
@@ -1108,15 +1115,12 @@ void Client::Pump(Timestamp now) noexcept {
             return;
         } else if (const auto* snap =
                        std::get_if<session::ApplySnapshot>(&event)) {
-            // Path B (ver=2, §9): queue the snapshot into the normal stdout
-            // path and defer ConfirmApply until the last byte has been written.
-            // This keeps stdin, signals, and keepalives serviced while the
-            // terminal drains (no blocking write).  Inline notices already in
-            // Stdout_ are preserved; the snapshot appends after them.
-            if (!Stdout_.Append(snap->Bytes)) {
-                // Snapshot does not fit (> STDOUT_QUEUE_MAX).  GridApplied is
-                // never sent, so the agent keeps the snapshot owed and offers
-                // it again on the next connection.
+            // Path B (ver=2, §9): queue the snapshot behind the output already
+            // waiting and confirm it once its last byte is written, so stdin,
+            // signals and keepalives are served while the terminal drains.
+            if (!Stdout_.Append(snap->Bytes, STDOUT_SNAPSHOT_CEILING)) {
+                // Unreachable while the read gate and the wire limit hold.
+                // Without GridApplied the agent offers it again on reconnect.
                 Connection_->DenyApply(snap->StreamGen);
                 Drop(now);
                 return;
@@ -1216,6 +1220,8 @@ void Client::Drop(Timestamp now) noexcept {
     if (!LostSince_) {
         LostSince_ = now;
     }
+    // The snapshot can only be confirmed on the connection that carried it.
+    PendingSnapshot_.reset();
     if (Connection_) {
         Connection_->Close(now);
         Connection_.reset();
@@ -1419,25 +1425,22 @@ int Client::Finish(int status) noexcept {
 
 // Defined inside the anonymous namespace so it can access Client's private
 // members (via the friend declaration) and ELink.
-int RunSessionForTestImpl(SessionTestConfig config) noexcept {
+SessionTestResult RunSessionForTestImpl(SessionTestConfig config) noexcept {
     auto maybePoller = io::Poller::Create();
     if (!maybePoller) {
-        return FAILURE_STATUS;
+        return {.Status = FAILURE_STATUS, .SnapshotBufferBytes = 0};
     }
 
     Options opts;
     opts.Limits = config.Limits;
-    opts.BackoffMax = std::chrono::hours{1};
+    opts.BackoffMax = config.BackoffMax;
 
     session::BootstrapResult br;
     br.Secrets = std::move(config.Secrets);
 
-    // Empty address list: StartConnecting will backoff immediately and never
-    // open a real TCP connection — the test injects the socket directly.
-    io::AddressList addr;
-
-    auto clientObj = std::make_unique<Client>(
-        opts, std::move(br), addr, std::move(*maybePoller), config.GiveUpAfter);
+    auto clientObj =
+        std::make_unique<Client>(opts, std::move(br), config.Addresses,
+                                 std::move(*maybePoller), config.GiveUpAfter);
 
     clientObj->StdoutFd_ = config.StdoutFd;
     clientObj->StderrFd_ = config.StderrFd;
@@ -1447,21 +1450,16 @@ int RunSessionForTestImpl(SessionTestConfig config) noexcept {
     // Tests have no real stdin; mark it ended so the poller never watches fd 0.
     clientObj->InEnded_ = true;
 
-    // Enter through FinishConnecting so the test runs the production setup:
-    // lazy snapshot buffer, GRID_CAPABLE, and the connection itself.
-    clientObj->Socket_ = std::move(config.Socket);
-    clientObj->SocketWatch_.emplace(clientObj->Socket_.Get(), SOCKET_TOKEN);
-    clientObj->Link_ = Client::ELink::Connecting;
-    clientObj->FinishConnecting(io::MonotonicNow());
-
-    return clientObj->Run();
+    const int status = clientObj->Run();
+    return {.Status = status,
+            .SnapshotBufferBytes = clientObj->SnapshotBuf_.size()};
 }
 
 }  // namespace
 
 // Public entry point; delegates to the anonymous-namespace implementation
 // which has friend access to Client's private members.
-int RunSessionForTest(SessionTestConfig config) noexcept {
+SessionTestResult RunSessionForTest(SessionTestConfig config) noexcept {
     return RunSessionForTestImpl(std::move(config));
 }
 

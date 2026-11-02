@@ -68,6 +68,7 @@ target_link_libraries(zet_tests PRIVATE
 # and Detach, which only the agent needs, on Linux (src/CMakeLists.txt).
 if(ZET_HAVE_IO)
     target_sources(zet_tests PRIVATE
+        app/byte_queue_test.cpp
         client/deliver_test.cpp
         client/escape_test.cpp
         client/snapshot_client_test.cpp

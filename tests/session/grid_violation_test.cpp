@@ -49,7 +49,7 @@ struct SodiumFixture {
 struct ViolationRig {
     static constexpr std::size_t BUF_SIZE = RESEND_BUFFER_MAX;
 
-    explicit ViolationRig()
+    explicit ViolationRig(std::size_t snapshotBytes = wire::SNAPSHOT_MAX_BYTES)
         : Keys{DeriveConnectionKeys(
               DeriveSessionSecrets(MakeKey(1)).ConnectionSeed, MakeNonce(1),
               MakeNonce(2))},
@@ -59,7 +59,7 @@ struct ViolationRig {
           AgentSendBuf{MutableByteSpan{AgentSendStore}, 0},
           ClientRecv{0},
           AgentRecv{0},
-          ClientSnapshotStore(wire::SNAPSHOT_MAX_BYTES, std::byte{}),
+          ClientSnapshotStore(snapshotBytes, std::byte{}),
           Client{Keys,
                  ERole::Client,
                  ClientSendBuf,
@@ -442,13 +442,39 @@ TEST_CASE_FIXTURE(
     SodiumFixture,
     "a complete grid snapshot is delivered as DeliveredGridSnapshot") {
     ViolationRig rig;
+    // Output before the snapshot moves the cursor, so the reset shows.
+    const auto data = DataRaw(16);
+    REQUIRE(rig.InjectToClient(ByteSpan{data}).has_value());
+    REQUIRE(rig.ClientRecv.RecvOffset() == 16);
+
     const std::uint32_t kTotal = 32;
     const bool ok = DeliverValidSnapshot(rig, kTotal, 1);
     REQUIRE(ok);
-    // The test only verifies that no violation was triggered and that
-    // RecvCursor was reset to 0 after delivery. The connection test covers
-    // the full round-trip including GridApplied.
+    // The connection test covers the full round trip including GridApplied.
     CHECK(rig.ClientRecv.RecvOffset() == 0);
+}
+
+TEST_CASE_FIXTURE(SodiumFixture,
+                  "GridBegin total_len of exactly SNAPSHOT_MAX_BYTES is "
+                  "accepted") {
+    ViolationRig rig;
+    const auto plain = GridBeginRaw(0, 1, 0, SNAPSHOT_MAX_BYTES);
+    CHECK(rig.InjectToClient(ByteSpan{plain}).has_value());
+}
+
+TEST_CASE_FIXTURE(SodiumFixture,
+                  "GridBegin total_len past the client's snapshot buffer "
+                  "closes the connection") {
+    ViolationRig fits{64};
+    const auto exact = GridBeginRaw(0, 1, 0, 64);
+    CHECK(fits.InjectToClient(ByteSpan{exact}).has_value());
+
+    ViolationRig over{64};
+    const auto plain = GridBeginRaw(0, 1, 0, 65);
+    const auto ev = over.InjectToClient(ByteSpan{plain});
+    REQUIRE_FALSE(ev.has_value());
+    CHECK(ev.error().Disposition() == EDisposition::CloseConnection);
+    CHECK(ev.error().Proto() == EProtoError::UnexpectedMessage);
 }
 
 // ── Happy path: generation rollback guard is per-channel ─────────────────
