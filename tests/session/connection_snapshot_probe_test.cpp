@@ -48,7 +48,12 @@ struct Conn {
              START,
              capable,
              ceiling,
-             MutableByteSpan{rig.Sp.SnapshotBuf}} {}
+             MutableByteSpan{rig.Sp.SnapshotBuf}} {
+        // The agent waits for the post-Resume Resize before asking for a
+        // snapshot (design.md §9, path B, step 1) and these tests run on a
+        // frozen clock; a test that cares about the size queues its own.
+        Cc.QueueResize(ResizeMessage{.Rows = 24, .Cols = 80});
+    }
     void Rec(const ConnectionEvent& e) {
         Ev v{EvName(e)};
         if (const auto* n = std::get_if<NeedsSnapshot>(&e)) {
@@ -220,6 +225,7 @@ TEST_CASE_FIXTURE(SodiumFixture,
     ClientConnection cc{
         client, MakeNonce(++nonces),   MutableByteSpan{sp.ClientFrames}, START,
         true,   PROTOCOL_VERSION_GRID, MutableByteSpan{sp.SnapshotBuf}};
+    cc.QueueResize(ResizeMessage{.Rows = 24, .Cols = 80});
     bool gotNeeds = false;
     for (int i = 0; i < 64 && !gotNeeds; ++i) {
         auto ea = PumpAgent(ac, sp, START);
