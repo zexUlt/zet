@@ -115,9 +115,7 @@ const char* DiffCell(const Cell& src, const Cell& dst, EColors colors) {
     if ((dst.Codepoint == 0 ? U' ' : dst.Codepoint) != want) return "cp";
     if (src.Width != dst.Width) return "width";
     if (src.Attrs != dst.Attrs) return "attrs";
-    // AttrEx is the underline style: SGR 24 leaves it stale on a cell without
-    // Underline, and the snapshot writes it only together with SGR 4.
-    if ((src.Attrs & Underline) && src.AttrEx != dst.AttrEx) return "attrex";
+    if (src.AttrEx != dst.AttrEx) return "attrex";
     if (src.UlIdx != dst.UlIdx) return "ulidx";
     if (!ColorOk(src.FgKind, src.Fg, dst.FgKind, dst.Fg, colors)) return "fg";
     if (!ColorOk(src.BgKind, src.Bg, dst.BgKind, dst.Bg, colors)) return "bg";

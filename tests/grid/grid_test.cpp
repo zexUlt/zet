@@ -428,6 +428,27 @@ TEST_CASE("SGR 4:0 colon sub-param clears underline") {
     delete g;
 }
 
+TEST_CASE("SGR 24 clears the underline style along with the flag") {
+    Grid* g = MakeGrid(10, 5);
+    VtParser p;
+    Feed(p, *g, "\x1b[4:3m");  // curly underline
+    CHECK(g->PenAttrEx() == 3);
+    Feed(p, *g, "\x1b[24m");
+    CHECK((g->PenAttrs() & static_cast<uint8_t>(EAttr::Underline)) == 0);
+    CHECK(g->PenAttrEx() == 0);
+    Feed(p, *g, "x");
+    CHECK(g->CellAt(0, 0).AttrEx == 0);
+    delete g;
+}
+
+TEST_CASE("SGR 0 clears the underline style") {
+    Grid* g = MakeGrid(10, 5);
+    VtParser p;
+    Feed(p, *g, "\x1b[4:3m\x1b[0m");
+    CHECK(g->PenAttrEx() == 0);
+    delete g;
+}
+
 TEST_CASE("SGR 38:2:r:g:b colon-form sets truecolor fg") {
     Grid* g = MakeGrid(10, 5);
     VtParser p;

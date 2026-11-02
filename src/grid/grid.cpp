@@ -901,6 +901,7 @@ void Grid::ApplySgr(const std::uint16_t* params, const bool* colon,
                 break;
             case 24:
                 PenAttrs_ &= static_cast<std::uint8_t>(~Underline);
+                PenAttrEx_ = 0;
                 break;
             case 25:
                 PenAttrs_ &= static_cast<std::uint8_t>(~Blink);
