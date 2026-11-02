@@ -60,6 +60,12 @@ Deadline ConnectionBase::NextDeadline() const noexcept {
     return Deadline{Started_ + HANDSHAKE_TIMEOUT};
 }
 
+void ConnectionBase::SetReadGate(bool open, Timestamp now) noexcept {
+    if (Channel_) {
+        Channel_->SetReadGate(open, now);
+    }
+}
+
 // ── AgentConnection ────────────────────────────────────────────────────
 
 Deadline AgentConnection::NextDeadline() const noexcept {

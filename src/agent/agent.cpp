@@ -634,8 +634,11 @@ bool Agent::UpdateInterest() noexcept {
         ok = static_cast<bool>(PtyWatch_->Want(Poller_, read, write)) && ok;
     }
     for (auto& connection : Connections_) {
-        const bool read = connection->Link.ReadRoom() > 0 &&
-                          PtyInput_.Room() >= connection->Link.ReadCapacity();
+        // Holding back for a full pty is no sign of a dead path: the silence
+        // timer waits until reading resumes (§9).
+        const bool stalled = PtyInput_.Room() < connection->Link.ReadCapacity();
+        connection->Link.SetReadGate(!stalled, io::MonotonicNow());
+        const bool read = connection->Link.ReadRoom() > 0 && !stalled;
         const bool write = !connection->Output.Empty();
         if (!connection->Watch.Want(Poller_, read, write)) {
             connection->Closing = true;

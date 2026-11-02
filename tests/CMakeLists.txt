@@ -37,6 +37,7 @@ add_executable(zet_tests
     session/receive_cursor_test.cpp
     session/reconnect_property_test.cpp
     session/channel_test.cpp
+    session/channel_read_gate_test.cpp
     session/grid_violation_test.cpp
     session/grid_path_property_test.cpp
     session/connection_snapshot_probe_test.cpp
@@ -72,6 +73,7 @@ if(ZET_HAVE_IO)
         app/byte_queue_test.cpp
         client/deliver_test.cpp
         client/escape_test.cpp
+        client/read_gate_client_test.cpp
         client/snapshot_client_test.cpp
         io/clock_test.cpp
         io/fd_test.cpp

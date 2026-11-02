@@ -1248,8 +1248,11 @@ bool Client::UpdateInterest() noexcept {
         if (Link_ == ELink::Connecting) {
             write = true;
         } else if (Link_ == ELink::Up && Connection_) {
-            read = Connection_->ReadRoom() > 0 &&
-                   Stdout_.Room() >= Connection_->ReadCapacity();
+            // Holding back for a full terminal is no sign of a dead path:
+            // the silence timer waits until reading resumes (§9).
+            const bool stalled = Stdout_.Room() < Connection_->ReadCapacity();
+            Connection_->SetReadGate(!stalled, io::MonotonicNow());
+            read = Connection_->ReadRoom() > 0 && !stalled;
             write = !SocketOut_.Empty();
         }
         if (!SocketWatch_->Want(Poller_, read, write)) {
