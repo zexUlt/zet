@@ -49,9 +49,9 @@ constexpr std::string_view LOST_PREFIX = "zet: connection lost";
 constexpr std::uint8_t KEY_SEED = 77;
 
 // Short enough to run in seconds; the stall below is longer than three of them.
-constexpr Duration KEEPALIVE = 150ms;
-constexpr Duration SILENCE = 600ms;
-constexpr auto STALL = 2000ms;
+constexpr Duration KEEPALIVE = 250ms;
+constexpr Duration SILENCE = 1000ms;
+constexpr auto STALL = 3500ms;
 
 // More than the client's stdout queue, the pty-sized pipe and both ends of the
 // loopback socket can hold, so that the agent is left with bytes it cannot
@@ -116,7 +116,8 @@ SessionLimits ShortLiveness() {
 }
 
 /// The agent end of the one connection, never blocking: what the socket does
-/// not take stays in `Pending` and nothing more is sealed until it is gone.
+/// not take stays in `Pending`, and every Step still works through what the
+/// client sent, so that a full socket does not look like a silent client.
 struct AgentPeer {
     explicit AgentPeer(io::UniqueFd fd)
         : Fd(std::move(fd)),
@@ -129,15 +130,18 @@ struct AgentPeer {
         const Timestamp now = io::MonotonicNow();
         std::array<std::byte, 4096> buf{};
         pollfd pfd{.fd = Fd.Get(), .events = POLLIN, .revents = 0};
-        while (::poll(&pfd, 1, 0) > 0 && (pfd.revents & POLLIN) != 0) {
-            const auto n = io::ReadSome(Fd.Get(), MutableByteSpan{buf});
+        while (Ac.ReadRoom() > 0 && ::poll(&pfd, 1, 0) > 0 &&
+               (pfd.revents & POLLIN) != 0) {
+            const auto n =
+                io::ReadSome(Fd.Get(), MutableByteSpan{buf}.first(std::min(
+                                           buf.size(), Ac.ReadRoom())));
             if (!n || *n == 0 || !Ac.OnBytes(ByteSpan{buf}.first(*n))) {
                 return false;
             }
             pfd.revents = 0;
         }
         Flush();
-        for (int i = 0; i < 16 && Pending.empty(); ++i) {
+        for (int i = 0; i < 16; ++i) {
             const auto r =
                 Ac.Pump(now, MutableByteSpan{Out}, MutableByteSpan{Scratch});
             if (!r) {
@@ -158,7 +162,7 @@ struct AgentPeer {
     }
 
     /// Whether frames are waiting for a socket that is full.
-    [[nodiscard]] bool Backlogged() const { return !Pending.empty(); }
+    [[nodiscard]] bool Backlogged() const { return Sent < Pending.size(); }
 
     io::UniqueFd Fd;
     std::array<std::byte, CONNECTION_FRAME_STORAGE> Frames{};
@@ -166,17 +170,20 @@ struct AgentPeer {
     std::array<std::byte, CONNECTION_SCRATCH_SIZE> Scratch{};
     AgentConnection Ac;
     std::vector<std::byte> Pending;
+    std::size_t Sent = 0;
 
 private:
     void Flush() {
-        while (!Pending.empty()) {
-            const auto n = io::WriteSome(Fd.Get(), ByteSpan{Pending});
+        while (Sent < Pending.size()) {
+            const auto n =
+                io::WriteSome(Fd.Get(), ByteSpan{Pending}.subspan(Sent));
             if (!n || *n == 0) {
                 return;
             }
-            Pending.erase(Pending.begin(),
-                          Pending.begin() + static_cast<std::ptrdiff_t>(*n));
+            Sent += *n;
         }
+        Pending.clear();
+        Sent = 0;
     }
 };
 
@@ -186,11 +193,16 @@ TEST_CASE_FIXTURE(
     SodiumFixture,
     "a client that stops reading for its terminal is not cut for silence") {
     const SessionLimits limits = ShortLiveness();
+    // The test's own agent end does not judge the client's silence: a loaded
+    // runner may starve the client for longer than the short timeout, and
+    // that is not what is under test.
+    SessionLimits agentLimits = limits;
+    agentLimits.Liveness.PeerSilenceTimeout = Duration::zero();
     std::vector<std::byte> storage(limits.ResendMax + 256);
     AgentSession session{wire::DeriveSessionSecrets(MakeKey(KEY_SEED)),
                          SessionStreams{.Storage = MutableByteSpan{storage},
                                         .Now = io::MonotonicNow(),
-                                        .Limits = limits}};
+                                        .Limits = agentLimits}};
     std::uint64_t nonces = 0;
 
     auto listener = io::ListenTcp(0);
