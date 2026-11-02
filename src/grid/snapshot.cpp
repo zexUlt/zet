@@ -268,7 +268,12 @@ static void EmitSgr(EscWriter& w, Pen& pen, const Cell& c) noexcept {
         Sep();
         w.WriteByte('3');
     }
-    if (c.Attrs & Underline) {
+    if (c.AttrEx != 0) {
+        // Extended underline style (4:N): overrides plain SGR 4.
+        Sep();
+        w.WriteLiteral("4:");
+        w.WriteDecimal(c.AttrEx);
+    } else if (c.Attrs & Underline) {
         Sep();
         w.WriteByte('4');
     }
@@ -287,6 +292,12 @@ static void EmitSgr(EscWriter& w, Pen& pen, const Cell& c) noexcept {
     if (c.Attrs & StrikeThrough) {
         Sep();
         w.WriteByte('9');
+    }
+    if (c.UlIdx != 0) {
+        // Underline colour (SGR 58;5;N).
+        Sep();
+        w.WriteLiteral("58;5;");
+        w.WriteDecimal(c.UlIdx);
     }
 
     if (c.FgKind == EColorKind::Indexed) {
@@ -361,11 +372,20 @@ static void EmitSgrFromSaved(EscWriter& w, const SavedCursor& sc,
     if (sc.Attrs & Bold) w.WriteLiteral(";1");
     if (sc.Attrs & Dim) w.WriteLiteral(";2");
     if (sc.Attrs & Italic) w.WriteLiteral(";3");
-    if (sc.Attrs & Underline) w.WriteLiteral(";4");
+    if (sc.AttrEx != 0) {
+        w.WriteLiteral(";4:");
+        w.WriteDecimal(sc.AttrEx);
+    } else if (sc.Attrs & Underline) {
+        w.WriteLiteral(";4");
+    }
     if (sc.Attrs & Blink) w.WriteLiteral(";5");
     if (sc.Attrs & Inverse) w.WriteLiteral(";7");
     if (sc.Attrs & Invisible) w.WriteLiteral(";8");
     if (sc.Attrs & StrikeThrough) w.WriteLiteral(";9");
+    if (sc.UlIdx != 0) {
+        w.WriteLiteral(";58;5;");
+        w.WriteDecimal(sc.UlIdx);
+    }
 
     if (cm != EColorMode::None) {
         EColorKind fgKind = sc.FgKind;
@@ -481,11 +501,9 @@ static void EncodeHistory(EscWriter& w, const Grid& g, Pen& pen,
 // ---------------------------------------------------------------------------
 
 static void EncodeScreen(EscWriter& w, const Grid& g, Pen& pen,
-                         std::uint16_t firstRow, EColorMode cm) noexcept {
-    const std::uint16_t rows = g.Rows();
-    const std::uint16_t cols = g.Cols();
-
-    for (std::uint16_t row = firstRow; row < rows; ++row) {
+                         std::uint16_t firstRow, std::uint16_t lastRow,
+                         EColorMode cm) noexcept {
+    for (std::uint16_t row = firstRow; row < lastRow; ++row) {
         const std::uint16_t used = ScreenCellsUsed(g, row);
         if (used == 0) continue;
 
@@ -509,8 +527,6 @@ static void EncodeScreen(EscWriter& w, const Grid& g, Pen& pen,
             col += (raw.Width >= 2) ? static_cast<std::uint16_t>(2)
                                     : static_cast<std::uint16_t>(1);
         }
-
-        (void)cols;
     }
 }
 
@@ -600,10 +616,12 @@ struct EncodeResult {
 ///
 /// Returns {0,0} on overflow (result exceeds cap).
 /// histStart + histCount must be ≤ grid.ScrollbackSize().
+/// cropTopRows rows are omitted from the top of the screen.
+/// cropBotRows rows are omitted from the bottom of the screen.
 static EncodeResult DoEncode(std::byte* buf, std::size_t cap, const Grid& grid,
                              std::uint32_t histStart, std::uint32_t histCount,
-                             EColorMode cm,
-                             std::uint16_t cropTopRows) noexcept {
+                             EColorMode cm, std::uint16_t cropTopRows,
+                             std::uint16_t cropBotRows = 0) noexcept {
     EscWriter w{buf, cap};
     Pen pen{};
     const bool altScreen = grid.IsAltScreen();
@@ -643,7 +661,9 @@ static EncodeResult DoEncode(std::byte* buf, std::size_t cap, const Grid& grid,
     w.WriteLiteral("\x1b[?2026h");
 
     pen = Pen{};
-    EncodeScreen(w, grid, pen, cropTopRows, cm);
+    const std::uint16_t lastRow = static_cast<std::uint16_t>(
+        grid.Rows() > cropBotRows ? grid.Rows() - cropBotRows : 0u);
+    EncodeScreen(w, grid, pen, cropTopRows, lastRow, cm);
     EncodeModeRestore(w, grid, cm);
 
     if (w.Overflow) return {};
@@ -687,7 +707,9 @@ GridResult<Snapshot*> Snapshot::Create(const Grid& grid,
     }
 
     // Step 1: trim scrollback history by count (binary-search on max lines).
-    if (sz > 0) {
+    // Skipped in alt-screen mode: alt screen carries no history of its own,
+    // so DoEncode ignores histCount; trimming would not help.
+    if (sz > 0 && !grid.IsAltScreen()) {
         // Find the maximum N lines (from the newest end) that fit.
         std::uint32_t lo = 0, hi = sz;
         while (lo < hi) {
@@ -723,8 +745,9 @@ GridResult<Snapshot*> Snapshot::Create(const Grid& grid,
         goto build;
     }
 
-    // Step 4: crop rows from the top (no colour, no history).
-    // The cursor row is always kept; maximum crop = CursorRow().
+    // Step 4: crop rows (no colour, no history).
+    // Phase A: crop from the top, keeping the cursor row and everything below.
+    //          Maximum top crop = CursorRow() (cursor row is preserved).
     {
         const std::uint16_t maxCrop = grid.CursorRow();
         // Binary-search for minimum cropTopRows that fits.
@@ -742,6 +765,36 @@ GridResult<Snapshot*> Snapshot::Create(const Grid& grid,
         if (best.Len > 0) {
             deg = EDegradation::RowsCropped;
             goto build;
+        }
+    }
+
+    // Phase B: with all rows above the cursor cropped, also crop rows below it.
+    //          Maximum bottom crop = Rows - CursorRow - 1 (cursor row kept).
+    {
+        const std::uint16_t curRow = grid.CursorRow();
+        const std::uint16_t topCrop = curRow;  // maximum from Phase A
+        const std::uint16_t rows = grid.Rows();
+        // There must be at least one row below the cursor to crop.
+        if (rows > static_cast<std::uint16_t>(curRow + 1u)) {
+            const std::uint16_t maxBotCrop =
+                static_cast<std::uint16_t>(rows - curRow - 1u);
+            std::uint16_t lo = 1, hi = maxBotCrop;
+            while (lo < hi) {
+                const std::uint16_t mid =
+                    static_cast<std::uint16_t>(lo + (hi - lo) / 2);
+                if (DoEncode(buf, maxBytes, grid, sz, 0, EColorMode::None,
+                             topCrop, mid)
+                        .Len > 0)
+                    hi = mid;
+                else
+                    lo = static_cast<std::uint16_t>(mid + 1);
+            }
+            best = DoEncode(buf, maxBytes, grid, sz, 0, EColorMode::None,
+                            topCrop, lo);
+            if (best.Len > 0) {
+                deg = EDegradation::RowsCropped;
+                goto build;
+            }
         }
     }
 
