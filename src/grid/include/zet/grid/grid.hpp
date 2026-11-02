@@ -13,7 +13,7 @@ namespace zet::grid {
 enum class EGridError : std::uint8_t {
     /// Allocation failed (new(std::nothrow) returned nullptr).
     AllocationFailed,
-    /// Requested size exceeds MAX_COLS × MAX_ROWS.
+    /// Unused since oversize screens are clamped, not rejected (design.md §9).
     SizeTooLarge,
     /// Scrollback limit exceeds implementation max (effectively 2^31).
     ScrollbackTooLarge,
@@ -91,8 +91,9 @@ public:
     /// Construct a Grid with the given dimensions and scrollback limit.
     ///
     /// Uses new(std::nothrow) for all arenas. On allocation failure returns
-    /// EGridError::AllocationFailed. cols and rows must be ≥ 1 and ≤ their
-    /// respective maximums.
+    /// EGridError::AllocationFailed. cols and rows are clamped, never rejected:
+    /// 0 becomes 1, cols goes to MAX_COLS, rows to min(MAX_ROWS,
+    /// MAX_SCREEN_CELLS / cols). Cols()/Rows() report the clamped size.
     [[nodiscard]] static GridResult<Grid*> Create(
         std::uint16_t cols, std::uint16_t rows,
         std::uint32_t scrollbackLimit = DEFAULT_SCROLLBACK_LIMIT) noexcept;
