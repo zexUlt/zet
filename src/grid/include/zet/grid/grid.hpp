@@ -309,6 +309,8 @@ public:
                                           std::uint16_t newRows) noexcept;
 
 private:
+    friend struct GridTestAccess;  // tests/grid: states the VT cannot reach
+
     explicit Grid() noexcept = default;
 
     // Allocate all arenas. Returns false on any allocation failure.

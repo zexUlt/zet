@@ -1806,3 +1806,56 @@ TEST_CASE("degrade: zero-row grid does not crash") {
 
     delete g;
 }
+
+// ---------------------------------------------------------------------------
+// DECOM cursor outside the scroll region
+// ---------------------------------------------------------------------------
+
+namespace zet::grid {
+// Puts the cursor where the VT cannot: the encoder must not rely on that.
+struct GridTestAccess {
+    static void SetCursorRow(Grid& g, std::uint16_t row) { g.CursorRow_ = row; }
+};
+}  // namespace zet::grid
+
+TEST_CASE("DECOM alt-screen entry round-trips the cursor inside the region") {
+    // Seed decom_cursor_above_region. Mutant: row 0 on ?1049h under DECOM.
+    Grid* src = MakeGrid(20, 10, 0);
+    VtParser p;
+    Feed(p, *src, "\x1b[5r\x1b[?6h\x1b[?1049h");
+    REQUIRE(src->ModeSet(EMode::Decom));
+    REQUIRE(src->CursorRow() == src->ScrollTop());
+
+    auto r = Snapshot::Create(*src);
+    REQUIRE(r.has_value());
+    Grid* dst = Restore(*r.value(), 20, 10, 0);
+    CHECK(dst->IsAltScreen());
+    CHECK(dst->CursorRow() == src->CursorRow());
+    CHECK(dst->CursorCol() == src->CursorCol());
+    delete dst;
+    delete r.value();
+    delete src;
+}
+
+TEST_CASE("encoder clamps a DECOM cursor outside the region into it") {
+    // Mutant: cupRow = curRow - ScrollTop + 1 wraps to 4294967293 for a cursor
+    // above the region.
+    for (const std::uint16_t row : {std::uint16_t{0}, std::uint16_t{9}}) {
+        Grid* src = MakeGrid(20, 10, 0);
+        VtParser p;
+        Feed(p, *src, "\x1b[4;7r\x1b[?6h");  // region rows 3..6 (0-based)
+        REQUIRE(src->ScrollTop() == 3);
+        REQUIRE(src->ScrollBot() == 6);
+        GridTestAccess::SetCursorRow(*src, row);
+
+        auto r = Snapshot::Create(*src);
+        REQUIRE(r.has_value());
+        CHECK_FALSE(Contains(r.value()->Bytes(), "4294967"));
+        Grid* dst = Restore(*r.value(), 20, 10, 0);
+        CHECK(dst->ModeSet(EMode::Decom));
+        CHECK(dst->CursorRow() == (row == 0 ? 3 : 6));
+        delete dst;
+        delete r.value();
+        delete src;
+    }
+}

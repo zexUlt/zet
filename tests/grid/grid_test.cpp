@@ -344,6 +344,36 @@ TEST_CASE("Alt screen switch preserves main screen content") {
     delete g;
 }
 
+TEST_CASE("Alt screen entry under DECOM homes into the scroll region") {
+    // Mutant: CursorRow_ = 0 under DECOM leaves the cursor above the region.
+    Grid* g = MakeGrid(10, 10);
+    VtParser p;
+    Feed(p, *g, "\x1b[5;8r");  // region rows 5-8 (1-based)
+    Feed(p, *g, "\x1b[?6h");   // DECOM on: cursor to region top
+    REQUIRE(g->CursorRow() == 4);
+    Feed(p, *g, "\x1b[3;4H");  // region row 3, col 4 -> absolute row 6
+    REQUIRE(g->CursorRow() == 6);
+
+    Feed(p, *g, "\x1b[?1049h");
+    CHECK(g->IsAltScreen());
+    CHECK(g->CursorRow() == g->ScrollTop());
+    CHECK(g->CursorCol() == 0);
+
+    Feed(p, *g, "\x1b[?1049l");  // restore lands inside the region too
+    CHECK(g->CursorRow() == 6);
+    CHECK(g->CursorCol() == 3);
+    delete g;
+}
+
+TEST_CASE("Alt screen entry without DECOM still homes to row 0") {
+    Grid* g = MakeGrid(10, 10);
+    VtParser p;
+    Feed(p, *g, "\x1b[5;8r\x1b[7;3H\x1b[?1049h");
+    CHECK(g->CursorRow() == 0);
+    CHECK(g->CursorCol() == 0);
+    delete g;
+}
+
 TEST_CASE("Alt screen has no scrollback") {
     Grid* g = MakeGrid(5, 3, 100);
     VtParser p;
