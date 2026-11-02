@@ -1,4 +1,5 @@
 #include "client.hpp"
+#include "pump_test_api.hpp"
 
 #include <fcntl.h>
 #include <poll.h>
@@ -41,6 +42,7 @@
 #include "zet/session/client_session.hpp"
 #include "zet/session/connection.hpp"
 #include "zet/session/limits.hpp"
+#include "zet/wire/limits.hpp"
 #include "zet/wire/probe.hpp"
 
 extern char** environ;
@@ -83,6 +85,12 @@ constexpr std::size_t STDOUT_QUEUE_MAX = 1024 * 1024;
 // and the gate would never open.
 static_assert(STDOUT_QUEUE_MAX >= session::CONNECTION_FRAME_STORAGE);
 
+/// A snapshot is queued whole, on top of whatever output is ahead of it: the
+/// read gate keeps that under STDOUT_QUEUE_MAX, and the wire caps the
+/// snapshot, so every legal one fits.
+constexpr std::size_t STDOUT_SNAPSHOT_CEILING =
+    STDOUT_QUEUE_MAX + wire::SNAPSHOT_MAX_BYTES;
+
 /// Sealed frames the socket has not taken yet, past the resend window.
 constexpr std::size_t SOCKET_OUTPUT_SLACK = 1024 * 1024;
 
@@ -120,6 +128,11 @@ constexpr std::string_view ESCAPE_NOTICE = "zet: closed by ~.\r\n";
 /// overflowed while the client did not have GRID_CAPABLE.
 constexpr std::string_view OVERFLOW_NOTICE =
     "zet: session output overflowed \u2014 reconnect to resume\r\n";
+/// Printed (via Notice) after a grid snapshot replaces missed output on
+/// path B reconnect (ver=2, \u00a79).  On stderr so the user knows the screen
+/// was restored from a snapshot rather than a byte-identical replay.
+constexpr std::string_view SNAPSHOT_RESTORE_NOTICE =
+    "zet: screen restored, output during the cut skipped\r\n";
 
 constexpr std::string_view USAGE =
     "usage: zet [--agent PATH] [--ssh-arg ARG]... HOST\n"
@@ -395,11 +408,11 @@ std::string DeliveryCommand() {
     return "exec /bin/sh -c " + Quoted(INSTALLER_SCRIPT);
 }
 
-/// Writes all of `bytes` to the non-blocking pipe `fd`, using poll() to wait
-/// when the kernel buffer is full.  Returns false on a real write error or if
-/// `until` is reached before all bytes are sent.
-[[nodiscard]] bool WriteAllPipe(int fd, ByteSpan bytes,
-                                Timestamp until) noexcept {
+}  // namespace
+
+// Defined at zet::client scope (outside the anonymous namespace) so tests can
+// call it without a separate symbol.  WriteAllPipe (below) is a thin wrapper.
+bool TryWriteSnapshot(int fd, ByteSpan bytes, Timestamp until) noexcept {
     std::size_t sent = 0;
     while (sent < bytes.size()) {
         const Timestamp now = io::MonotonicNow();
@@ -420,6 +433,14 @@ std::string DeliveryCommand() {
         sent += *wr;
     }
     return true;
+}
+
+namespace {
+
+/// Thin wrapper so delivery code keeps its original call site.
+[[nodiscard]] bool WriteAllPipe(int fd, ByteSpan bytes,
+                                Timestamp until) noexcept {
+    return client::TryWriteSnapshot(fd, bytes, until);
 }
 
 /// Returns true when the agent binary for `arch` is simply absent from
@@ -892,6 +913,9 @@ private:
         Up,
     };
 
+    friend SessionTestResult RunSessionForTestImpl(
+        SessionTestConfig config) noexcept;
+
     void FeedStdin() noexcept;
     void Pump(Timestamp now) noexcept;
     void StartConnecting(Timestamp now) noexcept;
@@ -923,6 +947,10 @@ private:
     io::UniqueFd Socket_;
     std::optional<app::Registration> SocketWatch_;
     std::vector<std::byte> Frames_;
+    /// Receive buffer for incoming grid snapshots (§9 path B).  Owned here so
+    /// that each ClientConnection has a stable buffer for the lifetime of the
+    /// Client.  SNAPSHOT_MAX_BYTES (4 MiB); not used at v1.
+    std::vector<std::byte> SnapshotBuf_;
     std::optional<session::ClientConnection> Connection_;
     app::ByteQueue SocketOut_;
 
@@ -941,6 +969,19 @@ private:
     /// with the output, whole, instead of a write that a full, non-blocking
     /// terminal would cut short.
     bool NoticesInline_;
+
+    /// Injected fds for testing; default to the real stdio descriptors.
+    int StdoutFd_{STDOUT_FILENO};
+    int StderrFd_{STDERR_FILENO};
+    /// Protocol ceiling for FinishConnecting (default: v1 production).
+    uint16_t Ceiling_{wire::PROTOCOL_VERSION_MAX};
+
+    struct PendingSnapshotInfo {
+        std::uint32_t StreamGen{0};
+    };
+    /// Set when a grid snapshot is queued into Stdout_ but ConfirmApply has not
+    /// been sent yet; cleared in WriteStdout once the queue drains. §9 path B.
+    std::optional<PendingSnapshotInfo> PendingSnapshot_;
 
     std::optional<wire::SessionEndMessage> Ended_;
     std::optional<int> Signaled_;
@@ -1072,6 +1113,20 @@ void Client::Pump(Timestamp now) noexcept {
         } else if (const auto* ended = std::get_if<session::Ended>(&event)) {
             Ended_ = ended->End;
             return;
+        } else if (const auto* snap =
+                       std::get_if<session::ApplySnapshot>(&event)) {
+            // Path B (ver=2, §9): queue the snapshot behind the output already
+            // waiting and confirm it once its last byte is written, so stdin,
+            // signals and keepalives are served while the terminal drains.
+            if (!Stdout_.Append(snap->Bytes, STDOUT_SNAPSHOT_CEILING)) {
+                // Unreachable while the read gate and the wire limit hold.
+                // Without GridApplied the agent offers it again on reconnect.
+                Connection_->DenyApply(snap->StreamGen);
+                Drop(now);
+                return;
+            }
+            PendingSnapshot_ =
+                PendingSnapshotInfo{.StreamGen = snap->StreamGen};
         } else if (std::holds_alternative<session::SessionOverflowed>(event)) {
             // Agent killed the session because the ring overflowed and this
             // client does not have GRID_CAPABLE (ver=2 only, §7). Record it
@@ -1114,6 +1169,10 @@ void Client::StartConnecting(Timestamp now) noexcept {
     if (AddressIndex_ >= addresses.size()) {
         AddressIndex_ = 0;
     }
+    if (addresses.empty()) {
+        LinkDeadline_ = Deadline{now + Backoff()};
+        return;
+    }
     auto socket = io::StartConnect(addresses[AddressIndex_]);
     if (!socket) {
         ++AddressIndex_;
@@ -1132,8 +1191,18 @@ void Client::FinishConnecting(Timestamp now) noexcept {
         Drop(now);
         return;
     }
+    // gridCapable=true: advertise GRID_CAPABLE so the agent can choose path B
+    // on reconnect (ver=2 only; at v1 the flag is sent but has no effect).
+    // SnapshotBuf_ gives the connection a place to reassemble incoming chunks.
+    // Allocate lazily: v1 sessions never receive snapshots, so the 4 MiB buffer
+    // is only needed when the negotiated ceiling allows v2.
+    if (Ceiling_ >= wire::PROTOCOL_VERSION_GRID && SnapshotBuf_.empty()) {
+        SnapshotBuf_.resize(wire::SNAPSHOT_MAX_BYTES);
+    }
     Connection_.emplace(Session_, RandomNonce<wire::HandshakeNonce>(),
-                        MutableByteSpan{Frames_}, now);
+                        MutableByteSpan{Frames_}, now,
+                        /*gridCapable=*/true, Ceiling_,
+                        MutableByteSpan{SnapshotBuf_});
     if (Size_) {
         Connection_->QueueResize(*Size_);
     }
@@ -1151,6 +1220,8 @@ void Client::Drop(Timestamp now) noexcept {
     if (!LostSince_) {
         LostSince_ = now;
     }
+    // The snapshot can only be confirmed on the connection that carried it.
+    PendingSnapshot_.reset();
     if (Connection_) {
         Connection_->Close(now);
         Connection_.reset();
@@ -1259,7 +1330,7 @@ void Client::ReadStdin() noexcept {
 
 void Client::WriteStdout() noexcept {
     while (!Stdout_.Empty()) {
-        const auto n = io::WriteSome(STDOUT_FILENO, Stdout_.Front());
+        const auto n = io::WriteSome(StdoutFd_, Stdout_.Front());
         if (!n) {
             if (!n.error().WouldBlock()) {
                 Fatal_ = "the terminal went away";
@@ -1267,6 +1338,13 @@ void Client::WriteStdout() noexcept {
             return;
         }
         Stdout_.Consume(*n);
+    }
+    // Deferred ConfirmApply: sent only once the snapshot's last byte has been
+    // written to the terminal.  §9 path B.
+    if (PendingSnapshot_ && Connection_) {
+        Connection_->ConfirmApply(PendingSnapshot_->StreamGen);
+        Notice(SNAPSHOT_RESTORE_NOTICE);
+        PendingSnapshot_.reset();
     }
 }
 
@@ -1306,7 +1384,7 @@ void Client::Notice(std::string_view text) noexcept {
     const ByteSpan bytes{reinterpret_cast<const std::byte*>(text.data()),
                          text.size()};
     if (!NoticesInline_) {
-        Say(text);
+        static_cast<void>(::write(StderrFd_, text.data(), text.size()));
     } else if (!Stdout_.Append(bytes)) {
         // The terminal is far behind; the notice is not worth stalling for.
     }
@@ -1327,7 +1405,7 @@ int Client::Finish(int status) noexcept {
         if (now >= until) {
             break;
         }
-        pollfd waiting{.fd = STDOUT_FILENO, .events = POLLOUT, .revents = 0};
+        pollfd waiting{.fd = StdoutFd_, .events = POLLOUT, .revents = 0};
         if (::poll(&waiting, 1, io::TimeoutMillis(Deadline{until}, now)) > 0) {
             WriteStdout();
         }
@@ -1345,7 +1423,45 @@ int Client::Finish(int status) noexcept {
     return status;
 }
 
+// Defined inside the anonymous namespace so it can access Client's private
+// members (via the friend declaration) and ELink.
+SessionTestResult RunSessionForTestImpl(SessionTestConfig config) noexcept {
+    auto maybePoller = io::Poller::Create();
+    if (!maybePoller) {
+        return {.Status = FAILURE_STATUS, .SnapshotBufferBytes = 0};
+    }
+
+    Options opts;
+    opts.Limits = config.Limits;
+    opts.BackoffMax = config.BackoffMax;
+
+    session::BootstrapResult br;
+    br.Secrets = std::move(config.Secrets);
+
+    auto clientObj =
+        std::make_unique<Client>(opts, std::move(br), config.Addresses,
+                                 std::move(*maybePoller), config.GiveUpAfter);
+
+    clientObj->StdoutFd_ = config.StdoutFd;
+    clientObj->StderrFd_ = config.StderrFd;
+    clientObj->NoticesInline_ = config.NoticesInline;
+    clientObj->Ceiling_ = config.Ceiling;
+    clientObj->StdoutWatch_ = app::Registration{config.StdoutFd, STDOUT_TOKEN};
+    // Tests have no real stdin; mark it ended so the poller never watches fd 0.
+    clientObj->InEnded_ = true;
+
+    const int status = clientObj->Run();
+    return {.Status = status,
+            .SnapshotBufferBytes = clientObj->SnapshotBuf_.size()};
+}
+
 }  // namespace
+
+// Public entry point; delegates to the anonymous-namespace implementation
+// which has friend access to Client's private members.
+SessionTestResult RunSessionForTest(SessionTestConfig config) noexcept {
+    return RunSessionForTestImpl(std::move(config));
+}
 
 int Main(std::span<char*> args) noexcept {
     auto options = ReadOptions(args);

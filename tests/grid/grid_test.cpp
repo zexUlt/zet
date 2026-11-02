@@ -62,11 +62,32 @@ TEST_CASE("Create allocates a usable grid") {
     delete g;
 }
 
-TEST_CASE("Create rejects out-of-range dimensions") {
-    CHECK(!Grid::Create(0, 24).has_value());
-    CHECK(!Grid::Create(80, 0).has_value());
-    CHECK(!Grid::Create(MAX_COLS + 1, 24).has_value());
-    CHECK(!Grid::Create(80, MAX_ROWS + 1).has_value());
+TEST_CASE("Create clamps out-of-range dimensions") {
+    auto zero = Grid::Create(0, 0);
+    REQUIRE(zero.has_value());
+    CHECK(zero.value()->Cols() == 1);
+    CHECK(zero.value()->Rows() == 1);
+    delete zero.value();
+
+    auto wide = Grid::Create(MAX_COLS + 1, 10);
+    REQUIRE(wide.has_value());
+    CHECK(wide.value()->Cols() == MAX_COLS);
+    CHECK(wide.value()->Rows() == 10);
+    delete wide.value();
+
+    auto tall = Grid::Create(80, MAX_ROWS + 1);
+    REQUIRE(tall.has_value());
+    CHECK(tall.value()->Cols() == 80);
+    CHECK(tall.value()->Rows() == MAX_ROWS);
+    delete tall.value();
+}
+
+TEST_CASE("Create clamps rows so the screen fits MAX_SCREEN_CELLS") {
+    auto r = Grid::Create(MAX_COLS, MAX_ROWS);
+    REQUIRE(r.has_value());
+    CHECK(r.value()->Cols() == MAX_COLS);
+    CHECK(r.value()->Rows() == MAX_SCREEN_CELLS / MAX_COLS);
+    delete r.value();
 }
 
 TEST_CASE("Create with scrollback 0 is valid") {
@@ -539,55 +560,58 @@ TEST_CASE("Resize to zero is clamped to 1x1") {
     delete g;
 }
 
-TEST_CASE("Resize rejects out-of-range dimensions") {
+TEST_CASE("Resize clamps out-of-range dimensions") {
     Grid* g = MakeGrid(80, 24);
-    CHECK(g->Resize(MAX_COLS + 1, 24).error() == EGridError::SizeTooLarge);
-    CHECK(g->Resize(80, MAX_ROWS + 1).error() == EGridError::SizeTooLarge);
-    CHECK(g->Cols() == 80);
+    REQUIRE(g->Resize(MAX_COLS + 1, 24).has_value());
+    CHECK(g->Cols() == MAX_COLS);
     CHECK(g->Rows() == 24);
+    REQUIRE(g->Resize(80, MAX_ROWS + 1).has_value());
+    CHECK(g->Cols() == 80);
+    CHECK(g->Rows() == MAX_ROWS);
     delete g;
 }
 
-TEST_CASE("Resize rejects screens whose arenas exceed the Create budget") {
-    // 4096 x 1024 is within MAX_COLS/MAX_ROWS but needs ~200 MB for both
-    // screen arenas; Create refuses it, so Resize must too.
+TEST_CASE("Resize clamps oversize screens to the cell budget") {
+    // 4096 x 1024 is 4 Mi cells; rows are clamped to MAX_SCREEN_CELLS / cols.
     Grid* g = MakeGrid(80, 24);
-    auto r = g->Resize(4096, 1024);
-    REQUIRE_FALSE(r.has_value());
-    CHECK(r.error() == EGridError::SizeTooLarge);
-    CHECK(g->Cols() == 80);
-    CHECK(g->Rows() == 24);
+    REQUIRE(g->Resize(4096, 1024).has_value());
+    CHECK(g->Cols() == 4096);
+    CHECK(g->Rows() == 256);
+    CHECK(std::size_t{g->Cols()} * g->Rows() <= MAX_SCREEN_CELLS);
 
     // The grid is still usable.
     VtParser p;
     Feed(p, *g, "Z");
     CHECK(CP(*g, 0, 0) == U'Z');
+    Feed(p, *g, "\x1b[256;4096Hq");
+    CHECK(CP(*g, 255, 4095) == U'q');
     delete g;
 }
 
 TEST_CASE("Resize screen cap boundary matches Create") {
-    // Both arenas together must stay strictly below MAX_SCROLLBACK_BYTES.
-    // With MAX_COLS x MAX_ROWS = 4096 x 1024 the budget is hit exactly
-    // (rejected); one row less is the largest accepted size for that width.
-    constexpr std::size_t kLimitCells =
-        MAX_SCROLLBACK_BYTES / (sizeof(Cell) * 2);
-    static_assert(std::size_t{MAX_COLS} * MAX_ROWS == kLimitCells);
-
     Grid* g = MakeGrid(80, 24, 0);
-    CHECK(g->Resize(MAX_COLS, MAX_ROWS).error() == EGridError::SizeTooLarge);
-    CHECK(g->Cols() == 80);
-    CHECK(g->Rows() == 24);
 
-    REQUIRE(g->Resize(MAX_COLS, MAX_ROWS - 1).has_value());
-    CHECK(g->Cols() == MAX_COLS);
-    CHECK(g->Rows() == MAX_ROWS - 1);
+    // 1024 x 1024 is exactly MAX_SCREEN_CELLS: accepted as is.
+    REQUIRE(g->Resize(1024, 1024).has_value());
+    CHECK(g->Cols() == 1024);
+    CHECK(g->Rows() == 1024);
+
+    // One column more: rows = 1048576 / 1025 = 1023.
+    REQUIRE(g->Resize(1025, 1024).has_value());
+    CHECK(g->Cols() == 1025);
+    CHECK(g->Rows() == 1023);
     delete g;
 
-    // Create applies the same boundary.
-    CHECK_FALSE(Grid::Create(MAX_COLS, MAX_ROWS, 0).has_value());
-    auto ok = Grid::Create(MAX_COLS, MAX_ROWS - 1, 0);
-    REQUIRE(ok.has_value());
-    delete ok.value();
+    auto exact = Grid::Create(1024, 1024, 0);
+    REQUIRE(exact.has_value());
+    CHECK(exact.value()->Rows() == 1024);
+    delete exact.value();
+
+    auto over = Grid::Create(1025, 1024, 0);
+    REQUIRE(over.has_value());
+    CHECK(over.value()->Cols() == 1025);
+    CHECK(over.value()->Rows() == 1023);
+    delete over.value();
 }
 
 // ---------------------------------------------------------------------------
