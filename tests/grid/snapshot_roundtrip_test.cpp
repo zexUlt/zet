@@ -193,63 +193,63 @@ void Probe(const char* name, int cols, int rows, int sb, std::string_view input,
 
 }  // namespace
 
-TEST_CASE(" P01 colors 16/256/truecolor") {
+TEST_CASE("P01 colors 16/256/truecolor") {
     Probe("P01", 20, 6, 10,
           "\x1b[31mred\x1b[0m "
           "\x1b[1;92mbright\x1b[0m\r\n\x1b[38;5;200;48;5;17mi256\x1b[0m "
           "\x1b[38;2;1;2;3;48;2;250;251;252mtrue\x1b[0m\r\n"
           "\x1b[97;40mwb\x1b[0m\x1b[48;5;9mbg9\x1b[0m");
 }
-TEST_CASE(" P02 all attrs") {
+TEST_CASE("P02 all attrs") {
     Probe("P02", 20, 4, 10,
           "\x1b[1mB\x1b[2mD\x1b[3mI\x1b[4mU\x1b[5mK\x1b[7mV\x1b[8mX\x1b["
           "9mS\x1b[0m plain\x1b[1;3;5;7;9mmix");
 }
-TEST_CASE(" P03 underline styles + colour") {
+TEST_CASE("P03 underline styles + colour") {
     Probe("P03", 30, 4, 10,
           "\x1b[4:1mA\x1b[4:2mB\x1b[4:3mC\x1b[4:4mD\x1b[4:5mE\x1b[0m\r\n\x1b[4;"
           "58;5;9mulc\x1b[0m \x1b[4:3;58;5;200mcurly\x1b[0m");
 }
-TEST_CASE(" P04 ul colour without underline attr") {
+TEST_CASE("P04 ul colour without underline attr") {
     Probe("P04", 20, 4, 10, "\x1b[58;5;5mabc\x1b[0m\r\nplain");
 }
-TEST_CASE(" P05 scrollback coloured") {
+TEST_CASE("P05 scrollback coloured") {
     std::string in;
     for (int i = 0; i < 30; ++i)
         in += "\x1b[3" + std::to_string(i % 8) + "mline " + std::to_string(i) +
               "\x1b[0m\r\n";
     Probe("P05", 20, 10, 100, in);
 }
-TEST_CASE(" P06 scrollback ring overflow") {
+TEST_CASE("P06 scrollback ring overflow") {
     std::string in;
     for (int i = 0; i < 80; ++i) in += "L" + std::to_string(i) + "\r\n";
     Probe("P06", 12, 5, 20, in);
 }
-TEST_CASE(" P07 DECSC + colors then more movement") {
+TEST_CASE("P07 DECSC + colors then more movement") {
     Probe("P07", 20, 8, 10,
           "\x1b[3;4H\x1b[1;31;44m\x1b"
           "7\x1b[0m\x1b[6;10Hxyz",
           "\x1b"
           "8Q");
 }
-TEST_CASE(" P08 DECSTBM + DECOM cursor") {
+TEST_CASE("P08 DECSTBM + DECOM cursor") {
     Probe("P08", 20, 10, 10, "\x1b[3;7r\x1b[?6h\x1b[2;5Hhi",
           "X\x1b[?6l\x1b[1;1HZ");
 }
-TEST_CASE(" P09 DECOM + saved cursor inside region") {
+TEST_CASE("P09 DECOM + saved cursor inside region") {
     Probe("P09", 20, 10, 10,
           "\x1b[3;7r\x1b[?6h\x1b[2;5H\x1b"
           "7\x1b[4;4Hq",
           "\x1b"
           "8W");
 }
-TEST_CASE(" P10 alt screen main preserved") {
+TEST_CASE("P10 alt screen main preserved") {
     Probe("P10", 20, 6, 20,
           "m1\r\nm2\r\nm3\r\nm4\r\nm5\r\nm6\r\nm7\r\nm8\x1b[?1049h\x1b[2;"
           "2Halt\x1b[4;1Hmore",
           "\x1b[?1049l");
 }
-TEST_CASE(" P11 DECSC in main, then alt, then DECSC in alt, leave alt") {
+TEST_CASE("P11 DECSC in main, then alt, then DECSC in alt, leave alt") {
     Probe("P11", 20, 8, 10,
           "main\x1b[3;5H\x1b[32m\x1b"
           "7\x1b[0m\x1b[5;5H\x1b[?1049h\x1b[2;2Halt\x1b[4;4H\x1b"
@@ -257,105 +257,105 @@ TEST_CASE(" P11 DECSC in main, then alt, then DECSC in alt, leave alt") {
           "\x1b[?1049l\x1b"
           "8!");
 }
-TEST_CASE(" P12 alt screen, cursor in main before entering") {
+TEST_CASE("P12 alt screen, cursor in main before entering") {
     Probe("P12", 20, 8, 10, "\x1b[7;7Hmain\x1b[?1049h\x1b[1;1Halt",
           "\x1b[?1049l");
 }
-TEST_CASE(" P13 pending wrap at last col") {
+TEST_CASE("P13 pending wrap at last col") {
     Probe("P13", 10, 4, 10, "0123456789", "Z");
 }
-TEST_CASE(" P14 pending wrap with coloured pen: live pen") {
+TEST_CASE("P14 pending wrap with coloured pen: live pen") {
     Probe("P14", 10, 4, 10, "\x1b[31m0123456789\x1b[1;42m", "Z");
 }
-TEST_CASE(" P15 pending wrap, cell has attrs, pen differs") {
+TEST_CASE("P15 pending wrap, cell has attrs, pen differs") {
     Probe("P15", 10, 4, 10, "\x1b[1;34m012345678\x1b[0;4m9", "Z");
 }
-TEST_CASE(" P16 insert mode") {
+TEST_CASE("P16 insert mode") {
     Probe("P16", 20, 4, 10, "abcdef\x1b[1;3H\x1b[4h", "XY");
 }
-TEST_CASE(" P17 cursor hidden") { Probe("P17", 20, 4, 10, "abc\x1b[?25l"); }
-TEST_CASE(" P18 wide char at right edge (pending wrap on continuation)") {
+TEST_CASE("P17 cursor hidden") { Probe("P17", 20, 4, 10, "abc\x1b[?25l"); }
+TEST_CASE("P18 wide char at right edge (pending wrap on continuation)") {
     Probe("P18", 10, 4, 10, "12345678\xe4\xb8\xad", "Z");
 }
-TEST_CASE(" P19 wide char wraps at last col") {
+TEST_CASE("P19 wide char wraps at last col") {
     Probe("P19", 10, 4, 10,
           "123456789\xe4\xb8\xad"
           "x");
 }
-TEST_CASE(" P20 graphics charset G0 + pending wrap") {
+TEST_CASE("P20 graphics charset G0 + pending wrap") {
     Probe("P20", 10, 4, 10, "012345678q\x1b(0", "q");
 }
-TEST_CASE(" P21 G1 graphics + SO") {
+TEST_CASE("P21 G1 graphics + SO") {
     Probe("P21", 10, 4, 10, "abc\x1b)0\x0e", "qx");
 }
-TEST_CASE(" P22 custom tab stops") {
+TEST_CASE("P22 custom tab stops") {
     Probe("P22", 40, 4, 10,
           "\x1b[3g\x1b[1;5H\x1bH\x1b[1;13H\x1bH\x1b[1;1Ha\tb\tc", "\td");
 }
-TEST_CASE(" P23 mouse/paste/focus/ckm/lnm") {
+TEST_CASE("P23 mouse/paste/focus/ckm/lnm") {
     Probe("P23", 20, 4, 10,
           "\x1b[?1h\x1b[?1000h\x1b[?1006h\x1b[?2004h\x1b[?1004h\x1b[20h\x1b[?"
           "1002h\x1b[?1003h\x1b[?1005h\x1b[?1015h",
           "\n");
 }
-TEST_CASE(" P24 autowrap off at right edge") {
+TEST_CASE("P24 autowrap off at right edge") {
     Probe("P24", 10, 4, 10, "\x1b[?7l0123456789ABC", "Z");
 }
-TEST_CASE(" P25 history with ul-colour-only last cell then plain screen") {
+TEST_CASE("P25 history with ul-colour-only last cell then plain screen") {
     std::string in = "\x1b[58;5;7mxx\x1b[0m\r\n\r\n\r\n\r\n\r\n\r\nscreen";
     Probe("P25", 20, 4, 10, in);
 }
-TEST_CASE(" P26 bg erase cells") {
+TEST_CASE("P26 bg erase cells") {
     Probe("P26", 20, 4, 10,
           "\x1b[44mab\x1b[K\r\n\x1b[41m\x1b[2K\x1b[0m\x1b[3;3H\x1b[45m\x1b[3X");
 }
-TEST_CASE(" P27 full-width rows + history") {
+TEST_CASE("P27 full-width rows + history") {
     std::string in;
     for (int i = 0; i < 12; ++i)
         in += std::string(10, static_cast<char>('a' + i)) + "\r\n";
     Probe("P27", 10, 5, 20, in);
 }
-TEST_CASE(" P28 one-row grid with history") {
+TEST_CASE("P28 one-row grid with history") {
     Probe("P28", 10, 1, 20, "a\r\nb\r\nc\r\nd");
 }
-TEST_CASE(" P29 emoji 4-byte + wide in history") {
+TEST_CASE("P29 emoji 4-byte + wide in history") {
     std::string in;
     for (int i = 0; i < 8; ++i)
         in += "\xf0\x9f\x98\x80 \xe4\xb8\xad\xe6\x96\x87\r\n";
     Probe("P29", 10, 4, 20, in);
 }
-TEST_CASE(" P30 wide char in last two cols of history rows") {
+TEST_CASE("P30 wide char in last two cols of history rows") {
     std::string in;
     for (int i = 0; i < 6; ++i) in += "12345678\xe4\xb8\xad\r\n";
     Probe("P30", 10, 4, 20, in);
 }
-TEST_CASE(" P31 alt screen + pending wrap + colors") {
+TEST_CASE("P31 alt screen + pending wrap + colors") {
     Probe("P31", 10, 4, 10, "m\x1b[?1049h\x1b[33m0123456789", "Z\x1b[?1049l");
 }
-TEST_CASE(" P32 region + scrollback (region scrolled)") {
+TEST_CASE("P32 region + scrollback (region scrolled)") {
     std::string in = "\x1b[2;4r\x1b[4;1H";
     for (int i = 0; i < 6; ++i) in += "r" + std::to_string(i) + "\r\n";
     in += "\x1b[r";
     for (int i = 0; i < 10; ++i) in += "s" + std::to_string(i) + "\r\n";
     Probe("P32", 10, 6, 20, in);
 }
-TEST_CASE(" P33 DECSCUSR + title-ish stuff") {
+TEST_CASE("P33 DECSCUSR + title-ish stuff") {
     Probe("P33", 10, 4, 10, "\x1b[5 qabc");
 }
-TEST_CASE(" P34 alt screen + DECOM region") {
+TEST_CASE("P34 alt screen + DECOM region") {
     Probe("P34", 20, 8, 10, "x\x1b[?1049h\x1b[2;6r\x1b[?6h\x1b[3;3Hhey",
           "k\x1b[?1049l");
 }
-TEST_CASE(" P35 pending wrap with IRM on") {
+TEST_CASE("P35 pending wrap with IRM on") {
     Probe("P35", 10, 4, 10, "\x1b[4h0123456789", "Z");
 }
-TEST_CASE(" P36 pending wrap with DECOM") {
+TEST_CASE("P36 pending wrap with DECOM") {
     Probe("P36", 10, 8, 10, "\x1b[3;6r\x1b[?6h\x1b[1;1H0123456789", "Z");
 }
-TEST_CASE(" P37 grid with sync output left on in source") {
+TEST_CASE("P37 grid with sync output left on in source") {
     Probe("P37", 10, 4, 10, "abc\x1b[?2026h");
 }
-TEST_CASE(" P38 idempotent re-snapshot") {
+TEST_CASE("P38 idempotent re-snapshot") {
     Grid* a = Mk(12, 5, 20);
     VtParser p;
     std::string in;
@@ -374,9 +374,13 @@ TEST_CASE(" P38 idempotent re-snapshot") {
     auto b2 = s2.value()->Bytes();
     CHECK(b1.size() == b2.size());
     CHECK((b1.size() == b2.size() && !memcmp(b1.data(), b2.data(), b1.size())));
+    delete s2.value();
+    delete s1.value();
+    delete b;
+    delete a;
 }
 TEST_CASE(
-    " P39 DECSTR-surviving hostile prior state: snapshot into dirty grid") {
+    "P39 DECSTR-surviving hostile prior state: snapshot into dirty grid") {
     // fresh-grid target is clean; try a dirty target: restore into grid with
     // junk state.
     Grid* src = Mk(10, 4, 10);
@@ -394,8 +398,11 @@ TEST_CASE(
     Compare(d, *src, *dst);
     INFO(d.Out);
     CHECK(d.N == 0);
+    delete snap.value();
+    delete dst;
+    delete src;
 }
-TEST_CASE(" P40 dirty target with scrollback junk") {
+TEST_CASE("P40 dirty target with scrollback junk") {
     Grid* src = Mk(10, 4, 10);
     VtParser sp;
     Feed(sp, *src, "h1\r\nh2\r\nh3\r\nh4\r\nh5\r\nh6");
@@ -412,10 +419,13 @@ TEST_CASE(" P40 dirty target with scrollback junk") {
     // existing scrollback.  The visible screen must match; scrollback may
     // differ.  This is expected, so use WARN (info-only, never a hard fail).
     WARN_MESSAGE(d.N == 0, "scrollback junk (expected: no CSI 3J by design)");
+    delete snap.value();
+    delete dst;
+    delete src;
 }
 
 // ---- Hostile cells ----
-TEST_CASE(" H1 hostile codepoints via PutChar") {
+TEST_CASE("H1 hostile codepoints via PutChar") {
     Grid* g = Mk(20, 3, 10);
     const char32_t bad[] = {0x1b, 0x9b, 0x9d, 0x90,   0x9c,     0x07,      0x18,
                             0x1a, 0x7f, 0x85, 0xD800, 0x110000, 0xFFFFFFFF};
@@ -465,8 +475,13 @@ TEST_CASE(" H1 hostile codepoints via PutChar") {
     }
     CHECK(c1 == 0);
     (void)esc;
+    delete st.value();
+    delete twin;
+    delete dst;
+    delete s.value();
+    delete g;
 }
-TEST_CASE(" H2 bidi / line-separator codepoints pass through (info)") {
+TEST_CASE("H2 bidi / line-separator codepoints pass through (info)") {
     Grid* g = Mk(20, 3, 10);
     const char32_t bidi[] = {0x202A, 0x202B, 0x202C, 0x202D, 0x202E, 0x2066,
                              0x2067, 0x2068, 0x2069, 0x200E, 0x200F, 0x061C,
@@ -520,8 +535,10 @@ TEST_CASE(" H2 bidi / line-separator codepoints pass through (info)") {
     MESSAGE("bidi/separator codepoints stored in cells: "
             << in_cells << ", E2 80/81 sequences in snapshot: " << found);
     CHECK(true);
+    delete s.value();
+    delete g;
 }
-TEST_CASE(" H3 title/OSC cannot reach snapshot") {
+TEST_CASE("H3 title/OSC cannot reach snapshot") {
     Grid* g = Mk(20, 3, 10);
     VtParser p;
     Feed(p, *g,
@@ -533,15 +550,17 @@ TEST_CASE(" H3 title/OSC cannot reach snapshot") {
     CHECK(str.find("evil") == std::string::npos);
     CHECK(str.find("payload") == std::string::npos);
     CHECK(str.find("]52") == std::string::npos);
+    delete s.value();
+    delete g;
 }
-TEST_CASE(" P41 pending wrap with AWM off then re-enabled") {
+TEST_CASE("P41 pending wrap with AWM off then re-enabled") {
     Probe("P41", 10, 4, 10, "\x1b[?7l0123456789", "\x1b[?7hZ");
 }
-TEST_CASE(" P42 alt screen, main cursor mid-screen, exit alt") {
+TEST_CASE("P42 alt screen, main cursor mid-screen, exit alt") {
     Probe("P42", 20, 8, 10, "abc\r\ndef\x1b[3;7H\x1b[?1049h\x1b[1;1Halt",
           "\x1b[?1049lX");
 }
-TEST_CASE(" P43 alt screen, no DECSC anywhere, main blank bottom") {
+TEST_CASE("P43 alt screen, no DECSC anywhere, main blank bottom") {
     Probe("P43", 20, 8, 10, "top\x1b[2;2H\x1b[?1049h", "\x1b[?1049lX");
 }
 #pragma clang diagnostic pop
