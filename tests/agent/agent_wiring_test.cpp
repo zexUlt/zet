@@ -372,6 +372,7 @@ public:
         auto c = Connect();
         c->QueueResize(rows, cols);
         REQUIRE(c->RunUntil(8000, [&] { return c->IsLive(); }));
+        c->Run(200);  // the Resize follows the Resume; let the agent take it
     }
 
     ClientSession& Session() { return Sess_; }
@@ -857,6 +858,34 @@ TEST_CASE_FIXTURE(SodiumFixture,
     c->QueueResize(24, 80);
     const auto start = std::chrono::steady_clock::now();
     REQUIRE(rig.AwaitSnapshot(*c));
+    CHECK(std::chrono::steady_clock::now() - start <
+          std::chrono::milliseconds{1500});
+}
+
+// ── Agent: a snapshot owed with no size known is requested at once ──────────
+//
+// Without a known terminal size there is no Resize to wait for, so the
+// snapshot request is due as soon as the Resume is taken.  No byte follows
+// and no timer was set: the connection has to report itself due.
+//
+// Kills: AgentConnection::NextDeadline not reporting an owed NeedsSnapshot.
+
+TEST_CASE_FIXTURE(SodiumFixture,
+                  "Agent: a snapshot owed with no known size is requested at "
+                  "once") {
+    AgentRig rig{79};
+    {
+        auto c = rig.Connect();  // never sends a Resize
+        REQUIRE(c->RunUntil(8000, [&] { return c->IsLive(); }));
+        c->Run(200);
+    }
+    SleepMs(300);
+    rig.PtyPrints(std::vector<std::byte>(OVERFLOW_BYTES, std::byte{'A'}));
+    SleepMs(300);
+
+    auto c = rig.Connect();
+    const auto start = std::chrono::steady_clock::now();
+    REQUIRE(rig.AwaitSnapshot(*c, 5000));
     CHECK(std::chrono::steady_clock::now() - start <
           std::chrono::milliseconds{1500});
 }

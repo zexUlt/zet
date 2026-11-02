@@ -63,6 +63,13 @@ Deadline ConnectionBase::NextDeadline() const noexcept {
 // ── AgentConnection ────────────────────────────────────────────────────
 
 Deadline AgentConnection::NextDeadline() const noexcept {
+    // A NeedsSnapshot the next Pump owes is due now.  With a known size the
+    // Resize wait puts a deadline on it; without one nothing else would wake a
+    // caller that sleeps until a byte or a deadline.
+    if (!Failed_ && Stage_ == EStage::AwaitSnapshot && !WaitForResize_ &&
+        !SnapshotReminderSent_) {
+        return Deadline{Timestamp{}};
+    }
     return Earliest(
         Earliest(Earliest(ConnectionBase::NextDeadline(),
                           ResizeWaitDeadline_ ? Deadline{*ResizeWaitDeadline_}
@@ -510,11 +517,19 @@ ConnectionResult AgentConnection::PumpResume(Timestamp now, MutableByteSpan out,
     QueueEnd();
     // Straight on: the resend is waiting, and an Idle here would tell the
     // caller there is nothing to do until the client speaks again.
-    return PumpLive(
+    auto result = PumpLive(
         now, out, scratch, [] {},
         [](const DeliveredGridSnapshot&) -> std::optional<ConnectionResult> {
             return std::nullopt;
         });
+    // A Resize read together with the Resume comes out of this call, not out
+    // of Pump's Live case; the size must reach the session either way.
+    if (result) {
+        if (const auto* resized = std::get_if<Resized>(&*result)) {
+            Handle_->ReportResize(resized->Size);
+        }
+    }
+    return result;
 }
 
 ConnectionResult AgentConnection::PumpAwaitSnapshot(
