@@ -61,6 +61,10 @@ def test_input_the_pty_cannot_take_yet_does_not_stall_the_output(zet: Zet, clean
         terminal.expect(b"ready\n")
 
         received = _exchange(terminal, keystrokes)
+        # End the shell, so that the agent goes with it rather than lingering
+        # until its orphan timeout with the installed binary still open.
+        terminal.send(_typed("exit 0"))
+        assert terminal.finish() == 0
     finally:
         terminal.kill()
 
