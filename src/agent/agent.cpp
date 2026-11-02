@@ -1,6 +1,8 @@
 #include "agent.hpp"
 
+#include "grid_pump.hpp"
 #include "mux_link.hpp"
+#include "pump_test_api.hpp"
 
 #include <fcntl.h>
 #include <poll.h>
@@ -11,6 +13,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cerrno>
 #include <chrono>
 #include <cstddef>
@@ -358,11 +361,12 @@ private:
 /// One TCP connection and what it has not written yet.
 struct Connection {
     Connection(io::UniqueFd socket, std::uint64_t token, Timestamp now,
-               std::size_t outputLimit)
+               std::size_t outputLimit,
+               std::uint16_t ceiling = wire::PROTOCOL_VERSION_MAX)
         : Socket(std::move(socket)),
           Watch(Socket.Get(), token),
           Frames(session::CONNECTION_FRAME_STORAGE),
-          Link(MutableByteSpan{Frames}, now),
+          Link(MutableByteSpan{Frames}, now, ceiling),
           Output(outputLimit) {}
 
     io::UniqueFd Socket;
@@ -414,6 +418,7 @@ public:
 private:
     [[nodiscard]] bool Start() noexcept;
     void MovePtyOutput() noexcept;
+    void TrySupplySnapshot(Timestamp now) noexcept;
     void Pump(Connection& connection, Timestamp now) noexcept;
     void DropClosed(Timestamp now) noexcept;
     [[nodiscard]] bool UpdateInterest() noexcept;
@@ -429,6 +434,11 @@ private:
     [[nodiscard]] int Hangup() noexcept;
     [[nodiscard]] Connection* Find(std::uint64_t token) noexcept;
 
+    friend int RunAgentForTestImpl(AgentTestConfig cfg) noexcept;
+    [[nodiscard]] bool StartForTest(io::UniqueFd ptyFd,
+                                    std::uint16_t ceiling) noexcept;
+    [[nodiscard]] int RunLoop(std::optional<Timestamp> giveUpAt) noexcept;
+
     Config Config_;
     /// What the client asked the shell's environment to have (§4).
     wire::BootstrapEnvironment ShellEnvironment_;
@@ -441,6 +451,21 @@ private:
     crypto::Key LocalSecret_;
     std::optional<app::Registration> ListenerWatch_;
     std::vector<HandedOver> HandedOver_;
+
+    // ── Grid: tracks the terminal state across reconnects. §9 ADR-030. ────
+
+    /// Owned per-session grid+parser+snapshot state; created in Start().
+    std::unique_ptr<GridPump> GridPump_;
+
+    /// How many bytes of PtyRead_[0..PtyTo_] have been fed to GridPump_.
+    /// Advances with PtyTo_; reset to 0 when PtyFrom_/PtyTo_ are reset.
+    std::size_t GridFed_{0};
+
+    /// The connection that triggered NeedsSnapshot; cleared after snapshot
+    /// emission completes (GridEmissionDone) or the connection closes.
+    Connection* SnapWaitConn_{nullptr};
+
+    // ── Pty ─────────────────────────────────────────────────────────────────
 
     io::Child Child_;
     std::optional<app::Registration> PtyWatch_;
@@ -455,6 +480,10 @@ private:
     std::uint64_t NextToken_{FIRST_CONNECTION_TOKEN};
     bool EndDelivered_{false};
     bool Terminating_{false};
+    /// Non-zero only in tests: ceiling passed to every accepted connection.
+    std::uint16_t TestCeiling_{0};
+    /// Set only in tests: ends RunLoop when it reads true.
+    const std::atomic<bool>* TestStop_{nullptr};
 
     std::array<std::byte, session::CONNECTION_OUT_SIZE> Out_{};
     std::array<std::byte, session::CONNECTION_SCRATCH_SIZE> Scratch_{};
@@ -467,6 +496,13 @@ bool Agent::Start() noexcept {
             return false;
         }
     }
+    auto gp = GridPump::Create(INITIAL_SIZE.Cols, INITIAL_SIZE.Rows);
+    if (!gp) {
+        Log(log::ELevel::Error, "cannot create the grid");
+        return false;
+    }
+    GridPump_ = std::move(*gp);
+
     const ShellCommand shell{ShellEnvironment_};
     auto child = io::Spawn(shell.Spec());
     if (!child) {
@@ -491,9 +527,17 @@ int Agent::Run() noexcept {
     if (!Start()) {
         return FAILURE_STATUS;
     }
+    return RunLoop(std::nullopt);
+}
+
+int Agent::RunLoop(std::optional<Timestamp> giveUpAt) noexcept {
     std::array<io::PollEvent, EVENTS_PER_WAIT> events{};
     for (;;) {
         const Timestamp now = io::MonotonicNow();
+        if ((giveUpAt && now >= *giveUpAt) ||
+            (TestStop_ && TestStop_->load())) {
+            return FAILURE_STATUS;
+        }
         Session_.OnTimer(now);
         if (Session_.State() == session::ESessionState::Reaped ||
             Terminating_) {
@@ -503,6 +547,7 @@ int Agent::Run() noexcept {
             Mux_->OnTimer(Poller_, now);
         }
         MovePtyOutput();
+        TrySupplySnapshot(now);
         if (ChildStatus_ && PtyEnded_ && PtyFrom_ == PtyTo_ &&
             !Session_.HasEnded()) {
             Session_.End(EndOf(*ChildStatus_));
@@ -524,7 +569,10 @@ int Agent::Run() noexcept {
         if (!UpdateInterest()) {
             return Hangup();
         }
-        const auto ready = Poller_.Wait(events, NextDeadline(), now);
+        const Deadline waitDeadline =
+            giveUpAt ? Earliest(NextDeadline(), Deadline(*giveUpAt))
+                     : NextDeadline();
+        const auto ready = Poller_.Wait(events, waitDeadline, now);
         if (!ready) {
             Log(log::ELevel::Error, "the poller failed");
             return Hangup();
@@ -535,13 +583,37 @@ int Agent::Run() noexcept {
     }
 }
 
+bool Agent::StartForTest(io::UniqueFd ptyFd, std::uint16_t ceiling) noexcept {
+    TestCeiling_ = ceiling;
+    auto gp = GridPump::Create(INITIAL_SIZE.Cols, INITIAL_SIZE.Rows);
+    if (!gp) {
+        return false;
+    }
+    GridPump_ = std::move(*gp);
+    Child_.Master = std::move(ptyFd);
+    // Pre-set ChildStatus_ so Hangup() skips kill/waitpid.
+    ChildStatus_ = io::ExitStatus{};
+    PtyWatch_.emplace(Child_.Master.Get(), PTY_TOKEN);
+    // Registrations are added on the first UpdateInterest() call in RunLoop.
+    return true;
+}
+
 void Agent::MovePtyOutput() noexcept {
+    // Feed all bytes the grid has not yet seen — before the session write, so
+    // the grid always tracks the full terminal output regardless of what the
+    // session buffers or drops in Resync mode. §9 ADR-030.
+    if (GridPump_ && GridFed_ < PtyTo_) {
+        const std::size_t newBytes = PtyTo_ - GridFed_;
+        GridPump_->FeedBytes(PtyRead_.data() + GridFed_, newBytes);
+        GridFed_ = PtyTo_;
+    }
+
     while (PtyFrom_ < PtyTo_ && Session_.AcceptsWrites()) {
         const auto taken = Session_.Write(
             ByteSpan{PtyRead_}.subspan(PtyFrom_, PtyTo_ - PtyFrom_));
         if (!taken || *taken == 0) {
             // An overflow while detached reaps the session; the top of the
-            // loop sees it.
+            // loop sees it. The grid has already seen these bytes above.
             return;
         }
         PtyFrom_ += *taken;
@@ -549,7 +621,61 @@ void Agent::MovePtyOutput() noexcept {
     if (PtyFrom_ == PtyTo_) {
         PtyFrom_ = 0;
         PtyTo_ = 0;
+        GridFed_ = 0;
     }
+}
+
+void Agent::TrySupplySnapshot(Timestamp now) noexcept {
+    if (!GridPump_ || !SnapWaitConn_) {
+        return;
+    }
+
+    // Check if the requesting connection is still alive.
+    bool alive = false;
+    for (auto& c : Connections_) {
+        if (c.get() == SnapWaitConn_ && !c->Closing) {
+            alive = true;
+            break;
+        }
+    }
+    if (!alive) {
+        GridPump_->CancelPendingSnap();
+        SnapWaitConn_ = nullptr;
+        return;
+    }
+
+    // Release snapshot bytes once GridEnd has been sent. §9 ADR-030.
+    if (GridPump_->HasSnapshot() && SnapWaitConn_->Link.GridEmissionDone()) {
+        GridPump_->ReleaseSnapshot();
+        SnapWaitConn_ = nullptr;
+        return;
+    }
+
+    if (GridPump_->HasSnapshot()) {
+        return;  // snapshot emitting, not yet done
+    }
+
+    auto result = GridPump_->TryBuild(now);
+    if (!result) {
+        const bool tooLarge =
+            (result.error() == grid::EGridError::SnapshotTooLarge);
+        Log(log::ELevel::Warn, tooLarge ? "grid snapshot too large"
+                                        : "grid snapshot alloc failed");
+        SnapWaitConn_->Closing = true;
+        SnapWaitConn_ = nullptr;
+        return;
+    }
+    if (!result->has_value()) {
+        return;  // still waiting for parser Ground
+    }
+
+    const auto& ready = **result;
+    SnapWaitConn_->Link.SupplySnapshot(now, ready.Bytes, ready.ScrollbackLen,
+                                       ready.Flags);
+    // Drop bytes that were fed to the grid but not yet written to the
+    // new session generation — they belong to the pre-snapshot stream. §9.
+    PtyFrom_ = PtyTo_;
+    // SnapWaitConn_ stays set; next call will detect GridEmissionDone.
 }
 
 void Agent::Pump(Connection& connection, Timestamp now) noexcept {
@@ -590,12 +716,42 @@ void Agent::Pump(Connection& connection, Timestamp now) noexcept {
             }
         } else if (const auto* resized =
                        std::get_if<session::Resized>(&event)) {
-            static_cast<void>(
-                io::Resize(Child_.Master.Get(),
-                           io::WindowSize{.Rows = resized->Size.Rows,
-                                          .Cols = resized->Size.Cols,
-                                          .XPixels = resized->Size.XPixel,
-                                          .YPixels = resized->Size.YPixel}));
+            const io::WindowSize ws{.Rows = resized->Size.Rows,
+                                    .Cols = resized->Size.Cols,
+                                    .XPixels = resized->Size.XPixel,
+                                    .YPixels = resized->Size.YPixel};
+            // Keep the grid in sync before resizing the pty. On error keep
+            // both at current size (no pty resize) so they stay consistent.
+            if (GridPump_) {
+                if (auto r = GridPump_->HandleResize(ws.Cols, ws.Rows); !r) {
+                    Log(log::ELevel::Warn,
+                        "grid resize failed; keeping current size");
+                    return;
+                }
+            }
+            static_cast<void>(io::Resize(Child_.Master.Get(), ws));
+        } else if (const auto* ns =
+                       std::get_if<session::NeedsSnapshot>(&event)) {
+            // Arm ground-wait; supply immediately if parser is already in
+            // Ground — no need to wait for the next loop iteration. §9 ADR-030.
+            SnapWaitConn_ = &connection;
+            bool suppliedInline = false;
+            if (GridPump_) {
+                if (auto ready =
+                        GridPump_->OnNeedsSnapshot(ns->Rows, ns->Cols, now)) {
+                    connection.Link.SupplySnapshot(
+                        now, ready->Bytes, ready->ScrollbackLen, ready->Flags);
+                    PtyFrom_ = PtyTo_;
+                    suppliedInline = true;
+                }
+            }
+            // When the snapshot was supplied inline the connection is now Live;
+            // fall through so Channel_->Poll() generates grid frames into
+            // Output before UpdateInterest runs.  When it was not (parser not
+            // in Ground), stop here — TrySupplySnapshot will drive emission.
+            if (!suppliedInline) {
+                return;
+            }
         } else if (std::holds_alternative<session::Idle>(event)) {
             return;
         }
@@ -627,8 +783,10 @@ bool Agent::UpdateInterest() noexcept {
         Mux_->UpdateInterest(Poller_, io::MonotonicNow());
     }
     if (PtyWatch_) {
-        const bool read =
-            !PtyEnded_ && PtyFrom_ == PtyTo_ && Session_.AcceptsWrites();
+        // Always watch for pty data/EOF while the buffer is drained; not
+        // gated on AcceptsWrites so a pty POLLHUP is never missed when the
+        // last client disconnects before the shell exits.
+        const bool read = !PtyEnded_ && PtyFrom_ == PtyTo_;
         // Once the shell has gone, nothing reads what we write to it.
         const bool write = !PtyInput_.Empty() && !ChildStatus_;
         ok = static_cast<bool>(PtyWatch_->Want(Poller_, read, write)) && ok;
@@ -648,6 +806,9 @@ Deadline Agent::NextDeadline() const noexcept {
     Deadline next = Session_.NextDeadline();
     if (Mux_) {
         next = Earliest(next, Mux_->NextDeadline());
+    }
+    if (GridPump_ && GridPump_->HasPendingSnap()) {
+        next = Earliest(next, GridPump_->NextDeadline());
     }
     for (const auto& connection : Connections_) {
         next = Earliest(next, connection->Link.NextDeadline());
@@ -723,9 +884,11 @@ void Agent::AcceptAll() noexcept {
             Log(log::ELevel::Warn, "too many connections; refusing one");
             continue;
         }
+        const std::uint16_t ceiling =
+            TestCeiling_ ? TestCeiling_ : wire::PROTOCOL_VERSION_MAX;
         Connections_.push_back(std::make_unique<Connection>(
             std::move(*socket), NextToken_++, io::MonotonicNow(),
-            Config_.Limits.ResendMax + SOCKET_OUTPUT_SLACK));
+            Config_.Limits.ResendMax + SOCKET_OUTPUT_SLACK, ceiling));
         Log(log::ELevel::Info, "connection accepted");
     }
 }
@@ -877,7 +1040,39 @@ int Agent::Hangup() noexcept {
     return 0;
 }
 
+// Defined inside the anonymous namespace so it can access Agent's private
+// members via the friend declaration, Config, Bootstrapped, and FAILURE_STATUS.
+int RunAgentForTestImpl(AgentTestConfig cfg) noexcept {
+    auto maybePoller = io::Poller::Create();
+    if (!maybePoller) {
+        return FAILURE_STATUS;
+    }
+    Config config;
+    config.Limits = cfg.Limits;
+    Bootstrapped bootstrapped;
+    bootstrapped.Result.Secrets = std::move(cfg.Secrets);
+    bootstrapped.Listener = std::move(cfg.Listen);
+    auto agentObj = std::make_unique<Agent>(
+        std::move(config), std::move(bootstrapped), std::move(*maybePoller));
+    if (!agentObj->StartForTest(std::move(cfg.PtyReadFd), cfg.Ceiling)) {
+        return FAILURE_STATUS;
+    }
+    agentObj->TestStop_ = cfg.Stop;
+    const std::optional<Timestamp> giveUpAt =
+        cfg.GiveUpAfter ? std::optional{io::MonotonicNow() + *cfg.GiveUpAfter}
+                        : std::nullopt;
+    const int status = agentObj->RunLoop(giveUpAt);
+    if (cfg.Inspect && agentObj->GridPump_) {
+        cfg.Inspect(*agentObj->GridPump_);
+    }
+    return status;
+}
+
 }  // namespace
+
+int RunAgentForTest(AgentTestConfig config) noexcept {
+    return RunAgentForTestImpl(std::move(config));
+}
 
 int Main(std::span<char*> args) noexcept {
     auto config = ReadConfig(args);
