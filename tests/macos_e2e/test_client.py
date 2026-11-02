@@ -35,7 +35,11 @@ CUT_RANGE = (512 * 1024, 2 * 1024 * 1024)
 
 CUT_SEED = int(os.environ.get("ZET_E2E_SEED", "23"))
 
-DEFAULT_ORPHAN_TIMEOUT_S = 20
+# A client whose terminal is drained slowly counts no silence while it holds
+# back (design.md §9), so it finds a cut only after the backlog on its side,
+# up to a few MiB, has been shown. The agent must not give the session up
+# before that.
+DEFAULT_ORPHAN_TIMEOUT_S = 120
 
 
 # PENDIN in macOS's lflag: "retype pending input", set by the tty driver
