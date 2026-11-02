@@ -1,25 +1,32 @@
 /// Tests for the client-side snapshot wiring (§9 path B, ADR-035):
-///   • TryWriteSnapshot writes bytes correctly and detects errors.
-///   • ClientConnection at ceiling=2 with gridCapable=true produces an
-///     ApplySnapshot event; ConfirmApply causes GridApplied; DenyApply does
-///     not.
-///   • A non-capable client at ceiling=2 receives SessionOverflowed when the
-///     ring overflows — the Run loop maps this to OVERFLOW_STATUS with no
-///     reconnect attempt.
+///   24. TryWriteSnapshot writes bytes correctly.
+///   25. TryWriteSnapshot returns false on write error.
+///   26. Client::Pump: snapshot bytes reach the stdout pipe.
+///   27. Client::Pump: ConfirmApply deferred until stdout drains.
+///   28. Client::Pump: DenyApply + drop when snapshot too large.
+///   29. Client::Pump: SNAPSHOT_RESTORE_NOTICE on stderr after success.
+///   30. Client::Pump: SessionEnd{Overflow} exits with OVERFLOW_STATUS.
 ///
-/// Tests are in the ZET_HAVE_IO section of CMakeLists.txt because
-/// TryWriteSnapshot needs real I/O (pipes), and zet_client_loop is an
-/// IO-dependent library.
+/// Tests 26-30 drive the real Client via RunSessionForTest over a socketpair
+/// whose other end is an in-process AgentConnection.
 
 #include "client.hpp"
+#include "pump_test_api.hpp"
 
 #include <doctest/doctest.h>
 
-#include <fcntl.h>
+#include <poll.h>
 #include <unistd.h>
+
 #include <array>
+#include <chrono>
+#include <csignal>
 #include <cstddef>
 #include <cstdint>
+#include <future>
+#include <optional>
+#include <string>
+#include <tuple>
 #include <vector>
 
 #include "zet/core/bytes.hpp"
@@ -47,9 +54,9 @@ struct SodiumFixture {
     SodiumFixture() { REQUIRE(crypto::Init()); }
 };
 
-// ── Helpers ───────────────────────────────────────────────────────────────
-
-const Timestamp START = Timestamp::FromNanos(1'000'000'000);
+// Matches the constant in client.cpp.
+constexpr std::size_t STDOUT_QUEUE_MAX = 1024 * 1024;
+constexpr int OVERFLOW_STATUS = 70;
 
 crypto::Key MakeKey(std::uint8_t seed) {
     crypto::KeyBytes bytes{};
@@ -90,359 +97,438 @@ struct Space {
     std::vector<std::byte> SnapshotBuf{wire::SNAPSHOT_MAX_BYTES, std::byte{}};
 };
 
-template <typename TConn>
-[[nodiscard]] bool Feed(TConn& conn, Space& sp, std::size_t written) {
-    auto r = conn.OnBytes(ByteSpan{sp.Out}.first(written));
-    return r.has_value();
+// ── Agent harness ─────────────────────────────────────────────────────────
+
+/// The socket is non-blocking and a frame dropped halfway desynchronises the
+/// stream, so wait for room instead of discarding what did not fit.
+void WriteAll(int fd, ByteSpan bytes) {
+    while (!bytes.empty()) {
+        auto n = io::WriteSome(fd, bytes);
+        if (n) {
+            bytes = bytes.subspan(*n);
+            continue;
+        }
+        REQUIRE(n.error().WouldBlock());
+        pollfd pfd{.fd = fd, .events = POLLOUT, .revents = 0};
+        REQUIRE(::poll(&pfd, 1, 3000) > 0);
+    }
 }
 
-ConnectionResult PumpAgent(AgentConnection& a, Space& sp, Timestamp now) {
-    return a.Pump(now, MutableByteSpan{sp.Out}, MutableByteSpan{sp.Scratch});
-}
-
-ConnectionResult PumpClient(ClientConnection& c, Space& sp, Timestamp now) {
-    return c.Pump(now, MutableByteSpan{sp.Out}, MutableByteSpan{sp.Scratch});
-}
-
-/// Drive both ends to Live (handshake complete).
-bool DriveToLive(AgentConnection& agent, ClientConnection& client,
-                 AgentSession& session, Space& sp, std::uint64_t& nonces) {
+/// Feed available socket bytes into the agent, drain its pump writing every
+/// SendFrame back, and return the first non-SendFrame, non-Idle event.
+std::optional<ConnectionEvent> AgentTick(AgentConnection& ac, Space& sp,
+                                         int agentFd, Timestamp now) {
+    std::array<std::byte, 4096> buf{};
+    pollfd pfd{.fd = agentFd, .events = POLLIN, .revents = 0};
+    while (::poll(&pfd, 1, 0) > 0 && (pfd.revents & POLLIN)) {
+        auto n = io::ReadSome(agentFd, MutableByteSpan{buf});
+        if (!n || *n == 0) break;
+        if (!ac.OnBytes(ByteSpan{buf}.first(*n))) break;
+        pfd.revents = 0;
+    }
     for (int i = 0; i < 64; ++i) {
-        auto ea = PumpAgent(agent, sp, START);
-        if (!ea) return false;
-        if (std::get_if<NeedsSession>(&*ea) != nullptr)
-            agent.Route(session.Ref(), MakeNonce(++nonces));
-        else if (const auto* sf = std::get_if<SendFrame>(&*ea))
-            if (!Feed(client, sp, sf->Written)) return false;
-        auto ec = PumpClient(client, sp, START);
-        if (!ec) return false;
-        if (const auto* sf = std::get_if<SendFrame>(&*ec))
-            if (!Feed(agent, sp, sf->Written)) return false;
-        if (agent.IsLive() && client.IsLive()) return true;
+        auto r =
+            ac.Pump(now, MutableByteSpan{sp.Out}, MutableByteSpan{sp.Scratch});
+        if (!r) return std::nullopt;
+        if (const auto* sf = std::get_if<SendFrame>(&*r)) {
+            WriteAll(agentFd, ByteSpan{sp.Out}.first(sf->Written));
+            continue;
+        }
+        if (std::holds_alternative<Idle>(*r)) return std::nullopt;
+        return *r;
+    }
+    return std::nullopt;
+}
+
+bool DriveAgentToLive(AgentConnection& ac, AgentSession& session, Space& sp,
+                      int agentFd, std::uint64_t& nonces,
+                      std::chrono::milliseconds timeout = 3000ms) {
+    const auto until = std::chrono::steady_clock::now() + timeout;
+    while (std::chrono::steady_clock::now() < until) {
+        auto ev = AgentTick(ac, sp, agentFd, io::MonotonicNow());
+        if (ev && std::holds_alternative<NeedsSession>(*ev)) {
+            ac.Route(session.Ref(), MakeNonce(++nonces));
+        }
+        if (ac.IsLive()) return true;
+        ::usleep(500);
     }
     return false;
 }
 
-// ── TryWriteSnapshot unit tests ───────────────────────────────────────────
+/// Path B: answer NeedsSnapshot with `snap`; true once the agent is live.
+bool DriveAgentSupplySnapshot(AgentConnection& ac, Space& sp, int agentFd,
+                              ByteSpan snap,
+                              std::chrono::milliseconds timeout = 3000ms) {
+    const auto until = std::chrono::steady_clock::now() + timeout;
+    bool supplied = false;
+    while (std::chrono::steady_clock::now() < until) {
+        const Timestamp now = io::MonotonicNow();
+        auto ev = AgentTick(ac, sp, agentFd, now);
+        if (ev && std::holds_alternative<NeedsSnapshot>(*ev)) {
+            ac.SupplySnapshot(now, snap, 0, 0);
+            supplied = true;
+        }
+        if (supplied && ac.IsLive()) return true;
+        ::usleep(500);
+    }
+    return false;
+}
+
+bool DriveAgentToEnd(AgentConnection& ac, Space& sp, int agentFd,
+                     std::chrono::milliseconds timeout = 3000ms) {
+    const auto until = std::chrono::steady_clock::now() + timeout;
+    while (std::chrono::steady_clock::now() < until && !ac.DeliveredEnd()) {
+        static_cast<void>(AgentTick(ac, sp, agentFd, io::MonotonicNow()));
+        ::usleep(500);
+    }
+    return ac.DeliveredEnd();
+}
+
+std::vector<std::byte> DrainFd(int fd,
+                               std::chrono::milliseconds timeout = 3000ms) {
+    std::vector<std::byte> result;
+    std::array<std::byte, 4096> buf{};
+    const auto until = std::chrono::steady_clock::now() + timeout;
+    while (true) {
+        const auto left = std::chrono::duration_cast<std::chrono::milliseconds>(
+            until - std::chrono::steady_clock::now());
+        if (left.count() <= 0) break;
+        pollfd pfd{.fd = fd, .events = POLLIN, .revents = 0};
+        if (::poll(&pfd, 1, static_cast<int>(left.count())) <= 0) break;
+        auto n = io::ReadSome(fd, MutableByteSpan{buf});
+        if (!n || *n == 0) break;
+        result.insert(result.end(), buf.begin(), buf.begin() + *n);
+    }
+    return result;
+}
+
+/// AgentSession starts in Reap mode, so overflowing a fresh session reaps it.
+/// One in-memory connection runs SetGridInfo (capable → Resync), then
+/// detaches, leaving the session ready for an overflow that forces path B.
+void PrimeAgentSession(AgentSession& agentSession, std::uint8_t keySeed,
+                       const SessionLimits& lim, std::uint64_t& nonces) {
+    const Timestamp now = io::MonotonicNow();
+    Space sp;
+    std::vector<std::byte> clientStorage(lim.ResendMax + 256);
+    ClientSession clientSession{
+        DeriveSessionSecrets(MakeKey(keySeed)),
+        SessionStreams{.Storage = MutableByteSpan{clientStorage},
+                       .Now = now,
+                       .Limits = lim}};
+    AgentConnection ac{MutableByteSpan{sp.AgentFrames}, now,
+                       wire::PROTOCOL_VERSION_GRID};
+    ClientConnection cc{clientSession,
+                        MakeNonce(++nonces),
+                        MutableByteSpan{sp.ClientFrames},
+                        now,
+                        true,
+                        wire::PROTOCOL_VERSION_GRID,
+                        MutableByteSpan{sp.SnapshotBuf}};
+    for (int i = 0; i < 64 && !ac.IsLive(); ++i) {
+        auto ea =
+            ac.Pump(now, MutableByteSpan{sp.Out}, MutableByteSpan{sp.Scratch});
+        REQUIRE(ea.has_value());
+        if (std::holds_alternative<NeedsSession>(*ea)) {
+            ac.Route(agentSession.Ref(), MakeNonce(++nonces));
+        } else if (const auto* sf = std::get_if<SendFrame>(&*ea)) {
+            REQUIRE(
+                cc.OnBytes(ByteSpan{sp.Out}.first(sf->Written)).has_value());
+        }
+        auto ec =
+            cc.Pump(now, MutableByteSpan{sp.Out}, MutableByteSpan{sp.Scratch});
+        REQUIRE(ec.has_value());
+        if (const auto* sf = std::get_if<SendFrame>(&*ec)) {
+            REQUIRE(
+                ac.OnBytes(ByteSpan{sp.Out}.first(sf->Written)).has_value());
+        }
+    }
+    REQUIRE(ac.IsLive());
+    ac.Close(now);
+}
+
+/// An agent session whose ring overflowed while detached in Resync mode, so
+/// the next connection takes path B.
+struct OverflowedSession {
+    SessionLimits Limits = TinyLimits();
+    std::uint8_t KeySeed;
+    std::vector<std::byte> Storage;
+    AgentSession Session;
+    std::uint64_t Nonces = 0;
+
+    explicit OverflowedSession(std::uint8_t keySeed)
+        : KeySeed{keySeed},
+          Storage(Limits.DisconnectMax + 256),
+          Session{DeriveSessionSecrets(MakeKey(keySeed)),
+                  SessionStreams{.Storage = MutableByteSpan{Storage},
+                                 .Now = io::MonotonicNow(),
+                                 .Limits = Limits}} {
+        PrimeAgentSession(Session, KeySeed, Limits, Nonces);
+        const std::vector<std::byte> fill(200, std::byte{0xBB});
+        for (int i = 0; i < 6; ++i) std::ignore = Session.Write(ByteSpan{fill});
+        REQUIRE_FALSE(Session.HasEnded());
+    }
+};
+
+// ── TryWriteSnapshot unit tests (24-25) ───────────────────────────────────
 
 TEST_CASE_FIXTURE(SodiumFixture,
                   "TryWriteSnapshot writes bytes to a pipe in order") {
-    // Arrange: a non-blocking pipe.
     const auto pipe = io::MakePipe();
     REQUIRE(pipe.has_value());
 
-    // Content: 64 bytes of a known pattern so order is verifiable.
     std::vector<std::byte> payload(64);
     for (std::size_t i = 0; i < payload.size(); ++i) {
         payload[i] = static_cast<std::byte>(static_cast<std::uint8_t>(i * 3));
     }
-    // Deadline uses the real clock because TryWriteSnapshot calls MonotonicNow.
     const Timestamp until = io::MonotonicNow() + 5s;
 
-    // Act.
     REQUIRE(
         client::TryWriteSnapshot(pipe->Write.Get(), ByteSpan{payload}, until));
 
-    // Assert: every byte arrives in order.
     std::vector<std::byte> received(payload.size());
     const auto n = ::read(pipe->Read.Get(), received.data(), received.size());
     REQUIRE(n == static_cast<ssize_t>(payload.size()));
     CHECK(received == payload);
-
-    // Break check: if TryWriteSnapshot wrote bytes in a different order the
-    // equality check above would fail.
 }
 
 TEST_CASE_FIXTURE(SodiumFixture,
                   "TryWriteSnapshot returns false on write error") {
-    // Arrange: close the read end so any write raises EPIPE.
-    const auto pipe = io::MakePipe();
+    auto pipe = io::MakePipe();
     REQUIRE(pipe.has_value());
-    const int wfd = pipe->Write.Get();
-    // Close the read end to make the pipe broken.
-    // Release() returns the fd but we deliberately do not use it (we just
-    // closed it above; the UniqueFd destructor must not double-close).
-    ::close(pipe->Read.Get());
-    static_cast<void>(const_cast<io::UniqueFd&>(pipe->Read).Release());
+    pipe->Read.Reset();
 
     const std::vector<std::byte> payload(32, std::byte{0xAB});
     const Timestamp until = io::MonotonicNow() + 5s;
 
-    // Act + Assert: must return false; SIGPIPE is already ignored by Main
-    // but in this test context we must not die on it.
     ::signal(SIGPIPE, SIG_IGN);
-    CHECK_FALSE(client::TryWriteSnapshot(wfd, ByteSpan{payload}, until));
-
-    // Break check: if the function ignores write errors it would return true
-    // and this CHECK_FALSE would fail.
+    CHECK_FALSE(
+        client::TryWriteSnapshot(pipe->Write.Get(), ByteSpan{payload}, until));
 }
 
-// ── Connection-layer wiring tests ─────────────────────────────────────────
-//
-// These tests exercise the session/connection API directly, mirroring what
-// Client::Pump does after FinishConnecting advertises gridCapable=true.
+// ── Client::Pump integration tests (26-30) ────────────────────────────────
 
 TEST_CASE_FIXTURE(SodiumFixture,
-                  "ApplySnapshot bytes match snapshot; "
-                  "ConfirmApply sends GridApplied (stream gen advances)") {
-    // Session pair with tiny limits so a short write overflows the ring.
-    const SessionLimits lim = TinyLimits();
-    std::vector<std::byte> agentStorage(lim.DisconnectMax + 256);
-    std::vector<std::byte> clientStorage(lim.ResendMax + 256);
-    AgentSession agent{DeriveSessionSecrets(MakeKey(11)),
-                       SessionStreams{.Storage = MutableByteSpan{agentStorage},
-                                      .Now = START,
-                                      .Limits = lim}};
-    ClientSession client{
-        DeriveSessionSecrets(MakeKey(11)),
-        SessionStreams{.Storage = MutableByteSpan{clientStorage},
-                       .Now = START,
-                       .Limits = lim}};
+                  "snapshot bytes reach the stdout pipe (Client::Pump)") {
+    OverflowedSession s{41};
+    auto pair = io::MakeSocketPair();
+    REQUIRE(pair.has_value());
+    auto stdoutPipe = io::MakePipe();
+    REQUIRE(stdoutPipe.has_value());
+    const int agentFd = pair->First.Get();
+
     Space sp;
-    std::uint64_t nonces = 0;
+    AgentConnection ac{MutableByteSpan{sp.AgentFrames}, io::MonotonicNow(),
+                       wire::PROTOCOL_VERSION_GRID};
+    const std::vector<std::byte> snap(64, std::byte{0xAB});
 
-    // First connection: bring up, then drop.
-    {
-        AgentConnection ac{MutableByteSpan{sp.AgentFrames}, START,
-                           wire::PROTOCOL_VERSION_GRID};
-        ClientConnection cc{client,
-                            MakeNonce(++nonces),
-                            MutableByteSpan{sp.ClientFrames},
-                            START,
-                            /*gridCapable=*/true,
-                            wire::PROTOCOL_VERSION_GRID,
-                            MutableByteSpan{sp.SnapshotBuf}};
-        REQUIRE(DriveToLive(ac, cc, agent, sp, nonces));
-        ac.Close(START);
-    }
+    auto fut = std::async(std::launch::async, [&] {
+        return client::RunSessionForTest(client::SessionTestConfig{
+            .Secrets = DeriveSessionSecrets(MakeKey(s.KeySeed)),
+            .Limits = s.Limits,
+            .Socket = std::move(pair->Second),
+            .StdoutFd = stdoutPipe->Write.Get(),
+            .GiveUpAfter = 2s,
+        });
+    });
 
-    // Write enough data to force path B.
-    const std::vector<std::byte> overflow(200, std::byte{0xBB});
-    for (int i = 0; i < 6; ++i) std::ignore = agent.Write(ByteSpan{overflow});
+    REQUIRE(DriveAgentToLive(ac, s.Session, sp, agentFd, s.Nonces));
+    REQUIRE(DriveAgentSupplySnapshot(ac, sp, agentFd, ByteSpan{snap}));
+    s.Session.End({.Kind = wire::ESessionEndKind::Exited, .Value = 0});
+    CHECK(DriveAgentToEnd(ac, sp, agentFd));
 
-    const std::uint32_t genBefore = client.StreamGen();
+    const int status = fut.get();
+    stdoutPipe->Write.Reset();
+    const std::vector<std::byte> received = DrainFd(stdoutPipe->Read.Get());
 
-    // Second connection: gridCapable=true, ceiling=2.
-    AgentConnection ac2{MutableByteSpan{sp.AgentFrames}, START,
-                        wire::PROTOCOL_VERSION_GRID};
-    ClientConnection cc2{client,
-                         MakeNonce(++nonces),
-                         MutableByteSpan{sp.ClientFrames},
-                         START,
-                         /*gridCapable=*/true,
-                         wire::PROTOCOL_VERSION_GRID,
-                         MutableByteSpan{sp.SnapshotBuf}};
-    REQUIRE(DriveToLive(ac2, cc2, agent, sp, nonces));
-
-    // Drive until ApplySnapshot arrives at the client.
-    const std::vector<std::byte> snap(16, std::byte{0x77});
-    bool gotApply = false;
-    std::uint32_t applyGen = 0;
-    for (int i = 0; i < 120 && !gotApply; ++i) {
-        auto ea = PumpAgent(ac2, sp, START);
-        REQUIRE(ea.has_value());
-        if (std::holds_alternative<NeedsSnapshot>(*ea)) {
-            ac2.SupplySnapshot(START, ByteSpan{snap}, 0, 0);
-        } else if (const auto* sf = std::get_if<SendFrame>(&*ea)) {
-            REQUIRE(Feed(cc2, sp, sf->Written));
-        }
-        auto ec = PumpClient(cc2, sp, START);
-        REQUIRE(ec.has_value());
-        if (const auto* as = std::get_if<ApplySnapshot>(&*ec)) {
-            gotApply = true;
-            // Verify the bytes match the snapshot the agent supplied.
-            REQUIRE(as->Bytes.size() == snap.size());
-            CHECK(std::equal(as->Bytes.begin(), as->Bytes.end(), snap.begin()));
-            applyGen = as->StreamGen;
-            // Confirm: this is what Client::Pump does on a successful write.
-            cc2.ConfirmApply(applyGen);
-        } else if (const auto* sf = std::get_if<SendFrame>(&*ec)) {
-            REQUIRE(Feed(ac2, sp, sf->Written));
-        }
-    }
-    REQUIRE(gotApply);
-
-    // Drain so GridApplied reaches the agent (several more pump cycles).
-    for (int i = 0; i < 40; ++i) {
-        auto ea = PumpAgent(ac2, sp, START);
-        if (!ea) break;
-        if (const auto* sf = std::get_if<SendFrame>(&*ea))
-            REQUIRE(Feed(cc2, sp, sf->Written));
-        auto ec = PumpClient(cc2, sp, START);
-        if (!ec) break;
-        if (const auto* sf = std::get_if<SendFrame>(&*ec))
-            REQUIRE(Feed(ac2, sp, sf->Written));
-    }
-
-    // GridApplied advanced StreamGen — proof that ConfirmApply was called.
-    CHECK(client.StreamGen() > genBefore);
-
-    // Break check: remove the cc2.ConfirmApply(applyGen) call above →
-    // GridApplied is never sent → StreamGen stays at genBefore → CHECK fails.
+    CHECK(status == 0);
+    CHECK(received == snap);
 }
 
 TEST_CASE_FIXTURE(SodiumFixture,
-                  "DenyApply does not advance StreamGen and sends no "
-                  "GridApplied") {
-    const SessionLimits lim = TinyLimits();
-    std::vector<std::byte> agentStorage(lim.DisconnectMax + 256);
-    std::vector<std::byte> clientStorage(lim.ResendMax + 256);
-    AgentSession agent{DeriveSessionSecrets(MakeKey(22)),
-                       SessionStreams{.Storage = MutableByteSpan{agentStorage},
-                                      .Now = START,
-                                      .Limits = lim}};
-    ClientSession client{
-        DeriveSessionSecrets(MakeKey(22)),
-        SessionStreams{.Storage = MutableByteSpan{clientStorage},
-                       .Now = START,
-                       .Limits = lim}};
-    Space sp;
-    std::uint64_t nonces = 0;
+                  "ConfirmApply deferred until stdout drains (Client::Pump)") {
+    // Agent Data is held while the grid awaits GridApplied, and SessionEnd
+    // waits for every byte to be acknowledged.  With stdout full the snapshot
+    // cannot drain, so ConfirmApply, and with it SessionEnd, must wait.
+    OverflowedSession s{42};
+    auto pair = io::MakeSocketPair();
+    REQUIRE(pair.has_value());
+    auto stdoutPipe = io::MakePipe();
+    REQUIRE(stdoutPipe.has_value());
+    const int agentFd = pair->First.Get();
 
+    std::size_t prefilled = 0;
     {
-        AgentConnection ac{MutableByteSpan{sp.AgentFrames}, START,
-                           wire::PROTOCOL_VERSION_GRID};
-        ClientConnection cc{client,
-                            MakeNonce(++nonces),
-                            MutableByteSpan{sp.ClientFrames},
-                            START,
-                            /*gridCapable=*/true,
-                            wire::PROTOCOL_VERSION_GRID,
-                            MutableByteSpan{sp.SnapshotBuf}};
-        REQUIRE(DriveToLive(ac, cc, agent, sp, nonces));
-        ac.Close(START);
-    }
-
-    const std::vector<std::byte> overflow(200, std::byte{0xCC});
-    for (int i = 0; i < 6; ++i) std::ignore = agent.Write(ByteSpan{overflow});
-
-    const std::uint32_t genBefore = client.StreamGen();
-
-    AgentConnection ac2{MutableByteSpan{sp.AgentFrames}, START,
-                        wire::PROTOCOL_VERSION_GRID};
-    ClientConnection cc2{client,
-                         MakeNonce(++nonces),
-                         MutableByteSpan{sp.ClientFrames},
-                         START,
-                         /*gridCapable=*/true,
-                         wire::PROTOCOL_VERSION_GRID,
-                         MutableByteSpan{sp.SnapshotBuf}};
-    REQUIRE(DriveToLive(ac2, cc2, agent, sp, nonces));
-
-    const std::vector<std::byte> snap(16, std::byte{0x55});
-    bool gotApply = false;
-    for (int i = 0; i < 120 && !gotApply; ++i) {
-        auto ea = PumpAgent(ac2, sp, START);
-        REQUIRE(ea.has_value());
-        if (std::holds_alternative<NeedsSnapshot>(*ea)) {
-            ac2.SupplySnapshot(START, ByteSpan{snap}, 0, 0);
-        } else if (const auto* sf = std::get_if<SendFrame>(&*ea)) {
-            REQUIRE(Feed(cc2, sp, sf->Written));
-        }
-        auto ec = PumpClient(cc2, sp, START);
-        REQUIRE(ec.has_value());
-        if (const auto* as = std::get_if<ApplySnapshot>(&*ec)) {
-            gotApply = true;
-            // Deny: simulates a write failure, as Client::Pump does.
-            cc2.DenyApply(as->StreamGen);
-        } else if (const auto* sf = std::get_if<SendFrame>(&*ec)) {
-            REQUIRE(Feed(ac2, sp, sf->Written));
+        const std::array<std::byte, 4096> junk{};
+        while (true) {
+            auto n = io::WriteSome(stdoutPipe->Write.Get(), ByteSpan{junk});
+            if (!n || *n == 0) break;
+            prefilled += *n;
         }
     }
-    REQUIRE(gotApply);
+    REQUIRE(prefilled > 0);
 
-    // Pump a few more cycles; GridApplied must NOT have been sent.
-    for (int i = 0; i < 40; ++i) {
-        auto ea = PumpAgent(ac2, sp, START);
-        if (!ea) break;
-        if (const auto* sf = std::get_if<SendFrame>(&*ea))
-            REQUIRE(Feed(cc2, sp, sf->Written));
-        auto ec = PumpClient(cc2, sp, START);
-        if (!ec) break;
-        if (const auto* sf = std::get_if<SendFrame>(&*ec))
-            REQUIRE(Feed(ac2, sp, sf->Written));
+    Space sp;
+    AgentConnection ac{MutableByteSpan{sp.AgentFrames}, io::MonotonicNow(),
+                       wire::PROTOCOL_VERSION_GRID};
+    const std::vector<std::byte> snap(64, std::byte{0xDD});
+    const std::vector<std::byte> tail(1, std::byte{0x7A});
+
+    auto fut = std::async(std::launch::async, [&] {
+        return client::RunSessionForTest(client::SessionTestConfig{
+            .Secrets = DeriveSessionSecrets(MakeKey(s.KeySeed)),
+            .Limits = s.Limits,
+            .Socket = std::move(pair->Second),
+            .StdoutFd = stdoutPipe->Write.Get(),
+            .GiveUpAfter = 2s,
+        });
+    });
+
+    REQUIRE(DriveAgentToLive(ac, s.Session, sp, agentFd, s.Nonces));
+    REQUIRE(DriveAgentSupplySnapshot(ac, sp, agentFd, ByteSpan{snap}));
+    REQUIRE(s.Session.Write(ByteSpan{tail}).has_value());
+    s.Session.End({.Kind = wire::ESessionEndKind::Exited, .Value = 0});
+
+    CHECK_FALSE(DriveAgentToEnd(ac, sp, agentFd, 300ms));
+
+    std::vector<std::byte> drained;
+    const auto until = std::chrono::steady_clock::now() + 3s;
+    while (!ac.DeliveredEnd() && std::chrono::steady_clock::now() < until) {
+        const auto chunk = DrainFd(stdoutPipe->Read.Get(), 5ms);
+        drained.insert(drained.end(), chunk.begin(), chunk.end());
+        static_cast<void>(AgentTick(ac, sp, agentFd, io::MonotonicNow()));
     }
+    CHECK(ac.DeliveredEnd());
+    CHECK(fut.get() == 0);
+    stdoutPipe->Write.Reset();
+    const auto rest = DrainFd(stdoutPipe->Read.Get(), 500ms);
+    drained.insert(drained.end(), rest.begin(), rest.end());
 
-    // StreamGen must be unchanged: DenyApply does not advance it.
-    CHECK(client.StreamGen() == genBefore);
-
-    // Break check: replace cc2.DenyApply with cc2.ConfirmApply →
-    // StreamGen advances → CHECK(== genBefore) fails.
+    std::vector<std::byte> expected(prefilled, std::byte{0});
+    expected.insert(expected.end(), snap.begin(), snap.end());
+    expected.insert(expected.end(), tail.begin(), tail.end());
+    CHECK(drained == expected);
 }
 
 TEST_CASE_FIXTURE(SodiumFixture,
-                  "Non-capable client at ceiling=2 receives SessionOverflowed "
-                  "when the ring overflows; no reconnect") {
-    // This mirrors what Client::Run does: it exits with OVERFLOW_STATUS and
-    // never calls StartConnecting again.  Here we verify the session layer
-    // produces SessionOverflowed so the Run loop can act on it.
+                  "DenyApply and drop when snapshot too large (Client::Pump)") {
+    OverflowedSession s{43};
+    auto pair = io::MakeSocketPair();
+    REQUIRE(pair.has_value());
+    auto stdoutPipe = io::MakePipe();
+    REQUIRE(stdoutPipe.has_value());
+    const int agentFd = pair->First.Get();
+
+    Space sp;
+    AgentConnection ac{MutableByteSpan{sp.AgentFrames}, io::MonotonicNow(),
+                       wire::PROTOCOL_VERSION_GRID};
+    const std::vector<std::byte> bigSnap(STDOUT_QUEUE_MAX + 1, std::byte{0xFF});
+
+    auto fut = std::async(std::launch::async, [&] {
+        return client::RunSessionForTest(client::SessionTestConfig{
+            .Secrets = DeriveSessionSecrets(MakeKey(s.KeySeed)),
+            .Limits = s.Limits,
+            .Socket = std::move(pair->Second),
+            .StdoutFd = stdoutPipe->Write.Get(),
+            .GiveUpAfter = 1s,
+        });
+    });
+
+    REQUIRE(DriveAgentToLive(ac, s.Session, sp, agentFd, s.Nonces));
+    REQUIRE(DriveAgentSupplySnapshot(ac, sp, agentFd, ByteSpan{bigSnap}));
+    // Keep emitting the grid until the client gives up on the link.
+    while (fut.wait_for(1ms) != std::future_status::ready) {
+        static_cast<void>(AgentTick(ac, sp, agentFd, io::MonotonicNow()));
+    }
+
+    const int status = fut.get();
+    stdoutPipe->Write.Reset();
+    const std::vector<std::byte> received =
+        DrainFd(stdoutPipe->Read.Get(), 500ms);
+
+    CHECK(status != 0);
+    CHECK(received.empty());
+}
+
+TEST_CASE_FIXTURE(SodiumFixture,
+                  "SNAPSHOT_RESTORE_NOTICE written to stderr (Client::Pump)") {
+    OverflowedSession s{44};
+    auto pair = io::MakeSocketPair();
+    REQUIRE(pair.has_value());
+    auto stdoutPipe = io::MakePipe();
+    REQUIRE(stdoutPipe.has_value());
+    auto stderrPipe = io::MakePipe();
+    REQUIRE(stderrPipe.has_value());
+    const int agentFd = pair->First.Get();
+
+    Space sp;
+    AgentConnection ac{MutableByteSpan{sp.AgentFrames}, io::MonotonicNow(),
+                       wire::PROTOCOL_VERSION_GRID};
+    const std::vector<std::byte> snap(32, std::byte{0x11});
+
+    auto fut = std::async(std::launch::async, [&] {
+        return client::RunSessionForTest(client::SessionTestConfig{
+            .Secrets = DeriveSessionSecrets(MakeKey(s.KeySeed)),
+            .Limits = s.Limits,
+            .Socket = std::move(pair->Second),
+            .StdoutFd = stdoutPipe->Write.Get(),
+            .StderrFd = stderrPipe->Write.Get(),
+            .NoticesInline = false,
+            .GiveUpAfter = 2s,
+        });
+    });
+
+    REQUIRE(DriveAgentToLive(ac, s.Session, sp, agentFd, s.Nonces));
+    REQUIRE(DriveAgentSupplySnapshot(ac, sp, agentFd, ByteSpan{snap}));
+    s.Session.End({.Kind = wire::ESessionEndKind::Exited, .Value = 0});
+    CHECK(DriveAgentToEnd(ac, sp, agentFd));
+    CHECK(fut.get() == 0);
+
+    stderrPipe->Write.Reset();
+    const std::vector<std::byte> stderrBytes =
+        DrainFd(stderrPipe->Read.Get(), 500ms);
+    const std::string stderrStr{
+        reinterpret_cast<const char*>(stderrBytes.data()), stderrBytes.size()};
+    CHECK(stderrStr.find("zet: screen restored") != std::string::npos);
+}
+
+TEST_CASE_FIXTURE(SodiumFixture,
+                  "SessionEnd{Overflow} exits OVERFLOW_STATUS (Client::Pump)") {
+    // The overflow verdict reaches the client over the live channel.
     const SessionLimits lim = TinyLimits();
+    constexpr std::uint8_t KEY_SEED = 45;
     std::vector<std::byte> agentStorage(lim.DisconnectMax + 256);
-    std::vector<std::byte> clientStorage(lim.ResendMax + 256);
-    AgentSession agent{DeriveSessionSecrets(MakeKey(33)),
-                       SessionStreams{.Storage = MutableByteSpan{agentStorage},
-                                      .Now = START,
-                                      .Limits = lim}};
-    ClientSession client{
-        DeriveSessionSecrets(MakeKey(33)),
-        SessionStreams{.Storage = MutableByteSpan{clientStorage},
-                       .Now = START,
+    AgentSession agentSession{
+        DeriveSessionSecrets(MakeKey(KEY_SEED)),
+        SessionStreams{.Storage = MutableByteSpan{agentStorage},
+                       .Now = io::MonotonicNow(),
                        .Limits = lim}};
+
+    auto pair = io::MakeSocketPair();
+    REQUIRE(pair.has_value());
+    auto stdoutPipe = io::MakePipe();
+    REQUIRE(stdoutPipe.has_value());
+    const int agentFd = pair->First.Get();
+
     Space sp;
     std::uint64_t nonces = 0;
+    AgentConnection ac{MutableByteSpan{sp.AgentFrames}, io::MonotonicNow(),
+                       wire::PROTOCOL_VERSION_GRID};
 
-    // First connection without GRID_CAPABLE.
-    {
-        AgentConnection ac{MutableByteSpan{sp.AgentFrames}, START,
-                           wire::PROTOCOL_VERSION_GRID};
-        ClientConnection cc{client,
-                            MakeNonce(++nonces),
-                            MutableByteSpan{sp.ClientFrames},
-                            START,
-                            /*gridCapable=*/false,
-                            wire::PROTOCOL_VERSION_GRID,
-                            MutableByteSpan{sp.SnapshotBuf}};
-        REQUIRE(DriveToLive(ac, cc, agent, sp, nonces));
-        ac.Close(START);
-    }
+    auto fut = std::async(std::launch::async, [&] {
+        return client::RunSessionForTest(client::SessionTestConfig{
+            .Secrets = DeriveSessionSecrets(MakeKey(KEY_SEED)),
+            .Limits = lim,
+            .Socket = std::move(pair->Second),
+            .StdoutFd = stdoutPipe->Write.Get(),
+            .GridCapable = false,
+            .GiveUpAfter = 2s,
+        });
+    });
 
-    // Overflow the ring.
-    const std::vector<std::byte> flood(200, std::byte{0xDD});
-    for (int i = 0; i < 6; ++i) std::ignore = agent.Write(ByteSpan{flood});
-
-    // Reconnect without GRID_CAPABLE at ceiling=2.
-    AgentConnection ac2{MutableByteSpan{sp.AgentFrames}, START,
-                        wire::PROTOCOL_VERSION_GRID};
-    ClientConnection cc2{client,
-                         MakeNonce(++nonces),
-                         MutableByteSpan{sp.ClientFrames},
-                         START,
-                         /*gridCapable=*/false,
-                         wire::PROTOCOL_VERSION_GRID,
-                         MutableByteSpan{sp.SnapshotBuf}};
-    REQUIRE(DriveToLive(ac2, cc2, agent, sp, nonces));
-
-    bool overflowed = false;
-    for (int i = 0; i < 60; ++i) {
-        auto ea = PumpAgent(ac2, sp, START);
-        if (!ea) break;
-        if (const auto* sf = std::get_if<SendFrame>(&*ea))
-            REQUIRE(Feed(cc2, sp, sf->Written));
-        auto ec = PumpClient(cc2, sp, START);
-        if (!ec) break;
-        if (std::holds_alternative<SessionOverflowed>(*ec)) {
-            overflowed = true;
-            break;
-        }
-        if (const auto* sf = std::get_if<SendFrame>(&*ec))
-            REQUIRE(Feed(ac2, sp, sf->Written));
-    }
-
-    CHECK(overflowed);
-
-    // Break check: remove the SessionOverflowed variant from the result
-    // type or from Client::Pump's event handling → overflowed stays false →
-    // CHECK fails.
+    REQUIRE(DriveAgentToLive(ac, agentSession, sp, agentFd, nonces));
+    agentSession.End({.Kind = wire::ESessionEndKind::Overflow, .Value = 0});
+    CHECK(DriveAgentToEnd(ac, sp, agentFd));
+    CHECK(fut.get() == OVERFLOW_STATUS);
 }
 
 }  // namespace
