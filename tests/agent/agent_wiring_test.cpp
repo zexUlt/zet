@@ -33,8 +33,8 @@
 /// in PtyRead_ after the grid has seen them; the assignment drops them so the
 /// new stream generation does not replay what the snapshot already holds.
 
-#include "grid_pump.hpp"
-#include "pump_test_api.hpp"
+#include "../../src/agent/grid_pump.hpp"
+#include "../../src/agent/pump_test_api.hpp"
 
 #include "../session/grid_path_helpers.hpp"
 
@@ -324,6 +324,7 @@ public:
                             Seen.HasSnapshot = gp.HasSnapshot();
                             Seen.HasPendingSnap = gp.HasPendingSnap();
                         },
+                    .Stop = &Stop_,
                 });
             });
     }
