@@ -143,63 +143,63 @@ static void EmitSgr(EscWriter& w, Pen& pen, const Cell& c) noexcept {
 
     w.WriteLiteral("\x1b[");
     bool first = true;
-    auto Sep = [&]() {
+    auto sep = [&]() {
         if (!first) w.WriteByte(';');
         first = false;
     };
 
     // Always reset first to ensure a clean baseline.
-    Sep();
+    sep();
     w.WriteByte('0');
 
     if (c.Attrs & Bold) {
-        Sep();
+        sep();
         w.WriteByte('1');
     }
     if (c.Attrs & Dim) {
-        Sep();
+        sep();
         w.WriteByte('2');
     }
     if (c.Attrs & Italic) {
-        Sep();
+        sep();
         w.WriteByte('3');
     }
     if (c.Attrs & Underline) {
-        Sep();
+        sep();
         w.WriteByte('4');
     }
     if (c.Attrs & Blink) {
-        Sep();
+        sep();
         w.WriteByte('5');
     }
     if (c.Attrs & Inverse) {
-        Sep();
+        sep();
         w.WriteByte('7');
     }
     if (c.Attrs & Invisible) {
-        Sep();
+        sep();
         w.WriteByte('8');
     }
     if (c.Attrs & StrikeThrough) {
-        Sep();
+        sep();
         w.WriteByte('9');
     }
 
     if (c.FgKind == EColorKind::Indexed) {
         std::uint8_t idx = c.Fg[0];
         if (idx < 8) {
-            Sep();
+            sep();
             w.WriteDecimal(30u + idx);
         } else if (idx < 16) {
-            Sep();
+            sep();
             w.WriteDecimal(90u + (idx - 8u));
         } else {
-            Sep();
+            sep();
             w.WriteLiteral("38;5;");
             w.WriteDecimal(idx);
         }
     } else if (c.FgKind == EColorKind::TrueColor) {
-        Sep();
+        sep();
         w.WriteLiteral("38;2;");
         w.WriteDecimal(c.Fg[0]);
         w.WriteByte(';');
@@ -211,18 +211,18 @@ static void EmitSgr(EscWriter& w, Pen& pen, const Cell& c) noexcept {
     if (c.BgKind == EColorKind::Indexed) {
         std::uint8_t idx = c.Bg[0];
         if (idx < 8) {
-            Sep();
+            sep();
             w.WriteDecimal(40u + idx);
         } else if (idx < 16) {
-            Sep();
+            sep();
             w.WriteDecimal(100u + (idx - 8u));
         } else {
-            Sep();
+            sep();
             w.WriteLiteral("48;5;");
             w.WriteDecimal(idx);
         }
     } else if (c.BgKind == EColorKind::TrueColor) {
-        Sep();
+        sep();
         w.WriteLiteral("48;2;");
         w.WriteDecimal(c.Bg[0]);
         w.WriteByte(';');

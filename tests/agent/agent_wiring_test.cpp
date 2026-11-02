@@ -303,8 +303,10 @@ TEST_CASE_FIXTURE(SodiumFixture,
 
 // ── Test 8: bytes dropped during overflow do not appear after snapshot ──────
 //
-// BREAK (h): remove PtyFrom_ = PtyTo_ after SupplySnapshot → pre-overflow bytes
-//   are written to the new session generation and appear as Deliver 0xBB.
+// BREAK (h): at AgentConnection::SupplySnapshot skip starting the new stream
+//   generation → the ring content from before the overflow is replayed in
+//   the new generation and appears as Deliver 0xBB events.
+// (Session-level test; uses AgentConnection directly, not Agent.)
 
 TEST_CASE_FIXTURE(SodiumFixture,
                   "bytes dropped during overflow do not appear as Deliver "
