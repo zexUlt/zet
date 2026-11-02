@@ -20,7 +20,7 @@ import pytest
 from e2e import (ESCAPE_NOTICE, ESCAPE_STATUS, GAVE_UP_STATUS, LOST_NOTICE, PROMPT,
                  REGAINED_NOTICE, TCP_LISTEN, Terminal, Zet, command_of,
                  connection_to_agent, parent_of, real_uid_of, socket_inodes, sockets_of)
-from harness import STEP_TIMEOUT_SECONDS, PtyProcess, wait_gone, wait_until
+from harness import STEP_TIMEOUT_SECONDS, PtyProcess, Timeout, wait_gone, wait_until
 
 # The stream the cut tests check: `seq 1 STREAM_LINES`, 6.9 MB. More than
 # RESEND_BUFFER_MAX (4 MiB), so the agent's shell meets backpressure while
@@ -172,9 +172,18 @@ def _cut_mid_stream(zet: Zet, iptables: str, rules_for, seed: int) -> None:
         try:
             # No descriptor says when another process closes a socket, hence
             # the poll: the cut connection leaving zet's descriptors is the
-            # client noticing the cut and dropping it.
-            wait_until(lambda: cut.inode not in socket_inodes(terminal.pid),
-                       f"zet to drop the cut connection ({context})")
+            # client noticing the cut and dropping it. The terminal is read
+            # meanwhile: a client whose terminal is not drained stops reading
+            # the socket and does not count the silence (design.md §9).
+            def dropped() -> bool:
+                while True:
+                    try:
+                        terminal.read_more(0)
+                    except Timeout:
+                        break
+                return cut.inode not in socket_inodes(terminal.pid)
+
+            wait_until(dropped, f"zet to drop the cut connection ({context})")
         finally:
             for rule in rules:
                 subprocess.run([iptables, "-D", *rule], check=True,
