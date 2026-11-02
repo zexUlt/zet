@@ -11,6 +11,10 @@ inline constexpr std::uint16_t MAX_COLS = 4096;
 /// Maximum terminal height (rows).
 inline constexpr std::uint16_t MAX_ROWS = 1024;
 
+/// Maximum cells in one screen arena (16 MiB); main + alt = 32 MiB (design.md
+/// §9).
+inline constexpr std::size_t MAX_SCREEN_CELLS = 1U << 20;
+
 /// Default scrollback ring size in lines (design.md §9).
 inline constexpr std::uint32_t DEFAULT_SCROLLBACK_LIMIT = 1000;
 

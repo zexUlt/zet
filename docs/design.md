@@ -502,6 +502,7 @@ Rune в снимке санируется: запрещены C0/C1 (0x00–0x1F
 |---|---|---|
 | `GRID_MAX_COLS` | 4096 | Resize до 4096, не CloseConnection |
 | `GRID_MAX_ROWS` | 1024 | Resize до 1024, не CloseConnection |
+| `GRID_MAX_SCREEN_CELLS` | 1 048 576 | rows зажимаются до `GRID_MAX_SCREEN_CELLS / cols`, не CloseConnection |
 | `GRAPHEME_MAX_CODEPOINTS` | 1 | Только первичный codepoint; дополнительные combining-метки отбрасываются |
 | `CSI_MAX_PARAMS` | 16 | Параметры сверх лимита игнорируются |
 | `CSI_PARAM_MAX_VALUE` | 65535 | Значения выше зажимаются |
@@ -876,6 +877,8 @@ Workflow собирает статические musl-бинари для `x86_6
 | Output ring | `DISCONNECT_BUFFER_MAX` | 16 МБ |
 | Снимок (временно, путь B) | ≤ `SNAPSHOT_MAX_BYTES` | 4 МБ |
 | **Итого на сессию** | | **≤ 24 МБ** |
+
+Худший случай: 4096 колонок при 1000 строках scrollback — экраны 2 × 1 048 576 × 16 = 32 МиБ (rows зажаты до 256), scrollback 4096 × 1000 × 16 ≈ 62,5 МиБ, output ring 16 МиБ (`DISCONNECT_BUFFER_MAX`), снимок 4 МиБ (`SNAPSHOT_MAX_BYTES`) — итого ≈ 115 МиБ.
 
 Снимок живёт только во время отправки и освобождается после `GridApplied`; в soak-метрике учитывается как пиковое потребление. Арены выделяются один раз при создании Grid с фактическим `cols × rows` и не растут.
 

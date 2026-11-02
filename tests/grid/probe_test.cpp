@@ -253,8 +253,11 @@ TEST_CASE("P7 resize alloc fail") {
 TEST_CASE("P8 limits") {
     auto r = Grid::Create(4096, 1024, 1000);  // 4096*1000*sizeof(Cell)
     INFO("sizeof Cell " << sizeof(Cell));
-    CHECK(!r.has_value());
-    if (r.has_value()) delete r.value();
+    // Oversize screens are clamped, not rejected: 4096 x 256 fits the budget.
+    REQUIRE(r.has_value());
+    CHECK(r.value()->Cols() == 4096);
+    CHECK(r.value()->Rows() == 256);
+    delete r.value();
     auto r2 = Grid::Create(4096, 1024, 100000000);
     CHECK(!r2.has_value());
     auto r3 = Grid::Create(80, 24, 1000000);
