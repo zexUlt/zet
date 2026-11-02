@@ -548,6 +548,9 @@ TEST_CASE("D1: alt-screen snapshot preserves main screen and history") {
     CHECK(CP(*dst, 0, 0) == U'A');
     // History preserved from main screen.
     CHECK(dst->ScrollbackSize() >= 2u);
+    // Main screen cells must be restored (D1 mutation: skip first
+    // EncodeAnyScreen → main screen is blank after restore).
+    CHECK(dst->MainCellAt(0, 0).Codepoint == U'm');
 
     delete snap;
     delete g;
@@ -1066,5 +1069,88 @@ TEST_CASE("trailing blank cells are trimmed from row output") {
     CHECK(snap->Bytes().size() < 500u);
 
     delete snap;
+    delete src;
+}
+
+TEST_CASE("D3: DECOM-relative CUP is used when DECOM is active") {
+    // Mutant D3: always emit absolute CUP row → cursor lands at wrong row when
+    // DECOM is on.
+    //
+    // Set a scroll region rows 5–10 (1-based) and enable DECOM.  Move cursor to
+    // the first row inside the region (row 5 absolute = row 1 relative).  After
+    // round-trip the cursor must still be at absolute row 4 (0-based).
+    Grid* src = MakeGrid(40, 20, 0);
+    VtParser p;
+    // Scroll region rows 5–10 (1-based), then enable DECOM.
+    Feed(p, *src, "\x1b[5;10r");  // DECSTBM: scroll region 5..10
+    Feed(p, *src, "\x1b[?6h");    // DECOM on
+    // With DECOM active, CUP 1;1 → row 5 absolute (scroll top).
+    Feed(p, *src, "\x1b[1;1H");
+
+    REQUIRE(src->ModeSet(EMode::Decom));
+    REQUIRE(src->CursorRow() == 4);  // absolute row 4 (0-based) = region row 1
+
+    auto r = Snapshot::Create(*src);
+    REQUIRE(r.has_value());
+    Snapshot* snap = r.value();
+
+    Grid* dst = Restore(*snap, 40, 20, 0);
+
+    // DECOM must be on and cursor at same absolute row.
+    CHECK(dst->ModeSet(EMode::Decom));
+    CHECK(dst->CursorRow() == 4);
+
+    delete snap;
+    delete src;
+    delete dst;
+}
+
+TEST_CASE("D9: background truecolor is reproduced after round-trip") {
+    // Mutant D9: remove second SGR sequence (bg colour) → BG lost after
+    // restore.
+    Grid* src = MakeGrid(40, 10, 0);
+    VtParser p;
+    // Set a TrueColor background, write a cell.
+    Feed(p, *src, "\x1b[48;2;0;128;255mB");
+
+    auto r = Snapshot::Create(*src);
+    REQUIRE(r.has_value());
+    Snapshot* snap = r.value();
+
+    Grid* dst = Restore(*snap, 40, 10, 0);
+
+    const Cell& c = dst->CellAt(0, 0);
+    CHECK(c.Codepoint == U'B');
+    CHECK(c.BgKind == EColorKind::TrueColor);
+    CHECK(c.Bg[0] == 0);
+    CHECK(c.Bg[1] == 128);
+    CHECK(c.Bg[2] == 255);
+
+    delete snap;
+    delete src;
+    delete dst;
+}
+
+TEST_CASE("D12: snapshot honours MaxBytes cap (dry-run rejects oversized)") {
+    // Mutant D12: skip dry-run, set totalSize=maxBytes → cap is ignored and
+    // any snapshot always succeeds even when it exceeds the requested cap.
+    //
+    // Use a grid large enough that its snapshot exceeds 100 bytes (trivially
+    // true), then request cap=50 → must return SnapshotTooLarge.
+    Grid* src = MakeGrid(80, 24, 0);
+    VtParser p;
+    for (int i = 0; i < 24; ++i) Feed(p, *src, "Hello World\r\n");
+
+    // Full snapshot is much larger than 50 bytes.
+    auto full = Snapshot::Create(*src);
+    REQUIRE(full.has_value());
+    REQUIRE(full.value()->Bytes().size() > 50u);
+    delete full.value();
+
+    // With cap=50: must fail.
+    auto r = Snapshot::Create(*src, SnapshotOptions{.MaxBytes = 50});
+    CHECK(!r.has_value());
+    if (!r.has_value()) CHECK(r.error() == EGridError::SnapshotTooLarge);
+
     delete src;
 }

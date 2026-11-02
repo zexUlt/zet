@@ -191,12 +191,12 @@ static void EmitSgr(EscWriter& w, Pen& pen, const Cell& c) noexcept {
     if (c.BgKind != EColorKind::Default || c.UlIdx != 0) {
         w.WriteLiteral("\x1b[");
         bool first2 = true;
-        auto Sep2 = [&]() noexcept {
+        auto sep2 = [&]() noexcept {
             if (!first2) w.WriteByte(';');
             first2 = false;
         };
         if (c.BgKind == EColorKind::Indexed) {
-            Sep2();
+            sep2();
             const std::uint8_t idx = c.Bg[0];
             if (idx < 8) {
                 w.WriteDecimal(40u + idx);
@@ -207,7 +207,7 @@ static void EmitSgr(EscWriter& w, Pen& pen, const Cell& c) noexcept {
                 w.WriteDecimal(idx);
             }
         } else if (c.BgKind == EColorKind::TrueColor) {
-            Sep2();
+            sep2();
             w.WriteLiteral("48;2;");
             w.WriteDecimal(c.Bg[0]);
             w.WriteByte(';');
@@ -216,7 +216,7 @@ static void EmitSgr(EscWriter& w, Pen& pen, const Cell& c) noexcept {
             w.WriteDecimal(c.Bg[2]);
         }
         if (c.UlIdx != 0) {
-            Sep2();
+            sep2();
             w.WriteLiteral("58;5;");
             w.WriteDecimal(static_cast<std::uint32_t>(c.UlIdx));
         }
