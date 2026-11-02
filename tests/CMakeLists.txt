@@ -14,6 +14,9 @@ add_executable(zet_tests
     main.cpp
     grid/grid_test.cpp
     grid/probe_test.cpp
+    grid/snapshot_test.cpp
+    grid/snapshot_roundtrip_test.cpp
+    grid/snapshot_restore_test.cpp
     core/byte_reader_test.cpp
     core/byte_writer_test.cpp
     core/log_test.cpp

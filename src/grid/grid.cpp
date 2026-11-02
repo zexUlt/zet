@@ -106,6 +106,20 @@ Cell& Grid::CellAt(std::uint16_t row, std::uint16_t col) noexcept {
     return ActiveLine(row).Cells[col];
 }
 
+const Cell& Grid::MainCellAt(std::uint16_t row,
+                             std::uint16_t col) const noexcept {
+    return MainLines_[row].Cells[col];
+}
+
+std::uint16_t Grid::MainRowCellsUsed(std::uint16_t row) const noexcept {
+    return MainLines_[row].CellsUsed;
+}
+
+bool Grid::IsTabStop(std::uint16_t col) const noexcept {
+    if (col >= Cols_) return false;
+    return (TabStops_[col / 64] >> (col % 64)) & std::uint64_t{1};
+}
+
 const Line* Grid::ScrollbackLine(std::uint32_t idx) const noexcept {
     if (!HistoryLines_ || idx >= HistorySize_) return nullptr;
     const std::uint32_t ring = (HistoryStart_ + idx) % ScrollbackLimit_;
