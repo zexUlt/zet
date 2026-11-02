@@ -344,8 +344,8 @@ TEST_CASE("round-trip: history line cleared with a BCE background keeps it") {
     // EncodeHistory stops at column 0 and the restored line is default.
     Grid* src = MakeGrid(10, 3, 10);
     VtParser p;
-    Feed(p, *src, "\x1b[42m\n\n\n\n\n");
-    REQUIRE(src->ScrollbackSize() >= 2u);
+    Feed(p, *src, "\x1b[42m\n\n\n\n\n\n\n\n");
+    REQUIRE(src->ScrollbackSize() >= 4u);
 
     auto r = Snapshot::Create(*src);
     REQUIRE(r.has_value());

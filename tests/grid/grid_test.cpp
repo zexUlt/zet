@@ -303,10 +303,11 @@ TEST_CASE(
     Grid* g = MakeGrid(10, 3, 10);
     VtParser p;
     Feed(p, *g, "\x1b[42m");
-    // Each LF at the bottom scrolls a fresh BCE-blank line in; the next LF
-    // pushes it to history.
-    Feed(p, *g, "\n\n\n\n\n");
-    REQUIRE(g->ScrollbackSize() >= 2u);
+    // Each LF at the bottom scrolls a fresh BCE-blank line in. The first LFs
+    // push the default-background rows already on screen; the later ones push
+    // the BCE-blank lines.
+    Feed(p, *g, "\n\n\n\n\n\n\n\n");
+    REQUIRE(g->ScrollbackSize() >= 4u);
     const Line* sb = g->ScrollbackLine(g->ScrollbackSize() - 1);
     REQUIRE(sb != nullptr);
     CHECK(sb->CellsUsed == 10);
