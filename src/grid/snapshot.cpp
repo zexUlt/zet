@@ -20,6 +20,7 @@
 #include "zet/grid/cell.hpp"
 #include "zet/grid/grid.hpp"
 #include "zet/grid/limits.hpp"
+#include "zet/grid/unicode.hpp"
 
 namespace zet::grid {
 
@@ -239,114 +240,92 @@ struct Pen {
     }
 };
 
-/// Emit a complete SGR sequence (reset + all non-default attrs) for a cell.
-/// The cell passed here must already be normalised for the active colour mode.
-/// Updates pen to the cell's attrs.
+/// Emit complete SGR for a cell, split into two sequences to respect
+/// MAX_PARAMS=16 (D9):
+///   Seq 1: reset + text attrs + fg color  (max 15 params)
+///   Seq 2: bg color + underline colour (D8) (max 8 params, only when needed)
+/// The cell must already be normalised for the active colour mode.
+/// Updates pen to the cell's state.
 static void EmitSgr(EscWriter& w, Pen& pen, const Cell& c) noexcept {
     if (pen.MatchesCell(c)) return;
 
-    w.WriteLiteral("\x1b[");
-    bool first = true;
-    auto sep = [&]() {
-        if (!first) w.WriteByte(';');
-        first = false;
-    };
+    // --- Sequence 1: reset + text attributes + fg color ---
+    w.WriteLiteral("\x1b[0");
 
-    // Always reset first to ensure a clean baseline.
-    sep();
-    w.WriteByte('0');
-
-    if (c.Attrs & Bold) {
-        sep();
-        w.WriteByte('1');
+    if (c.Attrs & Bold) w.WriteLiteral(";1");
+    if (c.Attrs & Dim) w.WriteLiteral(";2");
+    if (c.Attrs & Italic) w.WriteLiteral(";3");
+    if (c.Attrs & Underline) {
+        if (c.AttrEx > 1) {
+            // D8: extended underline style via colon sub-param (4:N)
+            w.WriteLiteral(";4:");
+            w.WriteDecimal(static_cast<std::uint32_t>(c.AttrEx));
+        } else {
+            w.WriteLiteral(";4");
+        }
     }
-    if (c.Attrs & Dim) {
-        sep();
-        w.WriteByte('2');
-    }
-    if (c.Attrs & Italic) {
-        sep();
-        w.WriteByte('3');
-    }
-    if (c.AttrEx != 0) {
-        // Extended underline style (4:N): overrides plain SGR 4.
-        sep();
-        w.WriteLiteral("4:");
-        w.WriteDecimal(c.AttrEx);
-    } else if (c.Attrs & Underline) {
-        sep();
-        w.WriteByte('4');
-    }
-    if (c.Attrs & Blink) {
-        sep();
-        w.WriteByte('5');
-    }
-    if (c.Attrs & Inverse) {
-        sep();
-        w.WriteByte('7');
-    }
-    if (c.Attrs & Invisible) {
-        sep();
-        w.WriteByte('8');
-    }
-    if (c.Attrs & StrikeThrough) {
-        sep();
-        w.WriteByte('9');
-    }
-    if (c.UlIdx != 0) {
-        // Underline colour (SGR 58;5;N).
-        sep();
-        w.WriteLiteral("58;5;");
-        w.WriteDecimal(c.UlIdx);
-    }
+    if (c.Attrs & Blink) w.WriteLiteral(";5");
+    if (c.Attrs & Inverse) w.WriteLiteral(";7");
+    if (c.Attrs & Invisible) w.WriteLiteral(";8");
+    if (c.Attrs & StrikeThrough) w.WriteLiteral(";9");
 
     if (c.FgKind == EColorKind::Indexed) {
-        std::uint8_t idx = c.Fg[0];
+        const std::uint8_t idx = c.Fg[0];
         if (idx < 8) {
-            sep();
+            w.WriteByte(';');
             w.WriteDecimal(30u + idx);
         } else if (idx < 16) {
-            sep();
+            w.WriteByte(';');
             w.WriteDecimal(90u + (idx - 8u));
         } else {
-            sep();
-            w.WriteLiteral("38;5;");
+            w.WriteLiteral(";38;5;");
             w.WriteDecimal(idx);
         }
     } else if (c.FgKind == EColorKind::TrueColor) {
-        sep();
-        w.WriteLiteral("38;2;");
+        w.WriteLiteral(";38;2;");
         w.WriteDecimal(c.Fg[0]);
         w.WriteByte(';');
         w.WriteDecimal(c.Fg[1]);
         w.WriteByte(';');
         w.WriteDecimal(c.Fg[2]);
     }
-
-    if (c.BgKind == EColorKind::Indexed) {
-        std::uint8_t idx = c.Bg[0];
-        if (idx < 8) {
-            sep();
-            w.WriteDecimal(40u + idx);
-        } else if (idx < 16) {
-            sep();
-            w.WriteDecimal(100u + (idx - 8u));
-        } else {
-            sep();
-            w.WriteLiteral("48;5;");
-            w.WriteDecimal(idx);
-        }
-    } else if (c.BgKind == EColorKind::TrueColor) {
-        sep();
-        w.WriteLiteral("48;2;");
-        w.WriteDecimal(c.Bg[0]);
-        w.WriteByte(';');
-        w.WriteDecimal(c.Bg[1]);
-        w.WriteByte(';');
-        w.WriteDecimal(c.Bg[2]);
-    }
-
     w.WriteByte('m');
+
+    // --- Sequence 2: bg color + underline colour (D8) — only when needed ---
+    if (c.BgKind != EColorKind::Default || c.UlIdx != 0) {
+        w.WriteLiteral("\x1b[");
+        bool first2 = true;
+        auto sep2 = [&]() noexcept {
+            if (!first2) w.WriteByte(';');
+            first2 = false;
+        };
+        if (c.BgKind == EColorKind::Indexed) {
+            sep2();
+            const std::uint8_t idx = c.Bg[0];
+            if (idx < 8) {
+                w.WriteDecimal(40u + idx);
+            } else if (idx < 16) {
+                w.WriteDecimal(100u + (idx - 8u));
+            } else {
+                w.WriteLiteral("48;5;");
+                w.WriteDecimal(idx);
+            }
+        } else if (c.BgKind == EColorKind::TrueColor) {
+            sep2();
+            w.WriteLiteral("48;2;");
+            w.WriteDecimal(c.Bg[0]);
+            w.WriteByte(';');
+            w.WriteDecimal(c.Bg[1]);
+            w.WriteByte(';');
+            w.WriteDecimal(c.Bg[2]);
+        }
+        if (c.UlIdx != 0) {
+            sep2();
+            w.WriteLiteral("58;5;");
+            w.WriteDecimal(static_cast<std::uint32_t>(c.UlIdx));
+        }
+        w.WriteByte('m');
+    }
 
     // Update pen state.
     pen.Attrs = c.Attrs;
@@ -446,10 +425,52 @@ static void EmitSgrFromSaved(EscWriter& w, const SavedCursor& sc,
     w.WriteByte('m');
 }
 
-static void EmitMode(EscWriter& w, std::uint16_t ps, bool on) noexcept {
+/// Emit a DECSET/DECRST private mode sequence (ESC [ ? Ps h/l).
+static void EmitPrivateMode(EscWriter& w, std::uint16_t ps, bool on) noexcept {
     w.WriteLiteral("\x1b[?");
     w.WriteDecimal(ps);
     w.WriteByte(on ? 'h' : 'l');
+}
+
+/// Emit an ANSI SM/RM mode sequence (ESC [ Ps h/l — no '?'). (D6)
+static void EmitAnsiMode(EscWriter& w, std::uint16_t ps, bool on) noexcept {
+    w.WriteLiteral("\x1b[");
+    w.WriteDecimal(ps);
+    w.WriteByte(on ? 'h' : 'l');
+}
+
+/// Build a Cell from the grid's LIVE pen state (D5: use live pen, not saved).
+static Cell LivePenCell(const Grid& g) noexcept {
+    Cell c{};
+    c.Attrs = g.PenAttrs();
+    c.FgKind = g.PenFgKind();
+    c.BgKind = g.PenBgKind();
+    c.Fg[0] = g.PenFg()[0];
+    c.Fg[1] = g.PenFg()[1];
+    c.Fg[2] = g.PenFg()[2];
+    c.Bg[0] = g.PenBg()[0];
+    c.Bg[1] = g.PenBg()[1];
+    c.Bg[2] = g.PenBg()[2];
+    c.AttrEx = g.PenAttrEx();
+    c.UlIdx = g.PenUlIdx();
+    return c;
+}
+
+/// Build a Cell from a SavedCursor (for DECSC pen setup).
+static Cell SavedCursorCell(const SavedCursor& sc) noexcept {
+    Cell c{};
+    c.Attrs = sc.Attrs;
+    c.FgKind = sc.FgKind;
+    c.BgKind = sc.BgKind;
+    c.Fg[0] = sc.Fg[0];
+    c.Fg[1] = sc.Fg[1];
+    c.Fg[2] = sc.Fg[2];
+    c.Bg[0] = sc.Bg[0];
+    c.Bg[1] = sc.Bg[1];
+    c.Bg[2] = sc.Bg[2];
+    c.AttrEx = sc.AttrEx;
+    c.UlIdx = sc.UlIdx;
+    return c;
 }
 
 // ---------------------------------------------------------------------------
@@ -484,9 +505,10 @@ static void EncodeHistory(EscWriter& w, const Grid& g, Pen& pen,
             col += (raw.Width >= 2) ? 2 : 1;
         }
 
-        // Reset pen at end of line for cleanliness.
+        // Reset pen at end of line to prevent SGR bleeding.
+        // Defect 6 fix: include AttrEx and UlIdx in the reset condition.
         if (pen.Attrs || pen.FgKind != EColorKind::Default ||
-            pen.BgKind != EColorKind::Default) {
+            pen.BgKind != EColorKind::Default || pen.AttrEx || pen.UlIdx) {
             w.WriteLiteral("\x1b[0m");
             pen = Pen{};
         }
@@ -530,76 +552,195 @@ static void EncodeScreen(EscWriter& w, const Grid& g, Pen& pen,
     }
 }
 
+// Encode all main-screen cells explicitly (used when altScreen is active,
+// to populate the target's main buffer before ?1049h — D1 requirement).
+static void EncodeMainScreen(EscWriter& w, const Grid& g, Pen& pen,
+                             EColorMode cm) noexcept {
+    for (std::uint16_t row = 0; row < g.Rows(); ++row) {
+        const std::uint16_t used = g.MainRowCellsUsed(row);
+        if (used == 0) continue;
+
+        w.WriteLiteral("\x1b[");
+        w.WriteDecimal(static_cast<std::uint32_t>(row + 1));
+        w.WriteLiteral(";1H");
+
+        std::uint16_t col = 0;
+        while (col < used) {
+            const Cell& raw = g.MainCellAt(row, col);
+            if (raw.Width == 0) {
+                ++col;
+                continue;
+            }
+
+            const Cell nc = NormalizeCell(raw, cm);
+            EmitSgr(w, pen, nc);
+            char32_t cp = SanitizeCp(raw.Codepoint);
+            w.WriteUtf8(cp);
+            col += (raw.Width >= 2) ? static_cast<std::uint16_t>(2)
+                                    : static_cast<std::uint16_t>(1);
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Encode mode-restore section (design.md §9).
 // ---------------------------------------------------------------------------
 
 static void EncodeModeRestore(EscWriter& w, const Grid& g,
                               EColorMode cm) noexcept {
-    // Reset SGR pen and restore saved cursor colours (for DECSC/DECRC).
-    w.WriteLiteral("\x1b[0m");
-
+    const bool isAlt = g.IsAltScreen();
     const SavedCursor& sc =
-        g.IsAltScreen() ? g.SavedCursorAltState() : g.SavedCursorMainState();
+        isAlt ? g.SavedCursorAltState() : g.SavedCursorMainState();
+
+    // 1. Reset pen, then set saved-cursor pen (for ESC 7 capture).
+    Pen pen{};
+    w.WriteLiteral("\x1b[0m");
     EmitSgrFromSaved(w, sc, cm);
 
-    // DECSC — save cursor (so DECRC restores the saved position).
+    // 2. CUP to saved cursor position (absolute; DECOM not yet enabled). (D3)
     w.WriteLiteral("\x1b[");
     w.WriteDecimal(static_cast<std::uint32_t>(sc.Row + 1));
     w.WriteByte(';');
     w.WriteDecimal(static_cast<std::uint32_t>(sc.Col + 1));
     w.WriteByte('H');
+
+    // 3. DECSC (ESC 7) — captures position + pen for future DECRC.
     w.WriteLiteral(
         "\x1b"
-        "7");  // ESC 7 = DECSC
+        "7");
 
-    // DECSTBM — scroll region (1-based).
+    // 4. Reset pen, then set LIVE pen (D5: live pen, not saved cursor's pen).
+    pen = Pen{};
+    w.WriteLiteral("\x1b[0m");
+    const Cell liveCell = LivePenCell(g);
+    EmitSgr(w, pen, liveCell);
+
+    // 5. DECSTBM — scroll region (1-based).
     w.WriteLiteral("\x1b[");
     w.WriteDecimal(static_cast<std::uint32_t>(g.ScrollTop() + 1));
     w.WriteByte(';');
     w.WriteDecimal(static_cast<std::uint32_t>(g.ScrollBot() + 1));
     w.WriteByte('r');
 
-    // Private modes.
-    EmitMode(w, 1, g.ModeSet(EMode::Decckm));
-    EmitMode(w, 7, g.ModeSet(EMode::Awm));
-    EmitMode(w, 4, g.ModeSet(EMode::Irm));
-    EmitMode(w, 20, g.ModeSet(EMode::Lnm));
-    EmitMode(w, 6, g.ModeSet(EMode::Decom));
-    EmitMode(w, 1000, g.ModeSet(EMode::Mouse1000));
-    EmitMode(w, 1002, g.ModeSet(EMode::Mouse1002));
-    EmitMode(w, 1003, g.ModeSet(EMode::Mouse1003));
-    EmitMode(w, 1005, g.ModeSet(EMode::Mouse1005));
-    EmitMode(w, 1006, g.ModeSet(EMode::Mouse1006));
-    EmitMode(w, 1015, g.ModeSet(EMode::Mouse1015));
-    EmitMode(w, 2004, g.ModeSet(EMode::BracketedPaste));
-    EmitMode(w, 1004, g.ModeSet(EMode::FocusEvents));
+    // 6. Modes (DECOM emitted last so final CUP is in the right coordinates).
+    EmitPrivateMode(w, 1, g.ModeSet(EMode::Decckm));
+    EmitPrivateMode(w, 7, g.ModeSet(EMode::Awm));
+    EmitAnsiMode(w, 4, g.ModeSet(EMode::Irm));   // D6: IRM is ANSI SM/RM
+    EmitAnsiMode(w, 20, g.ModeSet(EMode::Lnm));  // D6: LNM is ANSI SM/RM
+    EmitPrivateMode(w, 1000, g.ModeSet(EMode::Mouse1000));
+    EmitPrivateMode(w, 1002, g.ModeSet(EMode::Mouse1002));
+    EmitPrivateMode(w, 1003, g.ModeSet(EMode::Mouse1003));
+    EmitPrivateMode(w, 1005, g.ModeSet(EMode::Mouse1005));
+    EmitPrivateMode(w, 1006, g.ModeSet(EMode::Mouse1006));
+    EmitPrivateMode(w, 1015, g.ModeSet(EMode::Mouse1015));
+    EmitPrivateMode(w, 2004, g.ModeSet(EMode::BracketedPaste));
+    EmitPrivateMode(w, 1004, g.ModeSet(EMode::FocusEvents));
 
-    // Charset designations.
+    // 7. Charset designations and active charset.
     w.WriteLiteral("\x1b(");
     w.WriteByte(g.CharsetG0() == 0 ? 'B' : '0');
     w.WriteLiteral("\x1b)");
     w.WriteByte(g.CharsetG1() == 0 ? 'B' : '0');
-
-    // Charset active (SO = G1, SI = G0).
     w.WriteByte(g.CharsetActive() == 1 ? '\x0e' : '\x0f');
 
-    // DECSCUSR — cursor style.
+    // 8. Tab stops (D11): clear all, then re-set from grid state.
+    //    Use HTS (ESC H) at each column, positioned via CUP to row 1.
+    w.WriteLiteral("\x1b[3g");  // TBC 3 = clear all tab stops
+    for (std::uint16_t col = 0; col < g.Cols(); ++col) {
+        if (g.IsTabStop(col)) {
+            w.WriteLiteral("\x1b[1;");
+            w.WriteDecimal(static_cast<std::uint32_t>(col + 1));
+            w.WriteByte('H');
+            w.WriteLiteral(
+                "\x1b"
+                "H");  // ESC H = HTS
+        }
+    }
+
+    // 9. DECSCUSR — cursor style (ESC [ Ps SP q).
     w.WriteLiteral("\x1b[");
     w.WriteDecimal(g.CursorStyle());
     w.WriteLiteral(" q");
 
-    // Cursor position (1-based CUP).
+    // 10. Enable/disable DECOM BEFORE final CUP (D3: cursor set after DECOM).
+    const bool decom = g.ModeSet(EMode::Decom);
+    EmitPrivateMode(w, 6, decom);
+
+    // 11. Final cursor position (D3: DECOM-relative if DECOM is on).
+    const std::uint16_t curRow = g.CursorRow();
+    const std::uint16_t curCol = g.CursorCol();
+    std::uint32_t cupRow;
+    if (decom) {
+        cupRow = static_cast<std::uint32_t>(curRow - g.ScrollTop() + 1);
+    } else {
+        cupRow = static_cast<std::uint32_t>(curRow + 1);
+    }
+    // D4b: if PendingWrap is set and the cursor is on a wide-char continuation
+    // cell (Width==0) at the last column, position the initial CUP at the lead
+    // column (curCol-1) so step 12 can re-emit the lead char, advance the
+    // cursor to curCol, and set PendingWrap.
+    const bool wrapLeadReposition =
+        g.PendingWrap() &&
+        curCol + 1u == static_cast<std::uint32_t>(g.Cols()) && curCol > 0u &&
+        g.CellAt(curRow, curCol).Width == 0;
+    const std::uint16_t emitCol =
+        wrapLeadReposition ? static_cast<std::uint16_t>(curCol - 1u) : curCol;
+    const std::uint32_t cupCol = static_cast<std::uint32_t>(emitCol + 1);
     w.WriteLiteral("\x1b[");
-    w.WriteDecimal(static_cast<std::uint32_t>(g.CursorRow() + 1));
+    w.WriteDecimal(cupRow);
     w.WriteByte(';');
-    w.WriteDecimal(static_cast<std::uint32_t>(g.CursorCol() + 1));
+    w.WriteDecimal(cupCol);
     w.WriteByte('H');
 
-    // DECTCEM — cursor visibility.
-    EmitMode(w, 25, g.ModeSet(EMode::Dectcem));
+    // 12. Pending wrap (D4): re-emit cell at last column to trigger wrap state.
+    // Defect 5 fix: PendingWrap can be true even with AWM off.  When AWM is
+    // off, temporarily enable it so the re-printed char sets PendingWrap.
+    if (g.PendingWrap() &&
+        curCol + 1u == static_cast<std::uint32_t>(g.Cols())) {
+        const bool awmWasOff = !g.ModeSet(EMode::Awm);
+        if (awmWasOff)
+            EmitPrivateMode(w, 7,
+                            true);  // temp AWM on so re-print sets PendingWrap
 
-    // End sync-output.
+        // Defect 4 fix: if a graphics charset is active the re-printed char
+        // would be translated twice.  Temporarily switch to ASCII.
+        const bool g0GraphicsActive =
+            g.CharsetG0() != 0 && g.CharsetActive() == 0;
+        const bool g1GraphicsActive =
+            g.CharsetG1() != 0 && g.CharsetActive() != 0;
+        if (g0GraphicsActive) w.WriteLiteral("\x1b(B");
+        if (g1GraphicsActive) {
+            w.WriteLiteral("\x1b)B");
+            w.WriteByte('\x0f');
+        }
+
+        // D4b: emitCol already positions CUP at the wide-char lead if needed.
+        const Cell& wc = g.CellAt(curRow, emitCol);
+        EmitSgr(w, pen, wc);
+        char32_t cp = SanitizeCp(wc.Codepoint);
+        if (wc.Width == 1 && cp != U' ' && cp != U'?' && Wcwidth(cp) == 2)
+            cp = U'\xFFFD';
+        w.WriteUtf8(cp);
+
+        // Defect 3 fix: after the re-print, restore the live pen because
+        // EmitSgr set pen to wc's attrs, which may differ from the live pen.
+        const Cell liveCell2 = LivePenCell(g);
+        EmitSgr(w, pen, liveCell2);
+
+        // Restore charset state if we temporarily switched to ASCII.
+        if (g0GraphicsActive) w.WriteLiteral("\x1b(0");
+        if (g1GraphicsActive) {
+            w.WriteLiteral("\x1b)0");
+            w.WriteByte('\x0e');
+        }
+
+        if (awmWasOff) EmitPrivateMode(w, 7, false);  // restore AWM off
+    }
+
+    // 13. DECTCEM — cursor visibility.
+    EmitPrivateMode(w, 25, g.ModeSet(EMode::Dectcem));
+
+    // 14. End sync-output.
     w.WriteLiteral("\x1b[?2026l");
 }
 
@@ -632,32 +773,61 @@ static EncodeResult DoEncode(std::byte* buf, std::size_t cap, const Grid& grid,
     w.WriteByte('\x18');  // CAN
     // ESC backslash (ST — terminates any open DCS/OSC/APC):
     w.WriteLiteral("\x1b\\");
-
-    if (altScreen) {
-        w.WriteLiteral("\x1b[?1049h");
-    } else {
-        w.WriteLiteral("\x1b[?1049l");
-    }
+    w.WriteLiteral("\x1b[!p");      // DECSTR soft-reset (D2)
+    w.WriteLiteral("\x1b[?1049l");  // ensure main screen (always)
     w.WriteLiteral("\x1b[2J\x1b[H");
+    w.WriteLiteral("\x1b[?25l");  // hide cursor (D13: with preamble)
+    pen = Pen{};
 
     // -----------------------------------------------------------------------
-    // History section
+    // History section (always, even when on alt screen)
     // -----------------------------------------------------------------------
     const std::size_t scrollbackStart = w.Pos;
-    if (!altScreen && histCount > 0) {
+    if (histCount > 0) {
         EncodeHistory(w, grid, pen, histStart, histCount, cm);
-        for (std::uint16_t i = 0; i < grid.Rows(); ++i) w.WriteByte('\n');
+        for (std::uint16_t i = 0; i + 1 < grid.Rows(); ++i) w.WriteByte('\n');
     }
     const std::size_t scrollbackLen = w.Pos - scrollbackStart;
 
     // -----------------------------------------------------------------------
-    // Screen section
+    // Main screen cells + optional alt-screen switch
     // -----------------------------------------------------------------------
-    if (!altScreen) {
+    // D14: reset SGR pen before second clear so \x1b[2J always erases with the
+    // default background.  EncodeHistory may leave a non-default pen active.
+    w.WriteLiteral("\x1b[0m");
+    w.WriteLiteral("\x1b[2J\x1b[H");  // second clear
+    pen = Pen{};
+
+    if (altScreen) {
+        // Encode all main-screen cells so the target's main buffer is correct
+        // when the user exits alt mode (D1 requirement).
+        EncodeMainScreen(w, grid, pen, cm);
+
+        // Defect 1 fix: ?1049h saves the current cursor into the terminal's
+        // main-saved-cursor slot.  Position cursor at the source's main
+        // SavedCursor before issuing ?1049h, so the terminal records the
+        // correct saved position for the future ?1049l restore.
+        const SavedCursor& msc = grid.SavedCursorMainState();
+        const Cell mscCell = SavedCursorCell(msc);
+        pen = Pen{};
+        w.WriteLiteral("\x1b[0m");
+        EmitSgr(w, pen, mscCell);
+        w.WriteLiteral("\x1b[");
+        w.WriteDecimal(static_cast<std::uint32_t>(msc.Row + 1));
+        w.WriteByte(';');
+        w.WriteDecimal(static_cast<std::uint32_t>(msc.Col + 1));
+        w.WriteByte('H');
+        w.WriteLiteral("\x1b[?1049h");  // enter alt screen (saves msc position)
+        // D14: reset SGR before the alt-screen clear so \x1b[2J erases with
+        // the default background rather than a stale colour from main encoding.
+        w.WriteLiteral("\x1b[0m");
         w.WriteLiteral("\x1b[2J\x1b[H");
+        pen = Pen{};
     }
 
-    w.WriteLiteral("\x1b[?25l");
+    // -----------------------------------------------------------------------
+    // Screen section (sync window wraps visible screen)
+    // -----------------------------------------------------------------------
     w.WriteLiteral("\x1b[?2026h");
 
     pen = Pen{};
@@ -707,9 +877,7 @@ GridResult<Snapshot*> Snapshot::Create(const Grid& grid,
     }
 
     // Step 1: trim scrollback history by count (binary-search on max lines).
-    // Skipped in alt-screen mode: alt screen carries no history of its own,
-    // so DoEncode ignores histCount; trimming would not help.
-    if (sz > 0 && !grid.IsAltScreen()) {
+    if (sz > 0) {
         // Find the maximum N lines (from the newest end) that fit.
         std::uint32_t lo = 0, hi = sz;
         while (lo < hi) {
