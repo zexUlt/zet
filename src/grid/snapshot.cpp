@@ -114,14 +114,14 @@ enum class EColorMode : std::uint8_t {
 static std::uint8_t TrueColorTo256(std::uint8_t r, std::uint8_t g,
                                    std::uint8_t b) noexcept {
     // 6×6×6 cube: step values per channel are {0, 95, 135, 175, 215, 255}.
-    static constexpr std::uint8_t kCubeSteps[6] = {0, 95, 135, 175, 215, 255};
+    static constexpr std::uint8_t CUBE_STEPS[6] = {0, 95, 135, 175, 215, 255};
 
     // Find nearest cube index for a single channel value.
     auto cubeIdx = [](std::uint8_t v) -> std::uint8_t {
         std::uint8_t best = 0;
         int bestDist = 255 * 255 + 1;
         for (int i = 0; i < 6; ++i) {
-            int d = static_cast<int>(v) - static_cast<int>(kCubeSteps[i]);
+            int d = static_cast<int>(v) - static_cast<int>(CUBE_STEPS[i]);
             if (d * d < bestDist) {
                 bestDist = d * d;
                 best = static_cast<std::uint8_t>(i);
@@ -136,9 +136,9 @@ static std::uint8_t TrueColorTo256(std::uint8_t r, std::uint8_t g,
     const std::uint8_t cubeColor =
         static_cast<std::uint8_t>(16 + 36 * ri + 6 * gi + bi);
 
-    const int cr = kCubeSteps[ri];
-    const int cg = kCubeSteps[gi];
-    const int cb = kCubeSteps[bi];
+    const int cr = CUBE_STEPS[ri];
+    const int cg = CUBE_STEPS[gi];
+    const int cb = CUBE_STEPS[bi];
     const int cubeDist =
         (cr - r) * (cr - r) + (cg - g) * (cg - g) + (cb - b) * (cb - b);
 
@@ -247,55 +247,55 @@ static void EmitSgr(EscWriter& w, Pen& pen, const Cell& c) noexcept {
 
     w.WriteLiteral("\x1b[");
     bool first = true;
-    auto Sep = [&]() {
+    auto sep = [&]() {
         if (!first) w.WriteByte(';');
         first = false;
     };
 
     // Always reset first to ensure a clean baseline.
-    Sep();
+    sep();
     w.WriteByte('0');
 
     if (c.Attrs & Bold) {
-        Sep();
+        sep();
         w.WriteByte('1');
     }
     if (c.Attrs & Dim) {
-        Sep();
+        sep();
         w.WriteByte('2');
     }
     if (c.Attrs & Italic) {
-        Sep();
+        sep();
         w.WriteByte('3');
     }
     if (c.AttrEx != 0) {
         // Extended underline style (4:N): overrides plain SGR 4.
-        Sep();
+        sep();
         w.WriteLiteral("4:");
         w.WriteDecimal(c.AttrEx);
     } else if (c.Attrs & Underline) {
-        Sep();
+        sep();
         w.WriteByte('4');
     }
     if (c.Attrs & Blink) {
-        Sep();
+        sep();
         w.WriteByte('5');
     }
     if (c.Attrs & Inverse) {
-        Sep();
+        sep();
         w.WriteByte('7');
     }
     if (c.Attrs & Invisible) {
-        Sep();
+        sep();
         w.WriteByte('8');
     }
     if (c.Attrs & StrikeThrough) {
-        Sep();
+        sep();
         w.WriteByte('9');
     }
     if (c.UlIdx != 0) {
         // Underline colour (SGR 58;5;N).
-        Sep();
+        sep();
         w.WriteLiteral("58;5;");
         w.WriteDecimal(c.UlIdx);
     }
@@ -303,18 +303,18 @@ static void EmitSgr(EscWriter& w, Pen& pen, const Cell& c) noexcept {
     if (c.FgKind == EColorKind::Indexed) {
         std::uint8_t idx = c.Fg[0];
         if (idx < 8) {
-            Sep();
+            sep();
             w.WriteDecimal(30u + idx);
         } else if (idx < 16) {
-            Sep();
+            sep();
             w.WriteDecimal(90u + (idx - 8u));
         } else {
-            Sep();
+            sep();
             w.WriteLiteral("38;5;");
             w.WriteDecimal(idx);
         }
     } else if (c.FgKind == EColorKind::TrueColor) {
-        Sep();
+        sep();
         w.WriteLiteral("38;2;");
         w.WriteDecimal(c.Fg[0]);
         w.WriteByte(';');
@@ -326,18 +326,18 @@ static void EmitSgr(EscWriter& w, Pen& pen, const Cell& c) noexcept {
     if (c.BgKind == EColorKind::Indexed) {
         std::uint8_t idx = c.Bg[0];
         if (idx < 8) {
-            Sep();
+            sep();
             w.WriteDecimal(40u + idx);
         } else if (idx < 16) {
-            Sep();
+            sep();
             w.WriteDecimal(100u + (idx - 8u));
         } else {
-            Sep();
+            sep();
             w.WriteLiteral("48;5;");
             w.WriteDecimal(idx);
         }
     } else if (c.BgKind == EColorKind::TrueColor) {
-        Sep();
+        sep();
         w.WriteLiteral("48;2;");
         w.WriteDecimal(c.Bg[0]);
         w.WriteByte(';');

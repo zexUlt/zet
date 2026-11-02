@@ -546,15 +546,15 @@ TEST_CASE("degrade step1: history trimmed to fit cap") {
     // Full snapshot (no cap restriction).
     auto full = Snapshot::Create(*g);
     REQUIRE(full.has_value());
-    const std::size_t S = full.value()->Bytes().size();
+    const std::size_t s = full.value()->Bytes().size();
     delete full.value();
 
     // cap = S - 1 forces at least one line to be trimmed.
-    auto r = Snapshot::Create(*g, SnapshotOptions{.MaxBytes = S - 1});
+    auto r = Snapshot::Create(*g, SnapshotOptions{.MaxBytes = s - 1});
     REQUIRE(r.has_value());
     Snapshot* snap = r.value();
     CHECK(snap->Degradation() == EDegradation::HistoryTrimmed);
-    CHECK(snap->Bytes().size() <= S - 1);
+    CHECK(snap->Bytes().size() <= s - 1);
 
     delete snap;
     delete g;
@@ -575,14 +575,14 @@ TEST_CASE("degrade step1: binary-search trims to maximum fitting count") {
 
     auto full = Snapshot::Create(*g);
     REQUIRE(full.has_value());
-    const std::size_t S = full.value()->Bytes().size();
+    const std::size_t s = full.value()->Bytes().size();
     delete full.value();
 
     // cap = S - 1 triggers trimming.
-    auto r = Snapshot::Create(*g, SnapshotOptions{.MaxBytes = S - 1});
+    auto r = Snapshot::Create(*g, SnapshotOptions{.MaxBytes = s - 1});
     REQUIRE(r.has_value());
     CHECK(r.value()->Degradation() == EDegradation::HistoryTrimmed);
-    CHECK(r.value()->Bytes().size() <= S - 1);
+    CHECK(r.value()->Bytes().size() <= s - 1);
 
     delete r.value();
     delete g;
@@ -597,11 +597,11 @@ TEST_CASE("degrade step1: cap exactly at full size has no degradation") {
 
     auto full = Snapshot::Create(*g);
     REQUIRE(full.has_value());
-    const std::size_t S = full.value()->Bytes().size();
+    const std::size_t s = full.value()->Bytes().size();
     delete full.value();
 
     // cap = S: no trimming needed.
-    auto r = Snapshot::Create(*g, SnapshotOptions{.MaxBytes = S});
+    auto r = Snapshot::Create(*g, SnapshotOptions{.MaxBytes = s});
     REQUIRE(r.has_value());
     CHECK(r.value()->Degradation() == EDegradation::None);
 
@@ -632,16 +632,16 @@ TEST_CASE("degrade step2: truecolor downgraded to 256 when needed") {
     // Full snapshot (all TrueColor).
     auto full = Snapshot::Create(*g);
     REQUIRE(full.has_value());
-    const std::size_t S = full.value()->Bytes().size();
+    const std::size_t s = full.value()->Bytes().size();
     CHECK(full.value()->Degradation() == EDegradation::None);
     delete full.value();
 
     // 256-color snapshot must be smaller (TrueColor SGR is longer).
     // Set cap = S - 1 → should trigger Colors256.
-    auto r = Snapshot::Create(*g, SnapshotOptions{.MaxBytes = S - 1});
+    auto r = Snapshot::Create(*g, SnapshotOptions{.MaxBytes = s - 1});
     REQUIRE(r.has_value());
     CHECK(r.value()->Degradation() == EDegradation::Colors256);
-    CHECK(r.value()->Bytes().size() <= S - 1);
+    CHECK(r.value()->Bytes().size() <= s - 1);
 
     delete r.value();
     delete g;
@@ -654,44 +654,44 @@ TEST_CASE("degrade step2: truecolor->256 maps known values correctly") {
     // Verify the xterm-256 mapping on four canonical inputs by checking that
     // the encoded snapshot contains the expected indexed SGR sequences.
     struct Case {
-        std::uint8_t r, g, b;
-        std::uint8_t expected256;
-        const char* sgrSubstr;  // expected substring in 256-color output
+        std::uint8_t R, G, B;
+        std::uint8_t Expected256;
+        const char* SgrSubstr;  // expected substring in 256-color output
     };
     // Pure red (255,0,0)   → cube index 196 = 16+36*5+0+0
     // Pure green (0,255,0) → cube index 46  = 16+0+36*5/6*5... = 16+30
     // Pure white (255,255,255) → cube index 231 = 16+180+30+5
     // Mid-gray (118,118,118)  → grayscale 243 = 232+11
-    static const Case kCases[] = {
+    static const Case CASES[] = {
         {255, 0, 0, 196, "\x1b[0;38;5;196m"},
         {0, 255, 0, 46, "\x1b[0;38;5;46m"},
         {255, 255, 255, 231, "\x1b[0;38;5;231m"},
         {118, 118, 118, 243, "\x1b[0;38;5;243m"},
     };
 
-    for (const auto& tc : kCases) {
+    for (const auto& tc : CASES) {
         // Set one cell to TrueColor; put text.
         Grid* g = MakeGrid(10, 5, 0);
         VtParser p;
         char sgr[32];
         std::snprintf(sgr, sizeof(sgr), "\x1b[38;2;%d;%d;%dm",
-                      static_cast<int>(tc.r), static_cast<int>(tc.g),
-                      static_cast<int>(tc.b));
+                      static_cast<int>(tc.R), static_cast<int>(tc.G),
+                      static_cast<int>(tc.B));
         Feed(p, *g, sgr);
         Feed(p, *g, "A");
 
         // Force Colors256 by capping below full TrueColor.
         auto full = Snapshot::Create(*g);
         REQUIRE(full.has_value());
-        const std::size_t S = full.value()->Bytes().size();
+        const std::size_t s = full.value()->Bytes().size();
         delete full.value();
 
-        auto r = Snapshot::Create(*g, SnapshotOptions{.MaxBytes = S - 1});
+        auto r = Snapshot::Create(*g, SnapshotOptions{.MaxBytes = s - 1});
         REQUIRE(r.has_value());
         // Accept either Colors256 or None (if 256-colour happened to
         // produce the same size or smaller; unlikely but guard it).
         if (r.value()->Degradation() == EDegradation::Colors256) {
-            CHECK(Contains(r.value()->Bytes(), tc.sgrSubstr));
+            CHECK(Contains(r.value()->Bytes(), tc.SgrSubstr));
         }
 
         delete r.value();
@@ -725,14 +725,14 @@ TEST_CASE("degrade step3: colour stripped when 256-colour still too large") {
     // Full size.
     auto full = Snapshot::Create(*g);
     REQUIRE(full.has_value());
-    const std::size_t S = full.value()->Bytes().size();
+    const std::size_t s = full.value()->Bytes().size();
     delete full.value();
 
     // Build a no-colour snapshot to find its size.
     // We can't call DoEncode directly, so use a small cap that forces NoColor.
     // The no-colour snapshot should be substantially smaller than S because
     // colour SGRs dominate.  Try cap = S / 3 (generous for mode restore).
-    const std::size_t noCap = S / 3;
+    const std::size_t noCap = s / 3;
     auto r = Snapshot::Create(*g, SnapshotOptions{.MaxBytes = noCap});
     REQUIRE(r.has_value());
     CHECK(r.value()->Degradation() == EDegradation::NoColor);
@@ -880,12 +880,12 @@ TEST_CASE("degrade: output always fits within cap") {
 
     auto full = Snapshot::Create(*g);
     REQUIRE(full.has_value());
-    const std::size_t S = full.value()->Bytes().size();
+    const std::size_t s = full.value()->Bytes().size();
     delete full.value();
 
     // Try a range of caps.
     for (std::size_t cap :
-         {S, S - 1, S / 2, S / 4, S / 8, std::size_t{512}, std::size_t{256}}) {
+         {s, s - 1, s / 2, s / 4, s / 8, std::size_t{512}, std::size_t{256}}) {
         if (cap == 0) continue;
         auto r = Snapshot::Create(*g, SnapshotOptions{.MaxBytes = cap});
         if (r.has_value()) {
@@ -910,25 +910,25 @@ TEST_CASE("degrade: boundary cap == full size has None degradation") {
 
     auto full = Snapshot::Create(*g);
     REQUIRE(full.has_value());
-    const std::size_t S = full.value()->Bytes().size();
+    const std::size_t s = full.value()->Bytes().size();
     delete full.value();
 
     // Exactly at full size: no degradation.
-    auto r = Snapshot::Create(*g, SnapshotOptions{.MaxBytes = S});
+    auto r = Snapshot::Create(*g, SnapshotOptions{.MaxBytes = s});
     REQUIRE(r.has_value());
     CHECK(r.value()->Degradation() == EDegradation::None);
-    CHECK(r.value()->Bytes().size() == S);
+    CHECK(r.value()->Bytes().size() == s);
 
     // One byte above: same result.
-    auto r2 = Snapshot::Create(*g, SnapshotOptions{.MaxBytes = S + 1});
+    auto r2 = Snapshot::Create(*g, SnapshotOptions{.MaxBytes = s + 1});
     REQUIRE(r2.has_value());
     CHECK(r2.value()->Degradation() == EDegradation::None);
 
     // One byte below: degradation must kick in.
-    auto r3 = Snapshot::Create(*g, SnapshotOptions{.MaxBytes = S - 1});
+    auto r3 = Snapshot::Create(*g, SnapshotOptions{.MaxBytes = s - 1});
     REQUIRE(r3.has_value());
     CHECK(r3.value()->Degradation() != EDegradation::None);
-    CHECK(r3.value()->Bytes().size() <= S - 1);
+    CHECK(r3.value()->Bytes().size() <= s - 1);
 
     delete r.value();
     delete r2.value();
