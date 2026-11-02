@@ -675,10 +675,14 @@ static void EncodeModeRestore(EscWriter& w, const Grid& g,
     } else {
         cupRow = static_cast<std::uint32_t>(curRow + 1);
     }
+
     // D4b: if PendingWrap is set and the cursor is on a wide-char continuation
     // cell (Width==0) at the last column, position the initial CUP at the lead
     // column (curCol-1) so step 12 can re-emit the lead char, advance the
-    // cursor to curCol, and set PendingWrap.
+    // cursor to curCol, and set PendingWrap.  Writing directly into the
+    // continuation cell would trigger the left-neighbour check and break the
+    // wide pair.  This applies whether AWM is currently on or off (AWM-off is
+    // handled by the awmWasOff temp-enable below).
     const bool wrapLeadReposition =
         g.PendingWrap() &&
         curCol + 1u == static_cast<std::uint32_t>(g.Cols()) && curCol > 0u &&
@@ -793,7 +797,8 @@ static EncodeResult DoEncode(std::byte* buf, std::size_t cap, const Grid& grid,
     // Main screen cells + optional alt-screen switch
     // -----------------------------------------------------------------------
     // D14: reset SGR pen before second clear so \x1b[2J always erases with the
-    // default background.  EncodeHistory may leave a non-default pen active.
+    // default background.  EncodeHistory may leave a non-default pen active;
+    // without this the erase floods cells with the stale colour.
     w.WriteLiteral("\x1b[0m");
     w.WriteLiteral("\x1b[2J\x1b[H");  // second clear
     pen = Pen{};
@@ -818,10 +823,11 @@ static EncodeResult DoEncode(std::byte* buf, std::size_t cap, const Grid& grid,
         w.WriteDecimal(static_cast<std::uint32_t>(msc.Col + 1));
         w.WriteByte('H');
         w.WriteLiteral("\x1b[?1049h");  // enter alt screen (saves msc position)
-        // D14: reset SGR before the alt-screen clear so \x1b[2J erases with
-        // the default background rather than a stale colour from main encoding.
+        // D14: reset SGR before the alt-screen clear.  Main-screen encoding
+        // may leave a non-default pen active; without a reset, \x1b[2J would
+        // erase the entire alt screen with that background colour.
         w.WriteLiteral("\x1b[0m");
-        w.WriteLiteral("\x1b[2J\x1b[H");
+        w.WriteLiteral("\x1b[2J\x1b[H");  // clear alt with default bg
         pen = Pen{};
     }
 

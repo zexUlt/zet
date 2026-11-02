@@ -826,8 +826,11 @@ TEST_CASE("M62: orphan wide-head in history emits replacement char") {
 // by \x1b[0m so the erase uses the default background.
 // ---------------------------------------------------------------------------
 TEST_CASE("D14: SGR reset before every ED clear in snapshot") {
+    // Build a grid with a truecolor background in a cell so EncodeAnyScreen
+    // leaves a non-default pen active before the second clear.
     Grid* g = MkEx(10, 4, 5);
     VtParser p;
+    // Set a TrueColor background and write a cell.
     FeedEx(p, *g, "\x1b[48;2;200;100;50mA\x1b[0m");
 
     auto snap = Snapshot::Create(*g);
