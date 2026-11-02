@@ -4,8 +4,10 @@
 
 namespace zet::app {
 
-bool ByteQueue::Append(ByteSpan bytes) {
-    if (bytes.size() > Room()) {
+bool ByteQueue::Append(ByteSpan bytes) { return Append(bytes, Limit_); }
+
+bool ByteQueue::Append(ByteSpan bytes, std::size_t ceiling) {
+    if (Size() > ceiling || bytes.size() > ceiling - Size()) {
         return false;
     }
     Bytes_.insert(Bytes_.end(), bytes.begin(), bytes.end());
