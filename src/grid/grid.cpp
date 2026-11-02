@@ -5,6 +5,21 @@
 
 namespace zet::grid {
 
+namespace {
+
+// Both screen arenas (main + alt) together must be strictly less than the
+// scrollback budget.  Prevents Create(MAX_COLS, MAX_ROWS, ...) which needs
+// 2 x 64 MiB = 128 MiB for screens alone, leaving nothing for history and
+// hitting the practical memory ceiling.  Shared by Allocate and Resize so a
+// peer-driven resize cannot exceed what Create would accept.
+constexpr bool ScreenArenasFit(std::uint16_t cols,
+                               std::uint16_t rows) noexcept {
+    const std::size_t screenCells = static_cast<std::size_t>(cols) * rows;
+    return screenCells * sizeof(Cell) * 2 < MAX_SCROLLBACK_BYTES;
+}
+
+}  // namespace
+
 // ---------------------------------------------------------------------------
 // Construction / destruction
 // ---------------------------------------------------------------------------
@@ -34,11 +49,7 @@ bool Grid::Allocate(std::uint16_t cols, std::uint16_t rows,
     ScrollBot_ = static_cast<std::uint16_t>(rows - 1);
 
     const std::size_t screenCells = static_cast<std::size_t>(cols) * rows;
-    // Guard: both screen arenas together must be strictly less than the
-    // scrollback budget.  Prevents Create(MAX_COLS, MAX_ROWS, ...) which
-    // needs 2 × 64 MiB = 128 MiB for screens alone, leaving nothing for
-    // history and hitting the practical memory ceiling.
-    if (screenCells * sizeof(Cell) * 2 >= MAX_SCROLLBACK_BYTES) return false;
+    if (!ScreenArenasFit(cols, rows)) return false;
     MainCells_ = new (std::nothrow) Cell[screenCells]{};
     AltCells_ = new (std::nothrow) Cell[screenCells]{};
     MainLines_ = new (std::nothrow) Line[rows]{};
@@ -104,6 +115,20 @@ const Cell& Grid::CellAt(std::uint16_t row, std::uint16_t col) const noexcept {
 
 Cell& Grid::CellAt(std::uint16_t row, std::uint16_t col) noexcept {
     return ActiveLine(row).Cells[col];
+}
+
+const Cell& Grid::MainCellAt(std::uint16_t row,
+                             std::uint16_t col) const noexcept {
+    return MainLines_[row].Cells[col];
+}
+
+std::uint16_t Grid::MainRowCellsUsed(std::uint16_t row) const noexcept {
+    return MainLines_[row].CellsUsed;
+}
+
+bool Grid::IsTabStop(std::uint16_t col) const noexcept {
+    if (col >= Cols_) return false;
+    return (TabStops_[col / 64] >> (col % 64)) & std::uint64_t{1};
 }
 
 const Line* Grid::ScrollbackLine(std::uint32_t idx) const noexcept {
@@ -1164,8 +1189,10 @@ GridResult<void> Grid::Resize(std::uint16_t newCols,
                               std::uint16_t newRows) noexcept {
     if (newCols == 0) newCols = 1;
     if (newRows == 0) newRows = 1;
-    if (newCols > MAX_COLS) newCols = MAX_COLS;
-    if (newRows > MAX_ROWS) newRows = MAX_ROWS;
+    if (newCols > MAX_COLS || newRows > MAX_ROWS)
+        return std::unexpected(EGridError::SizeTooLarge);
+    if (!ScreenArenasFit(newCols, newRows))
+        return std::unexpected(EGridError::SizeTooLarge);
 
     if (newCols == Cols_ && newRows == Rows_) return {};
 
