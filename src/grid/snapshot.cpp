@@ -496,7 +496,21 @@ static void EncodeModeRestore(EscWriter& w, const Grid& g, Pen& pen) noexcept {
     } else {
         cupRow = static_cast<std::uint32_t>(curRow + 1);
     }
-    const std::uint32_t cupCol = static_cast<std::uint32_t>(curCol + 1);
+
+    // D4b: if PendingWrap is set and the cursor is on a wide-char continuation
+    // cell (Width==0) at the last column, position the initial CUP at the lead
+    // column (curCol-1) so step 12 can re-emit the lead char, advance the
+    // cursor to curCol, and set PendingWrap.  Writing directly into the
+    // continuation cell would trigger the left-neighbour check and break the
+    // wide pair.  This applies whether AWM is currently on or off (AWM-off is
+    // handled by the awmWasOff temp-enable below).
+    const bool wrapLeadReposition =
+        g.PendingWrap() &&
+        curCol + 1u == static_cast<std::uint32_t>(g.Cols()) && curCol > 0u &&
+        g.CellAt(curRow, curCol).Width == 0;
+    const std::uint16_t emitCol =
+        wrapLeadReposition ? static_cast<std::uint16_t>(curCol - 1u) : curCol;
+    const std::uint32_t cupCol = static_cast<std::uint32_t>(emitCol + 1);
     w.WriteLiteral("\x1b[");
     w.WriteDecimal(cupRow);
     w.WriteByte(';');
@@ -525,21 +539,8 @@ static void EncodeModeRestore(EscWriter& w, const Grid& g, Pen& pen) noexcept {
             w.WriteByte('\x0f');
         }
 
-        // Defect 2 fix: if the cursor is on a continuation cell (Width==0),
-        // back up to the wide head so the terminal prints the full glyph.
-        std::uint16_t wcCol = curCol;
-        if (curCol > 0 && g.CellAt(curRow, curCol).Width == 0)
-            wcCol = static_cast<std::uint16_t>(curCol - 1);
-        if (wcCol != curCol) {
-            // Reposition cursor at the wide-char head column.
-            w.WriteLiteral("\x1b[");
-            w.WriteDecimal(cupRow);
-            w.WriteByte(';');
-            w.WriteDecimal(static_cast<std::uint32_t>(wcCol + 1));
-            w.WriteByte('H');
-        }
-
-        const Cell& wc = g.CellAt(curRow, wcCol);
+        // D4b: emitCol already positions CUP at the wide-char lead if needed.
+        const Cell& wc = g.CellAt(curRow, emitCol);
         EmitSgr(w, pen, wc);
         char32_t cp = SanitizeCp(wc.Codepoint);
         if (wc.Width == 1 && cp != U' ' && cp != U'?' && Wcwidth(cp) == 2)
@@ -603,6 +604,10 @@ static void EncodeAll(EscWriter& w, const Grid& grid,
     // history survive the snapshot.  When we enter alt later, the main screen
     // content is already in the target's main buffer.
     // -----------------------------------------------------------------------
+    // D14: reset SGR pen before second clear so \x1b[2J always erases with the
+    // default background.  EncodeHistory may leave a non-default pen active;
+    // without this the erase floods cells with the stale colour.
+    w.WriteLiteral("\x1b[0m");
     w.WriteLiteral("\x1b[2J\x1b[H");  // second clear
     pen = Pen{};
     EncodeAnyScreen(w, grid, pen, MainCellAtFn, MainCellsUsedFn);
@@ -627,7 +632,11 @@ static void EncodeAll(EscWriter& w, const Grid& grid,
         w.WriteByte('H');
 
         w.WriteLiteral("\x1b[?1049h");  // enter alt screen (saves msc position)
-        w.WriteLiteral("\x1b[2J\x1b[H");  // clear alt
+        // D14: reset SGR before the alt-screen clear.  Main-screen encoding
+        // may leave a non-default pen active; without a reset, \x1b[2J would
+        // erase the entire alt screen with that background colour.
+        w.WriteLiteral("\x1b[0m");
+        w.WriteLiteral("\x1b[2J\x1b[H");  // clear alt with default bg
         pen = Pen{};
     }
 
