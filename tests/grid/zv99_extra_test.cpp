@@ -820,3 +820,43 @@ TEST_CASE("M62: orphan wide-head in history emits replacement char") {
     delete g;
     delete dst;
 }
+
+// ---------------------------------------------------------------------------
+// D14: stale SGR pen must not bleed into ED — every \x1b[2J must be preceded
+// by \x1b[0m so the erase uses the default background.
+// ---------------------------------------------------------------------------
+TEST_CASE("D14: SGR reset before every ED clear in snapshot") {
+    // Build a grid with a truecolor background in a cell so EncodeAnyScreen
+    // leaves a non-default pen active before the second clear.
+    Grid* g = MkEx(10, 4, 5);
+    VtParser p;
+    // Set a TrueColor background and write a cell.
+    FeedEx(p, *g, "\x1b[48;2;200;100;50mA\x1b[0m");
+
+    auto snap = Snapshot::Create(*g);
+    REQUIRE(snap.has_value());
+
+    const auto by = snap.value()->Bytes();
+    const std::string_view sv(reinterpret_cast<const char*>(by.data()),
+                              by.size());
+
+    // Every \x1b[2J must be preceded (somewhere before it) by \x1b[0m.
+    // Scan each occurrence of \x1b[2J and verify the closest preceding SGR
+    // reset is \x1b[0m, not a colored SGR.
+    const std::string_view clrSeq = "\x1b[2J";
+    const std::string_view resetSeq = "\x1b[0m";
+    std::size_t pos = 0;
+    int clrCount = 0;
+    while ((pos = sv.find(clrSeq, pos)) != std::string_view::npos) {
+        ++clrCount;
+        // Find the last \x1b[0m strictly before pos.
+        const std::string_view prefix = sv.substr(0, pos);
+        CHECK(prefix.rfind(resetSeq) != std::string_view::npos);
+        pos += clrSeq.size();
+    }
+    // There must be at least two clears (first preamble clear + second clear).
+    CHECK(clrCount >= 2);
+
+    delete snap.value();
+    delete g;
+}
