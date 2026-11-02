@@ -162,9 +162,7 @@ void CheckHistory(const Grid& a, const Grid& b, EDegradation deg,
         const Line* la = a.ScrollbackLine(n - k + i);
         const Line* lb = b.ScrollbackLine(i);
         if (!la || !lb) Fail("history-line", i);
-        // Open finding, seed history_bce_cellsused: EncodeHistory stops at
-        // Line::CellsUsed, which ClearLine leaves 0 for BCE-coloured blanks.
-        for (std::uint16_t c = 0; c < la->CellsUsed; ++c)
+        for (std::uint16_t c = 0; c < a.Cols(); ++c)
             if (const char* d = DiffCell(la->Cells[c], lb->Cells[c], colors))
                 FailCell("history", d, i, c, la->Cells[c], lb->Cells[c]);
     }

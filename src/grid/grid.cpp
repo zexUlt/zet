@@ -168,7 +168,10 @@ void Grid::PenToCell(Cell& cell) noexcept {
 
 void Grid::ClearLine(Line& line) noexcept {
     for (std::uint16_t c = 0; c < Cols_; ++c) BlankCell(line.Cells[c]);
-    line.CellsUsed = 0;
+    // BlankCell gives every cell the pen background, and a cell with a
+    // non-default background is "used" (UpdateCellsUsed): the line is empty
+    // only when the pen background is the default one.
+    line.CellsUsed = PenBgKind_ == EColorKind::Default ? 0 : Cols_;
 }
 
 void Grid::ClearCells(Cell* cells, std::uint16_t count) noexcept {

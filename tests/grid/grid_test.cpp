@@ -297,6 +297,24 @@ TEST_CASE("Scrollback ring stores displaced lines") {
     delete g;
 }
 
+TEST_CASE(
+    "Scrollback keeps CellsUsed of a line cleared with a BCE background") {
+    // Mutant: ClearLine sets CellsUsed = 0 whatever the pen background is.
+    Grid* g = MakeGrid(10, 3, 10);
+    VtParser p;
+    Feed(p, *g, "\x1b[42m");
+    // Each LF at the bottom scrolls a fresh BCE-blank line in. The first LFs
+    // push the default-background rows already on screen; the later ones push
+    // the BCE-blank lines.
+    Feed(p, *g, "\n\n\n\n\n\n\n\n");
+    REQUIRE(g->ScrollbackSize() >= 4u);
+    const Line* sb = g->ScrollbackLine(g->ScrollbackSize() - 1);
+    REQUIRE(sb != nullptr);
+    CHECK(sb->CellsUsed == 10);
+    CHECK(sb->Cells[9].BgKind == EColorKind::Indexed);
+    delete g;
+}
+
 TEST_CASE("Scrollback ring wraps at limit") {
     const int limit = 5;
     Grid* g = MakeGrid(5, 3, limit);
