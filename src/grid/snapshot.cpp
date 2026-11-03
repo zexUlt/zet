@@ -366,7 +366,13 @@ static void EncodeHistory(EscWriter& w, const Grid& g, Pen& pen,
         const Line* line = g.ScrollbackLine(i);
         if (!line) continue;
 
-        const std::uint16_t used = line->CellsUsed;
+        // The extent comes from the cells, as for the screen: Line::CellsUsed
+        // is bookkeeping that a missed update would turn into silently lost
+        // cells, so the output does not depend on it.
+        std::uint16_t used = g.Cols();
+        while (used > 0 &&
+               IsBlankCell(line->Cells[static_cast<std::size_t>(used) - 1]))
+            --used;
         std::uint16_t col = 0;
         while (col < used) {
             const Cell& c = line->Cells[col];
@@ -598,8 +604,13 @@ static void EncodeModeRestore(EscWriter& w, const Grid& g, Pen& pen,
     const std::uint16_t curCol = g.CursorCol();
     std::uint32_t cupRow;
     if (decom) {
-        // CUP is region-relative when DECOM is on: row 1 = scroll_top.
-        cupRow = static_cast<std::uint32_t>(curRow - g.ScrollTop() + 1);
+        // CUP is region-relative when DECOM is on: row 1 = scroll_top. A
+        // cursor outside the region has no such coordinate (the subtraction
+        // would wrap), so it is clamped into the region.
+        const std::uint16_t inRegion = curRow < g.ScrollTop()   ? g.ScrollTop()
+                                       : curRow > g.ScrollBot() ? g.ScrollBot()
+                                                                : curRow;
+        cupRow = static_cast<std::uint32_t>(inRegion - g.ScrollTop() + 1);
     } else {
         cupRow = static_cast<std::uint32_t>(curRow + 1);
     }

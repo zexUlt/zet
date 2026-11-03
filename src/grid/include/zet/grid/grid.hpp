@@ -297,7 +297,8 @@ public:
     /// Designate G0/G1 charset (ESC ( B, ESC ) B, etc.).
     void DesignateCharset(std::uint8_t g, std::uint8_t designator) noexcept;
 
-    /// Alt screen switch (?1049 / ?47).
+    /// Switch between the main and alt buffers and nothing else (?47). The
+    /// cursor, the saved cursors, the contents and the wrap flag are untouched.
     void SwitchAltScreen(bool enter) noexcept;
 
     /// Resize (design.md §9 — truncate, no reflow).
@@ -309,6 +310,8 @@ public:
                                           std::uint16_t newRows) noexcept;
 
 private:
+    friend struct GridTestAccess;  // tests/grid: states the VT cannot reach
+
     explicit Grid() noexcept = default;
 
     // Allocate all arenas. Returns false on any allocation failure.
@@ -329,6 +332,8 @@ private:
     [[nodiscard]] Line& ActiveBuf(std::uint16_t row) noexcept;
     void PushScrollback(std::uint16_t row) noexcept;
     void UpdateCellsUsed(Line& line) noexcept;
+    /// Erase the alt buffer and reset the pending wrap (xterm ClearScreen).
+    void ClearAltScreen() noexcept;
     void RepairWideOrphans(Line& line, std::uint16_t first,
                            std::uint16_t last) noexcept;
 

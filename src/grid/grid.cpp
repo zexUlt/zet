@@ -168,7 +168,10 @@ void Grid::PenToCell(Cell& cell) noexcept {
 
 void Grid::ClearLine(Line& line) noexcept {
     for (std::uint16_t c = 0; c < Cols_; ++c) BlankCell(line.Cells[c]);
-    line.CellsUsed = 0;
+    // BlankCell gives every cell the pen background, and a cell with a
+    // non-default background is "used" (UpdateCellsUsed): the line is empty
+    // only when the pen background is the default one.
+    line.CellsUsed = PenBgKind_ == EColorKind::Default ? 0 : Cols_;
 }
 
 void Grid::ClearCells(Cell* cells, std::uint16_t count) noexcept {
@@ -327,13 +330,20 @@ void Grid::PutChar(char32_t cp, int width) noexcept {
         if (left.Width == 2) left.Width = 1;
     }
 
+    // One past the rightmost cell this print leaves non-blank. The blanks D2
+    // and D2b write carry the pen background, which makes them "used".
+    auto reach = static_cast<std::uint16_t>(CursorCol_ + width);
+
     // D2: if writing over a wide head, blank its continuation to prevent an
     // orphan continuation cell (width==0 with no preceding width==2).
     {
         Cell& cur = CellAt(CursorRow_, CursorCol_);
-        if (cur.Width == 2 && CursorCol_ + 1 < Cols_)
+        if (cur.Width == 2 && CursorCol_ + 1 < Cols_) {
             BlankCell(
                 CellAt(CursorRow_, static_cast<std::uint16_t>(CursorCol_ + 1)));
+            if (PenBgKind_ != EColorKind::Default && reach < CursorCol_ + 2)
+                reach = static_cast<std::uint16_t>(CursorCol_ + 2);
+        }
     }
 
     Cell& cell = CellAt(CursorRow_, CursorCol_);
@@ -348,14 +358,17 @@ void Grid::PutChar(char32_t cp, int width) noexcept {
         // itself a wide head, its old tail at CursorCol_+2 would become an
         // orphaned Width==0 cell (no preceding Width==2).  Blank it first.
         if (cont.Width == 2 &&
-            static_cast<std::uint16_t>(CursorCol_ + 2) < Cols_)
+            static_cast<std::uint16_t>(CursorCol_ + 2) < Cols_) {
             BlankCell(
                 CellAt(CursorRow_, static_cast<std::uint16_t>(CursorCol_ + 2)));
+            if (PenBgKind_ != EColorKind::Default)
+                reach = static_cast<std::uint16_t>(CursorCol_ + 3);
+        }
         cont = Cell{};
         cont.Width = 0;
     }
 
-    const std::uint16_t used = static_cast<std::uint16_t>(CursorCol_ + width);
+    const std::uint16_t used = reach;
     if (used > ActiveLine(CursorRow_).CellsUsed)
         ActiveLine(CursorRow_).CellsUsed = (used <= Cols_ ? used : Cols_);
 
@@ -507,8 +520,10 @@ void Grid::MoveCursorTo(std::uint16_t row1, std::uint16_t col1) noexcept {
         (row1 > 0) ? static_cast<std::uint16_t>(row1 - 1) : 0;
     const std::uint16_t col0 =
         (col1 > 0) ? static_cast<std::uint16_t>(col1 - 1) : 0;
-    CursorRow_ = ClampRow(static_cast<std::uint16_t>(rowOff + row0));
-    if (CursorRow_ > maxRow) CursorRow_ = maxRow;
+    // Sum in 32 bits: with DECOM, rowOff + row0 wraps in 16 bits for a huge
+    // row parameter and would land above the scroll region.
+    const std::uint32_t row = static_cast<std::uint32_t>(rowOff) + row0;
+    CursorRow_ = row < maxRow ? static_cast<std::uint16_t>(row) : maxRow;
     CursorCol_ = ClampCol(col0);
 }
 
@@ -525,9 +540,9 @@ void Grid::MoveCursorToRow(std::uint16_t row1) noexcept {
                                      : static_cast<std::uint16_t>(Rows_ - 1);
     const std::uint16_t row0 =
         row1 > 0 ? static_cast<std::uint16_t>(row1 - 1) : 0;
-    CursorRow_ = static_cast<std::uint16_t>(rowOff + row0);
-    if (CursorRow_ > maxRow) CursorRow_ = maxRow;
-    if (CursorRow_ >= Rows_) CursorRow_ = static_cast<std::uint16_t>(Rows_ - 1);
+    // 32-bit sum, see MoveCursorTo.
+    const std::uint32_t row = static_cast<std::uint32_t>(rowOff) + row0;
+    CursorRow_ = row < maxRow ? static_cast<std::uint16_t>(row) : maxRow;
 }
 
 void Grid::CursorNextLine(std::uint16_t n) noexcept {
@@ -791,6 +806,19 @@ void Grid::SetMode(std::uint16_t param, bool value) noexcept {
         case 47:
             SwitchAltScreen(value);
             break;
+        case 1047:
+            // xterm srm_OPT_ALTBUF: h switches buffers; l clears the alt
+            // buffer if it is active, then switches back.
+            if (!value && IsAltScreen()) ClearAltScreen();
+            SwitchAltScreen(value);
+            break;
+        case 1048:
+            // xterm srm_SAVE_CURSOR: DECSC / DECRC.
+            if (value)
+                SaveCursor();
+            else
+                RestoreCursor();
+            break;
         case 1000:
             apply(EMode::Mouse1000);
             break;
@@ -813,7 +841,18 @@ void Grid::SetMode(std::uint16_t param, bool value) noexcept {
             apply(EMode::Mouse1015);
             break;
         case 1049:
-            SwitchAltScreen(value);
+            // xterm srm_OPT_ALTBUF_CURSOR. h: save the cursor (even when
+            // already on alt), switch, clear the alt buffer. l: switch back
+            // and restore the cursor (even when already on main). The cursor
+            // does not move on entry.
+            if (value) {
+                SaveCursor();
+                SwitchAltScreen(true);
+                ClearAltScreen();
+            } else {
+                SwitchAltScreen(false);
+                RestoreCursor();
+            }
             break;
         case 2004:
             apply(EMode::BracketedPaste);
@@ -901,6 +940,7 @@ void Grid::ApplySgr(const std::uint16_t* params, const bool* colon,
                 break;
             case 24:
                 PenAttrs_ &= static_cast<std::uint8_t>(~Underline);
+                PenAttrEx_ = 0;
                 break;
             case 25:
                 PenAttrs_ &= static_cast<std::uint8_t>(~Blink);
@@ -1174,21 +1214,22 @@ void Grid::DesignateCharset(std::uint8_t g, std::uint8_t designator) noexcept {
         CharsetG1_ = mapped;
 }
 
+// Buffer switch only (?47, and the switch inside ?1047/?1049): no cursor save
+// or restore, no clear, no wrap reset. xterm ToAlternate/FromAlternate with
+// clearFirst false (charproc.c); a switch into the current buffer is a no-op.
 void Grid::SwitchAltScreen(bool enter) noexcept {
-    const bool already = IsAltScreen();
-    if (enter == already) return;
-
-    if (enter) {
-        SaveCursor();
+    if (enter == IsAltScreen()) return;
+    if (enter)
         Modes_ |= ModeFlag(EMode::AltScreen);
-        for (std::uint16_t r = 0; r < Rows_; ++r) ClearLine(AltLines_[r]);
-        CursorRow_ = 0;
-        CursorCol_ = 0;
-        PendingWrap_ = false;
-    } else {
+    else
         Modes_ &= ~ModeFlag(EMode::AltScreen);
-        RestoreCursor();
-    }
+}
+
+// xterm ClearScreen on the active buffer: erase with the pen background and
+// reset the pending wrap. The cursor does not move.
+void Grid::ClearAltScreen() noexcept {
+    for (std::uint16_t r = 0; r < Rows_; ++r) ClearLine(AltLines_[r]);
+    PendingWrap_ = false;
 }
 
 GridResult<void> Grid::Resize(std::uint16_t newCols,
