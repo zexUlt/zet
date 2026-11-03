@@ -510,8 +510,10 @@ void Grid::MoveCursorTo(std::uint16_t row1, std::uint16_t col1) noexcept {
         (row1 > 0) ? static_cast<std::uint16_t>(row1 - 1) : 0;
     const std::uint16_t col0 =
         (col1 > 0) ? static_cast<std::uint16_t>(col1 - 1) : 0;
-    CursorRow_ = ClampRow(static_cast<std::uint16_t>(rowOff + row0));
-    if (CursorRow_ > maxRow) CursorRow_ = maxRow;
+    // Sum in 32 bits: with DECOM, rowOff + row0 wraps in 16 bits for a huge
+    // row parameter and would land above the scroll region.
+    const std::uint32_t row = static_cast<std::uint32_t>(rowOff) + row0;
+    CursorRow_ = row < maxRow ? static_cast<std::uint16_t>(row) : maxRow;
     CursorCol_ = ClampCol(col0);
 }
 
@@ -528,9 +530,9 @@ void Grid::MoveCursorToRow(std::uint16_t row1) noexcept {
                                      : static_cast<std::uint16_t>(Rows_ - 1);
     const std::uint16_t row0 =
         row1 > 0 ? static_cast<std::uint16_t>(row1 - 1) : 0;
-    CursorRow_ = static_cast<std::uint16_t>(rowOff + row0);
-    if (CursorRow_ > maxRow) CursorRow_ = maxRow;
-    if (CursorRow_ >= Rows_) CursorRow_ = static_cast<std::uint16_t>(Rows_ - 1);
+    // 32-bit sum, see MoveCursorTo.
+    const std::uint32_t row = static_cast<std::uint32_t>(rowOff) + row0;
+    CursorRow_ = row < maxRow ? static_cast<std::uint16_t>(row) : maxRow;
 }
 
 void Grid::CursorNextLine(std::uint16_t n) noexcept {
@@ -794,6 +796,19 @@ void Grid::SetMode(std::uint16_t param, bool value) noexcept {
         case 47:
             SwitchAltScreen(value);
             break;
+        case 1047:
+            // xterm srm_OPT_ALTBUF: h switches buffers; l clears the alt
+            // buffer if it is active, then switches back.
+            if (!value && IsAltScreen()) ClearAltScreen();
+            SwitchAltScreen(value);
+            break;
+        case 1048:
+            // xterm srm_SAVE_CURSOR: DECSC / DECRC.
+            if (value)
+                SaveCursor();
+            else
+                RestoreCursor();
+            break;
         case 1000:
             apply(EMode::Mouse1000);
             break;
@@ -816,7 +831,18 @@ void Grid::SetMode(std::uint16_t param, bool value) noexcept {
             apply(EMode::Mouse1015);
             break;
         case 1049:
-            SwitchAltScreen(value);
+            // xterm srm_OPT_ALTBUF_CURSOR. h: save the cursor (even when
+            // already on alt), switch, clear the alt buffer. l: switch back
+            // and restore the cursor (even when already on main). The cursor
+            // does not move on entry.
+            if (value) {
+                SaveCursor();
+                SwitchAltScreen(true);
+                ClearAltScreen();
+            } else {
+                SwitchAltScreen(false);
+                RestoreCursor();
+            }
             break;
         case 2004:
             apply(EMode::BracketedPaste);
@@ -1178,21 +1204,22 @@ void Grid::DesignateCharset(std::uint8_t g, std::uint8_t designator) noexcept {
         CharsetG1_ = mapped;
 }
 
+// Buffer switch only (?47, and the switch inside ?1047/?1049): no cursor save
+// or restore, no clear, no wrap reset. xterm ToAlternate/FromAlternate with
+// clearFirst false (charproc.c); a switch into the current buffer is a no-op.
 void Grid::SwitchAltScreen(bool enter) noexcept {
-    const bool already = IsAltScreen();
-    if (enter == already) return;
-
-    if (enter) {
-        SaveCursor();
+    if (enter == IsAltScreen()) return;
+    if (enter)
         Modes_ |= ModeFlag(EMode::AltScreen);
-        for (std::uint16_t r = 0; r < Rows_; ++r) ClearLine(AltLines_[r]);
-        CursorRow_ = 0;
-        CursorCol_ = 0;
-        PendingWrap_ = false;
-    } else {
+    else
         Modes_ &= ~ModeFlag(EMode::AltScreen);
-        RestoreCursor();
-    }
+}
+
+// xterm ClearScreen on the active buffer: erase with the pen background and
+// reset the pending wrap. The cursor does not move.
+void Grid::ClearAltScreen() noexcept {
+    for (std::uint16_t r = 0; r < Rows_; ++r) ClearLine(AltLines_[r]);
+    PendingWrap_ = false;
 }
 
 GridResult<void> Grid::Resize(std::uint16_t newCols,
