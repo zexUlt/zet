@@ -129,7 +129,7 @@ TEST_CASE("M09: surrogate 0xDFFF is sanitised") {
     Grid* g = MkEx(10, 3, 5);
     g->PutChar(0xDFFF, 1);
     // A visible non-surrogate char follows to force the surrogate cell into
-    // the "used" range computed by CellsUsed.
+    // the encoded extent of the row.
     g->PutChar(U'Z', 1);
     auto snap = Snapshot::Create(*g);
     REQUIRE(snap.has_value());

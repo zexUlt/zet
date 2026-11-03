@@ -340,8 +340,8 @@ TEST_CASE("round-trip: history lines are reproduced") {
 }
 
 TEST_CASE("round-trip: history line cleared with a BCE background keeps it") {
-    // Seed history_bce_cellsused. Mutant: ClearLine leaves CellsUsed = 0, so
-    // EncodeHistory stops at column 0 and the restored line is default.
+    // Seed history_bce_cellsused. Mutant: EncodeHistory ignores the BCE
+    // background of blank cells, so the restored line is default.
     Grid* src = MakeGrid(10, 3, 10);
     VtParser p;
     Feed(p, *src, "\x1b[42m\n\n\n\n\n\n\n\n");
@@ -365,8 +365,8 @@ TEST_CASE("round-trip: history line cleared with a BCE background keeps it") {
 }
 
 TEST_CASE("round-trip: history keeps the BCE blank left by a wide overwrite") {
-    // Seed wide_overwrite_bce_tail. Mutant: PutChar leaves CellsUsed short of
-    // the blanked tail, so EncodeHistory stops before its red background.
+    // Seed wide_overwrite_bce_tail. Mutant: PutChar does not give the blanked
+    // tail the pen background, so the restored line has no red there.
     Grid* src = MakeGrid(6, 2, 5);
     VtParser p;
     Feed(p, *src,
@@ -389,15 +389,12 @@ TEST_CASE("round-trip: history keeps the BCE blank left by a wide overwrite") {
     delete src;
 }
 
-TEST_CASE("round-trip: history does not depend on Line::CellsUsed") {
-    // The encoder reads the extent of a history line from its cells. Mutant:
-    // EncodeHistory stops at Line::CellsUsed, which is wrong here on purpose.
+TEST_CASE("round-trip: history line with a BCE prefix and a blank gap") {
+    // The encoder reads the extent of a history line from its cells.
     Grid* src = MakeGrid(10, 2, 5);
     VtParser p;
     Feed(p, *src, "\x1b[41mab\x1b[0m cd\n\n\n");
     REQUIRE(src->ScrollbackSize() >= 1u);
-    for (std::uint32_t i = 0; i < src->ScrollbackSize(); ++i)
-        const_cast<Line*>(src->ScrollbackLine(i))->CellsUsed = 0;
 
     auto r = Snapshot::Create(*src);
     REQUIRE(r.has_value());
@@ -1131,7 +1128,7 @@ TEST_CASE("SGR only emitted on pen change (no redundant sequences)") {
 }
 
 TEST_CASE("trailing blank cells are trimmed from row output") {
-    // Mutant: remove ScreenCellsUsed trim → trailing spaces emitted per row.
+    // Mutant: remove the trailing-blank trim → trailing spaces emitted per row.
     Grid* src = MakeGrid(40, 10, 0);
     VtParser p;
     Feed(p, *src, "Hi");  // 2 chars; remaining 38 cols are blank default

@@ -54,8 +54,7 @@ enum class EMode : std::uint32_t {
 ///
 /// Allocated in a fixed arena; never grows after construction.
 struct Line {
-    Cell* Cells{nullptr};        ///< [0 .. grid.Cols())
-    std::uint16_t CellsUsed{0};  ///< rightmost non-blank column + 1
+    Cell* Cells{nullptr};  ///< [0 .. grid.Cols())
 };
 
 /// Saved cursor state (DECSC/DECRC and alt-screen switch).
@@ -194,9 +193,6 @@ public:
     /// row must be < Rows_, col must be < Cols_.  No bounds check.
     [[nodiscard]] const Cell& MainCellAt(std::uint16_t row,
                                          std::uint16_t col) const noexcept;
-    /// CellsUsed for a MAIN screen row (always main, even in alt mode).
-    [[nodiscard]] std::uint16_t MainRowCellsUsed(
-        std::uint16_t row) const noexcept;
 
     /// True if column col is a tab stop in the grid's current tab-stop table.
     [[nodiscard]] bool IsTabStop(std::uint16_t col) const noexcept;
@@ -331,7 +327,6 @@ private:
     [[nodiscard]] const Line& ActiveLine(std::uint16_t row) const noexcept;
     [[nodiscard]] Line& ActiveBuf(std::uint16_t row) noexcept;
     void PushScrollback(std::uint16_t row) noexcept;
-    void UpdateCellsUsed(Line& line) noexcept;
     /// Erase the alt buffer and reset the pending wrap (xterm ClearScreen).
     void ClearAltScreen() noexcept;
     void RepairWideOrphans(Line& line, std::uint16_t first,
