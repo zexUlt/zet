@@ -366,9 +366,7 @@ static void EncodeHistory(EscWriter& w, const Grid& g, Pen& pen,
         const Line* line = g.ScrollbackLine(i);
         if (!line) continue;
 
-        // The extent comes from the cells, as for the screen: Line::CellsUsed
-        // is bookkeeping that a missed update would turn into silently lost
-        // cells, so the output does not depend on it.
+        // The extent comes from the cells, as for the screen.
         std::uint16_t used = g.Cols();
         while (used > 0 &&
                IsBlankCell(line->Cells[static_cast<std::size_t>(used) - 1]))
@@ -404,7 +402,7 @@ static void EncodeHistory(EscWriter& w, const Grid& g, Pen& pen,
 // ---------------------------------------------------------------------------
 // Encode screen section.
 //
-// CellAtFn / CellsUsedFn are used to read either main or alt screen cells
+// CellAtFn / ExtentFn are used to read either main or alt screen cells
 // without changing this function (D1).
 //
 // Adjacent non-blank rows are separated with CR+LF instead of per-row CUP
@@ -412,13 +410,13 @@ static void EncodeHistory(EscWriter& w, const Grid& g, Pen& pen,
 // ---------------------------------------------------------------------------
 
 using CellAtFn = const Cell& (*)(const Grid&, std::uint16_t, std::uint16_t);
-using CellsUsedFn = std::uint16_t (*)(const Grid&, std::uint16_t);
+using ExtentFn = std::uint16_t (*)(const Grid&, std::uint16_t);
 
 static const Cell& MainCellAtFn(const Grid& g, std::uint16_t r,
                                 std::uint16_t c) noexcept {
     return g.MainCellAt(r, c);
 }
-static std::uint16_t MainCellsUsedFn(const Grid& g, std::uint16_t r) noexcept {
+static std::uint16_t MainExtentFn(const Grid& g, std::uint16_t r) noexcept {
     // Scan from right to find used boundary (consistent with alt screen path).
     std::uint16_t used = g.Cols();
     while (used > 0 && IsBlankCell(MainCellAtFn(
@@ -431,7 +429,7 @@ static const Cell& AltCellAtFn(const Grid& g, std::uint16_t r,
     return g.CellAt(r,
                     c);  // CellAt reads active (alt) screen when in alt mode.
 }
-static std::uint16_t AltCellsUsedFn(const Grid& g, std::uint16_t r) noexcept {
+static std::uint16_t AltExtentFn(const Grid& g, std::uint16_t r) noexcept {
     std::uint16_t used = g.Cols();
     while (used > 0 &&
            IsBlankCell(AltCellAtFn(g, r, static_cast<std::uint16_t>(used - 1))))
@@ -440,13 +438,13 @@ static std::uint16_t AltCellsUsedFn(const Grid& g, std::uint16_t r) noexcept {
 }
 
 static void EncodeAnyScreen(EscWriter& w, const Grid& g, Pen& pen,
-                            CellAtFn cellAt, CellsUsedFn cellsUsed,
+                            CellAtFn cellAt, ExtentFn extentOf,
                             std::uint16_t firstRow, std::uint16_t endRow,
                             EColorMode cm) noexcept {
     std::int32_t lastRow = -1;  // -1 = none emitted yet
 
     for (std::uint16_t row = firstRow; row < endRow; ++row) {
-        const std::uint16_t used = cellsUsed(g, row);
+        const std::uint16_t used = extentOf(g, row);
         if (used == 0) continue;
 
         if (lastRow >= 0 && row == static_cast<std::uint16_t>(lastRow + 1)) {
@@ -742,8 +740,8 @@ static void EncodeAll(EscWriter& w, const Grid& grid, const EncodeParams& ep,
     w.WriteLiteral("\x1b[0m");
     w.WriteLiteral("\x1b[2J\x1b[H");  // second clear
     pen = Pen{};
-    EncodeAnyScreen(w, grid, pen, MainCellAtFn, MainCellsUsedFn, firstRow,
-                    endRow, cm);
+    EncodeAnyScreen(w, grid, pen, MainCellAtFn, MainExtentFn, firstRow, endRow,
+                    cm);
 
     // -----------------------------------------------------------------------
     // Alt screen switch (D1: enter alt only after main screen is done).
@@ -782,8 +780,8 @@ static void EncodeAll(EscWriter& w, const Grid& grid, const EncodeParams& ep,
     // -----------------------------------------------------------------------
     w.WriteLiteral("\x1b[?2026h");
     EncodeAnyScreen(w, grid, pen, altScreen ? AltCellAtFn : MainCellAtFn,
-                    altScreen ? AltCellsUsedFn : MainCellsUsedFn, firstRow,
-                    endRow, cm);
+                    altScreen ? AltExtentFn : MainExtentFn, firstRow, endRow,
+                    cm);
 
     // Mode restore + sync end (EncodeModeRestore ends with ?2026l).
     EncodeModeRestore(w, grid, pen, cm);
