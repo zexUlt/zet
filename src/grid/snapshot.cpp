@@ -366,7 +366,13 @@ static void EncodeHistory(EscWriter& w, const Grid& g, Pen& pen,
         const Line* line = g.ScrollbackLine(i);
         if (!line) continue;
 
-        const std::uint16_t used = line->CellsUsed;
+        // The extent comes from the cells, as for the screen: Line::CellsUsed
+        // is bookkeeping that a missed update would turn into silently lost
+        // cells, so the output does not depend on it.
+        std::uint16_t used = g.Cols();
+        while (used > 0 &&
+               IsBlankCell(line->Cells[static_cast<std::size_t>(used) - 1]))
+            --used;
         std::uint16_t col = 0;
         while (col < used) {
             const Cell& c = line->Cells[col];

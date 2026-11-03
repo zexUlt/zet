@@ -315,6 +315,32 @@ TEST_CASE(
     delete g;
 }
 
+TEST_CASE("A wide char over a wide head counts the BCE blank it leaves") {
+    // Seed wide_overwrite_bce_tail. Mutant: PutChar blanks the old tail
+    // (D2b) with the pen background but leaves CellsUsed one column short.
+    Grid* g = MakeGrid(6, 2, 5);
+    VtParser p;
+    // Wide char at columns 3-4, then ECH shrinks CellsUsed to 4, then a red
+    // wide char at columns 2-3 blanks the old tail at column 4 with red.
+    Feed(p, *g, "\x1b[1;4H\xe4\xb8\xad\x1b[1;1H\x1b[X");
+    Feed(p, *g, "\x1b[41m\x1b[1;3H\xe4\xb8\xad");
+    CHECK(g->CellAt(0, 4).BgKind == EColorKind::Indexed);
+    CHECK(g->MainRowCellsUsed(0) == 5);
+    delete g;
+}
+
+TEST_CASE("A narrow char over a wide head counts the BCE blank it leaves") {
+    // Seed narrow_overwrite_bce_tail. Mutant: PutChar blanks the old
+    // continuation (D2) with the pen background but leaves CellsUsed short.
+    Grid* g = MakeGrid(6, 2, 5);
+    VtParser p;
+    Feed(p, *g, "\x1b[1;4H\xe4\xb8\xad\x1b[1;1H\x1b[X");
+    Feed(p, *g, "\x1b[41m\x1b[1;4Ha");
+    CHECK(g->CellAt(0, 4).BgKind == EColorKind::Indexed);
+    CHECK(g->MainRowCellsUsed(0) == 5);
+    delete g;
+}
+
 TEST_CASE("Scrollback ring wraps at limit") {
     const int limit = 5;
     Grid* g = MakeGrid(5, 3, limit);
