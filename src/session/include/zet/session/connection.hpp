@@ -252,9 +252,13 @@ public:
     /// SupplySnapshot are no longer needed. §9 ADR-030.
     [[nodiscard]] bool GridEmissionDone() const noexcept;
 
-    /// Returns the earlier of the base deadline and any AwaitSnapshot deadline
-    /// (RESIZE_WAIT_TIMEOUT).  Shadows ConnectionBase so callers that hold an
-    /// AgentConnection directly see the resize-wait deadline.
+    /// Returns the earliest of the base deadline and the AwaitSnapshot
+    /// deadlines: the Resize wait (RESIZE_WAIT_TIMEOUT, set on every path-B
+    /// Resume, with or without a known size), SUPPLY_SNAPSHOT_TIMEOUT, and the
+    /// GridApplied wait (GRID_APPLIED_TIMEOUT).  A caller that sleeps until
+    /// bytes or NextDeadline is woken in time to ask for the snapshot.
+    /// Shadows ConnectionBase so callers that hold an AgentConnection directly
+    /// see these deadlines.
     [[nodiscard]] Deadline NextDeadline() const noexcept;
 
 private:
@@ -296,15 +300,15 @@ private:
     /// busy-loop: the first call informs the caller a snapshot is needed;
     /// subsequent calls return Idle until the snapshot is supplied. §9.
     bool SnapshotReminderSent_{false};
-    /// True when entering AwaitSnapshot with a non-null LastKnownSize: the
-    /// caller sent a terminal size on the *previous* connection.  We wait for
-    /// the client to send its post-Resume Resize (which may differ) before
-    /// issuing NeedsSnapshot, so the dimensions carried by NeedsSnapshot
-    /// reflect the current terminal rather than the stale one. §9 item (a).
+    /// True from path-B entry until the client's post-Resume Resize arrives or
+    /// ResizeWaitDeadline_ expires.  NeedsSnapshot is held back meanwhile, so
+    /// its dimensions reflect the current terminal rather than a stale one.
+    /// Applies whether or not a size is known. §9, path B, step 1.
     bool WaitForResize_{false};
     /// Cleared once: deadline for WaitForResize_ (START + RESIZE_WAIT_TIMEOUT).
     /// Once expired, WaitForResize_ is cleared so NeedsSnapshot fires with the
-    /// last known size.  std::nullopt when WaitForResize_ is false.
+    /// last known size (0x0 when none is known).  std::nullopt when
+    /// WaitForResize_ is false.
     std::optional<Timestamp> ResizeWaitDeadline_{};
     /// Set on path-B entry; cleared when SupplySnapshot succeeds.  If the
     /// caller has not supplied a snapshot by SUPPLY_SNAPSHOT_TIMEOUT the

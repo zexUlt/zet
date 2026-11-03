@@ -472,12 +472,19 @@ ConnectionResult AgentConnection::PumpResume(Timestamp now, MutableByteSpan out,
         Stage_ = EStage::AwaitSnapshot;
         SupplySnapshotDeadline_ = now + SUPPLY_SNAPSHOT_TIMEOUT;
         // Wait for the client's post-Resume Resize before reporting dimensions
-        // in NeedsSnapshot, unless the terminal size is not yet known.  §9 (a).
-        WaitForResize_ = Handle_->LastKnownSize().has_value();
-        if (WaitForResize_) {
-            ResizeWaitDeadline_ = now + RESIZE_WAIT_TIMEOUT;
-        }
+        // in NeedsSnapshot, whether or not a size is known: the Resize always
+        // follows the Resume (design.md §9, path B, step 1).  The deadline is
+        // what wakes the caller if it does not come.
+        WaitForResize_ = true;
+        ResizeWaitDeadline_ = now + RESIZE_WAIT_TIMEOUT;
         SnapshotReminderSent_ = false;
+        // Straight on, as path A does, when the read that carried the Resume
+        // carried more: the post-Resume Resize is already in Frames_, and an
+        // Idle here would leave it there until another byte arrives or
+        // RESIZE_WAIT_TIMEOUT expires.
+        if (Frames_.Buffered() > 0) {
+            return PumpAwaitSnapshot(now, out, scratch);
+        }
         return Idle{};
     }
 
@@ -490,6 +497,11 @@ ConnectionResult AgentConnection::PumpResume(Timestamp now, MutableByteSpan out,
         if (attached.error() == ESessionError::SessionReaped) {
             if (const auto end = Handle_->EndedWith();
                 end && end->Kind == wire::ESessionEndKind::Overflow) {
+                // Nothing more comes of this connection.  The keys were moved
+                // out above, so a Pump over a frame read after the Resume
+                // (a Resize, say) must find the connection failed, not try to
+                // open it with keys that are gone.
+                std::ignore = Fail(SessionError{attached.error()});
                 return SessionOverflowed{};
             }
         }
@@ -502,11 +514,19 @@ ConnectionResult AgentConnection::PumpResume(Timestamp now, MutableByteSpan out,
     QueueEnd();
     // Straight on: the resend is waiting, and an Idle here would tell the
     // caller there is nothing to do until the client speaks again.
-    return PumpLive(
+    auto result = PumpLive(
         now, out, scratch, [] {},
         [](const DeliveredGridSnapshot&) -> std::optional<ConnectionResult> {
             return std::nullopt;
         });
+    // A Resize read together with the Resume comes out of this call, not out
+    // of Pump's Live case; the size must reach the session either way.
+    if (result) {
+        if (const auto* resized = std::get_if<Resized>(&*result)) {
+            Handle_->ReportResize(resized->Size);
+        }
+    }
+    return result;
 }
 
 ConnectionResult AgentConnection::PumpAwaitSnapshot(
@@ -520,11 +540,17 @@ ConnectionResult AgentConnection::PumpAwaitSnapshot(
     // Process one incoming frame (Resize, keyboard Data, Ping/Pong, Ack), but
     // do not poll — no output goes out until SupplySnapshot clears the ring
     // and starts the grid emission. §9 ADR-030.
-    auto next = Frames_.Next();
-    if (!next) {
-        return std::unexpected(Fail(SessionError{next.error()}));
-    }
-    if (*next) {
+    // Every frame already buffered, like PumpLive: a frame that delivers
+    // nothing (a bare Ack, a Ping) must not hide the Resize behind it, because
+    // nothing wakes the caller for bytes it has already read.
+    while (true) {
+        auto next = Frames_.Next();
+        if (!next) {
+            return std::unexpected(Fail(SessionError{next.error()}));
+        }
+        if (!*next) {
+            break;
+        }
         auto event = Channel_->Receive(now, **next, scratch);
         if (!event) {
             return std::unexpected(Fail(event.error()));
@@ -535,14 +561,15 @@ ConnectionResult AgentConnection::PumpAwaitSnapshot(
         if (const auto* resize = std::get_if<DeliveredResize>(&*event)) {
             Handle_->ReportResize(resize->Resize);
             // Client sent its post-Resume Resize: unblock NeedsSnapshot and
-            // re-arm the reminder so it carries the fresh dimensions.  §9 (a).
+            // re-arm the reminder so it carries the fresh dimensions.  §9,
+            // path B, step 1.
             WaitForResize_ = false;
             ResizeWaitDeadline_.reset();
             SnapshotReminderSent_ = false;
             return Resized{.Size = resize->Resize};
         }
-        // DeliveredSessionEnd, DeliveredNothing, DeliveredGridApplied → fall
-        // through; none of these change the snapshot wait.
+        // DeliveredSessionEnd, DeliveredNothing, DeliveredGridApplied → loop;
+        // none of these change the snapshot wait.
     }
     // Poll keepalive/liveness maintenance even in the await-snapshot window so
     // the connection does not go silent.  §9 ADR-030.
@@ -554,8 +581,9 @@ ConnectionResult AgentConnection::PumpAwaitSnapshot(
         return SendFrame{.Written = *written};
     }
     // Suppress NeedsSnapshot until the client's post-Resume Resize arrives so
-    // the reported dimensions reflect the current terminal.  §9 (a).
-    // After RESIZE_WAIT_TIMEOUT, give up waiting and use the last known size.
+    // the reported dimensions reflect the current terminal.  §9, path B,
+    // step 1. After RESIZE_WAIT_TIMEOUT, give up waiting and use the last known
+    // size, or 0x0 (the grid's current size) when none is known.
     if (WaitForResize_) {
         if (ResizeWaitDeadline_ && now >= *ResizeWaitDeadline_) {
             WaitForResize_ = false;

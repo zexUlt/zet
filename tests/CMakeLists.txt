@@ -40,6 +40,7 @@ add_executable(zet_tests
     session/grid_violation_test.cpp
     session/grid_path_property_test.cpp
     session/connection_snapshot_probe_test.cpp
+    session/resume_resize_same_read_test.cpp
     session/channel_v1_violation_test.cpp
     session/connection_probe94c_test.cpp
     session/channel_probe94c_test.cpp
