@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <array>
 #include <string_view>
+#include <tuple>
 
 namespace zet::wire {
 

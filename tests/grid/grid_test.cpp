@@ -62,11 +62,32 @@ TEST_CASE("Create allocates a usable grid") {
     delete g;
 }
 
-TEST_CASE("Create rejects out-of-range dimensions") {
-    CHECK(!Grid::Create(0, 24).has_value());
-    CHECK(!Grid::Create(80, 0).has_value());
-    CHECK(!Grid::Create(MAX_COLS + 1, 24).has_value());
-    CHECK(!Grid::Create(80, MAX_ROWS + 1).has_value());
+TEST_CASE("Create clamps out-of-range dimensions") {
+    auto zero = Grid::Create(0, 0);
+    REQUIRE(zero.has_value());
+    CHECK(zero.value()->Cols() == 1);
+    CHECK(zero.value()->Rows() == 1);
+    delete zero.value();
+
+    auto wide = Grid::Create(MAX_COLS + 1, 10);
+    REQUIRE(wide.has_value());
+    CHECK(wide.value()->Cols() == MAX_COLS);
+    CHECK(wide.value()->Rows() == 10);
+    delete wide.value();
+
+    auto tall = Grid::Create(80, MAX_ROWS + 1);
+    REQUIRE(tall.has_value());
+    CHECK(tall.value()->Cols() == 80);
+    CHECK(tall.value()->Rows() == MAX_ROWS);
+    delete tall.value();
+}
+
+TEST_CASE("Create clamps rows so the screen fits MAX_SCREEN_CELLS") {
+    auto r = Grid::Create(MAX_COLS, MAX_ROWS);
+    REQUIRE(r.has_value());
+    CHECK(r.value()->Cols() == MAX_COLS);
+    CHECK(r.value()->Rows() == MAX_SCREEN_CELLS / MAX_COLS);
+    delete r.value();
 }
 
 TEST_CASE("Create with scrollback 0 is valid") {
@@ -276,6 +297,20 @@ TEST_CASE("Scrollback ring stores displaced lines") {
     delete g;
 }
 
+TEST_CASE("A narrow char over a wide head leaves the BCE blank in its tail") {
+    // Seed narrow_overwrite_bce_tail. Mutant: PutChar blanks the old
+    // continuation (D2) without the pen background.
+    Grid* g = MakeGrid(6, 2, 5);
+    VtParser p;
+    Feed(p, *g, "\x1b[1;4H\xe4\xb8\xad\x1b[1;1H\x1b[X");
+    Feed(p, *g, "\x1b[41m\x1b[1;4Ha");
+    CHECK(g->CellAt(0, 3).Codepoint == U'a');
+    CHECK(g->CellAt(0, 4).Codepoint == 0);
+    CHECK(g->CellAt(0, 4).BgKind == EColorKind::Indexed);
+    CHECK(g->CellAt(0, 4).Bg[0] == 1);
+    delete g;
+}
+
 TEST_CASE("Scrollback ring wraps at limit") {
     const int limit = 5;
     Grid* g = MakeGrid(5, 3, limit);
@@ -314,12 +349,175 @@ TEST_CASE("Alt screen switch preserves main screen content") {
     CHECK(g->IsAltScreen());
     CHECK(CP(*g, 0, 0) == 0);  // alt screen is blank
 
-    Feed(p, *g, "Alt");
+    // xterm leaves the cursor in place on entry; home it as an app would.
+    Feed(p, *g, "\x1b[HAlt");
     CHECK(CP(*g, 0, 0) == U'A');
 
     Feed(p, *g, "\x1b[?1049l");  // leave alt
     CHECK(!g->IsAltScreen());
     CHECK(CP(*g, 0, 0) == U'M');  // main restored
+    delete g;
+}
+
+// Buffer-switch modes follow xterm (charproc.c srm_OPT_ALTBUF_CURSOR,
+// srm_OPT_ALTBUF, srm_ALTBUF, srm_SAVE_CURSOR). Pending wrap is set by
+// printing in the last column.
+static void SetPendingWrap(VtParser& p, Grid& g) {
+    Feed(p, g, "\x1b[2;10Hx");
+    REQUIRE(g.PendingWrap());
+}
+
+TEST_CASE("?47 switches buffers only: no clear, no save, no wrap reset") {
+    // Mutant: ?47 saves/restores the cursor, clears, or resets the wrap flag.
+    Grid* g = MakeGrid(10, 5);
+    VtParser p;
+    Feed(p, *g,
+         "\x1b[4;4H\x1b"
+         "7");  // DECSC at (3,3) on main
+    SetPendingWrap(p, *g);
+    Feed(p, *g, "\x1b[?47h");
+    CHECK(g->IsAltScreen());
+    CHECK(g->CursorRow() == 1);
+    CHECK(g->CursorCol() == 9);
+    CHECK(g->PendingWrap());  // xterm keeps the wrap flag
+    Feed(p, *g, "\x1b[1;1HAlt");
+    SetPendingWrap(p, *g);
+    Feed(p, *g, "\x1b[?47l");
+    CHECK(!g->IsAltScreen());
+    CHECK(g->CursorRow() == 1);  // no restore of the saved (3,3)
+    CHECK(g->CursorCol() == 9);
+    CHECK(g->PendingWrap());
+    Feed(p, *g, "\x1b[?47h");  // alt content survives: no clear on entry
+    CHECK(CP(*g, 0, 0) == U'A');
+    delete g;
+}
+
+TEST_CASE("?1047 enters without clearing, clears on exit, never saves") {
+    // Mutant: l does not clear the alt buffer; h clears it; either saves.
+    Grid* g = MakeGrid(10, 5);
+    VtParser p;
+    Feed(p, *g,
+         "\x1b[4;4H\x1b"
+         "7");
+    Feed(p, *g, "\x1b[?47h\x1b[1;1HAlt\x1b[?47l");  // leave "Alt" in alt
+    SetPendingWrap(p, *g);
+    Feed(p, *g, "\x1b[?1047h");
+    CHECK(g->IsAltScreen());
+    CHECK(CP(*g, 0, 0) == U'A');  // h does not clear
+    CHECK(g->CursorRow() == 1);
+    CHECK(g->CursorCol() == 9);
+    CHECK(g->PendingWrap());  // h keeps the wrap flag
+    Feed(p, *g, "\x1b[?1047l");
+    CHECK(!g->IsAltScreen());
+    CHECK(g->CursorRow() == 1);  // no restore
+    CHECK(g->CursorCol() == 9);
+    CHECK(!g->PendingWrap());  // the clear resets the wrap flag
+    Feed(p, *g, "\x1b[?47h");
+    CHECK(CP(*g, 0, 0) == 0);  // l cleared the alt buffer
+    Feed(p, *g, "\x1b[1;1HZ\x1b[?47l");
+    SetPendingWrap(p, *g);
+    Feed(p, *g, "\x1b[?1047l");  // on main: no clear, wrap untouched
+    CHECK(g->PendingWrap());
+    Feed(p, *g, "\x1b[?47h");
+    CHECK(CP(*g, 0, 0) == U'Z');
+    delete g;
+}
+
+TEST_CASE("?1048 saves and restores the cursor without switching buffers") {
+    // Mutant: ?1048 switches buffers, or l does not reset the wrap flag.
+    Grid* g = MakeGrid(10, 5);
+    VtParser p;
+    Feed(p, *g, "\x1b[31m\x1b[3;5H\x1b[?1048h");
+    Feed(p, *g, "\x1b[0m\x1b[1;1H");
+    SetPendingWrap(p, *g);
+    Feed(p, *g, "\x1b[?1048l");
+    CHECK(!g->IsAltScreen());
+    CHECK(g->CursorRow() == 2);
+    CHECK(g->CursorCol() == 4);
+    CHECK(!g->PendingWrap());
+    CHECK(g->PenFgKind() == EColorKind::Indexed);
+    delete g;
+}
+
+TEST_CASE("?1049 keeps the cursor, saves it, clears, and restores on exit") {
+    // Mutant: home on entry; no clear; no wrap reset; no restore.
+    Grid* g = MakeGrid(10, 5);
+    VtParser p;
+    Feed(p, *g, "\x1b[?47h\x1b[1;1HOld\x1b[?47l");  // stale alt content
+    Feed(p, *g, "\x1b[3;4H");
+    CHECK(g->CursorRow() == 2);
+    Feed(p, *g, "\x1b[2;10Hx");
+    REQUIRE(g->PendingWrap());
+    Feed(p, *g, "\x1b[?1049h");
+    CHECK(g->IsAltScreen());
+    CHECK(g->CursorRow() == 1);  // not moved
+    CHECK(g->CursorCol() == 9);
+    CHECK(!g->PendingWrap());  // ClearScreen resets the wrap flag
+    CHECK(CP(*g, 0, 0) == 0);  // alt cleared
+    Feed(p, *g, "\x1b[5;5H");
+    Feed(p, *g, "\x1b[?1049l");
+    CHECK(!g->IsAltScreen());
+    CHECK(g->CursorRow() == 1);  // restored to where ?1049h saved it
+    CHECK(g->CursorCol() == 9);
+    delete g;
+}
+
+TEST_CASE("?1049 repeats follow xterm") {
+    // Mutant: ?1049h on alt returns early; ?1049l on main does nothing.
+    Grid* g = MakeGrid(10, 5);
+    VtParser p;
+    Feed(p, *g, "\x1b[?1049h\x1b[1;1HAlt\x1b[4;6H");
+    Feed(p, *g, "\x1b[?1049h");  // again, while on alt
+    CHECK(g->IsAltScreen());
+    CHECK(CP(*g, 0, 0) == 0);  // cleared again
+    CHECK(g->CursorRow() == 3);
+    Feed(p, *g, "\x1b[1;1H\x1b[?1048l");  // alt slot saved by the repeat
+    CHECK(g->CursorRow() == 3);
+    CHECK(g->CursorCol() == 5);
+
+    Feed(p, *g, "\x1b[?1049l");
+    Feed(p, *g,
+         "\x1b[2;2H\x1b"
+         "7\x1b[5;5H");          // DECSC (2,2) on main
+    Feed(p, *g, "\x1b[?1049l");  // again, while on main
+    CHECK(!g->IsAltScreen());
+    CHECK(g->CursorRow() == 1);  // restored anyway
+    CHECK(g->CursorCol() == 1);
+    delete g;
+}
+
+TEST_CASE("Alt screen entry under DECOM leaves the cursor inside the region") {
+    // Mutant: CursorRow_ = 0 on entry leaves a DECOM cursor above the region.
+    Grid* g = MakeGrid(10, 10);
+    VtParser p;
+    Feed(p, *g, "\x1b[5;8r");  // region rows 5-8 (1-based)
+    Feed(p, *g, "\x1b[?6h");   // DECOM on: cursor to region top
+    Feed(p, *g, "\x1b[3;4H");  // region row 3, col 4 -> absolute row 6
+    REQUIRE(g->CursorRow() == 6);
+    Feed(p, *g, "\x1b[?1049h");
+    CHECK(g->CursorRow() == 6);
+    CHECK(g->CursorCol() == 3);
+    CHECK(g->CursorRow() >= g->ScrollTop());
+    CHECK(g->CursorRow() <= g->ScrollBot());
+    Feed(p, *g, "\x1b[?1049l");
+    CHECK(g->CursorRow() == 6);
+    CHECK(g->CursorCol() == 3);
+    delete g;
+}
+
+TEST_CASE("CUP and VPA with a huge row under DECOM stop at the region bottom") {
+    // Mutant: rowOff + row0 summed in 16 bits wraps to a row above the region
+    // (4 + 65534 = 2 mod 65536). Found by the snapshot fuzzer.
+    Grid* g = MakeGrid(10, 12);
+    VtParser p;
+    Feed(p, *g, "\x1b[5;9r\x1b[?6h");  // region rows 4..8 (0-based)
+    Feed(p, *g, "\x1b[65535;1H");
+    CHECK(g->CursorRow() == 8);
+    Feed(p, *g, "\x1b[1;1H\x1b[65535d");
+    CHECK(g->CursorRow() == 8);
+    Feed(p, *g, "\x1b[90145;1H");  // parameter above 16 bits
+    CHECK(g->CursorRow() >= g->ScrollTop());
+    CHECK(g->CursorRow() <= g->ScrollBot());
     delete g;
 }
 
@@ -403,6 +601,27 @@ TEST_CASE("SGR 4:0 colon sub-param clears underline") {
     Feed(p, *g, "\x1b[4m");    // set underline
     Feed(p, *g, "\x1b[4:0m");  // clear via sub-param 0
     CHECK((g->PenAttrs() & static_cast<uint8_t>(EAttr::Underline)) == 0);
+    CHECK(g->PenAttrEx() == 0);
+    delete g;
+}
+
+TEST_CASE("SGR 24 clears the underline style along with the flag") {
+    Grid* g = MakeGrid(10, 5);
+    VtParser p;
+    Feed(p, *g, "\x1b[4:3m");  // curly underline
+    CHECK(g->PenAttrEx() == 3);
+    Feed(p, *g, "\x1b[24m");
+    CHECK((g->PenAttrs() & static_cast<uint8_t>(EAttr::Underline)) == 0);
+    CHECK(g->PenAttrEx() == 0);
+    Feed(p, *g, "x");
+    CHECK(g->CellAt(0, 0).AttrEx == 0);
+    delete g;
+}
+
+TEST_CASE("SGR 0 clears the underline style") {
+    Grid* g = MakeGrid(10, 5);
+    VtParser p;
+    Feed(p, *g, "\x1b[4:3m\x1b[0m");
     CHECK(g->PenAttrEx() == 0);
     delete g;
 }
@@ -537,6 +756,60 @@ TEST_CASE("Resize to zero is clamped to 1x1") {
     CHECK(g->Cols() >= 1);
     CHECK(g->Rows() >= 1);
     delete g;
+}
+
+TEST_CASE("Resize clamps out-of-range dimensions") {
+    Grid* g = MakeGrid(80, 24);
+    REQUIRE(g->Resize(MAX_COLS + 1, 24).has_value());
+    CHECK(g->Cols() == MAX_COLS);
+    CHECK(g->Rows() == 24);
+    REQUIRE(g->Resize(80, MAX_ROWS + 1).has_value());
+    CHECK(g->Cols() == 80);
+    CHECK(g->Rows() == MAX_ROWS);
+    delete g;
+}
+
+TEST_CASE("Resize clamps oversize screens to the cell budget") {
+    // 4096 x 1024 is 4 Mi cells; rows are clamped to MAX_SCREEN_CELLS / cols.
+    Grid* g = MakeGrid(80, 24);
+    REQUIRE(g->Resize(4096, 1024).has_value());
+    CHECK(g->Cols() == 4096);
+    CHECK(g->Rows() == 256);
+    CHECK(std::size_t{g->Cols()} * g->Rows() <= MAX_SCREEN_CELLS);
+
+    // The grid is still usable.
+    VtParser p;
+    Feed(p, *g, "Z");
+    CHECK(CP(*g, 0, 0) == U'Z');
+    Feed(p, *g, "\x1b[256;4096Hq");
+    CHECK(CP(*g, 255, 4095) == U'q');
+    delete g;
+}
+
+TEST_CASE("Resize screen cap boundary matches Create") {
+    Grid* g = MakeGrid(80, 24, 0);
+
+    // 1024 x 1024 is exactly MAX_SCREEN_CELLS: accepted as is.
+    REQUIRE(g->Resize(1024, 1024).has_value());
+    CHECK(g->Cols() == 1024);
+    CHECK(g->Rows() == 1024);
+
+    // One column more: rows = 1048576 / 1025 = 1023.
+    REQUIRE(g->Resize(1025, 1024).has_value());
+    CHECK(g->Cols() == 1025);
+    CHECK(g->Rows() == 1023);
+    delete g;
+
+    auto exact = Grid::Create(1024, 1024, 0);
+    REQUIRE(exact.has_value());
+    CHECK(exact.value()->Rows() == 1024);
+    delete exact.value();
+
+    auto over = Grid::Create(1025, 1024, 0);
+    REQUIRE(over.has_value());
+    CHECK(over.value()->Cols() == 1025);
+    CHECK(over.value()->Rows() == 1023);
+    delete over.value();
 }
 
 // ---------------------------------------------------------------------------
@@ -1385,8 +1658,9 @@ TEST_CASE("Alt-screen preserves colours on switch and restore") {
     Feed(p, *g, "\x1b[?1049h");
     CHECK(CP(*g, 0, 0) == 0);  // alt screen is blank
 
-    // Write blue 'B' on alt screen.
-    Feed(p, *g, "\x1b[34mB");
+    // Write blue 'B' on alt screen (home first: entry does not move the
+    // cursor).
+    Feed(p, *g, "\x1b[H\x1b[34mB");
     CHECK(CP(*g, 0, 0) == 'B');
     CHECK(g->CellAt(0, 0).FgKind == EColorKind::Indexed);
 

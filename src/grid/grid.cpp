@@ -5,21 +5,43 @@
 
 namespace zet::grid {
 
+namespace {
+
+// Clamps a requested screen size to what a grid may hold: 0 becomes 1, cols
+// goes to MAX_COLS, rows goes to min(MAX_ROWS, MAX_SCREEN_CELLS / cols).
+// Oversize requests are clamped, never rejected (design.md §9).
+struct ScreenSize {
+    std::uint16_t Cols;
+    std::uint16_t Rows;
+};
+
+constexpr ScreenSize ClampScreenSize(std::uint16_t cols,
+                                     std::uint16_t rows) noexcept {
+    if (cols == 0) cols = 1;
+    if (rows == 0) rows = 1;
+    if (cols > MAX_COLS) cols = MAX_COLS;
+    const std::size_t maxRows = std::min<std::size_t>(
+        MAX_ROWS, MAX_SCREEN_CELLS / static_cast<std::size_t>(cols));
+    if (rows > maxRows) rows = static_cast<std::uint16_t>(maxRows);
+    return {cols, rows};
+}
+
+}  // namespace
+
 // ---------------------------------------------------------------------------
 // Construction / destruction
 // ---------------------------------------------------------------------------
 
 GridResult<Grid*> Grid::Create(std::uint16_t cols, std::uint16_t rows,
                                std::uint32_t scrollbackLimit) noexcept {
-    if (cols == 0 || cols > MAX_COLS || rows == 0 || rows > MAX_ROWS)
-        return std::unexpected(EGridError::SizeTooLarge);
     if (scrollbackLimit > 0x7FFF'FFFF)
         return std::unexpected(EGridError::ScrollbackTooLarge);
 
     Grid* g = new (std::nothrow) Grid;
     if (!g) return std::unexpected(EGridError::AllocationFailed);
 
-    if (!g->Allocate(cols, rows, scrollbackLimit)) {
+    const ScreenSize size = ClampScreenSize(cols, rows);
+    if (!g->Allocate(size.Cols, size.Rows, scrollbackLimit)) {
         delete g;
         return std::unexpected(EGridError::AllocationFailed);
     }
@@ -34,11 +56,6 @@ bool Grid::Allocate(std::uint16_t cols, std::uint16_t rows,
     ScrollBot_ = static_cast<std::uint16_t>(rows - 1);
 
     const std::size_t screenCells = static_cast<std::size_t>(cols) * rows;
-    // Guard: both screen arenas together must be strictly less than the
-    // scrollback budget.  Prevents Create(MAX_COLS, MAX_ROWS, ...) which
-    // needs 2 × 64 MiB = 128 MiB for screens alone, leaving nothing for
-    // history and hitting the practical memory ceiling.
-    if (screenCells * sizeof(Cell) * 2 >= MAX_SCROLLBACK_BYTES) return false;
     MainCells_ = new (std::nothrow) Cell[screenCells]{};
     AltCells_ = new (std::nothrow) Cell[screenCells]{};
     MainLines_ = new (std::nothrow) Line[rows]{};
@@ -106,6 +123,16 @@ Cell& Grid::CellAt(std::uint16_t row, std::uint16_t col) noexcept {
     return ActiveLine(row).Cells[col];
 }
 
+const Cell& Grid::MainCellAt(std::uint16_t row,
+                             std::uint16_t col) const noexcept {
+    return MainLines_[row].Cells[col];
+}
+
+bool Grid::IsTabStop(std::uint16_t col) const noexcept {
+    if (col >= Cols_) return false;
+    return (TabStops_[col / 64] >> (col % 64)) & std::uint64_t{1};
+}
+
 const Line* Grid::ScrollbackLine(std::uint32_t idx) const noexcept {
     if (!HistoryLines_ || idx >= HistorySize_) return nullptr;
     const std::uint32_t ring = (HistoryStart_ + idx) % ScrollbackLimit_;
@@ -137,7 +164,6 @@ void Grid::PenToCell(Cell& cell) noexcept {
 
 void Grid::ClearLine(Line& line) noexcept {
     for (std::uint16_t c = 0; c < Cols_; ++c) BlankCell(line.Cells[c]);
-    line.CellsUsed = 0;
 }
 
 void Grid::ClearCells(Cell* cells, std::uint16_t count) noexcept {
@@ -167,16 +193,6 @@ void Grid::RepairWideOrphans(Line& line, std::uint16_t first,
         BlankCell(line.Cells[last]);
 }
 
-void Grid::UpdateCellsUsed(Line& line) noexcept {
-    std::uint16_t used = 0;
-    for (std::uint16_t c = 0; c < Cols_; ++c) {
-        if (line.Cells[c].Codepoint != 0 ||
-            line.Cells[c].BgKind != EColorKind::Default)
-            used = static_cast<std::uint16_t>(c + 1);
-    }
-    line.CellsUsed = used;
-}
-
 void Grid::PushScrollback(std::uint16_t row) noexcept {
     if (!HistoryLines_ || ScrollbackLimit_ == 0) return;
     const std::uint32_t slot =
@@ -184,7 +200,6 @@ void Grid::PushScrollback(std::uint16_t row) noexcept {
     Line& dest = HistoryLines_[slot];
     const Line& src = MainLines_[row];
     CopyCells(dest.Cells, src.Cells, Cols_);
-    dest.CellsUsed = src.CellsUsed;
 
     if (HistorySize_ < ScrollbackLimit_) {
         ++HistorySize_;
@@ -230,7 +245,6 @@ void Grid::ScrollRegionDown(std::uint16_t n) noexcept {
         Line& dst = ActiveLine(r);
         const Line& src = ActiveLine(static_cast<std::uint16_t>(r - n));
         CopyCells(dst.Cells, src.Cells, Cols_);
-        dst.CellsUsed = src.CellsUsed;
     }
     for (std::uint16_t r = ScrollTop_; r < ScrollTop_ + n; ++r)
         ClearLine(ActiveLine(r));
@@ -261,7 +275,6 @@ void Grid::PutChar(char32_t cp, int width) noexcept {
     if (width == 0) return;
 
     if (PendingWrap_ && ModeSet(EMode::Awm)) {
-        ActiveLine(CursorRow_).CellsUsed = Cols_;
         CursorCol_ = 0;
         LineFeed();
     }
@@ -280,7 +293,6 @@ void Grid::PutChar(char32_t cp, int width) noexcept {
 
     if (width == 2 && CursorCol_ + 1 >= Cols_) {
         if (ModeSet(EMode::Awm)) {
-            ActiveLine(CursorRow_).CellsUsed = Cols_;
             CursorCol_ = 0;
             LineFeed();
         } else {
@@ -300,9 +312,10 @@ void Grid::PutChar(char32_t cp, int width) noexcept {
     // orphan continuation cell (width==0 with no preceding width==2).
     {
         Cell& cur = CellAt(CursorRow_, CursorCol_);
-        if (cur.Width == 2 && CursorCol_ + 1 < Cols_)
+        if (cur.Width == 2 && CursorCol_ + 1 < Cols_) {
             BlankCell(
                 CellAt(CursorRow_, static_cast<std::uint16_t>(CursorCol_ + 1)));
+        }
     }
 
     Cell& cell = CellAt(CursorRow_, CursorCol_);
@@ -317,16 +330,13 @@ void Grid::PutChar(char32_t cp, int width) noexcept {
         // itself a wide head, its old tail at CursorCol_+2 would become an
         // orphaned Width==0 cell (no preceding Width==2).  Blank it first.
         if (cont.Width == 2 &&
-            static_cast<std::uint16_t>(CursorCol_ + 2) < Cols_)
+            static_cast<std::uint16_t>(CursorCol_ + 2) < Cols_) {
             BlankCell(
                 CellAt(CursorRow_, static_cast<std::uint16_t>(CursorCol_ + 2)));
+        }
         cont = Cell{};
         cont.Width = 0;
     }
-
-    const std::uint16_t used = static_cast<std::uint16_t>(CursorCol_ + width);
-    if (used > ActiveLine(CursorRow_).CellsUsed)
-        ActiveLine(CursorRow_).CellsUsed = (used <= Cols_ ? used : Cols_);
 
     LastPrintedChar_ = cp;
     LastPrintedWidth_ = width;
@@ -476,8 +486,10 @@ void Grid::MoveCursorTo(std::uint16_t row1, std::uint16_t col1) noexcept {
         (row1 > 0) ? static_cast<std::uint16_t>(row1 - 1) : 0;
     const std::uint16_t col0 =
         (col1 > 0) ? static_cast<std::uint16_t>(col1 - 1) : 0;
-    CursorRow_ = ClampRow(static_cast<std::uint16_t>(rowOff + row0));
-    if (CursorRow_ > maxRow) CursorRow_ = maxRow;
+    // Sum in 32 bits: with DECOM, rowOff + row0 wraps in 16 bits for a huge
+    // row parameter and would land above the scroll region.
+    const std::uint32_t row = static_cast<std::uint32_t>(rowOff) + row0;
+    CursorRow_ = row < maxRow ? static_cast<std::uint16_t>(row) : maxRow;
     CursorCol_ = ClampCol(col0);
 }
 
@@ -494,9 +506,9 @@ void Grid::MoveCursorToRow(std::uint16_t row1) noexcept {
                                      : static_cast<std::uint16_t>(Rows_ - 1);
     const std::uint16_t row0 =
         row1 > 0 ? static_cast<std::uint16_t>(row1 - 1) : 0;
-    CursorRow_ = static_cast<std::uint16_t>(rowOff + row0);
-    if (CursorRow_ > maxRow) CursorRow_ = maxRow;
-    if (CursorRow_ >= Rows_) CursorRow_ = static_cast<std::uint16_t>(Rows_ - 1);
+    // 32-bit sum, see MoveCursorTo.
+    const std::uint32_t row = static_cast<std::uint32_t>(rowOff) + row0;
+    CursorRow_ = row < maxRow ? static_cast<std::uint16_t>(row) : maxRow;
 }
 
 void Grid::CursorNextLine(std::uint16_t n) noexcept {
@@ -592,7 +604,6 @@ void Grid::EraseInLine(std::uint8_t param) noexcept {
             RepairWideOrphans(line, CursorCol_, CursorCol_);
             for (std::uint16_t c = CursorCol_; c < Cols_; ++c)
                 BlankCell(line.Cells[c]);
-            UpdateCellsUsed(line);
             break;
         case 1: {
             const std::uint16_t last =
@@ -600,7 +611,6 @@ void Grid::EraseInLine(std::uint8_t param) noexcept {
             RepairWideOrphans(line, 0, last);
             for (std::uint16_t c = 0; c < last && c < Cols_; ++c)
                 BlankCell(line.Cells[c]);
-            UpdateCellsUsed(line);
             break;
         }
         case 2:
@@ -620,7 +630,6 @@ void Grid::EraseChars(std::uint16_t n) noexcept {
                                   : Cols_;
     RepairWideOrphans(line, CursorCol_, end);
     for (std::uint16_t c = CursorCol_; c < end; ++c) BlankCell(line.Cells[c]);
-    UpdateCellsUsed(line);
 }
 
 void Grid::DeleteChars(std::uint16_t n) noexcept {
@@ -645,7 +654,6 @@ void Grid::DeleteChars(std::uint16_t n) noexcept {
     const std::uint16_t tailStart = static_cast<std::uint16_t>(Cols_ - n);
     if (tailStart > 0 && line.Cells[tailStart - 1].Width == 2)
         BlankCell(line.Cells[tailStart - 1]);
-    UpdateCellsUsed(line);
 }
 
 void Grid::InsertChars(std::uint16_t n) noexcept {
@@ -668,7 +676,6 @@ void Grid::InsertChars(std::uint16_t n) noexcept {
     // D3: the shift may have pushed a wide head into the last column where
     // its continuation would fall outside the grid — blank it.
     if (line.Cells[Cols_ - 1].Width == 2) BlankCell(line.Cells[Cols_ - 1]);
-    UpdateCellsUsed(line);
 }
 
 void Grid::InsertLines(std::uint16_t n) noexcept {
@@ -760,6 +767,19 @@ void Grid::SetMode(std::uint16_t param, bool value) noexcept {
         case 47:
             SwitchAltScreen(value);
             break;
+        case 1047:
+            // xterm srm_OPT_ALTBUF: h switches buffers; l clears the alt
+            // buffer if it is active, then switches back.
+            if (!value && IsAltScreen()) ClearAltScreen();
+            SwitchAltScreen(value);
+            break;
+        case 1048:
+            // xterm srm_SAVE_CURSOR: DECSC / DECRC.
+            if (value)
+                SaveCursor();
+            else
+                RestoreCursor();
+            break;
         case 1000:
             apply(EMode::Mouse1000);
             break;
@@ -782,7 +802,18 @@ void Grid::SetMode(std::uint16_t param, bool value) noexcept {
             apply(EMode::Mouse1015);
             break;
         case 1049:
-            SwitchAltScreen(value);
+            // xterm srm_OPT_ALTBUF_CURSOR. h: save the cursor (even when
+            // already on alt), switch, clear the alt buffer. l: switch back
+            // and restore the cursor (even when already on main). The cursor
+            // does not move on entry.
+            if (value) {
+                SaveCursor();
+                SwitchAltScreen(true);
+                ClearAltScreen();
+            } else {
+                SwitchAltScreen(false);
+                RestoreCursor();
+            }
             break;
         case 2004:
             apply(EMode::BracketedPaste);
@@ -870,6 +901,7 @@ void Grid::ApplySgr(const std::uint16_t* params, const bool* colon,
                 break;
             case 24:
                 PenAttrs_ &= static_cast<std::uint8_t>(~Underline);
+                PenAttrEx_ = 0;
                 break;
             case 25:
                 PenAttrs_ &= static_cast<std::uint8_t>(~Blink);
@@ -1143,29 +1175,29 @@ void Grid::DesignateCharset(std::uint8_t g, std::uint8_t designator) noexcept {
         CharsetG1_ = mapped;
 }
 
+// Buffer switch only (?47, and the switch inside ?1047/?1049): no cursor save
+// or restore, no clear, no wrap reset. xterm ToAlternate/FromAlternate with
+// clearFirst false (charproc.c); a switch into the current buffer is a no-op.
 void Grid::SwitchAltScreen(bool enter) noexcept {
-    const bool already = IsAltScreen();
-    if (enter == already) return;
-
-    if (enter) {
-        SaveCursor();
+    if (enter == IsAltScreen()) return;
+    if (enter)
         Modes_ |= ModeFlag(EMode::AltScreen);
-        for (std::uint16_t r = 0; r < Rows_; ++r) ClearLine(AltLines_[r]);
-        CursorRow_ = 0;
-        CursorCol_ = 0;
-        PendingWrap_ = false;
-    } else {
+    else
         Modes_ &= ~ModeFlag(EMode::AltScreen);
-        RestoreCursor();
-    }
+}
+
+// xterm ClearScreen on the active buffer: erase with the pen background and
+// reset the pending wrap. The cursor does not move.
+void Grid::ClearAltScreen() noexcept {
+    for (std::uint16_t r = 0; r < Rows_; ++r) ClearLine(AltLines_[r]);
+    PendingWrap_ = false;
 }
 
 GridResult<void> Grid::Resize(std::uint16_t newCols,
                               std::uint16_t newRows) noexcept {
-    if (newCols == 0) newCols = 1;
-    if (newRows == 0) newRows = 1;
-    if (newCols > MAX_COLS) newCols = MAX_COLS;
-    if (newRows > MAX_ROWS) newRows = MAX_ROWS;
+    const ScreenSize size = ClampScreenSize(newCols, newRows);
+    newCols = size.Cols;
+    newRows = size.Rows;
 
     if (newCols == Cols_ && newRows == Rows_) return {};
 
@@ -1216,14 +1248,6 @@ GridResult<void> Grid::Resize(std::uint16_t newCols,
     // Phase 2: all allocations succeeded — now mutate grid state.
     // -----------------------------------------------------------------------
 
-    // Truncate CellsUsed on the old lines before copying them (shrink case).
-    auto truncateCellsUsed = [&](Line* lines, std::uint16_t rows) noexcept {
-        for (std::uint16_t r = 0; r < rows; ++r)
-            if (lines[r].CellsUsed > clampCols) lines[r].CellsUsed = clampCols;
-    };
-    truncateCellsUsed(MainLines_, oldRows);
-    truncateCellsUsed(AltLines_, oldRows);
-
     // D1 (pre-copy): blank any wide-head cell at the new last column on the
     // OLD buffers.  CopyCells will carry the blanked cells into the new buffer,
     // so no suppression of the static analyser is needed — the old cells are
@@ -1266,12 +1290,6 @@ GridResult<void> Grid::Resize(std::uint16_t newCols,
         const std::uint16_t src = static_cast<std::uint16_t>(srcStart + r);
         CopyCells(newMainLines[r].Cells, MainLines_[src].Cells, clampCols);
         CopyCells(newAltLines[r].Cells, AltLines_[src].Cells, clampCols);
-        newMainLines[r].CellsUsed = MainLines_[src].CellsUsed < newCols
-                                        ? MainLines_[src].CellsUsed
-                                        : newCols;
-        newAltLines[r].CellsUsed = AltLines_[src].CellsUsed < newCols
-                                       ? AltLines_[src].CellsUsed
-                                       : newCols;
     }
 
     // Swap screen buffers.
@@ -1300,9 +1318,6 @@ GridResult<void> Grid::Resize(std::uint16_t newCols,
                 newHistCellsArena + static_cast<std::size_t>(i) * newCols;
             newHistLines[i].Cells = dstCells;
             CopyCells(dstCells, HistoryLines_[src].Cells, clampCols);
-            newHistLines[i].CellsUsed = HistoryLines_[src].CellsUsed < newCols
-                                            ? HistoryLines_[src].CellsUsed
-                                            : newCols;
         }
         delete[] HistoryCells_;
         delete[] HistoryLines_;

@@ -15,6 +15,9 @@ add_executable(zet_tests
     grid/grid_test.cpp
     grid/probe_test.cpp
     grid/snapshot_test.cpp
+    grid/snapshot_roundtrip_test.cpp
+    grid/snapshot_restore_test.cpp
+    grid/snapshot_ladder_test.cpp
     grid/snapshot_size_test.cpp
     core/byte_reader_test.cpp
     core/byte_writer_test.cpp
@@ -38,6 +41,7 @@ add_executable(zet_tests
     session/grid_violation_test.cpp
     session/grid_path_property_test.cpp
     session/connection_snapshot_probe_test.cpp
+    session/resume_resize_same_read_test.cpp
     session/channel_v1_violation_test.cpp
     session/connection_probe94c_test.cpp
     session/channel_probe94c_test.cpp
@@ -67,8 +71,10 @@ target_link_libraries(zet_tests PRIVATE
 # and Detach, which only the agent needs, on Linux (src/CMakeLists.txt).
 if(ZET_HAVE_IO)
     target_sources(zet_tests PRIVATE
+        app/byte_queue_test.cpp
         client/deliver_test.cpp
         client/escape_test.cpp
+        client/snapshot_client_test.cpp
         io/clock_test.cpp
         io/fd_test.cpp
         io/poller_test.cpp
@@ -82,6 +88,7 @@ endif()
 
 if(ZET_HAVE_AGENT)
     target_sources(zet_tests PRIVATE
+        agent/agent_wiring_test.cpp
         io/activation_test.cpp
         io/daemon_test.cpp
         io/fake_pty.cpp
@@ -102,6 +109,7 @@ if(ZET_HAVE_AGENT)
     target_compile_definitions(zet_tests PRIVATE
         ZET_PTY_ECHO_PATH="$<TARGET_FILE:zet_pty_echo>"
     )
+    target_link_libraries(zet_tests PRIVATE zet_agent_loop)
 endif()
 
 include(${doctest_SOURCE_DIR}/scripts/cmake/doctest.cmake)

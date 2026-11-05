@@ -131,6 +131,8 @@ bool DriveToLive(AgentConnection& agent, ClientConnection& client,
 // ── Probe harness (Rig + Reconnect) ──────────────────────────────────────
 
 struct Rig {
+    explicit Rig(SessionLimits limits = TinyLimits()) : Limits(limits) {}
+
     SessionLimits Limits = TinyLimits();
     std::vector<std::byte> As =
         std::vector<std::byte>(Limits.DisconnectMax + 256);
@@ -158,6 +160,9 @@ struct Rig {
                         capable,
                         ceiling,
                         MutableByteSpan{r.Sp.SnapshotBuf}};
+    // The agent waits for the post-Resume Resize before asking for a snapshot
+    // (design.md §9, path B, step 1), and these tests run on a frozen clock.
+    cc.QueueResize(wire::ResizeMessage{.Rows = 24, .Cols = 80});
     if (!DriveToLive(ac, cc, r.Agent, r.Sp, START, r.Nonces)) {
         return "drive-failed";
     }

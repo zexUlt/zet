@@ -18,6 +18,10 @@ public:
     /// Appends all of `bytes`, or nothing if that would pass the ceiling.
     [[nodiscard]] bool Append(ByteSpan bytes);
 
+    /// Appends all of `bytes`, or nothing if that would pass `ceiling`, which
+    /// may sit above the queue's own: Room() then reads 0 until it drains.
+    [[nodiscard]] bool Append(ByteSpan bytes, std::size_t ceiling);
+
     /// What is waiting, in order.
     [[nodiscard]] ByteSpan Front() const noexcept {
         return ByteSpan{Bytes_}.subspan(Head_);
@@ -30,7 +34,9 @@ public:
         return Bytes_.size() - Head_;
     }
     [[nodiscard]] bool Empty() const noexcept { return Size() == 0; }
-    [[nodiscard]] std::size_t Room() const noexcept { return Limit_ - Size(); }
+    [[nodiscard]] std::size_t Room() const noexcept {
+        return Size() < Limit_ ? Limit_ - Size() : 0;
+    }
 
 private:
     std::size_t Limit_;
