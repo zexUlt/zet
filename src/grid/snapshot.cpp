@@ -728,20 +728,37 @@ static void EncodeAll(EscWriter& w, const Grid& grid, const EncodeParams& ep,
     }
 
     // -----------------------------------------------------------------------
-    // Main screen cells (outside sync window; before alt if alt is active).
+    // Clean slate for the screen paint.
     //
-    // D1: encode main screen even when in alt mode, so the main screen and
-    // history survive the snapshot.  When we enter alt later, the main screen
-    // content is already in the target's main buffer.
+    // The paint that follows (the main screen when the alt screen is active,
+    // the sync-window paint otherwise) writes only the cells it needs, so it
+    // requires a cleared screen with the default pen.  In the grid's model the
+    // Rows-1 LFs already scroll every history line off the screen and
+    // EncodeHistory ends each line with a default pen; the clear and the reset
+    // are defensive, for a target that is taller than the grid or holds
+    // something the model does not see.  D14: reset SGR before the clear so
+    // \x1b[2J erases with the default background.  Needed in both cases.
     // -----------------------------------------------------------------------
-    // D14: reset SGR pen before second clear so \x1b[2J always erases with the
-    // default background.  EncodeHistory may leave a non-default pen active;
-    // without this the erase floods cells with the stale colour.
     w.WriteLiteral("\x1b[0m");
     w.WriteLiteral("\x1b[2J\x1b[H");  // second clear
     pen = Pen{};
-    EncodeAnyScreen(w, grid, pen, MainCellAtFn, MainExtentFn, firstRow, endRow,
-                    cm);
+
+    // -----------------------------------------------------------------------
+    // Main screen cells (outside sync window), alt screen only.
+    //
+    // D1: when the alt screen is active, the main buffer must hold the main
+    // screen before ?1049h, so the main screen and history survive the
+    // snapshot and are there after ?1049l.  Without the alt screen this paint
+    // would be redundant: the sync-window paint below rebuilds the whole
+    // screen, so painting it here as well would only double its bytes (a full
+    // screen, ~423 KB at 220x50 truecolor), push the degrade ladder one step
+    // further, and on terminals that save the screen to scrollback on ED 2
+    // leave a duplicate there.
+    // -----------------------------------------------------------------------
+    if (altScreen) {
+        EncodeAnyScreen(w, grid, pen, MainCellAtFn, MainExtentFn, firstRow,
+                        endRow, cm);
+    }
 
     // -----------------------------------------------------------------------
     // Alt screen switch (D1: enter alt only after main screen is done).
