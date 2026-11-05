@@ -70,10 +70,10 @@ int main(int argc, char** argv) {
     p.Feed(reinterpret_cast<const std::byte*>(buf.data()), buf.size(), *g);
 
     // Use MaxBytes=0 so Snapshot::Create applies SNAPSHOT_MAX_BYTES.
-    auto snap_res = Snapshot::Create(*g);
-    if (!snap_res.has_value()) {
+    auto snapRes = Snapshot::Create(*g);
+    if (!snapRes.has_value()) {
         const char* reason = "unknown";
-        switch (snap_res.error()) {
+        switch (snapRes.error()) {
             case EGridError::SnapshotTooLarge:
                 reason = "SnapshotTooLarge";
                 break;
@@ -87,7 +87,7 @@ int main(int argc, char** argv) {
         delete g;
         return 1;
     }
-    Snapshot* snap = snap_res.value();
+    Snapshot* snap = snapRes.value();
 
     const auto bytes = snap->Bytes();
     const auto* data = reinterpret_cast<const char*>(bytes.data());

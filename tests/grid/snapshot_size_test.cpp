@@ -1,47 +1,36 @@
-// Snapshot size-measurement tests (design.md §9/§14).
+// Snapshot size measurements (design.md §9, §14).
 //
-// Two test cases:
+// Every number here comes from Snapshot::Create on a real Grid, never from a
+// constant typed in by hand.  What the tests assert is the contract, not an
+// exact byte count: the exact counts move with harmless encoder tweaks (an
+// SGR reordering, a cheaper cursor jump) and a pin would break on them
+// without catching anything.  So:
 //
-//   worst_case_fits
-//     Builds a 220×50 grid with every screen cell having a unique truecolor
-//     foreground+background and 1000 history lines of cycling truecolor text,
-//     takes a snapshot with MaxBytes=0 (the maximum allowed cap), and prints
-//     the measured sizes.  Fails when:
-//       - Snapshot::Create returns SnapshotTooLarge  → the encoder's output
-//         for the defined worst case exceeds SNAPSHOT_MAX_BYTES, violating the
-//         design §9 budget promise.
-//       - total > SNAPSHOT_MAX_BYTES (redundant guard, same condition).
+//   - Total <= SNAPSHOT_MAX_BYTES for every case (the hard budget);
+//   - the degrade level is pinned only where the input is far from a
+//     threshold, so no harmless tweak can flip it;
+//   - a loose floor and ceiling on bytes per screen cell guard the worst
+//     case against an encoder that silently drops colour (floor) or bloats
+//     (ceiling).
 //
-//   corpus_sizes_within_budget
-//     For every .bin file in ZET_GRID_CORPUS_DIR (set by CMake), renders
-//     the capture at 80×24 with default scrollback, takes a snapshot, records
-//     sizes, and asserts the snapshot fits within SNAPSHOT_MAX_BYTES.  Fails
-//     when any corpus file produces a snapshot that exceeds the budget.
-//     Skipped (not failed) when the corpus dir is empty or not defined.
-//
-// How to confirm each assertion catches a regression:
-//   - Reduce SNAPSHOT_MAX_BYTES in limits.hpp: worst_case_fits fails.
-//   - Replace the Overflow check in Snapshot::Create with a no-op (always
-//     succeed): no meaningful regression visible here but the nm-gate catches
-//     the removed abort.
-//   - Make EncodeScreen emit each truecolor cell twice: total roughly doubles,
-//     worst_case_fits fails.
-//   - Feed a corpus file that is huge enough to overflow the budget: corpus
-//     test fails.
-
+// Run with `zet_tests -s -tc="sizes*"` to print the table that design.md §9
+// quotes.
 #include <doctest/doctest.h>
 
-#include "zet/grid/cell.hpp"
+#include <algorithm>
+#include <cstddef>
+#include <cstdint>
+#include <cstdio>
+#include <filesystem>
+#include <fstream>
+#include <iterator>
+#include <string>
+#include <vector>
+
 #include "zet/grid/grid.hpp"
 #include "zet/grid/limits.hpp"
 #include "zet/grid/snapshot.hpp"
 #include "zet/grid/vt_parser.hpp"
-
-#include <cassert>
-#include <cstdio>
-#include <cstring>
-#include <string>
-#include <vector>
 
 #ifndef ZET_GRID_CORPUS_DIR
 #define ZET_GRID_CORPUS_DIR ""
@@ -49,11 +38,32 @@
 
 using namespace zet::grid;
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
+namespace {
 
-static Grid* MakeSizeGrid(int cols, int rows, int scrollback) {
+struct Measured {
+    std::size_t Scrollback{0};  // preamble + history
+    std::size_t Screen{0};      // Total - Scrollback
+    std::size_t Total{0};
+    EDegradation Degradation{EDegradation::None};
+};
+
+const char* LevelName(EDegradation d) {
+    switch (d) {
+        case EDegradation::None:
+            return "none";
+        case EDegradation::HistoryTrimmed:
+            return "history-trimmed";
+        case EDegradation::Colors256:
+            return "256-colour";
+        case EDegradation::NoColor:
+            return "no-colour";
+        case EDegradation::RowsCropped:
+            return "rows-cropped";
+    }
+    return "?";
+}
+
+Grid* MakeGrid(int cols, int rows, int scrollback) {
     auto r = Grid::Create(static_cast<std::uint16_t>(cols),
                           static_cast<std::uint16_t>(rows),
                           static_cast<std::uint32_t>(scrollback));
@@ -61,291 +71,202 @@ static Grid* MakeSizeGrid(int cols, int rows, int scrollback) {
     return r.value();
 }
 
-// Build a short decimal SGR number string into buf (no NUL).  Returns bytes
-// written.  Buf must hold at least 3 bytes.
-static int DecStr(char* buf, unsigned v) {
-    if (v >= 100) {
-        buf[0] = static_cast<char>('0' + v / 100);
-        buf[1] = static_cast<char>('0' + (v / 10) % 10);
-        buf[2] = static_cast<char>('0' + v % 10);
-        return 3;
-    }
-    if (v >= 10) {
-        buf[0] = static_cast<char>('0' + v / 10);
-        buf[1] = static_cast<char>('0' + v % 10);
-        return 2;
-    }
-    buf[0] = static_cast<char>('0' + v);
-    return 1;
+void Feed(Grid& g, const std::string& s) {
+    VtParser p;
+    p.Feed(reinterpret_cast<const std::byte*>(s.data()), s.size(), g);
 }
 
-// Feed one line of truecolor text into the grid via VtParser.  Each call
-// produces one line of `cols` copies of `ch` in the given truecolor, followed
-// by \r\n to scroll.
-static void FeedColorLine(VtParser& p, Grid& g, int cols, unsigned r,
-                          unsigned gr, unsigned b, char ch) {
-    // Build: ESC[38;2;R;G;Bm + cols×ch + ESC[0m + \r\n
-    // Max sequence: "\x1b[38;2;255;255;255m" = 19 chars + cols chars +
-    // "\x1b[0m\r\n"
-    std::vector<char> seq;
-    seq.reserve(static_cast<std::size_t>(cols) + 32);
-
-    // SGR for foreground
-    seq.push_back('\x1b');
-    seq.push_back('[');
-    seq.push_back('3');
-    seq.push_back('8');
-    seq.push_back(';');
-    seq.push_back('2');
-    seq.push_back(';');
-    char tmp[3];
-    int n = DecStr(tmp, r);
-    for (int i = 0; i < n; i++) seq.push_back(tmp[i]);
-    seq.push_back(';');
-    n = DecStr(tmp, gr);
-    for (int i = 0; i < n; i++) seq.push_back(tmp[i]);
-    seq.push_back(';');
-    n = DecStr(tmp, b);
-    for (int i = 0; i < n; i++) seq.push_back(tmp[i]);
-    seq.push_back('m');
-
-    for (int i = 0; i < cols; ++i) seq.push_back(ch);
-
-    // Reset SGR + newline
-    seq.push_back('\x1b');
-    seq.push_back('[');
-    seq.push_back('0');
-    seq.push_back('m');
-    seq.push_back('\r');
-    seq.push_back('\n');
-
-    p.Feed(reinterpret_cast<const std::byte*>(seq.data()), seq.size(), g);
+Measured Measure(const Grid& g) {
+    auto r = Snapshot::Create(g);
+    REQUIRE(r.has_value());
+    const Snapshot* s = r.value();
+    Measured m;
+    m.Total = s->Bytes().size();
+    m.Scrollback = s->ScrollbackLen();
+    m.Screen = m.Total - m.Scrollback;
+    m.Degradation = s->Degradation();
+    delete s;
+    return m;
 }
 
-// ---------------------------------------------------------------------------
-// Print and record a size measurement row.
-// ---------------------------------------------------------------------------
-
-struct SizeRow {
-    const char* label;
-    std::size_t scrollback_len;  // preamble + history bytes
-    std::size_t screen_len;      // total - scrollback_len
-    std::size_t total;
-    int cols;
-    int rows;
-    std::size_t history_lines;
-};
-
-static void PrintHeader() {
+void PrintHeader() {
     MESSAGE(
-        "  label                          "
-        "  scrollback    screen       total   B/screen-cell");
+        "case                                     scrollback      screen"
+        "       total  B/cell  level");
 }
 
-static void PrintRow(const SizeRow& s) {
-    double bpc = (s.cols > 0 && s.rows > 0)
-                     ? static_cast<double>(s.screen_len) /
-                           (static_cast<double>(s.cols) * s.rows)
-                     : 0.0;
+void PrintRow(const char* label, const Measured& m, int cols, int rows) {
+    const double perCell =
+        static_cast<double>(m.Screen) / (static_cast<double>(cols) * rows);
     char line[200];
-    std::snprintf(line, sizeof(line), "  %-32s  %10zu  %10zu  %10zu  %7.1f",
-                  s.label, s.scrollback_len, s.screen_len, s.total, bpc);
+    std::snprintf(line, sizeof(line), "%-38s %12zu %11zu %11zu %7.1f  %s",
+                  label, m.Scrollback, m.Screen, m.Total, perCell,
+                  LevelName(m.Degradation));
     MESSAGE(line);
 }
 
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
-
-TEST_CASE("sizes: worst-case truecolor 220x50 1000 history lines") {
-    // Mutant: reduce SNAPSHOT_MAX_BYTES → this test fails.
-    // Mutant: make EncodeScreen emit each cell twice → total roughly doubles,
-    //   test fails on the CHECK at the end.
-    constexpr int kCols = 220;
-    constexpr int kRows = 50;
-    constexpr int kHistory = 1000;
-
-    Grid* g = MakeSizeGrid(kCols, kRows, kHistory);
-    VtParser p;
-
-    // --- Fill history: kHistory lines, each with a cycling truecolor.
-    // One SGR per line, kCols identical chars → the encoder emits one SGR +
-    // kCols chars per line.  Represents real-world coloured terminal output.
-    for (int line = 0; line < kHistory; ++line) {
-        unsigned cr = static_cast<unsigned>((line * 3) & 0xFF);
-        unsigned cg = static_cast<unsigned>((line * 7) & 0xFF);
-        unsigned cb = static_cast<unsigned>((line * 11) & 0xFF);
-        FeedColorLine(p, *g, kCols, cr, cg, cb, 'H');
+// One line of `cols` cells where every cell has its own truecolor FG and BG.
+// Adjacent cells always differ (the FG red channel steps by 3, mod 256), so
+// the encoder cannot reuse a pen between cells.
+void AppendUniqueLine(std::string& out, int cols, std::uint32_t& counter) {
+    for (int c = 0; c < cols; ++c, ++counter) {
+        const std::uint32_t i = counter;
+        out += "\x1b[38;2;" + std::to_string((i * 3 + 17) & 0xFF) + ";" +
+               std::to_string((i * 7 + 31) & 0xFF) + ";" +
+               std::to_string((i * 13 + 47) & 0xFF) + ";48;2;" +
+               std::to_string((~i * 5 + 11) & 0xFF) + ";" +
+               std::to_string((~i * 11 + 23) & 0xFF) + ";" +
+               std::to_string((~i * 19 + 37) & 0xFF) + "mX";
     }
-
-    // --- Fill screen: each cell with a unique truecolor FG + BG.
-    // This maximises per-cell SGR overhead (no two adjacent cells share
-    // colour) and represents the absolute worst-case for the screen section.
-    for (std::uint16_t row = 0; row < kRows; ++row) {
-        for (std::uint16_t col = 0; col < kCols; ++col) {
-            std::uint32_t idx = static_cast<std::uint32_t>(row) * kCols + col;
-            Cell& c = g->CellAt(row, col);
-            c.Codepoint = U'X';
-            c.Width = 1;
-            c.FgKind = EColorKind::TrueColor;
-            // Use idx to derive unique RGB; wrap within 0-255.
-            c.Fg[0] = static_cast<std::uint8_t>((idx * 3 + 17) & 0xFF);
-            c.Fg[1] = static_cast<std::uint8_t>((idx * 7 + 31) & 0xFF);
-            c.Fg[2] = static_cast<std::uint8_t>((idx * 13 + 47) & 0xFF);
-            c.BgKind = EColorKind::TrueColor;
-            c.Bg[0] = static_cast<std::uint8_t>((~idx * 5 + 11) & 0xFF);
-            c.Bg[1] = static_cast<std::uint8_t>((~idx * 11 + 23) & 0xFF);
-            c.Bg[2] = static_cast<std::uint8_t>((~idx * 19 + 37) & 0xFF);
-        }
-    }
-
-    // Take snapshot with the default cap (MaxBytes=0 → SNAPSHOT_MAX_BYTES).
-    auto snap_res = Snapshot::Create(*g, SnapshotOptions{.MaxBytes = 0});
-
-    // If Create fails the worst case does not fit within SNAPSHOT_MAX_BYTES —
-    // the design §9 budget is violated.
-    if (!snap_res.has_value()) {
-        FAIL("worst-case snapshot exceeds SNAPSHOT_MAX_BYTES ("
-             << SNAPSHOT_MAX_BYTES
-             << " bytes): design §9 budget violated — "
-                "increase SNAPSHOT_MAX_BYTES or reduce the worst case");
-    }
-
-    Snapshot* snap = snap_res.value();
-    const std::size_t total = snap->Bytes().size();
-    const std::size_t scrollback_len = snap->ScrollbackLen();
-    const std::size_t screen_len = total - scrollback_len;
-    const double bpc_screen = static_cast<double>(screen_len) / (kCols * kRows);
-    const double bpc_history =
-        (kHistory > 0)
-            ? static_cast<double>(scrollback_len) / (kHistory * kCols)
-            : 0.0;
-
-    MESSAGE("=== Snapshot size table — worst case ===");
-    MESSAGE("  grid:         " << kCols << "×" << kRows << " truecolor, "
-                               << kHistory << " history lines");
-    MESSAGE("  scrollback section (preamble+history): " << scrollback_len
-                                                        << " bytes");
-    MESSAGE("  screen section:                        " << screen_len
-                                                        << " bytes");
-    MESSAGE("  total:                                 " << total << " bytes");
-    MESSAGE("  SNAPSHOT_MAX_BYTES:                    " << SNAPSHOT_MAX_BYTES
-                                                        << " bytes");
-    MESSAGE("  bytes per screen cell (approx):        " << bpc_screen);
-    MESSAGE("  bytes per history cell (approx):       " << bpc_history);
-    MESSAGE("  budget used:  " << (100.0 * static_cast<double>(total) /
-                                   static_cast<double>(SNAPSHOT_MAX_BYTES))
-                               << "%");
-
-    // Structural assertion: total must fit the design promise.
-    CHECK(total <= SNAPSHOT_MAX_BYTES);
-
-    delete snap;
-    delete g;
 }
 
-TEST_CASE("sizes: corpus files all within budget") {
-    const char* corpus_dir = ZET_GRID_CORPUS_DIR;
-    if (!corpus_dir || corpus_dir[0] == '\0') {
-        // Corpus directory not configured — skip measurement but do not fail.
-        return;
+// One line of `cols` identical cells in a truecolor chosen by the line index:
+// one SGR per line, which is what coloured program output usually looks like.
+void AppendUniformLine(std::string& out, int cols, int line) {
+    out += "\x1b[38;2;" + std::to_string((line * 3) & 0xFF) + ";" +
+           std::to_string((line * 7) & 0xFF) + ";" +
+           std::to_string((line * 11) & 0xFF) + "m";
+    out.append(static_cast<std::size_t>(cols), 'H');
+}
+
+// `history` uniform lines that scroll off, then `rows` unique-cell screen rows.
+Grid* BuildUniformHistoryUniqueScreen(int cols, int rows, int history) {
+    Grid* g = MakeGrid(cols, rows, history);
+    std::string s;
+    for (int line = 0; line < history; ++line) {
+        AppendUniformLine(s, cols, line);
+        s += "\r\n";
     }
-
-    // Collect .bin files from corpus_dir.  Use plain C stdio: no filesystem
-    // library dependency.
-#if defined(_WIN32)
-    // Windows not in scope for v1 (design.md §12).
-    return;
-#else
-    // Use popen(ls) rather than dirent to avoid a system-header dependency
-    // mismatch between doctest and the rest.  This is a test helper.
-    std::string cmd = std::string("ls '") + corpus_dir + "'/*.bin 2>/dev/null";
-    FILE* fp = ::popen(cmd.c_str(), "r");
-    if (!fp) return;
-
-    std::vector<std::string> files;
-    {
-        char linebuf[4096];
-        while (std::fgets(linebuf, sizeof(linebuf), fp)) {
-            std::size_t len = std::strlen(linebuf);
-            while (len > 0 &&
-                   (linebuf[len - 1] == '\n' || linebuf[len - 1] == '\r'))
-                --len;
-            if (len > 0) files.emplace_back(linebuf, len);
-        }
+    std::uint32_t counter = 0;
+    for (int row = 0; row < rows; ++row) {
+        AppendUniqueLine(s, cols, counter);
+        if (row + 1 < rows) s += "\r\n";
     }
-    ::pclose(fp);
-#endif
+    Feed(*g, s);
+    return g;
+}
 
-    if (files.empty()) return;
+// Every cell of every line, history and screen alike, has a unique truecolor
+// FG and BG.
+Grid* BuildAllUnique(int cols, int rows, int history) {
+    Grid* g = MakeGrid(cols, rows, history);
+    std::string s;
+    std::uint32_t counter = 0;
+    for (int line = 0; line < history + rows; ++line) {
+        AppendUniqueLine(s, cols, counter);
+        if (line + 1 < history + rows) s += "\r\n";
+    }
+    Feed(*g, s);
+    return g;
+}
 
-    MESSAGE(
-        "=== Snapshot size table — corpus files (80×24 default "
-        "scrollback) ===");
+std::vector<std::filesystem::path> CorpusFiles() {
+    std::vector<std::filesystem::path> files;
+    const std::filesystem::path dir{ZET_GRID_CORPUS_DIR};
+    std::error_code ec;
+    for (const auto& e : std::filesystem::directory_iterator(dir, ec)) {
+        if (e.path().extension() == ".bin") files.push_back(e.path());
+    }
+    std::sort(files.begin(), files.end());
+    return files;
+}
+
+}  // namespace
+
+TEST_CASE("sizes: every corpus capture fits without degradation") {
+    // Mutant: a corpus capture that makes the encoder blow past the budget or
+    // trip the ladder fails the two CHECKs.
+    const auto files = CorpusFiles();
+    // The directory is wired in by CMake; an empty one is a broken build, not
+    // a reason to skip.
+    REQUIRE_MESSAGE(!files.empty(),
+                    "no .bin captures in " << ZET_GRID_CORPUS_DIR);
+
+    constexpr int cols = 80;
+    constexpr int rows = 24;
     PrintHeader();
-
-    bool any_over_budget = false;
     for (const auto& path : files) {
-        // Derive label from filename.
-        std::string label = path;
-        auto slash = label.rfind('/');
-        if (slash != std::string::npos) label = label.substr(slash + 1);
-        // Strip .bin
-        if (label.size() > 4 && label.substr(label.size() - 4) == ".bin")
-            label.resize(label.size() - 4);
-
-        // Read file.
-        FILE* f = std::fopen(path.c_str(), "rb");
-        if (!f) {
-            MESSAGE("  [skip] cannot open: " << path);
-            continue;
-        }
-        std::vector<std::uint8_t> raw;
-        {
-            std::uint8_t tmp[4096];
-            std::size_t n;
-            while ((n = std::fread(tmp, 1, sizeof(tmp), f)) > 0)
-                raw.insert(raw.end(), tmp, tmp + n);
-        }
-        std::fclose(f);
-
-        // Render through 80×24 grid.
-        constexpr int kCols = 80;
-        constexpr int kRows = 24;
-        Grid* g = nullptr;
-        {
-            auto gr = Grid::Create(kCols, kRows);
-            REQUIRE(gr.has_value());
-            g = gr.value();
-        }
-        VtParser p;
-        p.Feed(reinterpret_cast<const std::byte*>(raw.data()), raw.size(), *g);
-
-        auto snap_res = Snapshot::Create(*g, SnapshotOptions{.MaxBytes = 0});
-        if (!snap_res.has_value()) {
-            MESSAGE("  [FAIL] " << label << ": Snapshot::Create returned "
-                                << "SnapshotTooLarge");
-            any_over_budget = true;
-            delete g;
-            continue;
-        }
-        Snapshot* snap = snap_res.value();
-        SizeRow row{label.c_str(),
-                    snap->ScrollbackLen(),
-                    snap->Bytes().size() - snap->ScrollbackLen(),
-                    snap->Bytes().size(),
-                    kCols,
-                    kRows,
-                    0};
-        PrintRow(row);
-
-        if (snap->Bytes().size() > SNAPSHOT_MAX_BYTES) {
-            any_over_budget = true;
-        }
-
-        delete snap;
+        std::ifstream in(path, std::ios::binary);
+        REQUIRE_MESSAGE(in.good(), "cannot open " << path);
+        const std::string raw{std::istreambuf_iterator<char>(in),
+                              std::istreambuf_iterator<char>()};
+        Grid* g =
+            MakeGrid(cols, rows, static_cast<int>(DEFAULT_SCROLLBACK_LIMIT));
+        Feed(*g, raw);
+        const Measured m = Measure(*g);
         delete g;
-    }
 
-    CHECK(!any_over_budget);
+        PrintRow(path.stem().string().c_str(), m, cols, rows);
+        CHECK_MESSAGE(m.Total <= SNAPSHOT_MAX_BYTES, path.stem().string());
+        CHECK_MESSAGE(m.Degradation == EDegradation::None,
+                      path.stem().string());
+    }
+}
+
+TEST_CASE("sizes: 220x50 truecolor screen with 1000 history lines fits") {
+    // The worst case design.md §9 quotes: every screen cell has its own
+    // truecolor FG+BG; history is 1000 full-width lines, one colour per line.
+    // Mutant: an encoder that emits a cell twice, or SNAPSHOT_MAX_BYTES cut
+    // below the measured total, fails the budget CHECK; one that drops colour
+    // fails the floor.
+    constexpr int cols = 220;
+    constexpr int rows = 50;
+    constexpr int history = 1000;
+    Grid* g = BuildUniformHistoryUniqueScreen(cols, rows, history);
+    const Measured m = Measure(*g);
+    delete g;
+
+    PrintHeader();
+    PrintRow("220x50 unique screen, uniform history", m, cols, rows);
+
+    CHECK(m.Total <= SNAPSHOT_MAX_BYTES);
+    CHECK(m.Degradation == EDegradation::None);
+    const double perCell = static_cast<double>(m.Screen) / (cols * rows);
+    // Unique FG+BG needs at least one 38;2;r;g;b and one 48;2;r;g;b per cell.
+    CHECK(perCell >= 20.0);
+    CHECK(perCell <= 60.0);
+}
+
+TEST_CASE(
+    "sizes: 220x50 truecolor everywhere with 1000 history lines degrades") {
+    // The same grid with a unique pen on every history cell too: the full
+    // encoding is several times the cap, so the ladder must engage and stop
+    // at its first step (trimming history), which is enough here.
+    // Mutant: a ladder that skips step 1 and drops colour lands on a later
+    // level and fails the level CHECK; one that does not trim fails the budget.
+    constexpr int cols = 220;
+    constexpr int rows = 50;
+    constexpr int history = 1000;
+    Grid* g = BuildAllUnique(cols, rows, history);
+    const Measured m = Measure(*g);
+    delete g;
+
+    PrintHeader();
+    PrintRow("220x50 unique everywhere", m, cols, rows);
+
+    CHECK(m.Total <= SNAPSHOT_MAX_BYTES);
+    CHECK(m.Degradation == EDegradation::HistoryTrimmed);
+}
+
+TEST_CASE("sizes: full-width 4096 columns degrades past history trimming") {
+    // 4096 columns is MAX_COLS; MAX_SCREEN_CELLS (1 << 20) allows 256 rows.
+    // 50 unique-truecolor rows are ~200k cells, which alone is far over the
+    // cap, so trimming history cannot be enough and colour must go.
+    // Mutant: a ladder that stops after trimming history returns a snapshot
+    // over the cap or fails Create; the level CHECK catches both.
+    constexpr int cols = 4096;
+    constexpr int rows = 50;
+    constexpr int history = 20;
+    Grid* g = BuildAllUnique(cols, rows, history);
+    const Measured m = Measure(*g);
+    delete g;
+
+    PrintHeader();
+    PrintRow("4096x50 unique everywhere", m, cols, rows);
+
+    CHECK(m.Total <= SNAPSHOT_MAX_BYTES);
+    CHECK(m.Degradation >= EDegradation::Colors256);
+    // Dropping colour is enough for 50 rows; cropping rows would be a loss the
+    // ladder must not take while a cheaper step still fits.
+    CHECK(m.Degradation < EDegradation::RowsCropped);
 }

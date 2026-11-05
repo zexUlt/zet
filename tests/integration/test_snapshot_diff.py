@@ -194,42 +194,33 @@ def test_snapshot_matches_pyte(capture: Path) -> None:
     )
 
     stem = capture.stem
+    # Collect every difference first: an allowlisted row must not hide a
+    # non-allowlisted one further down.  Only when all differences are
+    # allowlisted is the test an xfail.
+    failures: list[str] = []
+    waived: list[str] = []
+
+    def record(what: str, orig_v: object, snap_v: object, row: int) -> None:
+        msg = f"{what}:\n  orig: {orig_v!r}\n  snap: {snap_v!r}"
+        reason = _is_allowlisted(stem, row)
+        if reason:
+            waived.append(f"{msg}\n  (allowlisted: {reason})")
+        else:
+            failures.append(msg)
+
     for r, (orig, snap) in enumerate(zip(pyte_orig_rows, pyte_snap_rows)):
         if orig != snap:
-            reason = _is_allowlisted(stem, r)
-            if reason:
-                pytest.xfail(
-                    f"Row {r} differs (allowlisted: {reason}):\n"
-                    f"  orig: {orig!r}\n  snap: {snap!r}"
-                )
-            assert orig == snap, (
-                f"Row {r} mismatch after snapshot restore:\n"
-                f"  orig: {orig!r}\n  snap: {snap!r}"
-            )
-
+            record(f"Row {r} mismatch after snapshot restore", orig, snap, r)
     if pyte_orig_cr != pyte_snap_cr:
-        reason = _is_allowlisted(stem, -1)
-        if reason:
-            pytest.xfail(
-                f"Cursor row mismatch (allowlisted: {reason}): "
-                f"orig={pyte_orig_cr} snap={pyte_snap_cr}"
-            )
-    assert pyte_orig_cr == pyte_snap_cr, (
-        f"Cursor row mismatch after snapshot restore: "
-        f"orig={pyte_orig_cr} snap={pyte_snap_cr}"
-    )
-
+        record("Cursor row mismatch after snapshot restore",
+               pyte_orig_cr, pyte_snap_cr, -1)
     if pyte_orig_cc != pyte_snap_cc:
-        reason = _is_allowlisted(stem, -1)
-        if reason:
-            pytest.xfail(
-                f"Cursor col mismatch (allowlisted: {reason}): "
-                f"orig={pyte_orig_cc} snap={pyte_snap_cc}"
-            )
-    assert pyte_orig_cc == pyte_snap_cc, (
-        f"Cursor col mismatch after snapshot restore: "
-        f"orig={pyte_orig_cc} snap={pyte_snap_cc}"
-    )
+        record("Cursor col mismatch after snapshot restore",
+               pyte_orig_cc, pyte_snap_cc, -1)
+
+    assert not failures, "\n".join(failures)
+    if waived:
+        pytest.xfail("\n".join(waived))
 
 
 @skip_no_pyte
@@ -248,7 +239,7 @@ def test_snapshot_dump_smoke() -> None:
     assert snap[0] == 0x18
 
 
-@pytest.mark.skipif(bool(BUILD_DIR), reason="checked only when ZET_BUILD_DIR is set")
+@pytest.mark.skipif(not BUILD_DIR, reason="checked only when ZET_BUILD_DIR is set")
 def test_corpus_not_empty_when_build_dir() -> None:
     """When ZET_BUILD_DIR is set the corpus must contain at least one file."""
     if BUILD_DIR:
