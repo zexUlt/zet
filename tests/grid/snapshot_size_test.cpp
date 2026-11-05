@@ -270,3 +270,26 @@ TEST_CASE("sizes: full-width 4096 columns degrades past history trimming") {
     // ladder must not take while a cheaper step still fits.
     CHECK(m.Degradation < EDegradation::RowsCropped);
 }
+
+TEST_CASE("sizes: 1024x64 unique truecolor lands exactly on 256 colours") {
+    // The only size case that reaches the Colors256 step: unique truecolor
+    // over 1024x64 cells is over the cap at full fidelity (the main screen is
+    // encoded twice, see design.md §9), and the 256-colour encoding of the
+    // same cells fits.  The 4096x50 case above accepts anything from
+    // Colors256 up, so it cannot tell a working step from a no-op.
+    // Mutant: a Colors256 step that is skipped or does not change the colour
+    // encoding lands on NoColor (or RowsCropped) and fails the level CHECK.
+    constexpr int cols = 1024;
+    constexpr int rows = 64;
+    Grid* g = BuildAllUnique(cols, rows, 0);
+    const Measured m = Measure(*g);
+    delete g;
+
+    PrintHeader();
+    PrintRow("1024x64 unique, no history", m, cols, rows);
+
+    CHECK(m.Total <= SNAPSHOT_MAX_BYTES);
+    CHECK(m.Degradation == EDegradation::Colors256);
+    // Colour is still there: far more than the ~1 byte per cell of NoColor.
+    CHECK(static_cast<double>(m.Screen) / (cols * rows) >= 5.0);
+}
