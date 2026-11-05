@@ -647,9 +647,8 @@ TEST_CASE("ladder inert: scrollback history") {
     static constexpr std::string_view GOLDEN =
         "\030\033\134\033[!p\033[\0771049l\033[2J\033[H\033["
         "\07725lline1\015\012"
-        "line2\015\012line3\015\012\012\012\033[0m\033[2J\033[H\033[1;"
-        "1Hline4\015"
-        "\012line5\015\012line6\033[\0772026h\033[1;"
+        "line2\015\012line3\015\012\012\012\033[0m\033[2J\033[H\033["
+        "\0772026h\033[1;"
         "1Hline4\015\012line5\015\012"
         "line6\033[0m\033[1;1H\0337\033[0m\033[1;3r\033[\0771l\033[\0777h\033["
         "4l"
@@ -662,7 +661,7 @@ TEST_CASE("ladder inert: scrollback history") {
         "2026l";
     ExpectLadderInert("L-hist", 10, 3, 5,
                       "line1\r\nline2\r\nline3\r\nline4\r\nline5\r\nline6",
-                      GOLDEN, 87);
+                      GOLDEN, 62);
 }
 
 TEST_CASE("ladder inert: truecolor fg and bg") {
@@ -670,8 +669,7 @@ TEST_CASE("ladder inert: truecolor fg and bg") {
     static constexpr std::string_view GOLDEN =
         "\030\033\134\033[!p\033[\0771049l\033[2J\033[H\033[\07725l\033[0m\033["
         "2"
-        "J\033[H\033[1;1H\033[0;38;2;10;200;30m\033[48;2;250;3;99mTC\033[0m "
-        "ok\033"
+        "J\033[H\033"
         "[\0772026h\033[1;1H\033[0;38;2;10;200;30m\033[48;2;250;3;99mTC\033[0m "
         "o"
         "k\033[0m\033[1;1H\0337\033[0m\033[1;2r\033[\0771l\033[\0777h\033["
@@ -685,7 +683,7 @@ TEST_CASE("ladder inert: truecolor fg and bg") {
         "2026l";
     ExpectLadderInert("L-true", 10, 2, 3,
                       "\x1b[38;2;10;200;30;48;2;250;3;99mTC\x1b[0m ok", GOLDEN,
-                      89);
+                      39);
 }
 
 TEST_CASE(
@@ -695,7 +693,7 @@ TEST_CASE(
     static constexpr std::string_view GOLDEN =
         "\030\033\134\033[!p\033[\0771049l\033[2J\033[H\033[\07725l\033[0m\033["
         "2"
-        "J\033[H\033[1;1Hab\344\270\255\346\226\207\033[\0772026h\033[1;"
+        "J\033[H\033[\0772026h\033[1;"
         "1Hab\344"
         "\270\255\346\226\207\033[0m\033[1;1H\0337\033[0m\033[1;2r\033["
         "\0771l\033"
@@ -707,7 +705,7 @@ TEST_CASE(
         "q\033[\0776l\033[1;5H\346\226\207\033"
         "[\07725h\033[\0772026l";
     ExpectLadderInert("L-wide", 6, 2, 3, "ab\xe4\xb8\xad\xe6\x96\x87", GOLDEN,
-                      53);
+                      39);
 }
 
 TEST_CASE("ladder inert: pending wrap, wide chars, history, truecolor, alt") {
@@ -717,4 +715,66 @@ TEST_CASE("ladder inert: pending wrap, wide chars, history, truecolor, alt") {
                       "\x1b[?1049h\x1b[48;2;1;2;3mALT\x1b[2;7Hxy",
                       {}, 0);
     ExpectLadderInert("L-wrap", 6, 3, 5, "abcdef\x1b[1;31mghijkl\r\nmn", {}, 0);
+}
+
+// ---------------------------------------------------------------------------
+// The main screen is painted once.
+// ---------------------------------------------------------------------------
+
+namespace {
+
+std::size_t CountOccurrences(std::string_view hay, std::string_view needle) {
+    std::size_t n = 0;
+    for (std::size_t p = hay.find(needle); p != std::string_view::npos;
+         p = hay.find(needle, p + needle.size()))
+        ++n;
+    return n;
+}
+
+std::string_view SnapshotView(const Snapshot& s) {
+    const auto b = s.Bytes();
+    return {reinterpret_cast<const char*>(b.data()), b.size()};
+}
+
+}  // namespace
+
+TEST_CASE("P44 non-alt snapshot paints the main screen once") {
+    // Mutant: an encoder that paints the main screen outside the sync window
+    // and again inside it (trunk before this change) finds the marker twice.
+    // Six lines into a 3-row grid: line1..line3 are history, the marker line
+    // is on screen.
+    constexpr std::string_view input =
+        "line1\r\nline2\r\nline3\r\nZETMARKER\r\nline5\r\nline6";
+    Grid* src = Mk(12, 3, 10);
+    VtParser sp;
+    Feed(sp, *src, input);
+    auto snap = Snapshot::Create(*src);
+    REQUIRE(snap.has_value());
+    CHECK(CountOccurrences(SnapshotView(*snap.value()), "ZETMARKER") == 1);
+    CHECK(CountOccurrences(SnapshotView(*snap.value()), "line5") == 1);
+    CHECK(CountOccurrences(SnapshotView(*snap.value()), "line1") == 1);
+    delete snap.value();
+    delete src;
+    Probe("P44", 12, 3, 10, input);
+}
+
+TEST_CASE("P45 alt snapshot paints main once and restores it after 1049l") {
+    // D1: with the alt screen active the main screen must still be painted
+    // before ?1049h; the sync-window paint holds the alt screen only.  The
+    // round trip below checks the main buffer after ?1049l, the byte counts
+    // check that neither screen is painted twice.
+    // Mutant: dropping the main paint under the alt screen loses MAINMARK
+    // (count 0 and the round trip diverges); keeping an extra paint doubles it.
+    constexpr std::string_view input =
+        "MAINMARK\r\nrow2\x1b[?1049h\x1b[1;1HALTMARK";
+    Grid* src = Mk(12, 4, 10);
+    VtParser sp;
+    Feed(sp, *src, input);
+    auto snap = Snapshot::Create(*src);
+    REQUIRE(snap.has_value());
+    CHECK(CountOccurrences(SnapshotView(*snap.value()), "MAINMARK") == 1);
+    CHECK(CountOccurrences(SnapshotView(*snap.value()), "ALTMARK") == 1);
+    delete snap.value();
+    delete src;
+    Probe("P45", 12, 4, 10, input, "\x1b[?1049l");
 }

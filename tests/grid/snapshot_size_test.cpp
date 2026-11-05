@@ -248,12 +248,17 @@ TEST_CASE(
     CHECK(m.Degradation == EDegradation::HistoryTrimmed);
 }
 
-TEST_CASE("sizes: full-width 4096 columns degrades past history trimming") {
+TEST_CASE("sizes: full-width 4096 columns lands on 256 colours") {
     // 4096 columns is MAX_COLS; MAX_SCREEN_CELLS (1 << 20) allows 256 rows.
-    // 50 unique-truecolor rows are ~200k cells, which alone is far over the
-    // cap, so trimming history cannot be enough and colour must go.
+    // 50 unique-truecolor rows are ~200k cells: ~7.8 MB at full fidelity, over
+    // the cap, so trimming history cannot be enough and colour must go.  The
+    // main screen is painted once, so the 256-colour encoding fits (about 4.16
+    // MB of the 4 MiB cap; it needed NoColor while the screen was painted
+    // twice).  This case is within 1% of the cap, so it pins the level of the
+    // current encoder: a heavier one would legitimately move it to NoColor.
     // Mutant: a ladder that stops after trimming history returns a snapshot
-    // over the cap or fails Create; the level CHECK catches both.
+    // over the cap or fails Create; one that paints the screen twice lands on
+    // NoColor.  Either fails the level CHECK.
     constexpr int cols = 4096;
     constexpr int rows = 50;
     constexpr int history = 20;
@@ -265,31 +270,45 @@ TEST_CASE("sizes: full-width 4096 columns degrades past history trimming") {
     PrintRow("4096x50 unique everywhere", m, cols, rows);
 
     CHECK(m.Total <= SNAPSHOT_MAX_BYTES);
-    CHECK(m.Degradation >= EDegradation::Colors256);
-    // Dropping colour is enough for 50 rows; cropping rows would be a loss the
-    // ladder must not take while a cheaper step still fits.
-    CHECK(m.Degradation < EDegradation::RowsCropped);
+    CHECK(m.Degradation == EDegradation::Colors256);
 }
 
-TEST_CASE("sizes: 1024x64 unique truecolor lands exactly on 256 colours") {
-    // The only size case that reaches the Colors256 step: unique truecolor
-    // over 1024x64 cells is over the cap at full fidelity (the main screen is
-    // encoded twice, see design.md §9), and the 256-colour encoding of the
-    // same cells fits.  The 4096x50 case above accepts anything from
-    // Colors256 up, so it cannot tell a working step from a no-op.
+TEST_CASE("sizes: 2048x64 unique truecolor lands exactly on 256 colours") {
+    // Far from both thresholds: ~5.0 MB at full fidelity (over the 4 MiB cap),
+    // ~2.7 MB in 256 colours (under it).  Pins the Colors256 step against a
+    // step that is skipped or does not change the colour encoding.
     // Mutant: a Colors256 step that is skipped or does not change the colour
     // encoding lands on NoColor (or RowsCropped) and fails the level CHECK.
-    constexpr int cols = 1024;
+    constexpr int cols = 2048;
     constexpr int rows = 64;
     Grid* g = BuildAllUnique(cols, rows, 0);
     const Measured m = Measure(*g);
     delete g;
 
     PrintHeader();
-    PrintRow("1024x64 unique, no history", m, cols, rows);
+    PrintRow("2048x64 unique, no history", m, cols, rows);
 
     CHECK(m.Total <= SNAPSHOT_MAX_BYTES);
     CHECK(m.Degradation == EDegradation::Colors256);
     // Colour is still there: far more than the ~1 byte per cell of NoColor.
     CHECK(static_cast<double>(m.Screen) / (cols * rows) >= 5.0);
+}
+
+TEST_CASE("sizes: 4096x64 unique truecolor lands exactly on no colour") {
+    // ~262k cells: over the cap in truecolor (~10 MB) and still over it in 256
+    // colours (~5.3 MB), but ~1 byte per cell without colour.  Pins the
+    // NoColor step; the row crop below it is not needed.
+    // Mutant: a ladder that skips NoColor lands on RowsCropped or fails
+    // Create; one that keeps colour exceeds the cap.
+    constexpr int cols = 4096;
+    constexpr int rows = 64;
+    Grid* g = BuildAllUnique(cols, rows, 0);
+    const Measured m = Measure(*g);
+    delete g;
+
+    PrintHeader();
+    PrintRow("4096x64 unique, no history", m, cols, rows);
+
+    CHECK(m.Total <= SNAPSHOT_MAX_BYTES);
+    CHECK(m.Degradation == EDegradation::NoColor);
 }
