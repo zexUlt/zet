@@ -248,17 +248,17 @@ TEST_CASE(
     CHECK(m.Degradation == EDegradation::HistoryTrimmed);
 }
 
-TEST_CASE("sizes: full-width 4096 columns lands on 256 colours") {
+TEST_CASE("sizes: full-width 4096 columns drops colour detail") {
     // 4096 columns is MAX_COLS; MAX_SCREEN_CELLS (1 << 20) allows 256 rows.
     // 50 unique-truecolor rows are ~200k cells: ~7.8 MB at full fidelity, over
     // the cap, so trimming history cannot be enough and colour must go.  The
     // main screen is painted once, so the 256-colour encoding fits (about 4.16
     // MB of the 4 MiB cap; it needed NoColor while the screen was painted
-    // twice).  This case is within 1% of the cap, so it pins the level of the
-    // current encoder: a heavier one would legitimately move it to NoColor.
+    // twice).  That is within 1% of the cap, so the CHECK accepts NoColor as
+    // well: a slightly heavier encoder would legitimately move it there.  The
+    // 2048x64 and 4096x64 cases pin Colors256 and NoColor with wide margins.
     // Mutant: a ladder that stops after trimming history returns a snapshot
-    // over the cap or fails Create; one that paints the screen twice lands on
-    // NoColor.  Either fails the level CHECK.
+    // over the cap or fails Create, which fails the level CHECK.
     constexpr int cols = 4096;
     constexpr int rows = 50;
     constexpr int history = 20;
@@ -270,7 +270,8 @@ TEST_CASE("sizes: full-width 4096 columns lands on 256 colours") {
     PrintRow("4096x50 unique everywhere", m, cols, rows);
 
     CHECK(m.Total <= SNAPSHOT_MAX_BYTES);
-    CHECK(m.Degradation == EDegradation::Colors256);
+    CHECK(m.Degradation >= EDegradation::Colors256);
+    CHECK(m.Degradation < EDegradation::RowsCropped);
 }
 
 TEST_CASE("sizes: 2048x64 unique truecolor lands exactly on 256 colours") {

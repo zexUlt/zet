@@ -730,13 +730,14 @@ static void EncodeAll(EscWriter& w, const Grid& grid, const EncodeParams& ep,
     // -----------------------------------------------------------------------
     // Clean slate for the screen paint.
     //
-    // The history lines and the Rows-1 LFs above leave LF-pushed rows on the
-    // target's screen and EncodeHistory may leave a non-default pen active.
     // The paint that follows (the main screen when the alt screen is active,
     // the sync-window paint otherwise) writes only the cells it needs, so it
-    // requires a cleared screen with the default pen.  D14: reset SGR before
-    // the clear so \x1b[2J erases with the default background and does not
-    // flood the screen with the stale colour.  Needed in both cases.
+    // requires a cleared screen with the default pen.  In the grid's model the
+    // Rows-1 LFs already scroll every history line off the screen and
+    // EncodeHistory ends each line with a default pen; the clear and the reset
+    // are defensive, for a target that is taller than the grid or holds
+    // something the model does not see.  D14: reset SGR before the clear so
+    // \x1b[2J erases with the default background.  Needed in both cases.
     // -----------------------------------------------------------------------
     w.WriteLiteral("\x1b[0m");
     w.WriteLiteral("\x1b[2J\x1b[H");  // second clear
