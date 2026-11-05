@@ -95,13 +95,15 @@ def _load_allowlist() -> list[dict]:
 _ALLOWLIST = _load_allowlist()
 
 
-def _is_allowlisted(stem: str, row: int) -> Optional[str]:
-    """Return the reason string if (file, row) matches an allowlist entry, else None."""
+def _is_allowlisted(stem: str, key: "int | str") -> Optional[str]:
+    """Return the allowlist reason for (file, key), else None.
+
+    key is a 0-based row index for a row difference, or the string "cursor"
+    for a cursor difference.  Matching is exact: an entry waives only the
+    row (or the cursor) it names.
+    """
     for entry in _ALLOWLIST:
-        entry_file = entry.get("file", "")
-        entry_row = entry.get("row", -1)
-        if (entry_file in ("*", stem) and
-                (entry_row == -1 or entry_row == row)):
+        if entry.get("file", "") in ("*", stem) and entry.get("row") == key:
             return str(entry.get("reason", "allowlisted"))
     return None
 
@@ -160,40 +162,32 @@ def test_grid_matches_pyte(capture: Path) -> None:
         f"Row count mismatch: zet={len(zet_rows)} pyte={len(pyte_rows)}"
     )
 
-    # Compare row by row; check allowlist for known pyte differences.
+    # Collect every difference first: an allowlisted row must not hide a
+    # non-allowlisted one further down.  Only when all differences are
+    # allowlisted is the test an xfail.
+    failures: list[str] = []
+    waived: list[str] = []
+
+    def record(msg: str, key: "int | str") -> None:
+        reason = _is_allowlisted(capture.stem, key)
+        if reason:
+            waived.append(f"{msg} (allowlisted: {reason})")
+        else:
+            failures.append(msg)
+
     for r, (z, p_) in enumerate(zip(zet_rows, pyte_rows)):
         if z != p_:
-            reason = _is_allowlisted(capture.stem, r)
-            if reason:
-                pytest.xfail(
-                    f"Row {r} differs (allowlisted: {reason}):\n"
-                    f"  zet:  {z!r}\n  pyte: {p_!r}"
-                )
-            assert z == p_, (
-                f"Row {r} mismatch:\n  zet:  {z!r}\n  pyte: {p_!r}"
-            )
-
+            record(f"Row {r} mismatch:\n  zet:  {z!r}\n  pyte: {p_!r}", r)
     if zet_cur_row != pyte_cur_row:
-        reason = _is_allowlisted(capture.stem, -1)
-        if reason:
-            pytest.xfail(
-                f"Cursor row mismatch (allowlisted: {reason}): "
-                f"zet={zet_cur_row} pyte={pyte_cur_row}"
-            )
-    assert zet_cur_row == pyte_cur_row, (
-        f"Cursor row mismatch: zet={zet_cur_row} pyte={pyte_cur_row}"
-    )
-
+        record(f"Cursor row mismatch: zet={zet_cur_row} pyte={pyte_cur_row}",
+               "cursor")
     if zet_cur_col != pyte_cur_col:
-        reason = _is_allowlisted(capture.stem, -1)
-        if reason:
-            pytest.xfail(
-                f"Cursor col mismatch (allowlisted: {reason}): "
-                f"zet={zet_cur_col} pyte={pyte_cur_col}"
-            )
-    assert zet_cur_col == pyte_cur_col, (
-        f"Cursor col mismatch: zet={zet_cur_col} pyte={pyte_cur_col}"
-    )
+        record(f"Cursor col mismatch: zet={zet_cur_col} pyte={pyte_cur_col}",
+               "cursor")
+
+    assert not failures, "\n".join(failures)
+    if waived:
+        pytest.xfail("\n".join(waived))
 
 
 @skip_no_pyte

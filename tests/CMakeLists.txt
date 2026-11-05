@@ -18,6 +18,7 @@ add_executable(zet_tests
     grid/snapshot_roundtrip_test.cpp
     grid/snapshot_restore_test.cpp
     grid/snapshot_ladder_test.cpp
+    grid/snapshot_size_test.cpp
     core/byte_reader_test.cpp
     core/byte_writer_test.cpp
     core/log_test.cpp
@@ -114,9 +115,21 @@ endif()
 include(${doctest_SOURCE_DIR}/scripts/cmake/doctest.cmake)
 doctest_discover_tests(zet_tests)
 
+# Size-measurement test gets the corpus directory at compile time so it can
+# read the .bin files directly without a separate fixture.
+target_compile_definitions(zet_tests PRIVATE
+    ZET_GRID_CORPUS_DIR="${CMAKE_CURRENT_SOURCE_DIR}/integration/grid_corpus"
+)
+
 # Differential-test helper: reads raw bytes from stdin, renders through
 # VtParser+Grid, outputs the visible screen as JSON on stdout.
 add_executable(zet_grid_dump grid/grid_dump_main.cpp)
 target_link_libraries(zet_grid_dump PRIVATE zet::grid zet::compile_options)
+
+# Snapshot differential-test helper: reads raw bytes from stdin, renders
+# through VtParser+Grid, serialises via Snapshot::Create, writes snapshot bytes
+# raw to stdout.  Used by tests/integration/test_snapshot_diff.py.
+add_executable(zet_snapshot_dump grid/snapshot_dump_main.cpp)
+target_link_libraries(zet_snapshot_dump PRIVATE zet::grid zet::compile_options)
 
 add_subdirectory(compile_fail)
