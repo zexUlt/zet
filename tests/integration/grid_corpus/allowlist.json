@@ -87,7 +87,7 @@
   },
   {
     "file": "scroll_region_synthetic",
-    "row": -1,
+    "row": "cursor",
     "reason": "cursor row differs because pyte ignores SU/SD and leaves cursor at row 19 (last written), while zet correctly tracks cursor through scroll operations"
   },
   {
@@ -103,7 +103,7 @@
   },
   {
     "file": "vim_session",
-    "row": -1,
+    "row": "cursor",
     "reason": "pyte.Screen does not restore the saved cursor position on alt-screen exit (?1049l); pyte cursor stays at the alt-screen position (row 23), zet restores the main-screen cursor (row 0)"
   }
 ]

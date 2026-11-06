@@ -726,15 +726,25 @@ void Agent::Pump(Connection& connection, Timestamp now) noexcept {
                                     .XPixels = resized->Size.XPixel,
                                     .YPixels = resized->Size.YPixel};
             // Keep the grid in sync before resizing the pty. On error keep
-            // both at current size (no pty resize) so they stay consistent.
+            // both at current size (no pty resize) so they stay consistent;
+            // the rest of this turn's frames are still pumped.
+            bool resizePty = true;
+            io::WindowSize applied = ws;
             if (GridPump_) {
                 if (auto r = GridPump_->HandleResize(ws.Cols, ws.Rows); !r) {
                     Log(log::ELevel::Warn,
                         "grid resize failed; keeping current size");
-                    return;
+                    resizePty = false;
+                } else {
+                    // The grid clamps a zero size to 1; the pty gets the size
+                    // the grid actually has.
+                    applied.Cols = GridPump_->GetGrid().Cols();
+                    applied.Rows = GridPump_->GetGrid().Rows();
                 }
             }
-            static_cast<void>(io::Resize(Child_.Master.Get(), ws));
+            if (resizePty) {
+                static_cast<void>(io::Resize(Child_.Master.Get(), applied));
+            }
         } else if (const auto* ns =
                        std::get_if<session::NeedsSnapshot>(&event)) {
             // Arm ground-wait; supply immediately if parser is already in

@@ -366,7 +366,11 @@ static void EncodeHistory(EscWriter& w, const Grid& g, Pen& pen,
         const Line* line = g.ScrollbackLine(i);
         if (!line) continue;
 
-        const std::uint16_t used = line->CellsUsed;
+        // The extent comes from the cells, as for the screen.
+        std::uint16_t used = g.Cols();
+        while (used > 0 &&
+               IsBlankCell(line->Cells[static_cast<std::size_t>(used) - 1]))
+            --used;
         std::uint16_t col = 0;
         while (col < used) {
             const Cell& c = line->Cells[col];
@@ -398,7 +402,7 @@ static void EncodeHistory(EscWriter& w, const Grid& g, Pen& pen,
 // ---------------------------------------------------------------------------
 // Encode screen section.
 //
-// CellAtFn / CellsUsedFn are used to read either main or alt screen cells
+// CellAtFn / ExtentFn are used to read either main or alt screen cells
 // without changing this function (D1).
 //
 // Adjacent non-blank rows are separated with CR+LF instead of per-row CUP
@@ -406,13 +410,13 @@ static void EncodeHistory(EscWriter& w, const Grid& g, Pen& pen,
 // ---------------------------------------------------------------------------
 
 using CellAtFn = const Cell& (*)(const Grid&, std::uint16_t, std::uint16_t);
-using CellsUsedFn = std::uint16_t (*)(const Grid&, std::uint16_t);
+using ExtentFn = std::uint16_t (*)(const Grid&, std::uint16_t);
 
 static const Cell& MainCellAtFn(const Grid& g, std::uint16_t r,
                                 std::uint16_t c) noexcept {
     return g.MainCellAt(r, c);
 }
-static std::uint16_t MainCellsUsedFn(const Grid& g, std::uint16_t r) noexcept {
+static std::uint16_t MainExtentFn(const Grid& g, std::uint16_t r) noexcept {
     // Scan from right to find used boundary (consistent with alt screen path).
     std::uint16_t used = g.Cols();
     while (used > 0 && IsBlankCell(MainCellAtFn(
@@ -425,7 +429,7 @@ static const Cell& AltCellAtFn(const Grid& g, std::uint16_t r,
     return g.CellAt(r,
                     c);  // CellAt reads active (alt) screen when in alt mode.
 }
-static std::uint16_t AltCellsUsedFn(const Grid& g, std::uint16_t r) noexcept {
+static std::uint16_t AltExtentFn(const Grid& g, std::uint16_t r) noexcept {
     std::uint16_t used = g.Cols();
     while (used > 0 &&
            IsBlankCell(AltCellAtFn(g, r, static_cast<std::uint16_t>(used - 1))))
@@ -434,13 +438,13 @@ static std::uint16_t AltCellsUsedFn(const Grid& g, std::uint16_t r) noexcept {
 }
 
 static void EncodeAnyScreen(EscWriter& w, const Grid& g, Pen& pen,
-                            CellAtFn cellAt, CellsUsedFn cellsUsed,
+                            CellAtFn cellAt, ExtentFn extentOf,
                             std::uint16_t firstRow, std::uint16_t endRow,
                             EColorMode cm) noexcept {
     std::int32_t lastRow = -1;  // -1 = none emitted yet
 
     for (std::uint16_t row = firstRow; row < endRow; ++row) {
-        const std::uint16_t used = cellsUsed(g, row);
+        const std::uint16_t used = extentOf(g, row);
         if (used == 0) continue;
 
         if (lastRow >= 0 && row == static_cast<std::uint16_t>(lastRow + 1)) {
@@ -598,8 +602,13 @@ static void EncodeModeRestore(EscWriter& w, const Grid& g, Pen& pen,
     const std::uint16_t curCol = g.CursorCol();
     std::uint32_t cupRow;
     if (decom) {
-        // CUP is region-relative when DECOM is on: row 1 = scroll_top.
-        cupRow = static_cast<std::uint32_t>(curRow - g.ScrollTop() + 1);
+        // CUP is region-relative when DECOM is on: row 1 = scroll_top. A
+        // cursor outside the region has no such coordinate (the subtraction
+        // would wrap), so it is clamped into the region.
+        const std::uint16_t inRegion = curRow < g.ScrollTop()   ? g.ScrollTop()
+                                       : curRow > g.ScrollBot() ? g.ScrollBot()
+                                                                : curRow;
+        cupRow = static_cast<std::uint32_t>(inRegion - g.ScrollTop() + 1);
     } else {
         cupRow = static_cast<std::uint32_t>(curRow + 1);
     }
@@ -719,20 +728,37 @@ static void EncodeAll(EscWriter& w, const Grid& grid, const EncodeParams& ep,
     }
 
     // -----------------------------------------------------------------------
-    // Main screen cells (outside sync window; before alt if alt is active).
+    // Clean slate for the screen paint.
     //
-    // D1: encode main screen even when in alt mode, so the main screen and
-    // history survive the snapshot.  When we enter alt later, the main screen
-    // content is already in the target's main buffer.
+    // The paint that follows (the main screen when the alt screen is active,
+    // the sync-window paint otherwise) writes only the cells it needs, so it
+    // requires a cleared screen with the default pen.  In the grid's model the
+    // Rows-1 LFs already scroll every history line off the screen and
+    // EncodeHistory ends each line with a default pen; the clear and the reset
+    // are defensive, for a target that is taller than the grid or holds
+    // something the model does not see.  D14: reset SGR before the clear so
+    // \x1b[2J erases with the default background.  Needed in both cases.
     // -----------------------------------------------------------------------
-    // D14: reset SGR pen before second clear so \x1b[2J always erases with the
-    // default background.  EncodeHistory may leave a non-default pen active;
-    // without this the erase floods cells with the stale colour.
     w.WriteLiteral("\x1b[0m");
     w.WriteLiteral("\x1b[2J\x1b[H");  // second clear
     pen = Pen{};
-    EncodeAnyScreen(w, grid, pen, MainCellAtFn, MainCellsUsedFn, firstRow,
-                    endRow, cm);
+
+    // -----------------------------------------------------------------------
+    // Main screen cells (outside sync window), alt screen only.
+    //
+    // D1: when the alt screen is active, the main buffer must hold the main
+    // screen before ?1049h, so the main screen and history survive the
+    // snapshot and are there after ?1049l.  Without the alt screen this paint
+    // would be redundant: the sync-window paint below rebuilds the whole
+    // screen, so painting it here as well would only double its bytes (a full
+    // screen, ~423 KB at 220x50 truecolor), push the degrade ladder one step
+    // further, and on terminals that save the screen to scrollback on ED 2
+    // leave a duplicate there.
+    // -----------------------------------------------------------------------
+    if (altScreen) {
+        EncodeAnyScreen(w, grid, pen, MainCellAtFn, MainExtentFn, firstRow,
+                        endRow, cm);
+    }
 
     // -----------------------------------------------------------------------
     // Alt screen switch (D1: enter alt only after main screen is done).
@@ -771,8 +797,8 @@ static void EncodeAll(EscWriter& w, const Grid& grid, const EncodeParams& ep,
     // -----------------------------------------------------------------------
     w.WriteLiteral("\x1b[?2026h");
     EncodeAnyScreen(w, grid, pen, altScreen ? AltCellAtFn : MainCellAtFn,
-                    altScreen ? AltCellsUsedFn : MainCellsUsedFn, firstRow,
-                    endRow, cm);
+                    altScreen ? AltExtentFn : MainExtentFn, firstRow, endRow,
+                    cm);
 
     // Mode restore + sync end (EncodeModeRestore ends with ?2026l).
     EncodeModeRestore(w, grid, pen, cm);

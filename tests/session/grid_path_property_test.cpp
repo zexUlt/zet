@@ -249,6 +249,7 @@ TEST_CASE_FIXTURE(
                          /*gridCapable=*/true,
                          wire::PROTOCOL_VERSION_GRID,
                          MutableByteSpan{sp.SnapshotBuf}};
+    cc2.QueueResize(wire::ResizeMessage{.Rows = 24, .Cols = 80});
     REQUIRE(DriveToLive(ac2, cc2, agent, sp, START, nonces));
 
     // Drive until NeedsSnapshot appears from the agent.
@@ -329,6 +330,7 @@ TEST_CASE_FIXTURE(SodiumFixture,
                             /*gridCapable=*/true,
                             wire::PROTOCOL_VERSION_GRID,
                             MutableByteSpan{sp.SnapshotBuf}};
+        cc.QueueResize(wire::ResizeMessage{.Rows = 24, .Cols = 80});
         if (!DriveToLive(ac, cc, agent, sp, START, nonces)) {
             return false;
         }
@@ -402,6 +404,7 @@ TEST_CASE_FIXTURE(SodiumFixture,
                          /*gridCapable=*/true,
                          wire::PROTOCOL_VERSION_GRID,
                          MutableByteSpan{sp.SnapshotBuf}};
+    cc3.QueueResize(wire::ResizeMessage{.Rows = 24, .Cols = 80});
 
     // freshClient sends stream_gen=0; agent's session_gen=1 → mandatory path B.
     bool gotNeedsSnapshot = false;
@@ -627,6 +630,7 @@ TEST_CASE_FIXTURE(SodiumFixture,
                         /*gridCapable=*/true,
                         wire::PROTOCOL_VERSION_GRID,
                         MutableByteSpan{sp.SnapshotBuf}};
+    cc.QueueResize(wire::ResizeMessage{.Rows = 24, .Cols = 80});
     REQUIRE(DriveToLive(ac, cc, agent, sp, START, nonces));
 
     // Drive path B to completion.
@@ -889,6 +893,7 @@ TEST_CASE_FIXTURE(
                             /*gridCapable=*/true,
                             wire::PROTOCOL_VERSION_GRID,
                             MutableByteSpan{sp.SnapshotBuf}};
+        cc.QueueResize(wire::ResizeMessage{.Rows = 24, .Cols = 80});
         REQUIRE(DriveToLive(ac, cc, agent, sp, START, nonces));
 
         const std::vector<std::byte> snap(16, std::byte{0x22});
@@ -936,6 +941,7 @@ TEST_CASE_FIXTURE(
                          /*gridCapable=*/true,
                          wire::PROTOCOL_VERSION_GRID,
                          MutableByteSpan{sp.SnapshotBuf}};
+    cc2.QueueResize(wire::ResizeMessage{.Rows = 24, .Cols = 80});
 
     // Drive until the fresh agent either closes the connection (fix: violation
     // detected) or goes Live (bug: stream_gen silently accepted).
@@ -1154,6 +1160,7 @@ TEST_CASE_FIXTURE(
                              /*gridCapable=*/true,
                              wire::PROTOCOL_VERSION_GRID,
                              MutableByteSpan{sp.SnapshotBuf}};
+        cc1.QueueResize(wire::ResizeMessage{.Rows = 24, .Cols = 80});
         REQUIRE(DriveToLive(ac1, cc1, agent, sp, START, nonces));
 
         bool gotNeedsSnapshot = false;
@@ -1194,6 +1201,7 @@ TEST_CASE_FIXTURE(
                          /*gridCapable=*/true,
                          wire::PROTOCOL_VERSION_GRID,
                          MutableByteSpan{sp.SnapshotBuf}};
+    cc2.QueueResize(wire::ResizeMessage{.Rows = 24, .Cols = 80});
     REQUIRE(DriveToLive(ac2, cc2, agent, sp, START, nonces));
 
     bool gotNeedsSnapshot2 = false;
@@ -1256,6 +1264,7 @@ std::string Reconnect(Rig& r, bool capable, std::uint16_t ceiling,
                         capable,
                         ceiling,
                         MutableByteSpan{r.Sp.SnapshotBuf}};
+    cc.QueueResize(wire::ResizeMessage{.Rows = 24, .Cols = 80});
     if (!DriveToLive(ac, cc, r.Agent, r.Sp, START, r.Nonces)) {
         return "drive-failed";
     }

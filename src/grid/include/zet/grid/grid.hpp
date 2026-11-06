@@ -54,8 +54,7 @@ enum class EMode : std::uint32_t {
 ///
 /// Allocated in a fixed arena; never grows after construction.
 struct Line {
-    Cell* Cells{nullptr};        ///< [0 .. grid.Cols())
-    std::uint16_t CellsUsed{0};  ///< rightmost non-blank column + 1
+    Cell* Cells{nullptr};  ///< [0 .. grid.Cols())
 };
 
 /// Saved cursor state (DECSC/DECRC and alt-screen switch).
@@ -194,9 +193,6 @@ public:
     /// row must be < Rows_, col must be < Cols_.  No bounds check.
     [[nodiscard]] const Cell& MainCellAt(std::uint16_t row,
                                          std::uint16_t col) const noexcept;
-    /// CellsUsed for a MAIN screen row (always main, even in alt mode).
-    [[nodiscard]] std::uint16_t MainRowCellsUsed(
-        std::uint16_t row) const noexcept;
 
     /// True if column col is a tab stop in the grid's current tab-stop table.
     [[nodiscard]] bool IsTabStop(std::uint16_t col) const noexcept;
@@ -297,7 +293,8 @@ public:
     /// Designate G0/G1 charset (ESC ( B, ESC ) B, etc.).
     void DesignateCharset(std::uint8_t g, std::uint8_t designator) noexcept;
 
-    /// Alt screen switch (?1049 / ?47).
+    /// Switch between the main and alt buffers and nothing else (?47). The
+    /// cursor, the saved cursors, the contents and the wrap flag are untouched.
     void SwitchAltScreen(bool enter) noexcept;
 
     /// Resize (design.md §9 — truncate, no reflow).
@@ -309,6 +306,8 @@ public:
                                           std::uint16_t newRows) noexcept;
 
 private:
+    friend struct GridTestAccess;  // tests/grid: states the VT cannot reach
+
     explicit Grid() noexcept = default;
 
     // Allocate all arenas. Returns false on any allocation failure.
@@ -328,7 +327,8 @@ private:
     [[nodiscard]] const Line& ActiveLine(std::uint16_t row) const noexcept;
     [[nodiscard]] Line& ActiveBuf(std::uint16_t row) noexcept;
     void PushScrollback(std::uint16_t row) noexcept;
-    void UpdateCellsUsed(Line& line) noexcept;
+    /// Erase the alt buffer and reset the pending wrap (xterm ClearScreen).
+    void ClearAltScreen() noexcept;
     void RepairWideOrphans(Line& line, std::uint16_t first,
                            std::uint16_t last) noexcept;
 

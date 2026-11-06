@@ -21,16 +21,25 @@ from e2e import (ESCAPE_NOTICE, ESCAPE_STATUS, KEEPALIVE_INTERVAL_MS, LOST_NOTIC
                  REGAINED_NOTICE, Terminal)
 from harness import PtyProcess
 
-# The stream the cut checks: as in the Linux suite, more than the agent's
-# resend buffer, so the cut meets backpressure on the far side.
-STREAM_LINES = 1_000_000
+# The stream the cut checks. The agent sends at most RESEND_BUFFER_MAX (4 MiB)
+# past what the client has acknowledged, and a client whose terminal is not
+# being read (a slow `docker exec` below) has acknowledged little more than
+# what it has shown plus its own 1 MiB stdout queue. So the stream
+# outruns the cut, and ends before it bites, unless it is longer than
+# CUT_RANGE's end plus about 5.5 MiB; 1.5M lines, 10.9 MB, leaves 3 MB over
+# that however slow the cut is.
+STREAM_LINES = 1_500_000
 
 # Where in the stream the cut lands, in bytes the client has received.
-CUT_RANGE = (512 * 1024, 5 * 1024 * 1024)
+CUT_RANGE = (512 * 1024, 2 * 1024 * 1024)
 
 CUT_SEED = int(os.environ.get("ZET_E2E_SEED", "23"))
 
-DEFAULT_ORPHAN_TIMEOUT_S = 20
+# A client whose terminal is drained slowly counts no silence while it holds
+# back (design.md §9), so it finds a cut only after the backlog on its side,
+# up to a few MiB, has been shown. The agent must not give the session up
+# before that.
+DEFAULT_ORPHAN_TIMEOUT_S = 120
 
 
 # PENDIN in macOS's lflag: "retype pending input", set by the tty driver

@@ -57,6 +57,7 @@
 #include <vector>
 
 #include <poll.h>
+#include <sys/ioctl.h>
 #include <termios.h>
 #include <unistd.h>
 
@@ -204,6 +205,8 @@ public:
 
     std::vector<std::byte> Delivered;
     std::vector<std::vector<std::byte>> Snapshots;
+    /// Frames sent since the client went Live: the Resume, then the Resize.
+    int LiveFramesSent{0};
     bool Closed{false};
     bool Failed{false};
 
@@ -222,30 +225,42 @@ private:
                 Closed = true;
             }
         }
+        // Everything this turn produces goes out in one write, so a Resume and
+        // the Resize queued behind it reach the agent in one read — as they do
+        // when a real client's socket is not drained between its frames.
+        std::vector<std::byte> outgoing;
+        const auto flush = [&] {
+            ByteSpan bytes{outgoing};
+            while (!bytes.empty()) {
+                auto w = io::WriteSome(Sock_.Get(), bytes);
+                if (!w) {
+                    if (w.error().WouldBlock()) {
+                        pollfd wpf{
+                            .fd = Sock_.Get(), .events = POLLOUT, .revents = 0};
+                        ::poll(&wpf, 1, 10);
+                        continue;
+                    }
+                    Closed = true;
+                    return;
+                }
+                bytes = bytes.subspan(*w);
+            }
+        };
         for (;;) {
             auto r = Cc_.Pump(io::MonotonicNow(), MutableByteSpan{Out_},
                               MutableByteSpan{Scratch_});
             if (!r) {
                 Failed = true;
+                flush();
                 return;
             }
             if (const auto* sf = std::get_if<SendFrame>(&*r)) {
-                auto bytes = ByteSpan{Out_.data(), sf->Written};
-                while (!bytes.empty()) {
-                    auto w = io::WriteSome(Sock_.Get(), bytes);
-                    if (!w) {
-                        if (w.error().WouldBlock()) {
-                            pollfd wpf{.fd = Sock_.Get(),
-                                       .events = POLLOUT,
-                                       .revents = 0};
-                            ::poll(&wpf, 1, 10);
-                            continue;
-                        }
-                        Closed = true;
-                        return;
-                    }
-                    bytes = bytes.subspan(*w);
+                if (Cc_.IsLive()) {
+                    ++LiveFramesSent;
                 }
+                outgoing.insert(
+                    outgoing.end(), Out_.begin(),
+                    Out_.begin() + static_cast<std::ptrdiff_t>(sf->Written));
                 continue;
             }
             if (const auto* d = std::get_if<Deliver>(&*r)) {
@@ -258,6 +273,7 @@ private:
                 Cc_.ConfirmApply(as->StreamGen);
                 continue;
             }
+            flush();
             return;  // Idle or an event the tests do not care about.
         }
     }
@@ -307,29 +323,31 @@ public:
         REQUIRE(listener.has_value());
         Port = listener->Port;
 
-        Fut_ = std::async(
-            std::launch::async, [this, key, l = std::move(*listener),
-                                 m = std::move(pty->Master)]() mutable {
-                return RunAgentForTest(AgentTestConfig{
-                    .Secrets = DeriveSessionSecrets(MakeKey(key)),
-                    .Limits = Lim_,
-                    .Listen = std::move(l),
-                    .PtyReadFd = std::move(m),
-                    .Ceiling = PROTOCOL_VERSION_GRID,
-                    .GiveUpAfter = std::chrono::seconds{60},
-                    .Inspect =
-                        [this](const GridPump& gp) {
-                            Seen.Seen = true;
-                            Seen.GridBytes = gp.TotalBytesProcessed();
-                            Seen.Cols = gp.GetGrid().Cols();
-                            Seen.Rows = gp.GetGrid().Rows();
-                            Seen.Cell00 = gp.GetGrid().CellAt(0, 0).Codepoint;
-                            Seen.HasSnapshot = gp.HasSnapshot();
-                            Seen.HasPendingSnap = gp.HasPendingSnap();
-                        },
-                    .Stop = &Stop_,
-                });
+        // A joined thread rather than std::async: the async state is ready
+        // before its thread has freed its own bookkeeping, and a test that
+        // ends in that window is reported as a leak.
+        Thread_ = std::thread([this, key, l = std::move(*listener),
+                               m = std::move(pty->Master)]() mutable {
+            Result_ = RunAgentForTest(AgentTestConfig{
+                .Secrets = DeriveSessionSecrets(MakeKey(key)),
+                .Limits = Lim_,
+                .Listen = std::move(l),
+                .PtyReadFd = std::move(m),
+                .Ceiling = PROTOCOL_VERSION_GRID,
+                .GiveUpAfter = std::chrono::seconds{60},
+                .Inspect =
+                    [this](const GridPump& gp) {
+                        Seen.Seen = true;
+                        Seen.GridBytes = gp.TotalBytesProcessed();
+                        Seen.Cols = gp.GetGrid().Cols();
+                        Seen.Rows = gp.GetGrid().Rows();
+                        Seen.Cell00 = gp.GetGrid().CellAt(0, 0).Codepoint;
+                        Seen.HasSnapshot = gp.HasSnapshot();
+                        Seen.HasPendingSnap = gp.HasPendingSnap();
+                    },
+                .Stop = &Stop_,
             });
+        });
     }
 
     AgentRig(const AgentRig&) = delete;
@@ -343,17 +361,13 @@ public:
         return Seen;
     }
 
-    /// Waits for `client` to receive a snapshot, nudging the agent loop now and
-    /// then (see Nudge).
+    /// Waits for `client` to receive a snapshot.
     bool AwaitSnapshot(TestClient& client, int ms = 10000) {
         const auto end =
             std::chrono::steady_clock::now() + std::chrono::milliseconds{ms};
         while (client.Snapshots.empty() && !client.Failed && !client.Closed &&
                std::chrono::steady_clock::now() < end) {
             client.Run(200);
-            if (client.Snapshots.empty()) {
-                Nudge();
-            }
         }
         return !client.Snapshots.empty();
     }
@@ -364,23 +378,44 @@ public:
         return std::make_unique<TestClient>(Sess_, ++Nonces_, std::move(sock));
     }
 
-    /// A client that sends `rows × cols`, goes Live, and is then dropped.
+    /// A client that sends `rows × cols`, goes Live, and is then dropped once
+    /// the agent has taken the Resize.
     void ConnectAndDrop(std::uint16_t rows, std::uint16_t cols) {
         auto c = Connect();
         c->QueueResize(rows, cols);
-        REQUIRE(c->RunUntil(8000, [&] { return c->IsLive(); }));
+        REQUIRE(c->RunUntil(8000, [&] { return c->LiveFramesSent >= 2; }));
+        AwaitPtySize(*c, rows, cols);
+    }
+
+    /// Returns once the agent has applied a Resize to the pty.  The agent
+    /// takes frames in order, so the Resume and everything before the Resize
+    /// are behind it by then.  Needs a size the pty does not have yet.
+    void AwaitPtySize(TestClient& client, std::uint16_t rows,
+                      std::uint16_t cols) {
+        REQUIRE(client.RunUntil(8000, [&] {
+            const auto ws = SlaveSize();
+            return ws.ws_row == rows && ws.ws_col == cols;
+        }));
+    }
+
+    /// Returns once the agent has taken `client`'s Resume: it sends the shell's
+    /// output only to a connection it has resumed, and in order.  Prints one
+    /// byte for it.
+    void AwaitResumeTaken(TestClient& client) {
+        const auto before = client.Delivered.size();
+        PtyPrints(Bytes("."));
+        REQUIRE(client.RunUntil(
+            8000, [&] { return client.Delivered.size() > before; }));
+    }
+
+    /// The window size the pty reports to the shell.
+    winsize SlaveSize() {
+        winsize ws{};
+        ::ioctl(Slave_.Get(), TIOCGWINSZ, &ws);
+        return ws;
     }
 
     ClientSession& Session() { return Sess_; }
-
-    /// Gives the agent loop one more turn: it accepts and drops a connection.
-    /// A frame that arrives in the same read as the one before it is left
-    /// buffered when AgentConnection returns Idle on a stage change, and is
-    /// only looked at on the loop's next turn.
-    void Nudge() {
-        std::ignore = TcpConnect(Port);
-        SleepMs(50);
-    }
 
     /// What the shell prints.
     void PtyPrints(const std::vector<std::byte>& data) {
@@ -401,10 +436,9 @@ private:
             return;
         }
         Stopped_ = true;
-        Nudge();  // one full turn first: it may still have work to finish
         Stop_ = true;
         std::ignore = TcpConnect(Port);
-        Fut_.wait();
+        Thread_.join();
     }
 
     bool Stopped_{false};
@@ -414,7 +448,8 @@ private:
     ClientSession Sess_;
     io::UniqueFd Slave_;
     std::uint64_t Nonces_{0};
-    std::future<int> Fut_;
+    std::thread Thread_;
+    int Result_{0};
 };
 
 }  // namespace
@@ -567,6 +602,9 @@ TEST_CASE_FIXTURE(SodiumFixture,
                         /*capable=*/true,
                         PROTOCOL_VERSION_GRID,
                         MutableByteSpan{r.Sp.SnapshotBuf}};
+    // The agent waits for this before asking for a snapshot (design.md §9,
+    // path B, step 1), and the clock here is frozen.
+    cc.QueueResize(ResizeMessage{.Rows = 24, .Cols = 80});
     REQUIRE(DriveToLive(ac, cc, r.Agent, r.Sp, START, r.Nonces));
 
     const std::vector<std::byte> snapData(16, std::byte{0x11});
@@ -791,7 +829,6 @@ TEST_CASE_FIXTURE(SodiumFixture,
     auto c2 = rig.Connect();
     c2->QueueResize(24, 80);
     c2->Run(300);
-    rig.Nudge();  // the agent has now seen the client's Resize
     c2->Run(200);
     REQUIRE(c2->Snapshots.empty());  // parser is inside the escape
 
@@ -842,6 +879,85 @@ TEST_CASE_FIXTURE(SodiumFixture,
     rig.PtyPrints(Bytes("Z"));
     c2->Run(500);
     CHECK(c2->Delivered == Bytes("Z"));
+}
+
+// ── Agent: a reconnect snapshot does not wait out RESIZE_WAIT_TIMEOUT ───────
+//
+// The client's Resize follows its Resume, usually in the same read.  The agent
+// must take it off the buffer on the same turn; if it does not, NeedsSnapshot
+// waits for RESIZE_WAIT_TIMEOUT (2 s) with nothing to wake the loop.
+//
+// Kills: PumpResume returning Idle after the path-B stage change.
+
+TEST_CASE_FIXTURE(SodiumFixture,
+                  "Agent: a reconnect snapshot does not wait out "
+                  "RESIZE_WAIT_TIMEOUT") {
+    AgentRig rig{77};
+    rig.ConnectAndDrop(24, 80);
+    SleepMs(300);
+    rig.PtyPrints(std::vector<std::byte>(OVERFLOW_BYTES, std::byte{'A'}));
+    SleepMs(300);
+
+    auto c = rig.Connect();
+    c->QueueResize(24, 80);
+    const auto start = std::chrono::steady_clock::now();
+    REQUIRE(rig.AwaitSnapshot(*c));
+    CHECK(std::chrono::steady_clock::now() - start <
+          std::chrono::milliseconds{1500});
+}
+
+// ── Agent: no Resize and no known size: the snapshot follows the wait ───────
+//
+// With no size ever reported the agent still waits for the Resize (design.md
+// §9, step 1).  None comes, nothing else is on the wire, and only the
+// connection's deadline can wake the loop; after RESIZE_WAIT_TIMEOUT the
+// snapshot is built at the grid's size.
+//
+// Kills: no wake-up for the Resize wait when no size is known.
+
+TEST_CASE_FIXTURE(SodiumFixture,
+                  "Agent: with no Resize and no known size the snapshot "
+                  "follows the Resize wait") {
+    AgentRig rig{79};
+    {
+        auto c = rig.Connect();  // never sends a Resize
+        REQUIRE(c->RunUntil(8000, [&] { return c->LiveFramesSent >= 1; }));
+        rig.AwaitResumeTaken(*c);
+    }
+    SleepMs(300);  // the agent notices the drop
+    rig.PtyPrints(std::vector<std::byte>(OVERFLOW_BYTES, std::byte{'A'}));
+    SleepMs(300);
+
+    auto c = rig.Connect();
+    const auto start = std::chrono::steady_clock::now();
+    REQUIRE(rig.AwaitSnapshot(*c, 6000));
+    const auto took = std::chrono::steady_clock::now() - start;
+    CHECK(took >= std::chrono::milliseconds{1500});
+    CHECK(took < std::chrono::milliseconds{4000});
+}
+
+// ── Agent: the pty gets the size the grid has ──────────────────────────────
+//
+// A Resize of 0×0 is accepted; the grid clamps it to 1×1, and the pty must be
+// told the same, not 0×0.
+//
+// Kills: the pty resized with the raw Resize instead of the grid's size.
+
+TEST_CASE_FIXTURE(SodiumFixture, "Agent: a 0x0 Resize leaves the pty at 1x1") {
+    AgentRig rig{80};
+    auto c = rig.Connect();
+    c->QueueResize(30, 100);
+    REQUIRE(c->RunUntil(8000, [&] { return c->LiveFramesSent >= 2; }));
+    rig.AwaitPtySize(*c, 30, 100);
+
+    c->QueueResize(0, 0);
+    REQUIRE(c->RunUntil(8000, [&] {
+        const auto ws = rig.SlaveSize();
+        return ws.ws_row != 30 || ws.ws_col != 100;
+    }));
+    const auto size = rig.SlaveSize();
+    CHECK(size.ws_row == 1);
+    CHECK(size.ws_col == 1);
 }
 
 // ── Agent: a second snapshot cycle succeeds and frees the first ────────────

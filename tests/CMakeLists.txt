@@ -18,6 +18,7 @@ add_executable(zet_tests
     grid/snapshot_roundtrip_test.cpp
     grid/snapshot_restore_test.cpp
     grid/snapshot_ladder_test.cpp
+    grid/snapshot_size_test.cpp
     core/byte_reader_test.cpp
     core/byte_writer_test.cpp
     core/log_test.cpp
@@ -38,9 +39,11 @@ add_executable(zet_tests
     session/reconnect_property_test.cpp
     session/channel_test.cpp
     session/deferred_input_ack_test.cpp
+    session/channel_read_gate_test.cpp
     session/grid_violation_test.cpp
     session/grid_path_property_test.cpp
     session/connection_snapshot_probe_test.cpp
+    session/resume_resize_same_read_test.cpp
     session/channel_v1_violation_test.cpp
     session/connection_probe94c_test.cpp
     session/channel_probe94c_test.cpp
@@ -73,6 +76,7 @@ if(ZET_HAVE_IO)
         app/byte_queue_test.cpp
         client/deliver_test.cpp
         client/escape_test.cpp
+        client/read_gate_client_test.cpp
         client/snapshot_client_test.cpp
         io/clock_test.cpp
         io/fd_test.cpp
@@ -114,9 +118,21 @@ endif()
 include(${doctest_SOURCE_DIR}/scripts/cmake/doctest.cmake)
 doctest_discover_tests(zet_tests)
 
+# Size-measurement test gets the corpus directory at compile time so it can
+# read the .bin files directly without a separate fixture.
+target_compile_definitions(zet_tests PRIVATE
+    ZET_GRID_CORPUS_DIR="${CMAKE_CURRENT_SOURCE_DIR}/integration/grid_corpus"
+)
+
 # Differential-test helper: reads raw bytes from stdin, renders through
 # VtParser+Grid, outputs the visible screen as JSON on stdout.
 add_executable(zet_grid_dump grid/grid_dump_main.cpp)
 target_link_libraries(zet_grid_dump PRIVATE zet::grid zet::compile_options)
+
+# Snapshot differential-test helper: reads raw bytes from stdin, renders
+# through VtParser+Grid, serialises via Snapshot::Create, writes snapshot bytes
+# raw to stdout.  Used by tests/integration/test_snapshot_diff.py.
+add_executable(zet_snapshot_dump grid/snapshot_dump_main.cpp)
+target_link_libraries(zet_snapshot_dump PRIVATE zet::grid zet::compile_options)
 
 add_subdirectory(compile_fail)

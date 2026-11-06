@@ -228,6 +228,14 @@ public:
     /// Returns an unset Deadline when nothing is pending.
     [[nodiscard]] Deadline NextDeadline() const noexcept;
 
+    /// Tells the channel whether its owner is reading the socket. A caller that
+    /// stops reading because its own consumer is full (§9 backpressure) closes
+    /// the gate: while it is closed the peer cannot be heard, so Poll does not
+    /// fail with PeerSilent and NextDeadline leaves the silence limit out.
+    /// Reopening restarts the silence timer from `now`. Idempotent; keepalives
+    /// and every other timer are unaffected.
+    void SetReadGate(bool open, Timestamp now) noexcept;
+
     /// Queue a Resize to be sent on the next Poll. Only meaningful on the
     /// client side; calling it from the agent side is harmless — the other side
     /// will apply the dimensions or ignore them. Idempotent: a later call
@@ -326,6 +334,8 @@ private:
     /// When a frame last opened, and when one last went out. §9 liveness.
     Timestamp LastHeard_;
     Timestamp LastSent_;
+    /// The owner has stopped reading the socket; the silence timer is off.
+    bool ReadGateClosed_{false};
     /// The token of the next keepalive Ping. Its value means nothing to the
     /// peer, which only echoes it.
     std::uint64_t NextPingToken_{1};

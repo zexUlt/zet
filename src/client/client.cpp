@@ -1248,8 +1248,14 @@ bool Client::UpdateInterest() noexcept {
         if (Link_ == ELink::Connecting) {
             write = true;
         } else if (Link_ == ELink::Up && Connection_) {
-            read = Connection_->ReadRoom() > 0 &&
-                   Stdout_.Room() >= Connection_->ReadCapacity();
+            // Holding back for a full terminal is no sign of a dead path:
+            // the silence timer waits until reading resumes (§9).
+            // Handshake frames are tiny and need no room on the terminal;
+            // holding them back would only time the handshake out.
+            const bool stalled = Connection_->IsLive() &&
+                                 Stdout_.Room() < Connection_->ReadCapacity();
+            Connection_->SetReadGate(!stalled, io::MonotonicNow());
+            read = Connection_->ReadRoom() > 0 && !stalled;
             write = !SocketOut_.Empty();
         }
         if (!SocketWatch_->Want(Poller_, read, write)) {
@@ -1351,7 +1357,8 @@ void Client::WriteStdout() noexcept {
 void Client::ReadSocket(Timestamp now) noexcept {
     std::array<std::byte, SOCKET_READ_CHUNK> chunk{};
     const std::size_t room = std::min(Connection_->ReadRoom(), chunk.size());
-    if (room == 0 || Stdout_.Room() < Connection_->ReadCapacity()) {
+    if (room == 0 || (Connection_->IsLive() &&
+                      Stdout_.Room() < Connection_->ReadCapacity())) {
         return;
     }
     const auto n =
