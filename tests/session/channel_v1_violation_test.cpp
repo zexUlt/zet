@@ -6,7 +6,7 @@
 ///
 /// The channel constructor's `version` argument is set to
 /// PROTOCOL_VERSION_MIN (1) for all channels in this file, which is the
-/// version that PROTOCOL_VERSION_MAX-capped peers negotiate.
+/// version that peers capped at PROTOCOL_VERSION_MIN negotiate.
 ///
 /// Note: two tests from the v2 violation file ("a complete grid snapshot is
 /// delivered" and "second snapshot with higher gen") were omitted because

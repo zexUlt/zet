@@ -148,6 +148,14 @@ std::optional<Config> ReadConfig(std::span<char*> args) {
             app::DurationFromEnv("ZET_ORPHAN_TIMEOUT", EUnit::Seconds)) {
         config.Limits.OrphanTimeout = *orphan;
     }
+    // Test hook: "A" or "B"; anything else leaves the cost to decide.
+    if (const auto force = app::StringFromEnv("ZET_TEST_FORCE_PATH")) {
+        if (*force == "A") {
+            config.Limits.ForcePath = session::EForcePath::A;
+        } else if (*force == "B") {
+            config.Limits.ForcePath = session::EForcePath::B;
+        }
+    }
     return config;
 }
 

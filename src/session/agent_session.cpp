@@ -139,6 +139,10 @@ LivenessLimits SessionHandle::Liveness() const noexcept {
     return Session_->Streams_.Limits().Liveness;
 }
 
+EForcePath SessionHandle::ForcePath() const noexcept {
+    return Session_->Streams_.Limits().ForcePath;
+}
+
 std::optional<wire::SessionEndMessage> SessionHandle::EndedWith()
     const noexcept {
     return Session_->End_;

@@ -110,7 +110,7 @@ struct AgentPeer {
     explicit AgentPeer(io::UniqueFd fd)
         : Fd(std::move(fd)),
           Ac{MutableByteSpan{Frames}, io::MonotonicNow(),
-             wire::PROTOCOL_VERSION_MAX} {}
+             wire::PROTOCOL_VERSION_MIN} {}
 
     /// One round: take what the client sent, flush, seal what is due.
     /// False once the connection has failed.
@@ -207,7 +207,7 @@ public:
             .StdoutFd = Out.Write.Get(),
             .StderrFd = Err.Write.Get(),
             .NoticesInline = false,
-            .Ceiling = wire::PROTOCOL_VERSION_MAX,
+            .Ceiling = wire::PROTOCOL_VERSION_MIN,
             .GiveUpAfter = 5s,
         };
         Result = std::async(

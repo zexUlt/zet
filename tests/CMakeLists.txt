@@ -46,6 +46,7 @@ add_executable(zet_tests
     session/grid_path_property_test.cpp
     session/connection_snapshot_probe_test.cpp
     session/resume_resize_same_read_test.cpp
+    session/agent_await_snapshot_test.cpp
     session/channel_v1_violation_test.cpp
     session/connection_probe94c_test.cpp
     session/channel_probe94c_test.cpp
@@ -93,6 +94,7 @@ endif()
 
 if(ZET_HAVE_AGENT)
     target_sources(zet_tests PRIVATE
+        agent/agent_failed_grid_resize_test.cpp
         agent/agent_input_queue_test.cpp
         agent/agent_wiring_test.cpp
         io/activation_test.cpp
