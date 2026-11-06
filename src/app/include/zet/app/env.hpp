@@ -1,6 +1,9 @@
 #pragma once
 
+#include <cstddef>
+#include <cstdint>
 #include <optional>
+#include <span>
 #include <string_view>
 
 #include "zet/core/time.hpp"
@@ -21,6 +24,16 @@ enum class EUnit : std::uint8_t {
 /// guessed at: a typo must not turn a 2-second test timeout into forever.
 [[nodiscard]] std::optional<Duration> DurationFromEnv(const char* name,
                                                       EUnit unit) noexcept;
+
+/// `name` read as a positive whole number, or nullopt when it is unset. Zero,
+/// a sign, a unit suffix or anything else is reported on stderr and ignored.
+[[nodiscard]] std::optional<std::size_t> SizeFromEnv(const char* name) noexcept;
+
+/// The entry of `allowed` that `name` equals exactly, or nullopt when it is
+/// unset. Any other value (a lower-case letter, trailing space) is reported on
+/// stderr and ignored, so a typo cannot silently select a different mode.
+[[nodiscard]] std::optional<std::string_view> ChoiceFromEnv(
+    const char* name, std::span<const std::string_view> allowed) noexcept;
 
 /// The raw value of `name`, or nullopt when it is unset.
 [[nodiscard]] std::optional<std::string_view> StringFromEnv(

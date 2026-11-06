@@ -310,7 +310,8 @@ struct SessionEndMessage {
 
 /// Announces an incoming Grid snapshot (ver=2 only, §7).
 ///
-/// `flags` bit 0: client must enter alt-screen before rendering the snapshot.
+/// `flags` bit 0: PossiblyDiverged, the agent's grid may differ from the real
+/// terminal state. The alt screen is not a flag: the snapshot bytes carry it.
 /// Bits 1–7 are reserved; ParseGridBegin returns MalformedField if any are set.
 struct GridBeginMessage {
     std::uint8_t Flags{0};

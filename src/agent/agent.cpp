@@ -148,13 +148,16 @@ std::optional<Config> ReadConfig(std::span<char*> args) {
             app::DurationFromEnv("ZET_ORPHAN_TIMEOUT", EUnit::Seconds)) {
         config.Limits.OrphanTimeout = *orphan;
     }
-    // Test hook: "A" or "B"; anything else leaves the cost to decide.
-    if (const auto force = app::StringFromEnv("ZET_TEST_FORCE_PATH")) {
-        if (*force == "A") {
-            config.Limits.ForcePath = session::EForcePath::A;
-        } else if (*force == "B") {
-            config.Limits.ForcePath = session::EForcePath::B;
-        }
+    // Test hooks. A value that is not exactly "A" or "B" is reported and
+    // ignored, as a malformed timeout is.
+    static constexpr std::array<std::string_view, 2> FORCE_PATHS{"A", "B"};
+    if (const auto force =
+            app::ChoiceFromEnv("ZET_TEST_FORCE_PATH", FORCE_PATHS)) {
+        config.Limits.ForcePath =
+            *force == "A" ? session::EForcePath::A : session::EForcePath::B;
+    }
+    if (const auto max = app::SizeFromEnv("ZET_DISCONNECT_BUFFER_MAX")) {
+        config.Limits.DisconnectMax = *max;
     }
     return config;
 }
