@@ -52,6 +52,8 @@ constexpr int OVERFLOW_STATUS = 70;
 constexpr int FAILURE_STATUS = 255;
 constexpr std::size_t STDOUT_QUEUE_MAX = 1024 * 1024;
 constexpr std::string_view RESTORE_NOTICE = "zet: screen restored";
+constexpr std::string_view DIVERGED_NOTICE =
+    "zet: warning: the restored screen";
 
 struct SodiumFixture {
     SodiumFixture() {
@@ -199,9 +201,9 @@ struct AgentLink {
         return false;
     }
 
-    [[nodiscard]] bool Supply(ByteSpan snap) {
+    [[nodiscard]] bool Supply(ByteSpan snap, std::uint8_t flags = 0) {
         if (!UntilNeedsSnapshot()) return false;
-        Ac.SupplySnapshot(io::MonotonicNow(), snap, 0, 0);
+        Ac.SupplySnapshot(io::MonotonicNow(), snap, 0, flags);
         return true;
     }
 
@@ -502,6 +504,38 @@ TEST_CASE_FIXTURE(SodiumFixture,
     CHECK(result.Status == 0);
     CHECK(result.SnapshotBufferBytes == wire::SNAPSHOT_MAX_BYTES);
     CHECK(run.Out == snap);
+}
+
+TEST_CASE_FIXTURE(
+    SodiumFixture,
+    "a PossiblyDiverged snapshot warns on stderr, not on stdout") {
+    AgentSide agent{43, TinyLimits(), true};
+    ClientRun run{agent};
+    AgentLink& link = run.AcceptLive();
+    const auto snap = Pattern(64, 43);
+    REQUIRE(link.Supply(ByteSpan{snap}, 1));
+
+    const auto result = EndCleanly(run, agent, link);
+    CHECK(result.Status == 0);
+    CHECK(run.Out == snap);
+    const auto err = run.Stderr();
+    CHECK(CountOf(err, RESTORE_NOTICE) == 1);
+    CHECK(CountOf(err, DIVERGED_NOTICE) == 1);
+}
+
+TEST_CASE_FIXTURE(SodiumFixture,
+                  "a snapshot without PossiblyDiverged does not warn") {
+    AgentSide agent{44, TinyLimits(), true};
+    ClientRun run{agent};
+    AgentLink& link = run.AcceptLive();
+    const auto snap = Pattern(64, 44);
+    REQUIRE(link.Supply(ByteSpan{snap}, 0));
+
+    const auto result = EndCleanly(run, agent, link);
+    CHECK(result.Status == 0);
+    const auto err = run.Stderr();
+    CHECK(CountOf(err, RESTORE_NOTICE) == 1);
+    CHECK(CountOf(err, DIVERGED_NOTICE) == 0);
 }
 
 TEST_CASE_FIXTURE(SodiumFixture,

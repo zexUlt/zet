@@ -26,6 +26,12 @@ a cut or an orphan resolve in seconds instead of minutes:
     ZET_RECONNECT_MAX         ms   client: the ceiling of the reconnect backoff
     ZET_ORPHAN_TIMEOUT        s    agent: reap a session left without a client
     ZET_AGENT_LOG             path agent: where to log once detached
+    ZET_TEST_FORCE_PATH       A|B  agent: pick the resume path, A (replay) or B
+                                   (snapshot); anything else is ignored with a
+                                   warning on stderr
+    ZET_DISCONNECT_BUFFER_MAX bytes agent: shrink the detached-output buffer so
+                                   a short burst overflows it; a positive whole
+                                   number, else ignored with a warning
 
 The client gets them from its own environment; the agent gets them through
 `--ssh-arg -oSetEnv=...`, which sshd lets through with `AcceptEnv ZET_*`.

@@ -77,6 +77,7 @@ target_link_libraries(zet_tests PRIVATE
 if(ZET_HAVE_IO)
     target_sources(zet_tests PRIVATE
         app/byte_queue_test.cpp
+        app/env_test.cpp
         client/deliver_test.cpp
         client/escape_test.cpp
         client/read_gate_client_test.cpp
