@@ -302,3 +302,93 @@ TEST_CASE("property: ReceiveCursor handles random duplicates and gaps") {
         CHECK(reference[i] == stream[i]);
     }
 }
+
+// Acknowledging on delivery -------------------------------------------------
+
+TEST_CASE("OnReceipt: the ack offset is the receive offset") {
+    ReceiveCursor cur;
+    const auto data = MakeBytes(10);
+    REQUIRE(cur.Receive(0, data).has_value());
+    CHECK(cur.AckOffset() == 10);
+    CHECK(cur.Pending() == 0);
+    cur.MarkDelivered(5);  // no effect: nothing is pending
+    CHECK(cur.AckOffset() == 10);
+}
+
+TEST_CASE("OnDelivery: the ack offset trails by what is not marked delivered") {
+    ReceiveCursor cur{0, EInputAck::OnDelivery};
+    const auto data = MakeBytes(10);
+    REQUIRE(cur.Receive(0, data).has_value());
+    CHECK(cur.RecvOffset() == 10);
+    CHECK(cur.AckOffset() == 0);
+    cur.MarkDelivered(4);
+    CHECK(cur.AckOffset() == 4);
+    CHECK(cur.Pending() == 6);
+    cur.MarkDelivered(100);  // clamped
+    CHECK(cur.AckOffset() == 10);
+    CHECK(cur.Pending() == 0);
+}
+
+TEST_CASE(
+    "OnDelivery: a resend from the ack offset is cut at the receive offset") {
+    ReceiveCursor cur{0, EInputAck::OnDelivery};
+    const auto data = MakeBytes(10);
+    REQUIRE(cur.Receive(0, data).has_value());
+    cur.MarkDelivered(4);
+    // The peer resends from 4: nothing of it is new, and nothing is pending
+    // twice.
+    const auto again = cur.Receive(4, ByteSpan{data}.subspan(4));
+    REQUIRE(again.has_value());
+    CHECK(again->empty());
+    CHECK(cur.RecvOffset() == 10);
+    CHECK(cur.Pending() == 6);
+}
+
+TEST_CASE("Reset clears what was pending") {
+    ReceiveCursor cur{0, EInputAck::OnDelivery};
+    const auto data = MakeBytes(10);
+    REQUIRE(cur.Receive(0, data).has_value());
+    cur.Reset(0);
+    CHECK(cur.AckOffset() == 0);
+    CHECK(cur.Pending() == 0);
+}
+
+TEST_CASE(
+    "OnDelivery: Unreceive takes the last bytes back and the resend brings "
+    "them again") {
+    ReceiveCursor cur{0, EInputAck::OnDelivery};
+    const auto data = MakeBytes(10);
+    REQUIRE(cur.Receive(0, ByteSpan{data}.first(6)).has_value());
+    cur.MarkDelivered(2);
+    const auto last = cur.Receive(6, ByteSpan{data}.subspan(6));
+    REQUIRE(last.has_value());
+    REQUIRE(last->size() == 4);
+
+    cur.Unreceive(last->size());
+    CHECK(cur.RecvOffset() == 6);
+    CHECK(cur.AckOffset() == 2);  // unchanged
+    CHECK(cur.Pending() == 4);
+
+    // The peer resends from the ack offset: the queued part is cut, the
+    // refused part is new again.
+    const auto again = cur.Receive(2, ByteSpan{data}.subspan(2));
+    REQUIRE(again.has_value());
+    CHECK(again->size() == 4);
+    CHECK(cur.RecvOffset() == 10);
+    CHECK(cur.Pending() == 8);
+}
+
+TEST_CASE("Unreceive is clamped to what is pending and not for OnReceipt") {
+    ReceiveCursor cur{0, EInputAck::OnDelivery};
+    const auto data = MakeBytes(10);
+    REQUIRE(cur.Receive(0, data).has_value());
+    cur.MarkDelivered(7);
+    cur.Unreceive(100);
+    CHECK(cur.RecvOffset() == 7);
+    CHECK(cur.AckOffset() == 7);
+
+    ReceiveCursor receipt;
+    REQUIRE(receipt.Receive(0, data).has_value());
+    receipt.Unreceive(5);
+    CHECK(receipt.RecvOffset() == 10);
+}

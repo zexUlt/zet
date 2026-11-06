@@ -22,6 +22,9 @@
 ///                                              succeeds and frees the first"
 ///   Resized not forwarded to GridPump         "Agent: Resized is forwarded to
 ///                                              the grid"
+///   no clear of PtyInput_ once the child has  "Agent: input for a shell that
+///   gone (RunLoop)                             has gone is dropped and
+///                                              acknowledged"
 ///
 /// GridPump units (tests 1-7 and 9-11) call GridPump
 /// directly; they cover GridPump's own logic, not the agent glue.  Test 8 is a
@@ -1037,4 +1040,28 @@ TEST_CASE_FIXTURE(SodiumFixture, "Agent: Resized is forwarded to the grid") {
     const auto ready = BuildNow(*ref, 10, 40);
     CHECK(c2->Snapshots.front() ==
           std::vector<std::byte>{ready.Bytes.begin(), ready.Bytes.end()});
+}
+
+// ── Input for a shell that has gone ────────────────────────────────────────
+//
+// The test seam presets the child as exited, so the pty never takes what the
+// client types.  The agent drops it and acknowledges it as gone, which is how
+// the client's window opens again (design.md §9); the agent does not hold on
+// to input nobody will read.
+//
+// Kills: RunLoop does not clear PtyInput_ once the child has gone (the
+// window stays full, the client never writes again).
+
+TEST_CASE_FIXTURE(SodiumFixture,
+                  "Agent: input for a shell that has gone is dropped and "
+                  "acknowledged") {
+    AgentRig rig{78};
+    const std::vector<std::byte> typed(TinyLimits().ResendMax, std::byte{'k'});
+    REQUIRE(rig.Session().Write(typed) == typed.size());
+    CHECK_FALSE(rig.Session().AcceptsWrites());  // the window is full
+
+    auto c = rig.Connect();
+    c->QueueResize(10, 40);
+    CHECK(c->RunUntil(
+        8000, [&] { return c->IsLive() && rig.Session().AcceptsWrites(); }));
 }

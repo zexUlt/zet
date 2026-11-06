@@ -53,7 +53,7 @@ Channel::Channel(DirectionFrames frames, SendBuffer& sendBuf,
     : SendBuf_{sendBuf},
       RecvCursor_{recvCursor},
       EpochStart_{now},
-      LastAckedOffset_{recvCursor.RecvOffset()},
+      LastAckedOffset_{recvCursor.AckOffset()},
       LastHeard_{now},
       LastSent_{now},
       Liveness_{liveness},
@@ -562,7 +562,7 @@ ChannelResult<std::size_t> Channel::PollOnce(Timestamp now, MutableByteSpan out,
             ByteWriter hdrWriter{scratch.first(DATA_HEADER)};
             std::ignore = hdrWriter.WriteU8(
                 static_cast<std::uint8_t>(wire::EMessageType::Data));
-            std::ignore = hdrWriter.WriteU64BE(RecvCursor_.RecvOffset());
+            std::ignore = hdrWriter.WriteU64BE(RecvCursor_.AckOffset());
             std::ignore = hdrWriter.WriteU64BE(SendBuf_.SendNext());
             // Copy payload after the 17-byte header.
             const MutableByteSpan payloadDest =
@@ -580,7 +580,7 @@ ChannelResult<std::size_t> Channel::PollOnce(Timestamp now, MutableByteSpan out,
             }
             SendBuf_.AdvanceSendNext(actualPayload);
             // The Data frame carried a piggybacked Ack. §9.
-            LastAckedOffset_ = RecvCursor_.RecvOffset();
+            LastAckedOffset_ = RecvCursor_.AckOffset();
             AckPendingSince_.reset();
             return *n;
         }
@@ -621,7 +621,7 @@ ChannelResult<std::size_t> Channel::PollOnce(Timestamp now, MutableByteSpan out,
     // Priority 4: a bare Ack after ACK_IDLE_DELAY of idleness. §9: "отдельным
     // Ack при простое дольше 200 мс". Only sent when there is a receive-offset
     // gap the peer has not heard about.
-    const std::uint64_t recvOff = RecvCursor_.RecvOffset();
+    const std::uint64_t recvOff = RecvCursor_.AckOffset();
     if (recvOff > LastAckedOffset_) {
         if (!AckPendingSince_.has_value()) {
             // First Poll that sees un-acked bytes with nothing to send:

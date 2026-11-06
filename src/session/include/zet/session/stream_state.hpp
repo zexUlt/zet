@@ -62,7 +62,8 @@ enum class EDetachedOverflow : std::uint8_t {
 /// can name it.
 class StreamState {
 public:
-    StreamState(SessionStreams streams, EDetachedOverflow overflow) noexcept;
+    StreamState(SessionStreams streams, EDetachedOverflow overflow,
+                EInputAck inputAck = EInputAck::OnReceipt) noexcept;
 
     StreamState(const StreamState&) = delete;
     StreamState& operator=(const StreamState&) = delete;
@@ -111,10 +112,11 @@ public:
     /// Reaps the session if its orphan deadline has passed.
     void OnTimer(Timestamp now) noexcept;
 
-    /// How much of the peer's stream this end holds. Read before
-    /// authentication, for the offset AuthOk and Resume carry.
+    /// How much of the peer's stream this end holds, as far as the peer may
+    /// forget: ReceiveCursor::AckOffset(). Read before authentication, for
+    /// the offset AuthOk and Resume carry.
     [[nodiscard]] std::uint64_t ReceiveOffset() const noexcept {
-        return Input_.RecvOffset();
+        return Input_.AckOffset();
     }
 
     // ── M6: path B helpers (§9 ADR-030). ────────────────────────────────────

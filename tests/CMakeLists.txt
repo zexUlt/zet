@@ -38,6 +38,8 @@ add_executable(zet_tests
     session/receive_cursor_test.cpp
     session/reconnect_property_test.cpp
     session/channel_test.cpp
+    session/deferred_input_ack_test.cpp
+    session/agent_input_overrun_test.cpp
     session/channel_read_gate_test.cpp
     session/grid_violation_test.cpp
     session/grid_path_property_test.cpp
@@ -90,6 +92,7 @@ endif()
 
 if(ZET_HAVE_AGENT)
     target_sources(zet_tests PRIVATE
+        agent/agent_input_queue_test.cpp
         agent/agent_wiring_test.cpp
         io/activation_test.cpp
         io/daemon_test.cpp

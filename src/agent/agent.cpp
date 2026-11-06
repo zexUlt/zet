@@ -62,16 +62,6 @@ constexpr Duration BOOTSTRAP_TIMEOUT = 60s;
 constexpr std::size_t PTY_READ_CHUNK = 64 * 1024;
 constexpr std::size_t SOCKET_READ_CHUNK = 64 * 1024;
 
-/// Keystrokes the pty has not taken yet. A socket is read only while this has
-/// room for everything that one read could deliver — a whole frame of the
-/// live stage — so it never overflows. Two frames, so that one can wait for
-/// the pty while the next is read.
-constexpr std::size_t PTY_INPUT_MAX = 2 * session::CONNECTION_FRAME_STORAGE;
-
-// Smaller than one frame, and the gate on reading the socket never opens once
-// the connection is live: the stall the first version of this file had.
-static_assert(PTY_INPUT_MAX >= session::CONNECTION_FRAME_STORAGE);
-
 /// Sealed frames a socket has not taken yet, on top of the resend window.
 /// The channel never has more than the window in flight, so a working
 /// connection never comes near it; a connection that does is dropped.
@@ -407,7 +397,8 @@ public:
                                            .Now = io::MonotonicNow(),
                                            .Limits = Config_.Limits}),
           LocalSecret_(RandomKey()),
-          PtyInput_(PTY_INPUT_MAX) {
+          PtyInput_(std::max(Config_.Limits.ResendMax,
+                             Config_.Limits.DisconnectMax)) {
         if (Listener_) {
             ListenerWatch_.emplace(Listener_->Socket.Get(), LISTENER_TOKEN);
         }
@@ -428,6 +419,8 @@ private:
     void Adopt(io::UniqueFd socket, ByteSpan prefix) noexcept;
     void ReadPty() noexcept;
     void WritePty() noexcept;
+    /// Drops the input the pty will never take and acknowledges it as gone.
+    void DiscardPtyInput() noexcept;
     void ReadSocket(Connection& connection) noexcept;
     void WriteSocket(Connection& connection) noexcept;
     void TakeChild() noexcept;
@@ -438,6 +431,10 @@ private:
     [[nodiscard]] bool StartForTest(io::UniqueFd ptyFd,
                                     std::uint16_t ceiling) noexcept;
     [[nodiscard]] int RunLoop(std::optional<Timestamp> giveUpAt) noexcept;
+    /// The shell has gone, so nothing reads what we would write to the pty.
+    [[nodiscard]] bool InputHasNowhereToGo() const noexcept {
+        return ChildStatus_ && !TestInputToPty_;
+    }
 
     Config Config_;
     /// What the client asked the shell's environment to have (§4).
@@ -474,6 +471,13 @@ private:
     std::array<std::byte, PTY_READ_CHUNK> PtyRead_{};
     std::size_t PtyFrom_{0};
     std::size_t PtyTo_{0};
+    /// The client's input the pty has not taken yet. It is acknowledged to
+    /// the client only as it leaves this queue (AgentSession::InputDelivered),
+    /// so it holds at most what the client keeps unacknowledged: ResendMax
+    /// live, DisconnectMax of replay after an outage. Sized for the larger,
+    /// as the stream storage is. A peer with bigger limits that overfills it
+    /// has the excess refused (AgentSession::InputRejected) and resends it
+    /// after the reconnect. The socket is read whether or not it has room. §9.
     app::ByteQueue PtyInput_;
 
     std::vector<std::unique_ptr<Connection>> Connections_;
@@ -484,6 +488,9 @@ private:
     std::uint16_t TestCeiling_{0};
     /// Set only in tests: ends RunLoop when it reads true.
     const std::atomic<bool>* TestStop_{nullptr};
+    /// Set only in tests: the pty takes the client's input although the test
+    /// seam presets the child as exited.
+    bool TestInputToPty_{false};
 
     std::array<std::byte, session::CONNECTION_OUT_SIZE> Out_{};
     std::array<std::byte, session::CONNECTION_SCRATCH_SIZE> Scratch_{};
@@ -564,6 +571,14 @@ int Agent::RunLoop(std::optional<Timestamp> giveUpAt) noexcept {
             return 0;
         }
         if (Session_.State() == session::ESessionState::Reaped) {
+            continue;
+        }
+        if (InputHasNowhereToGo() && !PtyInput_.Empty()) {
+            // Nothing reads what we would write to a shell that has gone, and
+            // nothing wakes the loop to acknowledge it later: acknowledge it
+            // as gone and take another turn, so the channel sees the new ack
+            // offset before the loop sleeps.
+            DiscardPtyInput();
             continue;
         }
         if (!UpdateInterest()) {
@@ -711,6 +726,9 @@ void Agent::Pump(Connection& connection, Timestamp now) noexcept {
         } else if (const auto* deliver =
                        std::get_if<session::Deliver>(&event)) {
             if (!PtyInput_.Append(deliver->Bytes)) {
+                // Not received after all: the client resends them from the
+                // acknowledged offset once it is back.
+                Session_.InputRejected(deliver->Bytes.size());
                 Log(log::ELevel::Warn, "keystrokes past the pty's queue");
                 connection.Closing = true;
             }
@@ -798,12 +816,14 @@ bool Agent::UpdateInterest() noexcept {
         // last client disconnects before the shell exits.
         const bool read = !PtyEnded_ && PtyFrom_ == PtyTo_;
         // Once the shell has gone, nothing reads what we write to it.
-        const bool write = !PtyInput_.Empty() && !ChildStatus_;
+        const bool write = !PtyInput_.Empty() && !InputHasNowhereToGo();
         ok = static_cast<bool>(PtyWatch_->Want(Poller_, read, write)) && ok;
     }
     for (auto& connection : Connections_) {
-        const bool read = connection->Link.ReadRoom() > 0 &&
-                          PtyInput_.Room() >= connection->Link.ReadCapacity();
+        // Never gated on the pty: the client's Acks for our output sit in the
+        // same stream behind its input, and without them the shell stops
+        // writing and never reads that input. §9.
+        const bool read = connection->Link.ReadRoom() > 0;
         const bool write = !connection->Output.Empty();
         if (!connection->Watch.Want(Poller_, read, write)) {
             connection->Closing = true;
@@ -947,18 +967,24 @@ void Agent::WritePty() noexcept {
         if (!n) {
             if (!n.error().WouldBlock()) {
                 // The shell is gone; what it would have read goes nowhere.
-                PtyInput_.Consume(PtyInput_.Size());
+                DiscardPtyInput();
             }
             return;
         }
         PtyInput_.Consume(*n);
+        Session_.InputDelivered(*n);
     }
+}
+
+void Agent::DiscardPtyInput() noexcept {
+    Session_.InputDelivered(PtyInput_.Size());
+    PtyInput_.Consume(PtyInput_.Size());
 }
 
 void Agent::ReadSocket(Connection& connection) noexcept {
     std::array<std::byte, SOCKET_READ_CHUNK> chunk{};
     const std::size_t room = std::min(connection.Link.ReadRoom(), chunk.size());
-    if (room == 0 || PtyInput_.Room() < connection.Link.ReadCapacity()) {
+    if (room == 0) {
         return;
     }
     const auto n = io::ReadSome(connection.Socket.Get(),
@@ -1068,6 +1094,7 @@ int RunAgentForTestImpl(AgentTestConfig cfg) noexcept {
         return FAILURE_STATUS;
     }
     agentObj->TestStop_ = cfg.Stop;
+    agentObj->TestInputToPty_ = cfg.InputToPty;
     const std::optional<Timestamp> giveUpAt =
         cfg.GiveUpAfter ? std::optional{io::MonotonicNow() + *cfg.GiveUpAfter}
                         : std::nullopt;
