@@ -68,6 +68,13 @@ struct SavedCursor {
     std::uint8_t Bg[3]{};    ///< inline color (see Cell::Bg)
     std::uint8_t AttrEx{0};  ///< underline style
     std::uint8_t UlIdx{0};   ///< underline colour index
+    // xterm CursorSave2 also keeps the origin mode, the wrap flag and the
+    // character-set state; the grid models G0/G1 and SO/SI only.
+    bool Decom{false};        ///< DECOM at the time of the save
+    bool PendingWrap{false};  ///< wrap flag (last-column-flag) at the save
+    std::uint8_t CharsetG0{0};
+    std::uint8_t CharsetG1{0};
+    std::uint8_t CharsetActive{0};
 };
 
 /// Sans-I/O terminal grid (design.md §9).

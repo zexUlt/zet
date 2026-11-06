@@ -80,7 +80,9 @@ void CmpSaved(Diff& d, const char* nm, const SavedCursor& a,
               const SavedCursor& b) {
     if (a.Row != b.Row || a.Col != b.Col || a.Attrs != b.Attrs ||
         a.FgKind != b.FgKind || a.BgKind != b.BgKind || memcmp(a.Fg, b.Fg, 3) ||
-        memcmp(a.Bg, b.Bg, 3) || a.AttrEx != b.AttrEx || a.UlIdx != b.UlIdx)
+        memcmp(a.Bg, b.Bg, 3) || a.AttrEx != b.AttrEx || a.UlIdx != b.UlIdx ||
+        a.Decom != b.Decom || a.CharsetG0 != b.CharsetG0 ||
+        a.CharsetG1 != b.CharsetG1 || a.CharsetActive != b.CharsetActive)
         d.Add(
             "%s saved cursor: (%d,%d) at=%02x fk=%d bk=%d ax=%d ul=%d vs "
             "(%d,%d) at=%02x fk=%d bk=%d ax=%d ul=%d",

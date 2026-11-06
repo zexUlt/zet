@@ -538,7 +538,7 @@ history_size     : u32
 history_start    : u32
 scroll_top, bot  : u16   // DECSTBM
 cursor_row, col  : u16
-saved_cursor     : {row:u16, col:u16, attrs:u8, fg_kind:u8, fg:u8[3], bg_kind:u8, bg:u8[3], attr_ex:u8}  // цвета тоже сохраняются
+saved_cursor     : {row:u16, col:u16, attrs:u8, fg_kind:u8, fg:u8[3], bg_kind:u8, bg:u8[3], attr_ex:u8, ul_idx:u8, decom:bool, pending_wrap:bool, charset_g0/g1/active:u8}  // как CursorSave2 в xterm: перо с цветами, DECOM, флаг переноса, наборы символов; два слота (main/alt)
 pending_wrap     : bool  // курсор в последней колонке, следующий символ начнёт новую строку
 modes            : u32   // битовая маска DECSET/DECRST-режимов (см. ниже)
 charset_g0/g1    : u8    // текущий набор символов
@@ -547,7 +547,7 @@ cursor_style     : u8    // DECSCUSR: 0=default,1–6
 tab_stops        : bitset  // HTS/TBC; по умолчанию каждые 8 столбцов
 ```
 
-**Отслеживаемые режимы (`modes`):** DECAWM (?7), IRM (?4), LNM (?20), DECOM (?6), DECTCEM (?25), DECCKM (?1), alt screen (?1049), mouse-1000/1002/1003/1005/1006/1015, bracketed-paste (?2004), focus-events (?1004), DECSET-2026 (sync-output, ?2026). Kitty keyboard mode не отслеживается: он использует стековый механизм `CSI > flags u` / `CSI < u`, не простой DECSET/DECRST; для корректного восстановления нужно хранить стек, что выходит за рамки текущей модели.
+**Отслеживаемые режимы (`modes`):** DECAWM (?7), IRM (?4), LNM (?20), DECOM (?6), DECTCEM (?25), DECCKM (?1), alt screen (?47/?1047/?1049), mouse-1000/1002/1003/1005/1006/1015, bracketed-paste (?2004), focus-events (?1004), DECSET-2026 (sync-output, ?2026). Kitty keyboard mode не отслеживается: он использует стековый механизм `CSI > flags u` / `CSI < u`, не простой DECSET/DECRST; для корректного восстановления нужно хранить стек, что выходит за рамки текущей модели.
 
 **Преамбула снимка (записывается клиентом в локальный tty).** Новое поколение всегда начинается на границе UTF-8 и в состоянии Ground парсера клиентского терминала.
 
@@ -577,7 +577,7 @@ tab_stops        : bitset  // HTS/TBC; по умолчанию каждые 8 с
 Затем (общая часть, восстановление режимов):
 ```
 — SGR pen: \e[0m; затем восстановление fg/bg/attrs из saved_cursor.attrs, fg, bg
-— saved cursor: \e7 (DECSC) — сохранить восстановленный курсор в terminal state
+— saved cursor: набор символов и DECOM слота (если не по умолчанию), CUP, \e7 (DECSC) — сохранить восстановленный курсор в terminal state; флаг переноса слота снимок не воспроизводит (нужна перепечатка символа в последнем столбце), у клиента он сбрасывается
 \e[<top>;<bot>r    — DECSTBM (scroll region)
 \e[?1h/l           — DECCKM
 \e[?7h/l           — DECAWM
@@ -608,12 +608,12 @@ tab_stops        : bitset  // HTS/TBC; по умолчанию каждые 8 с
 
 **Моделируемые последовательности:**
 - Движение курсора: CUU, CUD, CUF, CUB, CUP, CHA, VPA, HPA, CNL, CPL.
-- Сохранение/восстановление курсора: DECSC/DECRC (`\e7`/`\e8` и `\e[s`/`\e[u`), включая цвета; SCP/RCP — алиасы.
+- Сохранение/восстановление курсора: DECSC/DECRC (`\e7`/`\e8` и `\e[s`/`\e[u`, DECLRMM нет), как `CursorSave2`/`CursorRestoreFlags` в xterm: позиция, перо с цветами, DECOM, флаг отложенного переноса (сам DECAWM не входит), G0/G1 и SO/SI; G2/G3, GR и single shift не моделируются. Без предшествующего сохранения DECRC возвращает домой, с пустым пером и наборами по умолчанию. Слота два (main/alt), `?1048` и `?1049` работают через них.
 - Стирание: EL (три формы), ED, DCH, ECH, ICH, IL (вставить строку), DL (удалить строку).
 - Прокрутка: SD/SU, RI, IND; DECSTBM.
-- Атрибуты: SGR — bold, dim, italic, underline (стили 4:0–4:4, цвет через 58), blink, reverse, invisible, strikethrough; цвета 8/256/truecolor.
+- Атрибуты: SGR — bold, dim, italic, underline (стили 4:0–4:5, цвет через 58; SGR 21 = двойное подчёркивание, как в xterm `ATR_DBL_UNDER`, стиль 2; SGR 24 снимает любое), blink, reverse, invisible, strikethrough; цвета 8/256/truecolor.
 - Разное: LF/CR/VT/FF/BS/HT; NEL; HTS/TBC; REP; RIS/DECSTR (сброс до базового состояния); charset G0/G1 + SO/SI; DECPrivate set/reset; DECSCUSR.
-- Alt screen: `\e[?1049h`/`l`, `\e[?47h`/`l`.
+- Alt screen (xterm `srm_*`): `?47` и `?1047h` только переключают буфер (без очистки, без сохранения курсора); `?1047l` перед возвратом очищает alt, если он активен; `?1048` — DECSC/DECRC без переключения; `?1049h` — DECSC, переключение, очистка alt; `?1049l` — возврат и DECRC. Курсор при входе не двигается.
 - UTF-8 декодирование; East Asian Width.
 
 **Символы двойной ширины (East Asian Wide).** Символ с EAW-классом W или F занимает две колонки: в первой ячейке `Width = 2` (голова), в следующей — `Width = 0` (продолжение). Инварианты: голова (`Width = 2`) **не может** стоять в последней колонке; за каждой головой ровно одно продолжение; перед каждым продолжением ровно одна голова. Четыре краевых случая:

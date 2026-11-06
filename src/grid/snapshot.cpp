@@ -516,6 +516,53 @@ static Cell SavedCursorCell(const SavedCursor& sc) noexcept {
     return c;
 }
 
+/// True when a saved cursor carries DECOM or a non-default charset state, so
+/// the terminal's own DECSC would capture something the default state lacks.
+static bool SlotNeedsState(const SavedCursor& sc) noexcept {
+    return sc.Decom || sc.CharsetG0 != 0 || sc.CharsetG1 != 0 ||
+           sc.CharsetActive != 0;
+}
+
+/// Put the terminal into the saved slot's DECOM and charset state, then CUP
+/// to the saved position.  The caller issues DECSC / ?1049h next and then
+/// undoes the state with SlotUndoState.  The saved wrap flag is not
+/// reproduced (design.md §9): it would need a re-print in the last column.
+static void SlotSetState(EscWriter& w, const Grid& g,
+                         const SavedCursor& sc) noexcept {
+    w.WriteLiteral("\x1b(");
+    w.WriteByte(sc.CharsetG0 == 0 ? 'B' : '0');
+    w.WriteLiteral("\x1b)");
+    w.WriteByte(sc.CharsetG1 == 0 ? 'B' : '0');
+    w.WriteByte(sc.CharsetActive == 1 ? '\x0e' : '\x0f');
+    std::uint32_t row = static_cast<std::uint32_t>(sc.Row + 1);
+    if (sc.Decom) {
+        // Region first (DECSTBM homes the cursor), then DECOM: CUP is then
+        // relative to the region, so a row outside it is clamped into it.
+        w.WriteLiteral("\x1b[");
+        w.WriteDecimal(static_cast<std::uint32_t>(g.ScrollTop() + 1));
+        w.WriteByte(';');
+        w.WriteDecimal(static_cast<std::uint32_t>(g.ScrollBot() + 1));
+        w.WriteByte('r');
+        w.WriteLiteral("\x1b[?6h");
+        const std::uint16_t in = sc.Row < g.ScrollTop()   ? g.ScrollTop()
+                                 : sc.Row > g.ScrollBot() ? g.ScrollBot()
+                                                          : sc.Row;
+        row = static_cast<std::uint32_t>(in - g.ScrollTop() + 1);
+    }
+    w.WriteLiteral("\x1b[");
+    w.WriteDecimal(row);
+    w.WriteByte(';');
+    w.WriteDecimal(static_cast<std::uint32_t>(sc.Col + 1));
+    w.WriteByte('H');
+}
+
+/// Back to DECOM off, the full-screen region and default charsets, so the
+/// absolute-CUP paint and the cell text that follow are not offset, scrolled
+/// or translated.  Step 5 of the mode restore sets the real region again.
+static void SlotUndoState(EscWriter& w) noexcept {
+    w.WriteLiteral("\x1b[?6l\x1b[r\x1b(B\x1b)B\x0f");
+}
+
 static void EncodeModeRestore(EscWriter& w, const Grid& g, Pen& pen,
                               EColorMode cm) noexcept {
     const bool isAlt = g.IsAltScreen();
@@ -528,17 +575,24 @@ static void EncodeModeRestore(EscWriter& w, const Grid& g, Pen& pen,
     const Cell scCell = NormalizeCell(SavedCursorCell(sc), cm);
     EmitSgr(w, pen, scCell);
 
-    // 2. CUP to saved cursor position (absolute; DECOM not yet enabled). (D3)
-    w.WriteLiteral("\x1b[");
-    w.WriteDecimal(static_cast<std::uint32_t>(sc.Row + 1));
-    w.WriteByte(';');
-    w.WriteDecimal(static_cast<std::uint32_t>(sc.Col + 1));
-    w.WriteByte('H');
+    // 2. CUP to saved cursor position (absolute unless the slot saved DECOM,
+    //    then the state is put in place first). (D3)
+    const bool slotState = SlotNeedsState(sc);
+    if (slotState) {
+        SlotSetState(w, g, sc);
+    } else {
+        w.WriteLiteral("\x1b[");
+        w.WriteDecimal(static_cast<std::uint32_t>(sc.Row + 1));
+        w.WriteByte(';');
+        w.WriteDecimal(static_cast<std::uint32_t>(sc.Col + 1));
+        w.WriteByte('H');
+    }
 
-    // 3. DECSC (ESC 7) — captures position + pen for future DECRC.
+    // 3. DECSC (ESC 7) — captures position + pen + DECOM + charsets.
     w.WriteLiteral(
         "\x1b"
         "7");
+    if (slotState) SlotUndoState(w);
 
     // 4. Reset pen, then set LIVE pen (D5: live pen, not saved cursor's pen).
     pen = Pen{};
@@ -773,13 +827,19 @@ static void EncodeAll(EscWriter& w, const Grid& grid, const EncodeParams& ep,
         pen = Pen{};
         w.WriteLiteral("\x1b[0m");
         EmitSgr(w, pen, mscCell);
-        w.WriteLiteral("\x1b[");
-        w.WriteDecimal(static_cast<std::uint32_t>(msc.Row + 1));
-        w.WriteByte(';');
-        w.WriteDecimal(static_cast<std::uint32_t>(msc.Col + 1));
-        w.WriteByte('H');
+        const bool mscState = SlotNeedsState(msc);
+        if (mscState) {
+            SlotSetState(w, grid, msc);
+        } else {
+            w.WriteLiteral("\x1b[");
+            w.WriteDecimal(static_cast<std::uint32_t>(msc.Row + 1));
+            w.WriteByte(';');
+            w.WriteDecimal(static_cast<std::uint32_t>(msc.Col + 1));
+            w.WriteByte('H');
+        }
 
         w.WriteLiteral("\x1b[?1049h");  // enter alt screen (saves msc position)
+        if (mscState) SlotUndoState(w);
         // D14: reset SGR before the alt-screen clear.  Main-screen encoding
         // may leave a non-default pen active; without a reset, \x1b[2J would
         // erase the entire alt screen with that background colour.

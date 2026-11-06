@@ -540,14 +540,24 @@ void Grid::SaveCursor() noexcept {
     sc.Bg[0] = PenBg_[0];
     sc.Bg[1] = PenBg_[1];
     sc.Bg[2] = PenBg_[2];
+    sc.Decom = ModeSet(EMode::Decom);
+    sc.PendingWrap = PendingWrap_;
+    sc.CharsetG0 = CharsetG0_;
+    sc.CharsetG1 = CharsetG1_;
+    sc.CharsetActive = CharsetActive_;
 }
 
 void Grid::RestoreCursor() noexcept {
     const SavedCursor& sc = IsAltScreen() ? SavedCursorAlt_ : SavedCursorMain_;
     CursorRow_ = ClampRow(sc.Row);
     CursorCol_ = ClampCol(sc.Col);
-    // Under DECOM clamp into the scroll region.
-    if (ModeSet(EMode::Decom)) {
+    // xterm CursorRestoreFlags restores DECOM from the save, then places the
+    // cursor under that mode: with DECOM it stays inside the scroll region.
+    if (sc.Decom)
+        Modes_ |= ModeFlag(EMode::Decom);
+    else
+        Modes_ &= ~ModeFlag(EMode::Decom);
+    if (sc.Decom) {
         if (CursorRow_ < ScrollTop_) CursorRow_ = ScrollTop_;
         if (CursorRow_ > ScrollBot_) CursorRow_ = ScrollBot_;
     }
@@ -562,7 +572,12 @@ void Grid::RestoreCursor() noexcept {
     PenBg_[0] = sc.Bg[0];
     PenBg_[1] = sc.Bg[1];
     PenBg_[2] = sc.Bg[2];
-    PendingWrap_ = false;
+    CharsetG0_ = sc.CharsetG0;
+    CharsetG1_ = sc.CharsetG1;
+    CharsetActive_ = sc.CharsetActive;
+    // The wrap flag comes back as saved (xterm sets do_wrap after CursorSet);
+    // it only makes sense in the last column.
+    PendingWrap_ = sc.PendingWrap && CursorCol_ + 1u == Cols_;
 }
 
 // ---------------------------------------------------------------------------
@@ -892,6 +907,11 @@ void Grid::ApplySgr(const std::uint16_t* params, const bool* colon,
                 break;
             case 9:
                 PenAttrs_ |= StrikeThrough;
+                break;
+            case 21:
+                // xterm: doubly-underlined (ATR_DBL_UNDER), not bold off.
+                PenAttrs_ |= Underline;
+                PenAttrEx_ = 2;
                 break;
             case 22:
                 PenAttrs_ &= static_cast<std::uint8_t>(~(Bold | Dim));
@@ -1361,6 +1381,7 @@ GridResult<void> Grid::Resize(std::uint16_t newCols,
     auto clampSC = [&](SavedCursor& sc) noexcept {
         if (sc.Row >= newRows) sc.Row = static_cast<std::uint16_t>(newRows - 1);
         if (sc.Col >= newCols) sc.Col = static_cast<std::uint16_t>(newCols - 1);
+        sc.PendingWrap = false;  // Resize drops the live wrap flag too
     };
     clampSC(SavedCursorMain_);
     clampSC(SavedCursorAlt_);
