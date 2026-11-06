@@ -431,6 +431,10 @@ private:
     [[nodiscard]] bool StartForTest(io::UniqueFd ptyFd,
                                     std::uint16_t ceiling) noexcept;
     [[nodiscard]] int RunLoop(std::optional<Timestamp> giveUpAt) noexcept;
+    /// The shell has gone, so nothing reads what we would write to the pty.
+    [[nodiscard]] bool InputHasNowhereToGo() const noexcept {
+        return ChildStatus_ && !TestInputToPty_;
+    }
 
     Config Config_;
     /// What the client asked the shell's environment to have (§4).
@@ -484,6 +488,9 @@ private:
     std::uint16_t TestCeiling_{0};
     /// Set only in tests: ends RunLoop when it reads true.
     const std::atomic<bool>* TestStop_{nullptr};
+    /// Set only in tests: the pty takes the client's input although the test
+    /// seam presets the child as exited.
+    bool TestInputToPty_{false};
 
     std::array<std::byte, session::CONNECTION_OUT_SIZE> Out_{};
     std::array<std::byte, session::CONNECTION_SCRATCH_SIZE> Scratch_{};
@@ -566,7 +573,7 @@ int Agent::RunLoop(std::optional<Timestamp> giveUpAt) noexcept {
         if (Session_.State() == session::ESessionState::Reaped) {
             continue;
         }
-        if (ChildStatus_ && !PtyInput_.Empty()) {
+        if (InputHasNowhereToGo() && !PtyInput_.Empty()) {
             // Nothing reads what we would write to a shell that has gone, and
             // nothing wakes the loop to acknowledge it later: acknowledge it
             // as gone and take another turn, so the channel sees the new ack
@@ -809,7 +816,7 @@ bool Agent::UpdateInterest() noexcept {
         // last client disconnects before the shell exits.
         const bool read = !PtyEnded_ && PtyFrom_ == PtyTo_;
         // Once the shell has gone, nothing reads what we write to it.
-        const bool write = !PtyInput_.Empty() && !ChildStatus_;
+        const bool write = !PtyInput_.Empty() && !InputHasNowhereToGo();
         ok = static_cast<bool>(PtyWatch_->Want(Poller_, read, write)) && ok;
     }
     for (auto& connection : Connections_) {
@@ -1087,6 +1094,7 @@ int RunAgentForTestImpl(AgentTestConfig cfg) noexcept {
         return FAILURE_STATUS;
     }
     agentObj->TestStop_ = cfg.Stop;
+    agentObj->TestInputToPty_ = cfg.InputToPty;
     const std::optional<Timestamp> giveUpAt =
         cfg.GiveUpAfter ? std::optional{io::MonotonicNow() + *cfg.GiveUpAfter}
                         : std::nullopt;

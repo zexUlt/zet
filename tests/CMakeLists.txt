@@ -92,6 +92,7 @@ endif()
 
 if(ZET_HAVE_AGENT)
     target_sources(zet_tests PRIVATE
+        agent/agent_input_queue_test.cpp
         agent/agent_wiring_test.cpp
         io/activation_test.cpp
         io/daemon_test.cpp

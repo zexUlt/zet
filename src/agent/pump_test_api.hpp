@@ -35,6 +35,10 @@ struct AgentTestConfig {
     /// FAILURE_STATUS, like GiveUpAfter.  The loop only looks when something
     /// wakes it, so set it and then connect to Listen.Port.
     const std::atomic<bool>* Stop{nullptr};
+    /// The seam presets the child as exited, so by default the agent drops the
+    /// client's input as for a shell that has gone. True makes it write that
+    /// input to PtyReadFd (the pty master) instead.
+    bool InputToPty{false};
 };
 
 [[nodiscard]] int RunAgentForTest(AgentTestConfig config) noexcept;
