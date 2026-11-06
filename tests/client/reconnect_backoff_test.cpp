@@ -3,7 +3,10 @@
 /// does with input it cannot take (design.md §9). Reaching Live must not
 /// restart the backoff: without progress the retries have to slow down.
 ///
-/// Kills: Client::Pump resetting Attempts_ on IsLive() alone.
+/// Kills: Client::Pump resetting Attempts_ on IsLive() alone; and, in
+/// Client::CreditProgress, dropping any one of the progress clauses
+/// (ReceiveOffset changed, AckedOffset changed, outlived a keepalive) or the
+/// KeepaliveInterval > 0 guard.
 
 #include "client.hpp"
 #include "pump_test_api.hpp"
@@ -21,6 +24,7 @@
 #include <future>
 #include <memory>
 #include <optional>
+#include <string>
 #include <variant>
 #include <vector>
 
@@ -63,6 +67,9 @@ wire::HandshakeNonce MakeNonce(std::uint64_t counter) {
     return n;
 }
 
+/// What the agent end does with the input a connection hands over.
+enum class EInput { Ignore, Reject, Accept };
+
 /// The agent end of one connection, blocking on nothing.
 struct AgentPeer {
     explicit AgentPeer(io::UniqueFd fd)
@@ -71,7 +78,8 @@ struct AgentPeer {
              wire::PROTOCOL_VERSION_MAX} {}
 
     /// One round; false once the connection has failed.
-    bool Step(AgentSession& session, std::uint64_t& nonces) {
+    bool Step(AgentSession& session, std::uint64_t& nonces,
+              EInput input = EInput::Ignore) {
         const Timestamp now = io::MonotonicNow();
         std::array<std::byte, 4096> buf{};
         pollfd pfd{.fd = Fd.Get(), .events = POLLIN, .revents = 0};
@@ -99,6 +107,17 @@ struct AgentPeer {
                         return false;
                     }
                     sent += *n;
+                }
+            } else if (const auto* deliver = std::get_if<Deliver>(&*r)) {
+                // Reject is the agent whose pty queue is full: it takes the
+                // bytes back and closes. Accept is the agent that wrote them
+                // to the pty and acknowledges them.
+                if (input == EInput::Reject) {
+                    REQUIRE(session.InputRejected(deliver->Bytes.size()));
+                    return false;
+                }
+                if (input == EInput::Accept) {
+                    REQUIRE(session.InputDelivered(deliver->Bytes.size()));
                 }
             } else if (std::holds_alternative<NeedsSession>(*r)) {
                 Ac.Route(session.Ref(), MakeNonce(++nonces));
@@ -198,4 +217,148 @@ TEST_CASE(
     stdoutPipe->Read.Reset();
     listener->Socket.Reset();
     REQUIRE(result.wait_for(10s) == std::future_status::ready);
+}
+
+namespace {
+
+enum class EProgress { None, Acked, Output, Idle };
+
+/// Four connections go live without progress, so the backoff has grown to
+/// 2 s; the fourth then makes `progress` (or none), and the gap before the
+/// fifth connection tells whether the backoff was restarted: at most 250 ms
+/// when it was, at least 1000 ms (jitter takes half of 2 s) when it was not.
+std::chrono::milliseconds GapAfterFourthConnection(EProgress progress,
+                                                   bool keepalive) {
+    REQUIRE(crypto::Init());
+    ::signal(SIGPIPE, SIG_IGN);
+
+    const SessionLimits limits{};
+    std::vector<std::byte> storage(limits.ResendMax + 256);
+    AgentSession session{wire::DeriveSessionSecrets(MakeKey()),
+                         SessionStreams{.Storage = MutableByteSpan{storage},
+                                        .Now = io::MonotonicNow(),
+                                        .Limits = limits}};
+
+    auto listener = io::ListenTcp(0);
+    REQUIRE(listener.has_value());
+    auto addresses = io::Resolve("127.0.0.1", listener->Port);
+    REQUIRE(addresses.has_value());
+    auto stdoutPipe = io::MakePipe();
+    REQUIRE(stdoutPipe.has_value());
+    auto stderrPipe = io::MakePipe();
+    REQUIRE(stderrPipe.has_value());
+
+    SessionLimits clientLimits = limits;
+    if (!keepalive) {
+        clientLimits.Liveness.KeepaliveInterval = Duration::zero();
+        clientLimits.Liveness.PeerSilenceTimeout = Duration::zero();
+    } else if (progress == EProgress::Idle) {
+        clientLimits.Liveness.KeepaliveInterval = 150ms;
+    }
+    client::SessionTestConfig config{
+        .Secrets = wire::DeriveSessionSecrets(MakeKey()),
+        .Limits = clientLimits,
+        .Addresses = *addresses,
+        .StdoutFd = stdoutPipe->Write.Get(),
+        .StderrFd = stderrPipe->Write.Get(),
+        .NoticesInline = false,
+        .Ceiling = wire::PROTOCOL_VERSION_MAX,
+        .BackoffMax = 4s,
+        .GiveUpAfter = 20s,
+        .InitialInput = progress == EProgress::Acked ? "in" : "",
+    };
+    auto result =
+        std::async(std::launch::async, [config = std::move(config)]() mutable {
+            return client::RunSessionForTest(std::move(config));
+        });
+
+    std::uint64_t nonces = 0;
+    int lives = 0;
+    std::optional<Clock::time_point> closedAt;
+    std::chrono::milliseconds gap{-1};
+    const auto end = Clock::now() + 15s;
+    while (lives < 5 && Clock::now() < end) {
+        pollfd lfd{
+            .fd = listener->Socket.Get(), .events = POLLIN, .revents = 0};
+        if (::poll(&lfd, 1, 50) <= 0) {
+            continue;
+        }
+        auto accepted = io::Accept(listener->Socket.Get());
+        REQUIRE(accepted.has_value());
+        if (lives == 4 && closedAt) {
+            gap = std::chrono::duration_cast<std::chrono::milliseconds>(
+                Clock::now() - *closedAt);
+        }
+        AgentPeer peer{std::move(*accepted)};
+        const bool makes = lives == 3 && progress != EProgress::None;
+        // Input is refused on the first three connections and acknowledged on
+        // the fourth, from the first frame on, so that nothing is taken in
+        // passing before.
+        const EInput input = !makes                         ? EInput::Reject
+                             : progress == EProgress::Acked ? EInput::Accept
+                                                            : EInput::Ignore;
+        const auto liveBy = Clock::now() + 2s;
+        while (!peer.Ac.IsLive() && Clock::now() < liveBy) {
+            if (!peer.Step(session, nonces, input)) {
+                break;
+            }
+            ::usleep(200);
+        }
+        if (!peer.Ac.IsLive()) {
+            continue;
+        }
+        ++lives;
+        if (makes && progress == EProgress::Output) {
+            const std::array<std::byte, 3> out{std::byte{'o'}, std::byte{'u'},
+                                               std::byte{'t'}};
+            REQUIRE(session.Write(ByteSpan{out}).has_value());
+        }
+        if (lives == 5) {
+            // Over: the client ends with the session, and the run is short.
+            session.End({.Kind = wire::ESessionEndKind::Exited, .Value = 0});
+        }
+        // An idle connection must outlive the 150 ms keepalive, an
+        // acknowledgement waits 200 ms for a frame to ride on.
+        const auto hold =
+            Clock::now() + (!makes ? (lives == 5 ? 2s : 30ms)
+                            : progress == EProgress::Acked ? 700ms
+                            : progress == EProgress::Idle  ? 400ms
+                                                           : 150ms);
+        while (Clock::now() < hold) {
+            if (!peer.Step(session, nonces, input)) {
+                break;
+            }
+            ::usleep(200);
+        }
+        peer.Fd.Reset();
+        closedAt = Clock::now();
+    }
+
+    stdoutPipe->Read.Reset();
+    listener->Socket.Reset();
+    REQUIRE(result.wait_for(30s) == std::future_status::ready);
+    REQUIRE(lives == 5);
+    return gap;
+}
+
+}  // namespace
+
+TEST_CASE("input the agent acknowledged restarts the backoff") {
+    CHECK(GapAfterFourthConnection(EProgress::Acked, true) <= 600ms);
+}
+
+TEST_CASE("output the client received restarts the backoff") {
+    CHECK(GapAfterFourthConnection(EProgress::Output, true) <= 600ms);
+}
+
+TEST_CASE("a connection that outlived the keepalive restarts the backoff") {
+    CHECK(GapAfterFourthConnection(EProgress::Idle, true) <= 600ms);
+}
+
+TEST_CASE("without progress the backoff keeps growing") {
+    CHECK(GapAfterFourthConnection(EProgress::None, true) >= 900ms);
+}
+
+TEST_CASE("with the keepalive off a live connection is not progress") {
+    CHECK(GapAfterFourthConnection(EProgress::None, false) >= 900ms);
 }
