@@ -969,6 +969,8 @@ private:
     bool InEnded_{false};
     app::ByteQueue Stdout_;
     app::Registration StdinWatch_;
+    /// Where typed input is read from; tests point it at a pipe.
+    int StdinFd_{STDIN_FILENO};
     app::Registration StdoutWatch_;
     std::optional<wire::ResizeMessage> Size_;
     /// stderr is the terminal stdout writes to: a notice then goes in line
@@ -1090,6 +1092,11 @@ void Client::FeedStdin() noexcept {
 
 void Client::Pump(Timestamp now) noexcept {
     while (Connection_) {
+        // An input replay can be larger than the queue (up to DisconnectMax
+        // against ResendMax plus the slack): frames go in only while a whole
+        // one fits, and the rest goes as WriteSocket drains it. §9.
+        Connection_->SetSendGate(SocketOut_.Room() >=
+                                 session::CONNECTION_OUT_SIZE);
         auto result = Connection_->Pump(now, MutableByteSpan{Out_},
                                         MutableByteSpan{Scratch_});
         if (!result) {
@@ -1326,7 +1333,7 @@ void Client::ReadStdin() noexcept {
         return;
     }
     std::array<std::byte, STDIN_CHUNK> typed{};
-    const auto n = io::ReadSome(STDIN_FILENO, MutableByteSpan{typed});
+    const auto n = io::ReadSome(StdinFd_, MutableByteSpan{typed});
     if (!n) {
         if (!n.error().WouldBlock()) {
             InEnded_ = true;
@@ -1466,8 +1473,14 @@ SessionTestResult RunSessionForTestImpl(SessionTestConfig config) noexcept {
     clientObj->NoticesInline_ = config.NoticesInline;
     clientObj->Ceiling_ = config.Ceiling;
     clientObj->StdoutWatch_ = app::Registration{config.StdoutFd, STDOUT_TOKEN};
-    // Tests have no real stdin; mark it ended so the poller never watches fd 0.
-    clientObj->InEnded_ = true;
+    // Without a test stdin the input is ended, so the poller never watches
+    // fd 0.
+    if (config.StdinFd >= 0) {
+        clientObj->StdinFd_ = config.StdinFd;
+        clientObj->StdinWatch_ = app::Registration{config.StdinFd, STDIN_TOKEN};
+    } else {
+        clientObj->InEnded_ = true;
+    }
 
     const int status = clientObj->Run();
     return {.Status = status,
