@@ -34,7 +34,9 @@ public:
 
     /// Creates a GridPump with an initial terminal size of cols × rows.
     [[nodiscard]] static grid::GridResult<std::unique_ptr<GridPump>> Create(
-        std::uint16_t cols, std::uint16_t rows) noexcept;
+        std::uint16_t cols, std::uint16_t rows,
+        std::uint32_t scrollbackLimit =
+            grid::DEFAULT_SCROLLBACK_LIMIT) noexcept;
 
     // ── Feed ──────────────────────────────────────────────────────────────
 

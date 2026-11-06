@@ -32,6 +32,12 @@ a cut or an orphan resolve in seconds instead of minutes:
     ZET_DISCONNECT_BUFFER_MAX bytes agent: shrink the detached-output buffer so
                                    a short burst overflows it; a positive whole
                                    number, else ignored with a warning
+    ZET_TEST_SCROLLBACK_LIMIT lines agent: the grid's scrollback; a whole number
+                                   from 0 (no history) to 10000, else ignored
+                                   with a warning
+    ZET_TEST_VERSION_CEILING  1|2  client: the protocol ceiling offered in
+                                   Hello; 1 negotiates ver=1 with the agent
+    ZET_TEST_NO_GRID_CAPABLE  1    client: leave GRID_CAPABLE out of Hello
 
 The client gets them from its own environment; the agent gets them through
 `--ssh-arg -oSetEnv=...`, which sshd lets through with `AcceptEnv ZET_*`.
@@ -139,9 +145,13 @@ class Zet:
         env.update(overrides)
         return env
 
-    def start(self, **agent_env: str) -> "Terminal":
-        """zet on a fresh pty of its own, as a user would run it."""
-        return Terminal(PtyProcess(self.argv(self.agent_env(**agent_env)), env=self.env()))
+    def start(self, client_env: dict[str, str] | None = None,
+              **agent_env: str) -> "Terminal":
+        """zet on a fresh pty of its own, as a user would run it. `client_env`
+        adds to the client's environment, `agent_env` to the agent's."""
+        env = self.env()
+        env.update(client_env or {})
+        return Terminal(PtyProcess(self.argv(self.agent_env(**agent_env)), env=env))
 
 
 def install_agent(built: Path) -> Path:

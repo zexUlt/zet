@@ -181,6 +181,11 @@ struct Options {
     std::string Host;
     session::SessionLimits Limits;
     Duration BackoffMax{BACKOFF_MAX};
+    /// Test hooks (ZET_TEST_VERSION_CEILING, ZET_TEST_NO_GRID_CAPABLE): the
+    /// protocol ceiling offered in Hello, and whether GRID_CAPABLE goes with
+    /// it. Production offers the default ceiling and always the TLV.
+    std::uint16_t Ceiling{wire::PROTOCOL_VERSION_MAX};
+    bool GridCapable{true};
 };
 
 /// What of the local environment goes to the shell on the far side: the
@@ -235,6 +240,18 @@ std::optional<Options> ReadOptions(std::span<char*> args) {
     if (auto ceiling =
             app::DurationFromEnv("ZET_RECONNECT_MAX", EUnit::Milliseconds)) {
         options.BackoffMax = std::max(*ceiling, Duration{BACKOFF_MIN});
+    }
+    // Test hooks, read as the agent's are: anything but the exact values is
+    // reported and ignored.
+    static constexpr std::array<std::string_view, 2> CEILINGS{"1", "2"};
+    if (const auto ceiling =
+            app::ChoiceFromEnv("ZET_TEST_VERSION_CEILING", CEILINGS)) {
+        options.Ceiling = *ceiling == "1" ? wire::PROTOCOL_VERSION_MIN
+                                          : wire::PROTOCOL_VERSION_MAX;
+    }
+    static constexpr std::array<std::string_view, 1> ONLY_ONE{"1"};
+    if (app::ChoiceFromEnv("ZET_TEST_NO_GRID_CAPABLE", ONLY_ONE)) {
+        options.GridCapable = false;
     }
     return options;
 }
@@ -897,7 +914,9 @@ public:
           StdinWatch_(STDIN_FILENO, STDIN_TOKEN),
           StdoutWatch_(STDOUT_FILENO, STDOUT_TOKEN),
           Size_(TerminalSize()),
-          NoticesInline_(SameFile(STDOUT_FILENO, STDERR_FILENO)) {}
+          NoticesInline_(SameFile(STDOUT_FILENO, STDERR_FILENO)),
+          Ceiling_(options.Ceiling),
+          GridCapable_(options.GridCapable) {}
 
     /// Runs the session; the result is zet's exit status.
     [[nodiscard]] int Run() noexcept;
@@ -981,6 +1000,8 @@ private:
     int StderrFd_{STDERR_FILENO};
     /// Protocol ceiling for FinishConnecting (default: v1 production).
     uint16_t Ceiling_{wire::PROTOCOL_VERSION_MAX};
+    /// Whether Hello carries GRID_CAPABLE.
+    bool GridCapable_{true};
 
     struct PendingSnapshotInfo {
         std::uint32_t StreamGen{0};
@@ -1200,8 +1221,9 @@ void Client::FinishConnecting(Timestamp now) noexcept {
         Drop(now);
         return;
     }
-    // gridCapable=true: advertise GRID_CAPABLE so the agent can choose path B
-    // on reconnect (ver=2 only; at v1 the flag is sent but has no effect).
+    // Advertise GRID_CAPABLE (unless a test hook says not to) so the agent can
+    // choose path B on reconnect (ver=2 only; at v1 the flag is sent but has
+    // no effect).
     // SnapshotBuf_ gives the connection a place to reassemble incoming chunks.
     // Allocate lazily: v1 sessions never receive snapshots, so the 4 MiB buffer
     // is only needed when the negotiated ceiling allows v2.
@@ -1209,8 +1231,7 @@ void Client::FinishConnecting(Timestamp now) noexcept {
         SnapshotBuf_.resize(wire::SNAPSHOT_MAX_BYTES);
     }
     Connection_.emplace(Session_, RandomNonce<wire::HandshakeNonce>(),
-                        MutableByteSpan{Frames_}, now,
-                        /*gridCapable=*/true, Ceiling_,
+                        MutableByteSpan{Frames_}, now, GridCapable_, Ceiling_,
                         MutableByteSpan{SnapshotBuf_});
     if (Size_) {
         Connection_->QueueResize(*Size_);

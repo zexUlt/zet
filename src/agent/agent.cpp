@@ -34,6 +34,7 @@
 #include "zet/core/log.hpp"
 #include "zet/core/version.hpp"
 #include "zet/crypto/crypto.hpp"
+#include "zet/grid/limits.hpp"
 #include "zet/io/clock.hpp"
 #include "zet/io/daemon.hpp"
 #include "zet/io/fd.hpp"
@@ -115,6 +116,7 @@ void Log(log::ELevel level, std::string_view message,
 struct Config {
     bool PrintVersion{false};
     session::SessionLimits Limits;
+    std::uint32_t ScrollbackLimit{grid::DEFAULT_SCROLLBACK_LIMIT};
 };
 
 /// `--bootstrap`, and the environment of e2e.py.
@@ -164,6 +166,14 @@ std::optional<Config> ReadConfig(std::span<char*> args) {
     if (const auto max =
             app::SizeFromEnv("ZET_DISCONNECT_BUFFER_MAX", disconnectHookMax)) {
         config.Limits.DisconnectMax = *max;
+    }
+    // Zero is a valid scrollback (no history). Ten times the default is room
+    // enough to test a larger history without a multi-megabyte allocation.
+    constexpr std::size_t scrollbackHookMax =
+        10U * grid::DEFAULT_SCROLLBACK_LIMIT;
+    if (const auto lines =
+            app::CountFromEnv("ZET_TEST_SCROLLBACK_LIMIT", scrollbackHookMax)) {
+        config.ScrollbackLimit = static_cast<std::uint32_t>(*lines);
     }
     return config;
 }
@@ -520,7 +530,8 @@ bool Agent::Start() noexcept {
             return false;
         }
     }
-    auto gp = GridPump::Create(INITIAL_SIZE.Cols, INITIAL_SIZE.Rows);
+    auto gp = GridPump::Create(INITIAL_SIZE.Cols, INITIAL_SIZE.Rows,
+                               Config_.ScrollbackLimit);
     if (!gp) {
         Log(log::ELevel::Error, "cannot create the grid");
         return false;
