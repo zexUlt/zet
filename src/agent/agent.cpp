@@ -397,7 +397,8 @@ public:
                                            .Now = io::MonotonicNow(),
                                            .Limits = Config_.Limits}),
           LocalSecret_(RandomKey()),
-          PtyInput_(Config_.Limits.ResendMax) {
+          PtyInput_(std::max(Config_.Limits.ResendMax,
+                             Config_.Limits.DisconnectMax)) {
         if (Listener_) {
             ListenerWatch_.emplace(Listener_->Socket.Get(), LISTENER_TOKEN);
         }
@@ -468,9 +469,11 @@ private:
     std::size_t PtyTo_{0};
     /// The client's input the pty has not taken yet. It is acknowledged to
     /// the client only as it leaves this queue (AgentSession::InputDelivered),
-    /// so it never holds more than the client's resend window — the client
-    /// keeps at most that much unacknowledged — and the socket is read
-    /// whether or not it has room. §9.
+    /// so it holds at most what the client keeps unacknowledged: ResendMax
+    /// live, DisconnectMax of replay after an outage. Sized for the larger,
+    /// as the stream storage is. A peer with bigger limits that overfills it
+    /// has the excess refused (AgentSession::InputRejected) and resends it
+    /// after the reconnect. The socket is read whether or not it has room. §9.
     app::ByteQueue PtyInput_;
 
     std::vector<std::unique_ptr<Connection>> Connections_;
@@ -716,6 +719,9 @@ void Agent::Pump(Connection& connection, Timestamp now) noexcept {
         } else if (const auto* deliver =
                        std::get_if<session::Deliver>(&event)) {
             if (!PtyInput_.Append(deliver->Bytes)) {
+                // Not received after all: the client resends them from the
+                // acknowledged offset once it is back.
+                Session_.InputRejected(deliver->Bytes.size());
                 Log(log::ELevel::Warn, "keystrokes past the pty's queue");
                 connection.Closing = true;
             }

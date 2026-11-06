@@ -84,6 +84,13 @@ public:
     void InputDelivered(std::uint64_t count) noexcept {
         Streams_.Input().MarkDelivered(count);
     }
+    /// The agent could not queue the `count` bytes the last Deliver event
+    /// handed over: they count as not received, and the client's resend after
+    /// the reconnect brings them again. Call it before closing the
+    /// connection. §9.
+    void InputRejected(std::uint64_t count) noexcept {
+        Streams_.Input().Unreceive(count);
+    }
     [[nodiscard]] bool AcceptsWrites() const noexcept {
         return Streams_.AcceptsWrites();
     }

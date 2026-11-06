@@ -31,11 +31,12 @@ enum class EInputAck : std::uint8_t {
 /// original bytes.  The caller must consume or copy the result before the
 /// underlying frame buffer is recycled.
 ///
-/// recv_offset never decreases.  §9: "смещение recv_offset не убывает".
+/// recv_offset never decreases, except for Unreceive() and Reset().  §9:
+/// "смещение recv_offset не убывает".
 class ReceiveCursor {
 public:
     /// `initialOffset` is 0 for the first connection of a session and
-    /// c_recv_offset / s_recv_offset (from the Resume handshake) for a
+    /// c_recv_offset (Resume) / s_recv_offset (AuthOk) for a
     /// reconnect.  §9: offsets are absolute for the life of the session.
     explicit ReceiveCursor(std::uint64_t initialOffset = 0,
                            EInputAck ack = EInputAck::OnReceipt) noexcept;
@@ -68,12 +69,13 @@ public:
         return RecvOffset_;
     }
 
-    /// The offset the peer is told we hold, in Acks and in the Resume
-    /// handshake: everything below it is out of our hands and the peer may
-    /// forget it. Never above RecvOffset(). With OnReceipt it is RecvOffset();
-    /// with OnDelivery it trails by the bytes MarkDelivered() has not covered
-    /// yet. Duplicates are still cut at RecvOffset(), so a peer that resends
-    /// from AckOffset() after a reconnect does not deliver anything twice.
+    /// The offset the peer is told we hold, in Acks and in the AuthOk
+    /// handshake message (s_recv_offset): everything below it is out of our
+    /// hands and the peer may forget it. Never above RecvOffset(). With
+    /// OnReceipt it is RecvOffset(); with OnDelivery it trails by the bytes
+    /// MarkDelivered() has not covered yet. Duplicates are still cut at
+    /// RecvOffset(), so a peer that resends from AckOffset() after a reconnect
+    /// does not deliver anything twice.
     [[nodiscard]] std::uint64_t AckOffset() const noexcept {
         return RecvOffset_ - Pending_;
     }
@@ -87,6 +89,20 @@ public:
     /// OnDelivery only; a count past what is pending is clamped.
     void MarkDelivered(std::uint64_t count) noexcept {
         Pending_ -= count < Pending_ ? count : Pending_;
+    }
+
+    /// The caller could not take the last `count` bytes Receive() returned
+    /// (the agent's pty queue is full): they count as not received, so the
+    /// peer's resend from AckOffset() brings them again instead of Receive()
+    /// cutting them as duplicates. Only for bytes MarkDelivered() has not
+    /// covered, which is all of them when called right after Receive();
+    /// OnDelivery only, and a count past what is pending is clamped. This and
+    /// Reset() are the only ways RecvOffset() goes down. AckOffset() does not
+    /// change.
+    void Unreceive(std::uint64_t count) noexcept {
+        const std::uint64_t undo = count < Pending_ ? count : Pending_;
+        Pending_ -= undo;
+        RecvOffset_ -= undo;
     }
 
     /// Reset the cursor to `offset`. Used when path B (§9 ADR-030) opens a

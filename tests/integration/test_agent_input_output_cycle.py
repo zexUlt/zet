@@ -24,7 +24,15 @@ from harness import STEP_TIMEOUT_SECONDS
 
 # More than RESEND_BUFFER_MAX (4 MiB) of output ahead of the input is read.
 SEQ_LINES = 1_500_000
-INPUT_SIZE = 1024 * 1024
+
+# The agent's queue for input the pty has not taken is
+# max(RESEND_BUFFER_MAX, DISCONNECT_BUFFER_MAX) = 16 MiB (zet/session/limits.hpp,
+# design.md §9). While the shell does not read, only the acknowledgement on
+# delivery keeps the client from sending past it: an agent that acknowledged on
+# receipt would take everything the client has and overflow the queue. The
+# input is 4 MiB past it, so that this test fails for that agent.
+QUEUE_MAX = 16 * 1024 * 1024
+INPUT_SIZE = QUEUE_MAX + 4 * 1024 * 1024
 
 # One bound for the whole exchange, so that a deadlock fails the test instead
 # of hanging it. A passing run takes a fraction of it.
