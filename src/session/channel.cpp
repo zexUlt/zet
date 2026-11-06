@@ -386,7 +386,7 @@ ChannelResult<std::size_t> Channel::Poll(Timestamp now, MutableByteSpan out,
                                          MutableByteSpan scratch) noexcept {
     // §9: a path that has gone quiet in both directions, keepalives included,
     // is gone. Checked first so a dead connection does not go on sealing.
-    if (Liveness_.PeerSilenceTimeout > Duration::zero() &&
+    if (!ReadGateClosed_ && Liveness_.PeerSilenceTimeout > Duration::zero() &&
         now >= LastHeard_ + Liveness_.PeerSilenceTimeout) {
         return std::unexpected(SessionError{ESessionError::PeerSilent});
     }
@@ -682,12 +682,21 @@ Deadline Channel::NextDeadline() const noexcept {
             ? Deadline{LastSent_ + Liveness_.KeepaliveInterval}
             : Deadline{};
     const Deadline silenceDeadline =
-        Liveness_.PeerSilenceTimeout > Duration::zero()
+        !ReadGateClosed_ && Liveness_.PeerSilenceTimeout > Duration::zero()
             ? Deadline{LastHeard_ + Liveness_.PeerSilenceTimeout}
             : Deadline{};
 
     return Earliest(Earliest(ackDeadline, rekeyDeadline),
                     Earliest(keepaliveDeadline, silenceDeadline));
+}
+
+void Channel::SetReadGate(bool open, Timestamp now) noexcept {
+    if (open && ReadGateClosed_) {
+        // The peer could not be heard while the gate was shut, so the silence
+        // so far says nothing about the path.
+        LastHeard_ = now;
+    }
+    ReadGateClosed_ = !open;
 }
 
 void Channel::QueueResize(wire::ResizeMessage resize) noexcept {
