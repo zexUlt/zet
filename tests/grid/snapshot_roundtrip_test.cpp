@@ -80,7 +80,9 @@ void CmpSaved(Diff& d, const char* nm, const SavedCursor& a,
               const SavedCursor& b) {
     if (a.Row != b.Row || a.Col != b.Col || a.Attrs != b.Attrs ||
         a.FgKind != b.FgKind || a.BgKind != b.BgKind || memcmp(a.Fg, b.Fg, 3) ||
-        memcmp(a.Bg, b.Bg, 3) || a.AttrEx != b.AttrEx || a.UlIdx != b.UlIdx)
+        memcmp(a.Bg, b.Bg, 3) || a.AttrEx != b.AttrEx || a.UlIdx != b.UlIdx ||
+        a.Decom != b.Decom || a.CharsetG0 != b.CharsetG0 ||
+        a.CharsetG1 != b.CharsetG1 || a.CharsetActive != b.CharsetActive)
         d.Add(
             "%s saved cursor: (%d,%d) at=%02x fk=%d bk=%d ax=%d ul=%d vs "
             "(%d,%d) at=%02x fk=%d bk=%d ax=%d ul=%d",
@@ -777,4 +779,124 @@ TEST_CASE("P45 alt snapshot paints main once and restores it after 1049l") {
     delete snap.value();
     delete src;
     Probe("P45", 12, 4, 10, input, "\x1b[?1049l");
+}
+
+// ---- DECSC slot state: DECOM, charsets, rows outside the live region ----
+//
+// The encoder puts the terminal into the slot's state, issues DECSC (or
+// ?1049h) and undoes the state.  The saved wrap flag is not reproduced
+// (design.md §9), so a probe whose slot has it set is skipped.  The alt slot
+// of a snapshot taken with the main screen active is not reproduced either.
+namespace {
+
+const char* const SLOT_SAVES[] = {
+    // DECOM + region + G0/G1 graphics + SO, cursor in region
+    "\x1b[3;6r\x1b[?6h\x1b(0\x1b)0\x0e\x1b[2;5H\x1b"
+    "7",
+    // same, SO off, G0 graphics only
+    "\x1b[3;6r\x1b[?6h\x1b(0\x0f\x1b[4;2H\x1b"
+    "7",
+    // DECOM + G1 graphics, SI (G0 active)
+    "\x1b[2;7r\x1b[?6h\x1b)0\x0f\x1b[1;1H\x1b"
+    "7",
+    // saved row outside the region once the region changes
+    "\x1b[2;7r\x1b[?6h\x1b(0\x1b[5;3H\x1b"
+    "7\x1b[?6l\x1b[r",
+    // saved row below the new region
+    "\x1b[?6h\x1b[8;3H\x1b"
+    "7",
+    // saved with the wrap flag pending (skipped)
+    "\x1b[3;6r\x1b[?6h\x1b(0\x1b[2;12Hx\x1b"
+    "7",
+    // no DECOM, charsets only
+    "\x1b(0\x1b)0\x0e\x1b[3;3H\x1b"
+    "7",
+};
+const char* const SLOT_LIVES[] = {
+    "\x1b[?6l\x1b(B\x1b)B\x0f\x1b[r\x1b[1;1H",
+    "\x1b[2;7r\x1b[?6h\x1b(0\x0f\x1b[3;3Hxyz",
+    "\x1b[?6l\x1b)0\x0e\x1b[4;4Hq",
+    "\x1b[4;5r\x1b[?6h\x1b(0\x1b)0\x0e\x1b[2;2Hq",
+    "\x1b[1;3r\x1b[?6h\x1b[2;2H",
+};
+const char* const SLOT_AFTERS[] = {
+    "\x1b"
+    "8ABq\x0fq\x0eq",
+    "\x1b[?6l\x1b[r\x1b[H\x1b"
+    "8Zq",
+};
+
+// Probe unless a slot has the wrap flag set; returns whether it ran.
+bool ProbeSlots(const char* name, std::string_view input,
+                std::string_view after) {
+    Grid* src = Mk(12, 8, 10);
+    VtParser sp;
+    Feed(sp, *src, input);
+    const bool wrap = src->SavedCursorMainState().PendingWrap ||
+                      src->SavedCursorAltState().PendingWrap;
+    delete src;
+    if (wrap) return false;
+    Probe(name, 12, 8, 10, input, after);
+    return true;
+}
+
+}  // namespace
+
+TEST_CASE("P46 DECOM slot saved above the live region round-trips") {
+    // D1: the slot row (absolute 5) lies outside the live region 1..3; the
+    // set-up region must cover it.  Mutant: the row is clamped into the live
+    // region, so the client's slot is row 2 and DECRC lands there.
+    Probe("P46", 12, 8, 10,
+          "\x1b[2;7r\x1b[?6h\x1b(0\x1b[5;3H\x1b"
+          "7\x1b[?6l\x1b[r\x1b[1;3r\x1b[?6h\x1b[2;2H",
+          "\x1b[?6l\x1b[r\x1b"
+          "8Zq");
+}
+
+TEST_CASE("P47 slot state combinations, main screen") {
+    // Kills: no SI after set-up (live SO leaks), no ?6l after set-up (live
+    // DECOM and CUP offset), a charset-only slot not set up.
+    int n = 0, ran = 0;
+    for (auto s : SLOT_SAVES)
+        for (auto l : SLOT_LIVES)
+            for (auto a : SLOT_AFTERS)
+                ran += ProbeSlots(("P47." + std::to_string(n++)).c_str(),
+                                  std::string(s) + l, a);
+    CHECK(ran > 0);
+}
+
+TEST_CASE("P48 slot state combinations, alt screen active") {
+    int n = 0, ran = 0;
+    for (auto s : SLOT_SAVES)
+        for (auto l : SLOT_LIVES) {
+            std::string fill;
+            for (int r = 1; r <= 8; ++r)
+                fill += "\x1b[" + std::to_string(r) + ";1Hqwertyuiopa";
+            const std::string in =
+                std::string("MAINTXT") + s + "\x1b[?47h" + fill + l;
+            ran += ProbeSlots(("P48a." + std::to_string(n++)).c_str(), in,
+                              "\x1b[?1049l\x1b"
+                              "8Aq");
+            ran += ProbeSlots(("P48b." + std::to_string(n++)).c_str(), in,
+                              "\x1b"
+                              "8Aq");
+        }
+    CHECK(ran > 0);
+}
+
+TEST_CASE("P49 alt slot set in the alt screen") {
+    int n = 0, ran = 0;
+    for (auto s : SLOT_SAVES) {
+        for (auto l : SLOT_LIVES) {
+            const std::string in =
+                std::string("\x1b[2;2HMAIN\x1b[?1049h") + s + l;
+            ran += ProbeSlots(("P49a." + std::to_string(n++)).c_str(), in,
+                              "\x1b"
+                              "8Aq");
+            ran += ProbeSlots(("P49b." + std::to_string(n++)).c_str(), in,
+                              "\x1b[?1049l\x1b"
+                              "8Aq");
+        }
+    }
+    CHECK(ran > 0);
 }
