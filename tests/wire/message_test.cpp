@@ -1290,7 +1290,7 @@ TEST_CASE("GridBegin wire layout is pinned by explicit bytes") {
 }
 
 TEST_CASE("GridBegin rejects reserved flag bits both ways") {
-    // Bit 0 = alt-screen (defined). Bits 1–7 are reserved.
+    // Bit 0 = PossiblyDiverged (defined). Bits 1–7 are reserved.
     for (std::uint8_t bit = 1; bit <= 7; ++bit) {
         CAPTURE(bit);
         const auto badFlags = static_cast<std::uint8_t>(1U << bit);
@@ -1332,7 +1332,7 @@ TEST_CASE("GridBegin rejects reserved flag bits both ways") {
 // configurable total_len field.
 static std::vector<std::byte> GridBeginBody(std::uint32_t totalLen) {
     std::vector<std::byte> body;
-    body.push_back(std::byte{0x01});  // flags = alt-screen
+    body.push_back(std::byte{0x01});  // flags = PossiblyDiverged
     body.push_back(std::byte{0x00});
     body.push_back(std::byte{0x00});
     body.push_back(std::byte{0x00});

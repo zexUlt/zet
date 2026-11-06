@@ -281,6 +281,34 @@ TEST_CASE_FIXTURE(SodiumFixture, "the agent picks the highest common version") {
     CHECK(result->Version == PROTOCOL_VERSION_MAX);
 }
 
+TEST_CASE_FIXTURE(SodiumFixture, "an agent picks v1 for a v1-only client") {
+    // An older client offers exactly [1, 1]; a current agent must answer 1.
+    BootstrapAgent agent{MakeSeed(2), MakeNonce(2), PORT};
+    BootstrapOfferMessage offer{
+        .VersionMin = PROTOCOL_VERSION_MIN,
+        .VersionMax = PROTOCOL_VERSION_MIN,
+        .ClientKey = crypto::KeyPairFromSeed(MakeSeed(1)).Public,
+        .ClientNonce = MakeNonce(1)};
+    auto [result, taken] = Run(agent, ArmoredOffer(offer));
+    REQUIRE(result.has_value());
+    CHECK(result->Version == PROTOCOL_VERSION_MIN);
+}
+
+TEST_CASE_FIXTURE(SodiumFixture, "a current client accepts a v1 agent") {
+    // An older agent only knows [1, 1] and so answers with version 1, which
+    // is inside the range this client offered.
+    BootstrapClient client{MakeSeed(1), MakeNonce(1)};
+    BootstrapAcceptMessage accept{
+        .Version = PROTOCOL_VERSION_MIN,
+        .AgentKey = crypto::KeyPairFromSeed(MakeSeed(2)).Public,
+        .ClientNonce = MakeNonce(1),
+        .AgentNonce = MakeNonce(2),
+        .Port = PORT};
+    auto [result, taken] = Run(client, ArmoredAccept(accept));
+    REQUIRE(result.has_value());
+    CHECK(result->Version == PROTOCOL_VERSION_MIN);
+}
+
 TEST_CASE_FIXTURE(SodiumFixture,
                   "an offer with no version in common is final") {
     BootstrapAgent agent{MakeSeed(2), MakeNonce(2), PORT};

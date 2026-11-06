@@ -447,7 +447,14 @@ ConnectionResult AgentConnection::PumpResume(Timestamp now, MutableByteSpan out,
                         resume->StreamGen < Handle_->SessionGen());
 
     bool usePathB = mandatoryB;
-    if (!usePathB && gridCapable) {
+    // Test hook ZET_TEST_FORCE_PATH. A skips the cost check only: when the ring
+    // has overflowed (or the client's generation is stale) path A is
+    // impossible, so mandatoryB stands and the behaviour is today's. B takes
+    // path B for a capable peer even when the replay would do.
+    const EForcePath force = Handle_->ForcePath();
+    if (!usePathB && gridCapable && force == EForcePath::B) {
+        usePathB = true;
+    } else if (!usePathB && gridCapable && force == EForcePath::None) {
         // Cost check: prefer path B when the replay is more expensive than
         // building a snapshot. The estimate is coarse (bytes per cell) but
         // always well under SNAPSHOT_MAX_BYTES, so it is a safe sentinel.

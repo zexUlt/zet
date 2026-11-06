@@ -80,7 +80,7 @@ class MacZet:
         })
         return env
 
-    def argv(self) -> list[str]:
+    def argv(self, **agent_env: str) -> list[str]:
         # No --agent: the client uses ZET_AGENT_DIR (delivery mode). The
         # remote cache persists across tests in the session; the first test
         # pays the delivery cost and subsequent ones skip it.
@@ -89,13 +89,14 @@ class MacZet:
             "ZET_PEER_SILENCE_TIMEOUT": PEER_SILENCE_TIMEOUT_MS,
             "ZET_ORPHAN_TIMEOUT": DEFAULT_ORPHAN_TIMEOUT_S,
             "ASAN_OPTIONS": "detect_leaks=0",
+            **agent_env,
         }.items())
         return [str(self.client),
                 "--ssh-arg", "-F", "--ssh-arg", str(self.host.config),
                 "--ssh-arg", f"-oSetEnv={settings}", self.host.alias]
 
-    def start(self) -> Terminal:
-        return Terminal(PtyProcess(self.argv(), env=self.env()))
+    def start(self, **agent_env: str) -> Terminal:
+        return Terminal(PtyProcess(self.argv(**agent_env), env=self.env()))
 
 
 @pytest.fixture
@@ -159,7 +160,9 @@ def test_a_cut_recovers_byte_for_byte(zet, iptables):
     cut_at = random.Random(CUT_SEED).randrange(*CUT_RANGE)
     context = f"seed {CUT_SEED}, cut after {cut_at} bytes"
     rules = _agent_port_rules(iptables, "DROP")
-    terminal = zet.start()
+    # Path A only: a 10 MB replay is above the snapshot estimate, and a
+    # snapshot (path B) does not keep the bytes the cut swallowed.
+    terminal = zet.start(ZET_TEST_FORCE_PATH="A")
     try:
         terminal.expect(PROMPT)
         terminal.send(_typed(

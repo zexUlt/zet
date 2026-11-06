@@ -157,7 +157,9 @@ def _cut_mid_stream(zet: Zet, iptables: str, rules_for, seed: int) -> None:
     sent."""
     cut_at = random.Random(seed).randrange(*CUT_RANGE)
     context = f"seed {seed}, cut after {cut_at} bytes"
-    terminal = zet.start()
+    # Path A only: a 15 MB replay is above the snapshot estimate, and a
+    # snapshot (path B) does not keep the bytes the cut swallowed.
+    terminal = zet.start(ZET_TEST_FORCE_PATH="A")
     try:
         terminal.expect(PROMPT)
         terminal.send(_typed(

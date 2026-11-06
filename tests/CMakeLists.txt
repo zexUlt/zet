@@ -13,6 +13,7 @@ FetchContent_MakeAvailable(doctest)
 add_executable(zet_tests
     main.cpp
     grid/grid_test.cpp
+    grid/grid_fidelity_test.cpp
     grid/probe_test.cpp
     grid/snapshot_test.cpp
     grid/snapshot_roundtrip_test.cpp
@@ -77,6 +78,7 @@ target_link_libraries(zet_tests PRIVATE
 if(ZET_HAVE_IO)
     target_sources(zet_tests PRIVATE
         app/byte_queue_test.cpp
+        app/env_test.cpp
         client/deliver_test.cpp
         client/escape_test.cpp
         client/read_gate_client_test.cpp
