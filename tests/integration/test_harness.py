@@ -13,6 +13,7 @@ import random
 import select
 import socket
 import subprocess
+import time
 
 import pytest
 
@@ -21,6 +22,10 @@ from harness import NOISE_BANNER, PtyProcess, STEP_TIMEOUT_SECONDS, Timeout, wai
 # More than one pipe buffer each way, so that the copy below has to keep
 # both directions moving instead of writing everything first.
 CHANNEL_BYTES = 1024 * 1024
+
+# The whole copy, however slowly ssh drips: 1 MiB each way is seconds, so
+# four steps is a stall. STEP_TIMEOUT_SECONDS bounds only one wait inside it.
+PUMP_DEADLINE_SECONDS = 4 * STEP_TIMEOUT_SECONDS
 CHANNEL_SEED = 2024
 
 # How long a dropped segment is given to arrive anyway before the test
@@ -36,9 +41,14 @@ def _pump(process: subprocess.Popen, data: bytes) -> bytes:
     stdin, stdout = process.stdin.fileno(), process.stdout.fileno()
     os.set_blocking(stdin, False)
     open_out = True
+    deadline = time.monotonic() + PUMP_DEADLINE_SECONDS
     while open_out:
+        left = deadline - time.monotonic()
+        if left <= 0:
+            raise Timeout(f"ssh still going after {PUMP_DEADLINE_SECONDS}s: "
+                          f"{len(view)} bytes unsent, {len(out)} received")
         writers = [stdin] if view else []
-        readable, writable, _ = select.select([stdout], writers, [], STEP_TIMEOUT_SECONDS)
+        readable, writable, _ = select.select([stdout], writers, [], min(STEP_TIMEOUT_SECONDS, left))
         if not readable and not writable:
             raise Timeout(f"ssh stalled: {len(view)} bytes unsent, {len(out)} received")
         if writable:
