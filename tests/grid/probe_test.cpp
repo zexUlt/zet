@@ -1,4 +1,5 @@
 #include <doctest/doctest.h>
+#include <atomic>
 #include <cstdlib>
 #include <map>
 #include <new>
@@ -11,6 +12,9 @@
 using namespace zet::grid;
 
 static bool G_FAIL_ALLOC = false;
+// Other tests (the agent's failed grid resize) refuse blocks of this size and
+// above, from any thread; SIZE_MAX leaves it off.
+std::atomic<std::size_t> G_REFUSE_NOTHROW_ARRAYS_FROM{SIZE_MAX};
 static int G_FAIL_AT = -1;
 static int G_CNT = 0;
 
@@ -27,6 +31,7 @@ void* operator new[](std::size_t n) {
 // Grid uses new(nothrow)[] exclusively; this is the interception point for OOM.
 void* operator new[](std::size_t n, const std::nothrow_t&) noexcept {
     if (G_FAIL_ALLOC) return nullptr;
+    if (n >= G_REFUSE_NOTHROW_ARRAYS_FROM.load()) return nullptr;
     if (G_FAIL_AT >= 0 && G_CNT++ == G_FAIL_AT) return nullptr;
     return std::malloc(n ? n : 1);
 }
