@@ -13,6 +13,7 @@ FetchContent_MakeAvailable(doctest)
 add_executable(zet_tests
     main.cpp
     grid/grid_test.cpp
+    grid/grid_fidelity_test.cpp
     grid/probe_test.cpp
     grid/snapshot_test.cpp
     grid/snapshot_roundtrip_test.cpp
@@ -41,10 +42,12 @@ add_executable(zet_tests
     session/deferred_input_ack_test.cpp
     session/agent_input_overrun_test.cpp
     session/channel_read_gate_test.cpp
+    session/channel_send_gate_test.cpp
     session/grid_violation_test.cpp
     session/grid_path_property_test.cpp
     session/connection_snapshot_probe_test.cpp
     session/resume_resize_same_read_test.cpp
+    session/agent_await_snapshot_test.cpp
     session/channel_v1_violation_test.cpp
     session/connection_probe94c_test.cpp
     session/channel_probe94c_test.cpp
@@ -75,6 +78,7 @@ target_link_libraries(zet_tests PRIVATE
 if(ZET_HAVE_IO)
     target_sources(zet_tests PRIVATE
         app/byte_queue_test.cpp
+        app/env_test.cpp
         client/deliver_test.cpp
         client/escape_test.cpp
         client/read_gate_client_test.cpp
@@ -93,7 +97,9 @@ endif()
 
 if(ZET_HAVE_AGENT)
     target_sources(zet_tests PRIVATE
+        agent/agent_failed_grid_resize_test.cpp
         agent/agent_input_queue_test.cpp
+        agent/agent_replay_pacing_test.cpp
         agent/agent_wiring_test.cpp
         io/activation_test.cpp
         io/daemon_test.cpp

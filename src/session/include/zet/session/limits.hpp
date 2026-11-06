@@ -2,6 +2,7 @@
 
 #include <chrono>
 #include <cstddef>
+#include <cstdint>
 
 #include "zet/core/time.hpp"
 
@@ -105,6 +106,14 @@ struct LivenessLimits {
     Duration PeerSilenceTimeout{PEER_SILENCE_TIMEOUT};
 };
 
+/// Test hook (`ZET_TEST_FORCE_PATH`, §9 step 2): overrides the cost
+/// comparison of path A against path B on resume, nothing else.
+enum class EForcePath : std::uint8_t {
+    None,  ///< the cost decides
+    A,     ///< never choose B on cost; mandatory B (overflow, stale gen) stays
+    B,     ///< choose B even when the replay is possible
+};
+
 /// The policy one session runs under, defaulting to the figures above.
 ///
 /// A value rather than the constants themselves, the way FrameSealer takes its
@@ -118,6 +127,7 @@ struct SessionLimits {
     /// For every connection of the session. An integration test shortens
     /// these to watch a half-open path end in seconds.
     LivenessLimits Liveness{};
+    EForcePath ForcePath{EForcePath::None};
 };
 
 }  // namespace zet::session

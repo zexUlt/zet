@@ -151,6 +151,16 @@ public:
     /// the caller applies it again on its next pass.
     void SetReadGate(bool open, Timestamp now) noexcept;
 
+    /// Says whether the caller has room in its socket queue for a whole frame
+    /// (CONNECTION_OUT_SIZE): false makes Pump hold back every outgoing frame
+    /// of a live connection, still taking incoming ones and still failing
+    /// with PeerSilent; true lets them go again. The caller applies it before
+    /// each Pump, so a resend or snapshot far larger than its queue goes out
+    /// as the socket drains instead of overflowing the queue. A call before
+    /// the connection is live is dropped; the gate starts open (Channel::
+    /// SetSendGate, §9).
+    void SetSendGate(bool open) noexcept;
+
 protected:
     ConnectionBase(MutableByteSpan frameStorage, Timestamp now,
                    std::uint16_t ceiling = wire::PROTOCOL_VERSION_MAX,
@@ -205,8 +215,8 @@ public:
     /// `frameStorage` must hold CONNECTION_FRAME_STORAGE bytes; until the peer
     /// authenticates only MAX_HANDSHAKE_FRAME of it is used.
     /// `ceiling` caps the version negotiated in Hello; default is
-    /// PROTOCOL_VERSION_MAX (currently 1). Tests that exercise ver=2 pass
-    /// PROTOCOL_VERSION_GRID here.
+    /// PROTOCOL_VERSION_MAX (currently 2). Tests that exercise ver=1 pass
+    /// PROTOCOL_VERSION_MIN here.
     AgentConnection(
         MutableByteSpan frameStorage, Timestamp now,
         std::uint16_t ceiling = wire::PROTOCOL_VERSION_MAX) noexcept;
@@ -339,8 +349,8 @@ public:
     /// `gridCapable` includes GRID_CAPABLE in the Hello TLV so the agent can
     /// serve grid snapshots on path B reconnect. §7 ADR-035.
     /// `ceiling` caps the version negotiated in Hello; default is
-    /// PROTOCOL_VERSION_MAX (currently 1). Tests that exercise ver=2 pass
-    /// PROTOCOL_VERSION_GRID here.
+    /// PROTOCOL_VERSION_MAX (currently 2). Tests that exercise ver=1 pass
+    /// PROTOCOL_VERSION_MIN here.
     /// `snapshotBuf` is the caller-owned buffer for incoming grid snapshots
     /// (§1: no allocation in the core). Must be at least
     /// wire::SNAPSHOT_MAX_BYTES when path B may be used; pass {} otherwise.

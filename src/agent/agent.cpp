@@ -148,6 +148,23 @@ std::optional<Config> ReadConfig(std::span<char*> args) {
             app::DurationFromEnv("ZET_ORPHAN_TIMEOUT", EUnit::Seconds)) {
         config.Limits.OrphanTimeout = *orphan;
     }
+    // Test hooks. A value that is not exactly "A" or "B" is reported and
+    // ignored, as a malformed timeout is.
+    static constexpr std::array<std::string_view, 2> FORCE_PATHS{"A", "B"};
+    if (const auto force =
+            app::ChoiceFromEnv("ZET_TEST_FORCE_PATH", FORCE_PATHS)) {
+        config.Limits.ForcePath =
+            *force == "A" ? session::EForcePath::A : session::EForcePath::B;
+    }
+    // The agent allocates this much, zero-filled, before it serves anyone, so
+    // the hook is bounded: four times the compiled default (64 MiB) is room
+    // enough to test a larger buffer and nowhere near an allocation failure.
+    constexpr std::size_t disconnectHookMax =
+        4U * session::DISCONNECT_BUFFER_MAX;
+    if (const auto max =
+            app::SizeFromEnv("ZET_DISCONNECT_BUFFER_MAX", disconnectHookMax)) {
+        config.Limits.DisconnectMax = *max;
+    }
     return config;
 }
 
@@ -698,6 +715,11 @@ void Agent::TrySupplySnapshot(Timestamp now) noexcept {
 
 void Agent::Pump(Connection& connection, Timestamp now) noexcept {
     while (!connection.Closing) {
+        // A replay can be larger than the queue (up to DisconnectMax against
+        // ResendMax plus the slack): frames go in only while a whole one fits,
+        // and the rest goes as WriteSocket drains it. §9.
+        connection.Link.SetSendGate(connection.Output.Room() >=
+                                    session::CONNECTION_OUT_SIZE);
         auto result = connection.Link.Pump(now, MutableByteSpan{Out_},
                                            MutableByteSpan{Scratch_});
         if (!result) {

@@ -133,6 +133,12 @@ constexpr std::string_view OVERFLOW_NOTICE =
 /// was restored from a snapshot rather than a byte-identical replay.
 constexpr std::string_view SNAPSHOT_RESTORE_NOTICE =
     "zet: screen restored, output during the cut skipped\r\n";
+/// Printed after SNAPSHOT_RESTORE_NOTICE when GridBegin carries the
+/// PossiblyDiverged flag (bit 0): the agent's parser lost sync at some point,
+/// so the restored screen may differ from what the program drew.
+constexpr std::string_view SNAPSHOT_DIVERGED_NOTICE =
+    "zet: warning: the restored screen may differ from the remote one\r\n";
+constexpr std::uint8_t GRID_FLAG_POSSIBLY_DIVERGED = 0x01;
 
 constexpr std::string_view USAGE =
     "usage: zet [--agent PATH] [--ssh-arg ARG]... HOST\n"
@@ -988,6 +994,8 @@ private:
     bool Escaped_{false};
     /// The link went down after it had been live, and the user was told.
     bool Announced_{false};
+    /// GridBegin flags of PendingSnapshot_.
+    std::uint8_t PendingSnapshotFlags_{0};
     /// When the last live connection was lost; the give-up clock runs from it.
     std::optional<Timestamp> LostSince_;
     /// What the current connection started from, to tell whether it got
@@ -1135,6 +1143,7 @@ void Client::Pump(Timestamp now) noexcept {
             }
             PendingSnapshot_ =
                 PendingSnapshotInfo{.StreamGen = snap->StreamGen};
+            PendingSnapshotFlags_ = snap->Flags;
         } else if (std::holds_alternative<session::SessionOverflowed>(event)) {
             // Agent killed the session because the ring overflowed and this
             // client does not have GRID_CAPABLE (ver=2 only, §7). Record it
@@ -1371,6 +1380,9 @@ void Client::WriteStdout() noexcept {
     if (PendingSnapshot_ && Connection_) {
         Connection_->ConfirmApply(PendingSnapshot_->StreamGen);
         Notice(SNAPSHOT_RESTORE_NOTICE);
+        if ((PendingSnapshotFlags_ & GRID_FLAG_POSSIBLY_DIVERGED) != 0) {
+            Notice(SNAPSHOT_DIVERGED_NOTICE);
+        }
         PendingSnapshot_.reset();
     }
 }
