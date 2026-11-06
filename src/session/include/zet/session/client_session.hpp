@@ -190,7 +190,7 @@ public:
     /// `gridCapable` causes GRID_CAPABLE to be included in the Hello TLV,
     /// signalling that this client can receive grid snapshots. §7 ADR-035.
     /// `ceiling` caps the version negotiated in Hello; default is
-    /// PROTOCOL_VERSION_MAX. Tests that need ver=2 pass PROTOCOL_VERSION_GRID.
+    /// PROTOCOL_VERSION_MAX. Tests that need ver=1 pass PROTOCOL_VERSION_MIN.
     ClientResumeAttempt(
         ClientSession& session, wire::HandshakeNonce clientNonce,
         bool gridCapable = false,

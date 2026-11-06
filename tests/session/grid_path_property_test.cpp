@@ -1357,7 +1357,7 @@ TEST_CASE_FIXTURE(SodiumFixture,
     }
     auto a = Reconnect(r, true, wire::PROTOCOL_VERSION_GRID, true, true);
     MESSAGE("pathB: " << a << " client gen=" << r.Client.StreamGen());
-    auto b = Reconnect(r, false, wire::PROTOCOL_VERSION_MAX);  // v1 peer
+    auto b = Reconnect(r, false, wire::PROTOCOL_VERSION_MIN);  // v1 peer
     MESSAGE("v1 reconnect: " << b);
     CHECK(b == "no-snapshot");
     auto c =
@@ -1435,7 +1435,7 @@ TEST_CASE_FIXTURE(SodiumFixture,
 
 TEST_CASE_FIXTURE(SodiumFixture, "v1 peer overflow is silently reaped") {
     Rig r;
-    Reconnect(r, false, wire::PROTOCOL_VERSION_MAX);
+    Reconnect(r, false, wire::PROTOCOL_VERSION_MIN);
     const std::vector<std::byte> chunk(200, std::byte{0xBB});
     for (int i = 0; i < 8; ++i) {
         std::ignore = r.Agent.Write(ByteSpan{chunk});

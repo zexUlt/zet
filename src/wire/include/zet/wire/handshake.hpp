@@ -266,8 +266,8 @@ private:
 /// meet at all. Never equality — that is what left EternalTerminal unable to
 /// change its handshake without breaking every client it had.
 ///
-/// `ourMax` defaults to PROTOCOL_VERSION_MAX (v1). Pass PROTOCOL_VERSION_GRID
-/// to negotiate v2 when the session layer is ready to handle it.
+/// `ourMax` defaults to PROTOCOL_VERSION_MAX (v2). Pass PROTOCOL_VERSION_MIN
+/// to cap the negotiation at v1.
 /// Returns VersionMismatch if `ourMax < PROTOCOL_VERSION_MIN`.
 [[nodiscard]] PreAuthResult<std::uint16_t> NegotiateVersion(
     std::uint16_t peerMin, std::uint16_t peerMax,

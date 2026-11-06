@@ -205,8 +205,8 @@ public:
     /// `frameStorage` must hold CONNECTION_FRAME_STORAGE bytes; until the peer
     /// authenticates only MAX_HANDSHAKE_FRAME of it is used.
     /// `ceiling` caps the version negotiated in Hello; default is
-    /// PROTOCOL_VERSION_MAX (currently 1). Tests that exercise ver=2 pass
-    /// PROTOCOL_VERSION_GRID here.
+    /// PROTOCOL_VERSION_MAX (currently 2). Tests that exercise ver=1 pass
+    /// PROTOCOL_VERSION_MIN here.
     AgentConnection(
         MutableByteSpan frameStorage, Timestamp now,
         std::uint16_t ceiling = wire::PROTOCOL_VERSION_MAX) noexcept;
@@ -339,8 +339,8 @@ public:
     /// `gridCapable` includes GRID_CAPABLE in the Hello TLV so the agent can
     /// serve grid snapshots on path B reconnect. §7 ADR-035.
     /// `ceiling` caps the version negotiated in Hello; default is
-    /// PROTOCOL_VERSION_MAX (currently 1). Tests that exercise ver=2 pass
-    /// PROTOCOL_VERSION_GRID here.
+    /// PROTOCOL_VERSION_MAX (currently 2). Tests that exercise ver=1 pass
+    /// PROTOCOL_VERSION_MIN here.
     /// `snapshotBuf` is the caller-owned buffer for incoming grid snapshots
     /// (§1: no allocation in the core). Must be at least
     /// wire::SNAPSHOT_MAX_BYTES when path B may be used; pass {} otherwise.

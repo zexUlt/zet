@@ -327,19 +327,19 @@ TEST_CASE("a pre-auth error can never ask for the session") {
 }
 
 TEST_CASE("version negotiation takes the lower maximum, never equality") {
-    // Peer max=3, our default max=1 → settle on 1.
+    // Peer max=3, our default max=2 → settle on 2.
     const auto met = NegotiateVersion(PROTOCOL_VERSION_MIN, 3);
     REQUIRE(met.has_value());
     CHECK(*met == PROTOCOL_VERSION_MAX);
 
-    // Both sides cap at PROTOCOL_VERSION_MAX (1) → settle on 1.
+    // Both sides cap at PROTOCOL_VERSION_MAX (2) → settle on 2.
     const auto exact =
         NegotiateVersion(PROTOCOL_VERSION_MIN, PROTOCOL_VERSION_MAX);
     REQUIRE(exact.has_value());
     CHECK(*exact == PROTOCOL_VERSION_MAX);
 
-    // Passing ourMax=PROTOCOL_VERSION_GRID lets us settle on 2 when the peer
-    // also advertises at least 2.
+    // PROTOCOL_VERSION_GRID is the default ceiling now: settle on 2 when the
+    // peer also advertises at least 2.
     const auto grid = NegotiateVersion(
         PROTOCOL_VERSION_MIN, PROTOCOL_VERSION_GRID, PROTOCOL_VERSION_GRID);
     REQUIRE(grid.has_value());
@@ -359,7 +359,7 @@ TEST_CASE("version negotiation takes the lower maximum, never equality") {
 }
 
 TEST_CASE_FIXTURE(SodiumFixture,
-                  "a completed handshake reports version 1 by default") {
+                  "a completed handshake reports the default maximum version") {
     Harness peers;
     const auto run = peers.Run();
     REQUIRE(run.Completed);
@@ -819,6 +819,21 @@ TEST_CASE_FIXTURE(SodiumFixture,
     const auto version =
         RunWithCeilings(PROTOCOL_VERSION_MIN, PROTOCOL_VERSION_GRID);
     CHECK(version == PROTOCOL_VERSION_MIN);
+}
+
+TEST_CASE_FIXTURE(SodiumFixture,
+                  "ceiling=2 client and ceiling=1 server negotiate version 1") {
+    const auto version =
+        RunWithCeilings(PROTOCOL_VERSION_GRID, PROTOCOL_VERSION_MIN);
+    CHECK(version == PROTOCOL_VERSION_MIN);
+}
+
+TEST_CASE_FIXTURE(SodiumFixture,
+                  "default ceilings on both ends negotiate the default max") {
+    const auto version =
+        RunWithCeilings(PROTOCOL_VERSION_MAX, PROTOCOL_VERSION_MAX);
+    CHECK(version == PROTOCOL_VERSION_MAX);
+    CHECK(version == PROTOCOL_VERSION_GRID);
 }
 
 TEST_CASE_FIXTURE(SodiumFixture,
