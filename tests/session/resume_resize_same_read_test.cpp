@@ -279,9 +279,10 @@ TEST_CASE_FIXTURE(SodiumFixture,
 
 // Path A takes the Resize that came with the Resume straight out of
 // PumpResume.  The size has to reach the session there too: the next path-B
-// reconnect waits for a Resize only if a size is known.
+// reconnect asks for a snapshot at that size when its client sends no Resize.
 //
-// Kills: PumpResume's path A returning Resized without ReportResize.
+// Kills: PumpResume's path A returning Resized without ReportResize (the
+// snapshot request would carry 0x0).
 TEST_CASE_FIXTURE(SodiumFixture,
                   "path A: a Resize read together with Resume is remembered "
                   "for the next reconnect") {
@@ -352,4 +353,13 @@ TEST_CASE_FIXTURE(SodiumFixture,
     const Deadline next = ac.NextDeadline();
     REQUIRE(next.IsSet());
     CHECK(next.At() > START);  // waiting for the Resize, not due now
+
+    // No Resize comes: the request carries the size the Resize that came with
+    // the Resume reported, not 0x0.
+    auto due = PumpAgent(ac, r.Sp, next.At());
+    REQUIRE(due.has_value());
+    const auto* needs = std::get_if<NeedsSnapshot>(&*due);
+    REQUIRE(needs != nullptr);
+    CHECK(needs->Rows == 24);
+    CHECK(needs->Cols == 80);
 }
