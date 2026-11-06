@@ -151,6 +151,16 @@ public:
     /// the caller applies it again on its next pass.
     void SetReadGate(bool open, Timestamp now) noexcept;
 
+    /// Says whether the caller has room in its socket queue for a whole frame
+    /// (CONNECTION_OUT_SIZE): false makes Pump hold back every outgoing frame
+    /// of a live connection, still taking incoming ones and still failing
+    /// with PeerSilent; true lets them go again. The caller applies it before
+    /// each Pump, so a resend or snapshot far larger than its queue goes out
+    /// as the socket drains instead of overflowing the queue. A call before
+    /// the connection is live is dropped; the gate starts open (Channel::
+    /// SetSendGate, §9).
+    void SetSendGate(bool open) noexcept;
+
 protected:
     ConnectionBase(MutableByteSpan frameStorage, Timestamp now,
                    std::uint16_t ceiling = wire::PROTOCOL_VERSION_MAX,
