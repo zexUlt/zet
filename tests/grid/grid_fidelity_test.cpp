@@ -95,10 +95,12 @@ TEST_CASE("DECRC clears the origin mode when it was off at DECSC") {
     delete g;
 }
 
-TEST_CASE("DECRC under a saved origin mode clamps into the scroll region") {
-    // xterm CursorRestoreFlags: with ORIGIN restored, CursorSet is relative to
-    // the top margin and clamps to the region.  Mutant: the clamp looks at the
-    // DECOM in force at DECRC instead of the restored one.
+TEST_CASE("DECRC under a saved origin mode clamps at the bottom margin only") {
+    // xterm cursor.c CursorSet: with ORIGIN, use_row += top_marg and only
+    // "use_row <= max_row" (max_row = bot_marg) bounds it; the top is bounded
+    // by 0 alone.  So a saved row above the region stays, one below clamps.
+    // Mutants: the clamp looks at the DECOM in force at DECRC instead of the
+    // restored one; a top clamp is added.
     Grid* g = Mk(10, 8);
     VtParser p;
     Feed(p, *g, "\x1b[?6h");  // DECOM, full-screen region, cursor at row 0
@@ -106,7 +108,15 @@ TEST_CASE("DECRC under a saved origin mode clamps into the scroll region") {
     Feed(p, *g, "\x1b[?6l\x1b[4;6r");  // DECOM off, region rows 4..6
     Feed(p, *g, DECRC);
     CHECK(g->ModeSet(EMode::Decom));
-    CHECK(g->CursorRow() == 3);  // clamped to the region top
+    CHECK(g->CursorRow() == 0);  // above the region: no top clamp
+
+    Feed(p, *g, "\x1b[?6l\x1b[r\x1b[?6h\x1b[8;1H");  // DECOM, row 8
+    Feed(p, *g, DECSC);
+    REQUIRE(g->CursorRow() == 7);
+    Feed(p, *g, "\x1b[?6l\x1b[2;5r");  // region rows 2..5
+    Feed(p, *g, DECRC);
+    CHECK(g->ModeSet(EMode::Decom));
+    CHECK(g->CursorRow() == 4);  // clamped to the bottom margin
     delete g;
 }
 
@@ -125,6 +135,40 @@ TEST_CASE("DECRC restores the pending-wrap flag") {
     CHECK(g->PendingWrap());
     Feed(p, *g, "y");  // wraps to the next line
     CHECK(CP(*g, 2, 0) == U'y');
+    delete g;
+}
+
+TEST_CASE("DECRC restores the wrap flag only in the last column") {
+    // Mutant: the wrap flag is restored unconditionally.  A widening Resize
+    // after the save leaves the saved column short of the new last column.
+    Grid* g = Mk(10, 5);
+    VtParser p;
+    Feed(p, *g, "\x1b[2;10Hx");
+    REQUIRE(g->PendingWrap());
+    Feed(p, *g, DECSC);
+    REQUIRE(g->Resize(20, 5).has_value());
+    Feed(p, *g, DECRC);
+    CHECK(g->CursorCol() == 9);
+    CHECK(!g->PendingWrap());
+    Feed(p, *g, "y");  // prints in place, no wrap
+    CHECK(CP(*g, 1, 9) == U'y');
+    CHECK(g->CursorRow() == 1);
+    CHECK(g->CursorCol() == 10);
+    delete g;
+}
+
+TEST_CASE("a narrowing Resize keeps the saved wrap flag") {
+    // xterm ScreenResize does not touch the saved cursor's wrap_flag; the
+    // saved column is clamped to the new last column, where the flag is valid.
+    // Mutant: Resize clears the saved flag.
+    Grid* g = Mk(10, 5);
+    VtParser p;
+    Feed(p, *g, "\x1b[2;10Hx");
+    Feed(p, *g, DECSC);
+    REQUIRE(g->Resize(6, 5).has_value());
+    Feed(p, *g, DECRC);
+    CHECK(g->CursorCol() == 5);
+    CHECK(g->PendingWrap());
     delete g;
 }
 

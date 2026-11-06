@@ -19,6 +19,7 @@
 
 #include "zet/grid/snapshot.hpp"
 
+#include <algorithm>
 #include <cstring>
 #include <new>
 #include <span>
@@ -536,18 +537,19 @@ static void SlotSetState(EscWriter& w, const Grid& g,
     w.WriteByte(sc.CharsetActive == 1 ? '\x0e' : '\x0f');
     std::uint32_t row = static_cast<std::uint32_t>(sc.Row + 1);
     if (sc.Decom) {
-        // Region first (DECSTBM homes the cursor), then DECOM: CUP is then
-        // relative to the region, so a row outside it is clamped into it.
+        // Region first (DECSTBM homes the cursor), then DECOM: CUP is relative
+        // to the region top.  The region must cover the saved row, which may
+        // lie outside the live one (xterm saves the absolute row), so it is
+        // widened for the set-up; SlotUndoState resets it.
+        const std::uint16_t top = std::min(sc.Row, g.ScrollTop());
+        const std::uint16_t bot = std::max(sc.Row, g.ScrollBot());
         w.WriteLiteral("\x1b[");
-        w.WriteDecimal(static_cast<std::uint32_t>(g.ScrollTop() + 1));
+        w.WriteDecimal(static_cast<std::uint32_t>(top + 1));
         w.WriteByte(';');
-        w.WriteDecimal(static_cast<std::uint32_t>(g.ScrollBot() + 1));
+        w.WriteDecimal(static_cast<std::uint32_t>(bot + 1));
         w.WriteByte('r');
         w.WriteLiteral("\x1b[?6h");
-        const std::uint16_t in = sc.Row < g.ScrollTop()   ? g.ScrollTop()
-                                 : sc.Row > g.ScrollBot() ? g.ScrollBot()
-                                                          : sc.Row;
-        row = static_cast<std::uint32_t>(in - g.ScrollTop() + 1);
+        row = static_cast<std::uint32_t>(sc.Row - top + 1);
     }
     w.WriteLiteral("\x1b[");
     w.WriteDecimal(row);

@@ -551,16 +551,14 @@ void Grid::RestoreCursor() noexcept {
     const SavedCursor& sc = IsAltScreen() ? SavedCursorAlt_ : SavedCursorMain_;
     CursorRow_ = ClampRow(sc.Row);
     CursorCol_ = ClampCol(sc.Col);
-    // xterm CursorRestoreFlags restores DECOM from the save, then places the
-    // cursor under that mode: with DECOM it stays inside the scroll region.
+    // xterm CursorRestoreFlags restores DECOM from the save, then CursorSet
+    // places the cursor: with DECOM only the bottom margin clamps (cursor.c
+    // CursorSet, use_row <= max_row); a row above the top margin stays.
     if (sc.Decom)
         Modes_ |= ModeFlag(EMode::Decom);
     else
         Modes_ &= ~ModeFlag(EMode::Decom);
-    if (sc.Decom) {
-        if (CursorRow_ < ScrollTop_) CursorRow_ = ScrollTop_;
-        if (CursorRow_ > ScrollBot_) CursorRow_ = ScrollBot_;
-    }
+    if (sc.Decom && CursorRow_ > ScrollBot_) CursorRow_ = ScrollBot_;
     PenAttrs_ = sc.Attrs;
     PenAttrEx_ = sc.AttrEx;
     PenUlIdx_ = sc.UlIdx;
@@ -1378,10 +1376,12 @@ GridResult<void> Grid::Resize(std::uint16_t newCols,
         CursorCol_ = static_cast<std::uint16_t>(newCols - 1);
     PendingWrap_ = false;
 
+    // The saved wrap flag survives a Resize: xterm's ScreenResize does not
+    // touch the saved cursor's wrap_flag.  DECRC applies it only in the last
+    // column of the grid it finds.
     auto clampSC = [&](SavedCursor& sc) noexcept {
         if (sc.Row >= newRows) sc.Row = static_cast<std::uint16_t>(newRows - 1);
         if (sc.Col >= newCols) sc.Col = static_cast<std::uint16_t>(newCols - 1);
-        sc.PendingWrap = false;  // Resize drops the live wrap flag too
     };
     clampSC(SavedCursorMain_);
     clampSC(SavedCursorAlt_);
