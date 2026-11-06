@@ -8,6 +8,8 @@
 //   Colors256       no history; TrueColor becomes the nearest palette index
 //   NoColor         no history; fg/bg Default
 //   RowsCropped     as NoColor; cropped rows are blank, the cursor row is kept
+// Also compared: DECOM, scroll region, G0/G1/GL, and both saved-cursor slots
+// (the alt slot only with the alt screen active; the saved wrap flag never).
 // Other invariants: output fits the cap, ScrollbackLen is in range, no raw
 // control bytes, the ladder runs only when the full encoding does not fit,
 // and SnapshotTooLarge only when the cap is below a single row's worst case.
@@ -119,6 +121,25 @@ const char* DiffCell(const Cell& src, const Cell& dst, EColors colors) {
     if (src.UlIdx != dst.UlIdx) return "ulidx";
     if (!ColorOk(src.FgKind, src.Fg, dst.FgKind, dst.Fg, colors)) return "fg";
     if (!ColorOk(src.BgKind, src.Bg, dst.BgKind, dst.Bg, colors)) return "bg";
+    return nullptr;
+}
+
+// A saved-cursor slot must come back with the same position, DECOM, charsets
+// and (up to the ladder's colour step) pen.  The wrap flag is not reproduced
+// (design.md §9) and is not compared.
+const char* DiffSaved(const SavedCursor& a, const SavedCursor& b,
+                      EColors colors) {
+    if (a.Row != b.Row) return "row";
+    if (a.Col != b.Col) return "col";
+    if (a.Decom != b.Decom) return "decom";
+    if (a.CharsetG0 != b.CharsetG0 || a.CharsetG1 != b.CharsetG1 ||
+        a.CharsetActive != b.CharsetActive)
+        return "charset";
+    if (a.Attrs != b.Attrs) return "attrs";
+    if (a.AttrEx != b.AttrEx) return "attrex";
+    if (a.UlIdx != b.UlIdx) return "ulidx";
+    if (!ColorOk(a.FgKind, a.Fg, b.FgKind, b.Fg, colors)) return "fg";
+    if (!ColorOk(a.BgKind, a.Bg, b.BgKind, b.Bg, colors)) return "bg";
     return nullptr;
 }
 
@@ -274,6 +295,24 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data,
         : deg == EDegradation::Colors256 ? EColors::Indexed256
                                          : EColors::None;
     const bool mayCrop = deg == EDegradation::RowsCropped;
+    if (g1->ModeSet(EMode::Decom) != g2->ModeSet(EMode::Decom)) Fail("decom");
+    if (g1->ScrollTop() != g2->ScrollTop() ||
+        g1->ScrollBot() != g2->ScrollBot())
+        Fail("scroll-region", g1->ScrollTop(), g2->ScrollTop());
+    if (g1->CharsetG0() != g2->CharsetG0() ||
+        g1->CharsetG1() != g2->CharsetG1() ||
+        g1->CharsetActive() != g2->CharsetActive())
+        Fail("charset", g1->CharsetActive(), g2->CharsetActive());
+    if (const char* d = DiffSaved(g1->SavedCursorMainState(),
+                                  g2->SavedCursorMainState(), colors))
+        Fail(d, 0);
+    // With the main screen active the alt slot is not reproduced (design.md
+    // §9); with the alt screen active both slots are.
+    if (g1->IsAltScreen())
+        if (const char* d = DiffSaved(g1->SavedCursorAltState(),
+                                      g2->SavedCursorAltState(), colors))
+            Fail(d, 1);
+
     CheckScreen(VisibleCell, *g1, *g2, colors, mayCrop, g1->CursorRow(),
                 "screen");
     if (g1->IsAltScreen())

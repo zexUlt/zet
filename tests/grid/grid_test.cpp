@@ -2297,19 +2297,19 @@ TEST_CASE("Combining mark with PendingWrap is dropped; base codepoint stays") {
 // RestoreCursor with DECOM active clamps into scroll region
 // ---------------------------------------------------------------------------
 
-TEST_CASE("RestoreCursor clamps into scroll region when DECOM is active") {
+TEST_CASE(
+    "RestoreCursor uses the DECOM saved with the cursor, not the live one") {
+    // xterm CursorRestoreFlags restores the origin mode from the save, so a
+    // save made with DECOM off comes back with DECOM off and no clamp. The
+    // clamp under a saved DECOM is in grid_fidelity_test.cpp.
     Grid* g = MakeGrid(80, 24);
     VtParser p;
-    // Save cursor at row 0 (default), then set scroll region and enable DECOM.
-    // When restored with DECOM active, row 0 < ScrollTop → clamped to
-    // ScrollTop.
-    Feed(p, *g, "\x1b[s");  // save cursor at (0, 0)
-    Feed(
-        p, *g,
-        "\x1b[5;20r");  // set scroll region rows 5–20 (1-based → top=4, bot=19)
-    Feed(p, *g, "\x1b[?6h");  // enable DECOM
-    Feed(p, *g, "\x1b[u");    // restore: row 0 < ScrollTop=4 → clamp to 4
-    CHECK(g->CursorRow() == g->ScrollTop());
+    Feed(p, *g, "\x1b[s");      // save cursor at (0, 0), DECOM off
+    Feed(p, *g, "\x1b[5;20r");  // scroll region rows 5-20 (top=4, bot=19)
+    Feed(p, *g, "\x1b[?6h");    // enable DECOM
+    Feed(p, *g, "\x1b[u");
+    CHECK(!g->ModeSet(EMode::Decom));
+    CHECK(g->CursorRow() == 0);
     delete g;
 }
 
