@@ -390,6 +390,9 @@ ChannelResult<std::size_t> Channel::Poll(Timestamp now, MutableByteSpan out,
         now >= LastHeard_ + Liveness_.PeerSilenceTimeout) {
         return std::unexpected(SessionError{ESessionError::PeerSilent});
     }
+    if (SendGateClosed_) {
+        return 0;
+    }
     auto written = PollOnce(now, out, scratch);
     if (written && *written > 0) {
         LastSent_ = now;
@@ -686,6 +689,11 @@ Deadline Channel::NextDeadline() const noexcept {
             ? Deadline{LastHeard_ + Liveness_.PeerSilenceTimeout}
             : Deadline{};
 
+    // Nothing is sent while the send gate is closed, so a due send timer
+    // would only wake the owner to no effect; the socket draining does.
+    if (SendGateClosed_) {
+        return silenceDeadline;
+    }
     return Earliest(Earliest(ackDeadline, rekeyDeadline),
                     Earliest(keepaliveDeadline, silenceDeadline));
 }

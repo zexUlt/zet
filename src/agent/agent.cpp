@@ -695,6 +695,11 @@ void Agent::TrySupplySnapshot(Timestamp now) noexcept {
 
 void Agent::Pump(Connection& connection, Timestamp now) noexcept {
     while (!connection.Closing) {
+        // A replay can be larger than the queue (up to DisconnectMax against
+        // ResendMax plus the slack): frames go in only while a whole one fits,
+        // and the rest goes as WriteSocket drains it. §9.
+        connection.Link.SetSendGate(connection.Output.Room() >=
+                                    session::CONNECTION_OUT_SIZE);
         auto result = connection.Link.Pump(now, MutableByteSpan{Out_},
                                            MutableByteSpan{Scratch_});
         if (!result) {

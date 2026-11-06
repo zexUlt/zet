@@ -66,6 +66,12 @@ void ConnectionBase::SetReadGate(bool open, Timestamp now) noexcept {
     }
 }
 
+void ConnectionBase::SetSendGate(bool open) noexcept {
+    if (Channel_) {
+        Channel_->SetSendGate(open);
+    }
+}
+
 // ── AgentConnection ────────────────────────────────────────────────────
 
 Deadline AgentConnection::NextDeadline() const noexcept {

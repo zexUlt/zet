@@ -236,6 +236,15 @@ public:
     /// and every other timer are unaffected.
     void SetReadGate(bool open, Timestamp now) noexcept;
 
+    /// Tells the channel whether its owner has room for another frame. A
+    /// caller whose socket queue is full closes the gate: while it is closed
+    /// Poll sends nothing (it still enforces the silence limit) and
+    /// NextDeadline leaves out the send timers, which could not be served.
+    /// This is how a replay larger than the owner's queue goes out as the
+    /// socket drains (§9). Idempotent; the owner reopens it once the queue has
+    /// room and polls again.
+    void SetSendGate(bool open) noexcept { SendGateClosed_ = !open; }
+
     /// Queue a Resize to be sent on the next Poll. Only meaningful on the
     /// client side; calling it from the agent side is harmless — the other side
     /// will apply the dimensions or ignore them. Idempotent: a later call
@@ -336,6 +345,8 @@ private:
     Timestamp LastSent_;
     /// The owner has stopped reading the socket; the silence timer is off.
     bool ReadGateClosed_{false};
+    /// The owner has no room for a frame; Poll sends nothing.
+    bool SendGateClosed_{false};
     /// The token of the next keepalive Ping. Its value means nothing to the
     /// peer, which only echoes it.
     std::uint64_t NextPingToken_{1};
