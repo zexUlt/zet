@@ -18,7 +18,7 @@ import pytest
 
 from e2e import (ESCAPE_NOTICE, ESCAPE_STATUS, KEEPALIVE_INTERVAL_MS, LOST_NOTICE,
                  PEER_SILENCE_TIMEOUT_MS, PROFILE, PROMPT, RECONNECT_MAX_MS,
-                 REGAINED_NOTICE, Terminal)
+                 REGAINED_NOTICE, STREAM_DEADLINE_SECONDS, Terminal)
 from harness import PtyProcess
 
 # The stream the cut checks. The agent sends at most RESEND_BUFFER_MAX (4 MiB)
@@ -166,19 +166,20 @@ def test_a_cut_recovers_byte_for_byte(zet, iptables):
             f"printf '%s\\n' \"BE\"\"GIN\"; seq 1 {STREAM_LINES}; printf '%s\\n' \"EN\"\"D\""))
         terminal.expect(b"BEGIN\r\n")
         start = terminal.consumed
-        while len(terminal.buffer) - start < cut_at:
-            terminal.read_more()
+        terminal.read_until(lambda: len(terminal.buffer) - start >= cut_at,
+                            f"{cut_at} bytes of the stream ({context})",
+                            deadline=STREAM_DEADLINE_SECONDS)
 
         _apply(iptables, rules, "-I")
         try:
             # The client's notice is the event: it prints it as it drops the
             # connection its liveness timer gave up on.
-            while terminal.buffer.find(LOST_NOTICE, start) < 0:
-                terminal.read_more()
+            terminal.read_until(lambda: terminal.buffer.find(LOST_NOTICE, start) >= 0,
+                                f"the client's notice of the lost link ({context})")
         finally:
             _apply(iptables, rules, "-D")
 
-        terminal.expect(b"END\r\n")
+        terminal.expect(b"END\r\n", deadline=STREAM_DEADLINE_SECONDS)
         received = bytes(terminal.buffer[start:terminal.consumed - len(b"END\r\n")])
         assert received.count(LOST_NOTICE) == 1, context
         assert received.count(REGAINED_NOTICE) == 1, context

@@ -19,6 +19,10 @@ from dataclasses import dataclass
 # Generous for an ASan build on a shared runner; a passing step takes far less.
 STEP_TIMEOUT_SECONDS = 30.0
 
+# How long kill() waits for a SIGKILLed child to be reaped. SIGKILL cannot be
+# ignored, so this is for a child stuck in the kernel: seconds, not a step.
+KILL_WAIT_SECONDS = 10.0
+
 # How much one read takes off a descriptor.
 READ_CHUNK = 64 * 1024
 
@@ -189,16 +193,57 @@ class PtyProcess:
         return Finished(status=os.waitstatus_to_exitcode(status), output=output)
 
     def kill(self) -> None:
+        """Ends the child and its process group, closes the master, reaps.
+
+        The group gets SIGKILL first, the master is closed next, and only
+        then is the child waited for, with a deadline. The master has to go
+        before the wait: on macOS a process cannot finish exiting while the
+        pty it was writing to holds output nobody has read, so waitpid
+        before close blocks for ever on a session that was still printing,
+        and the failure that led to the teardown is never reported. (Linux
+        does not drain at exit; closing first costs it nothing.) Nothing here
+        waits without a deadline. pty.fork makes the child a session leader,
+        so its process group id is its pid."""
+        stuck = None
         if self.pid > 0:
+            pid, self.pid = self.pid, -1
+            self._signal_group(pid)
+            self._close_master()
+            if not self._reap(pid, KILL_WAIT_SECONDS):
+                self._signal_group(pid)
+                if not self._reap(pid, KILL_WAIT_SECONDS):
+                    stuck = Timeout(f"pid {pid} survived SIGKILL for {2 * KILL_WAIT_SECONDS}s")
+        self._close_master()
+        if stuck is not None:
+            raise stuck
+
+    @staticmethod
+    def _signal_group(pid: int) -> None:
+        try:
+            os.killpg(pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        except PermissionError:
             try:
-                os.kill(self.pid, signal.SIGKILL)
-                os.waitpid(self.pid, 0)
-            except (ProcessLookupError, ChildProcessError):
+                os.kill(pid, signal.SIGKILL)
+            except ProcessLookupError:
                 pass
-            self.pid = -1
+
+    @staticmethod
+    def _reap(pid: int, timeout: float) -> bool:
+        """Whether `pid` was reaped (or was never ours) within `timeout`."""
+        if not _exits_within(pid, timeout):
+            return False
+        try:
+            os.waitpid(pid, 0)
+        except ChildProcessError:
+            pass
+        return True
+
+    def _close_master(self) -> None:
         if self.master >= 0:
-            os.close(self.master)
-            self.master = -1
+            master, self.master = self.master, -1
+            os.close(master)
 
 
 def run_on_pty(argv: list[str], timeout: float = STEP_TIMEOUT_SECONDS, **kwargs) -> Finished:

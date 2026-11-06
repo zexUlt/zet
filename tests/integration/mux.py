@@ -49,6 +49,7 @@ import signal
 import socket
 import struct
 import subprocess
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -136,10 +137,16 @@ def read_frame(sock: socket.socket, timeout: float = STEP_TIMEOUT_SECONDS) -> tu
 
 
 def read_to_end(sock: socket.socket, timeout: float = STEP_TIMEOUT_SECONDS) -> bytes:
-    """Whatever comes until the peer closes, within `timeout`."""
-    sock.settimeout(timeout)
+    """Whatever comes until the peer closes. `timeout` bounds each wait and,
+    through `deadline`, the whole read: a peer that keeps sending never
+    reaches its end."""
+    deadline = time.monotonic() + 4 * timeout
     received = bytearray()
     while True:
+        left = deadline - time.monotonic()
+        if left <= 0:
+            raise TimeoutError(f"no end of stream within {4 * timeout}s, got {len(received)} bytes")
+        sock.settimeout(min(timeout, left))
         try:
             chunk = sock.recv(4096)
         except ConnectionResetError:

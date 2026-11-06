@@ -38,6 +38,7 @@ import os
 import select
 import shutil
 import subprocess
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -58,6 +59,17 @@ PROMPT = b"@zet-prompt$ "
 KEEPALIVE_INTERVAL_MS = 300
 PEER_SILENCE_TIMEOUT_MS = 2000
 RECONNECT_MAX_MS = 500
+
+# How long one expectation (or one wait for the session to end) may take in
+# all, however much the session prints meanwhile. `timeout` bounds the quiet
+# between two reads; this bounds a session that never goes quiet and never
+# prints what is awaited, such as repeated reconnect notices. Four steps: a
+# prompt on a loaded runner takes seconds, so this is a hang, not a slow run.
+EXPECT_DEADLINE_SECONDS = 4 * STEP_TIMEOUT_SECONDS
+
+# The same for waiting on the 6.9 MB stream of the cut tests, whose whole
+# test takes 50 to 130 s under load. Ten steps is more than twice the slowest.
+STREAM_DEADLINE_SECONDS = 10 * STEP_TIMEOUT_SECONDS
 
 # Agents of tests that end abnormally go away on their own, well before the
 # job ends, rather than after the default 30 minutes.
@@ -171,24 +183,49 @@ class Terminal:
         self.buffer += chunk
         return len(chunk)
 
-    def expect(self, needle: bytes, timeout: float = STEP_TIMEOUT_SECONDS) -> bytes:
-        """Everything up to and including the next `needle`."""
+    def _read_before(self, at: float, timeout: float, what: str, deadline: float) -> int:
+        """read_more, but not past the monotonic instant `at`."""
+        left = at - time.monotonic()
+        if left <= 0:
+            raise Timeout(f"{what} not seen within {deadline}s: {self.tail()!r}")
+        try:
+            return self.read_more(min(timeout, left))
+        except Timeout:
+            if time.monotonic() >= at:
+                raise Timeout(f"{what} not seen within {deadline}s: {self.tail()!r}") from None
+            raise
+
+    def expect(self, needle: bytes, timeout: float = STEP_TIMEOUT_SECONDS,
+               deadline: float = EXPECT_DEADLINE_SECONDS) -> bytes:
+        """Everything up to and including the next `needle`. `timeout` is the
+        longest quiet between reads, `deadline` the whole wait."""
+        at = time.monotonic() + deadline
         while True:
-            at = self.buffer.find(needle, self.consumed)
-            if at >= 0:
-                out = bytes(self.buffer[self.consumed:at + len(needle)])
-                self.consumed = at + len(needle)
+            found = self.buffer.find(needle, self.consumed)
+            if found >= 0:
+                out = bytes(self.buffer[self.consumed:found + len(needle)])
+                self.consumed = found + len(needle)
                 return out
-            if self.read_more(timeout) == 0:
+            if self._read_before(at, timeout, repr(needle), deadline) == 0:
                 raise AssertionError(f"the terminal ended before {needle!r}: {self.tail()!r}")
+
+    def read_until(self, condition, what: str, timeout: float = STEP_TIMEOUT_SECONDS,
+                   deadline: float = EXPECT_DEADLINE_SECONDS) -> None:
+        """Reads until `condition()` holds of the buffer, within `deadline`."""
+        at = time.monotonic() + deadline
+        while not condition():
+            if self._read_before(at, timeout, what, deadline) == 0:
+                raise AssertionError(f"the terminal ended before {what}: {self.tail()!r}")
 
     def tail(self, length: int = 400) -> bytes:
         return bytes(self.buffer[-length:])
 
-    def finish(self, timeout: float = STEP_TIMEOUT_SECONDS) -> int:
+    def finish(self, timeout: float = STEP_TIMEOUT_SECONDS,
+               deadline: float = EXPECT_DEADLINE_SECONDS) -> int:
         """Reads to the end and returns zet's exit code."""
+        at = time.monotonic() + deadline
         while not self.ended:
-            self.read_more(timeout)
+            self._read_before(at, timeout, "the end of the session", deadline)
         return self.process.finish(timeout).status
 
     def kill(self) -> None:
