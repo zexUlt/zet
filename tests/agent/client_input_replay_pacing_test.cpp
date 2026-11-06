@@ -9,7 +9,9 @@
 ///
 /// Kills: the send gate in Client::Pump removed (the replay overflows
 /// SocketOut_, the link is dropped on every reconnect and nothing arrives);
-/// the gate never reopened (the replay stops after the first queue-full).
+/// the gate never reopened (the replay stops after the first queue-full); a
+/// live connection dropped once (the client's lost-connection notice reaches
+/// stderr).
 
 #include "../../src/agent/pump_test_api.hpp"
 #include "../../src/client/pump_test_api.hpp"
@@ -24,6 +26,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <future>
+#include <string>
 #include <thread>
 #include <vector>
 
@@ -73,6 +76,12 @@ TEST_CASE_FIXTURE(SodiumFixture,
     REQUIRE(io::SetNonBlocking(in->Read.Get()).has_value());
     io::UniqueFd devnull{::open("/dev/null", O_WRONLY)};
     REQUIRE(devnull.Get() >= 0);
+    // The client prints its lost-connection notice here, and only when a live
+    // connection drops.
+    char errPath[] = "/tmp/zet_replay_pacing_stderr_XXXXXX";
+    io::UniqueFd errFile{::mkstemp(errPath)};
+    REQUIRE(errFile.Get() >= 0);
+    ::unlink(errPath);
 
     // Nobody answers on the listener yet: the client is detached and takes
     // the whole input into its session.
@@ -82,7 +91,7 @@ TEST_CASE_FIXTURE(SodiumFixture,
             .Limits = limits,
             .Addresses = *addresses,
             .StdoutFd = devnull.Get(),
-            .StderrFd = 2,
+            .StderrFd = errFile.Get(),
             .StdinFd = in->Read.Get(),
             .NoticesInline = false,
             .Ceiling = wire::PROTOCOL_VERSION_GRID,
@@ -136,6 +145,14 @@ TEST_CASE_FIXTURE(SodiumFixture,
             std::this_thread::sleep_for(2ms);
         }
     }
+
+    // One connection carried the whole replay: nothing live was dropped.
+    std::string errText(256, '\0');
+    const ssize_t errLen =
+        ::pread(errFile.Get(), errText.data(), errText.size(), 0);
+    REQUIRE(errLen >= 0);
+    errText.resize(static_cast<std::size_t>(errLen));
+    CHECK(errText.empty());
 
     stop = true;
     // A connection wakes the agent so it sees the flag.
