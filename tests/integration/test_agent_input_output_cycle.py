@@ -87,6 +87,9 @@ def _exchange(terminal: Terminal, keystrokes: bytes) -> bytes:
     line md5sum ends it with. Fails, rather than waits, once a step or the
     whole exchange takes too long or the client reports a lost connection."""
     master = terminal.process.master
+    # A blocking write would stop this loop from reading while the terminal
+    # is full, which is a deadlock of the test's own making.
+    os.set_blocking(master, False)
     # What was read past "ready" by the terminal already.
     received = bytearray(terminal.buffer[terminal.consumed:])
     terminal.consumed = len(terminal.buffer)
