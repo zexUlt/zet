@@ -112,6 +112,8 @@ def _exchange(terminal: Terminal, keystrokes: bytes) -> bytes:
         if readable:
             try:
                 chunk = os.read(master, READ_CHUNK)
+            except BlockingIOError:
+                continue
             except OSError:
                 chunk = b""
             if not chunk:
