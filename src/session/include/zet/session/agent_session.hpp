@@ -222,6 +222,9 @@ public:
     /// The liveness timers each connection of the session runs with.
     [[nodiscard]] LivenessLimits Liveness() const noexcept;
 
+    /// The test override of the path A/B cost comparison.
+    [[nodiscard]] EForcePath ForcePath() const noexcept;
+
     /// See AgentSession::End: what this connection is to send once the
     /// stream is acknowledged, if the shell is gone.
     [[nodiscard]] std::optional<wire::SessionEndMessage> EndedWith()

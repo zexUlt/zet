@@ -50,4 +50,13 @@ std::optional<Duration> DurationFromEnv(const char* name, EUnit unit) noexcept {
         std::chrono::milliseconds{count});
 }
 
+std::optional<std::string_view> StringFromEnv(const char* name) noexcept {
+    // NOLINTNEXTLINE(concurrency-mt-unsafe): read once, before any thread.
+    const char* raw = std::getenv(name);
+    if (raw == nullptr) {
+        return std::nullopt;
+    }
+    return std::string_view{raw};
+}
+
 }  // namespace zet::app

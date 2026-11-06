@@ -507,8 +507,8 @@ TEST_CASE_FIXTURE(SodiumFixture,
 TEST_CASE_FIXTURE(SodiumFixture,
                   "a v1 session never allocates the snapshot buffer") {
     AgentSide agent{60, TinyLimits(), false};
-    ClientRun run{agent, {.Ceiling = wire::PROTOCOL_VERSION_MAX}};
-    AgentLink& link = run.AcceptLive(wire::PROTOCOL_VERSION_MAX);
+    ClientRun run{agent, {.Ceiling = wire::PROTOCOL_VERSION_MIN}};
+    AgentLink& link = run.AcceptLive(wire::PROTOCOL_VERSION_MIN);
 
     const auto result = EndCleanly(run, agent, link);
     CHECK(result.Status == 0);
