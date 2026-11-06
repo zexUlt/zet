@@ -18,7 +18,7 @@ from pathlib import Path
 import pytest
 
 from e2e import (ESCAPE_NOTICE, ESCAPE_STATUS, GAVE_UP_STATUS, LOST_NOTICE, PROMPT,
-                 REGAINED_NOTICE, TCP_LISTEN, Terminal, Zet, command_of,
+                 REGAINED_NOTICE, STREAM_DEADLINE_SECONDS, TCP_LISTEN, Terminal, Zet, command_of,
                  connection_to_agent, parent_of, real_uid_of, socket_inodes, sockets_of)
 from harness import STEP_TIMEOUT_SECONDS, PtyProcess, wait_gone, wait_until
 
@@ -162,8 +162,9 @@ def _cut_mid_stream(zet: Zet, iptables: str, rules_for, seed: int) -> None:
             f"printf '%s\\n' \"BE\"\"GIN\"; seq 1 {STREAM_LINES}; printf '%s\\n' \"EN\"\"D\""))
         terminal.expect(b"BEGIN\r\n")
         start = terminal.consumed
-        while len(terminal.buffer) - start < cut_at:
-            terminal.read_more()
+        terminal.read_until(lambda: len(terminal.buffer) - start >= cut_at,
+                            f"{cut_at} bytes of the stream ({context})",
+                            deadline=STREAM_DEADLINE_SECONDS)
 
         cut = connection_to_agent(terminal.pid, zet.host.port)
         rules = rules_for(cut.remote_port)
@@ -180,7 +181,7 @@ def _cut_mid_stream(zet: Zet, iptables: str, rules_for, seed: int) -> None:
                 subprocess.run([iptables, "-D", *rule], check=True,
                                timeout=STEP_TIMEOUT_SECONDS)
 
-        terminal.expect(b"END\r\n")
+        terminal.expect(b"END\r\n", deadline=STREAM_DEADLINE_SECONDS)
         received = bytes(terminal.buffer[start:terminal.consumed - len(b"END\r\n")])
         # zet says so on stderr when the link goes and comes back, once each:
         # those lines are its own, not the session's.
