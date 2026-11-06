@@ -101,6 +101,7 @@ class Zet:
     client: Path
     agent: Path
     host: object  # conftest.SshHost
+    agent_log: Path | None = None  # where every agent of the test logs
 
     def argv(self, agent_env: dict[str, str]) -> list[str]:
         settings = " ".join(f"{name}={value}" for name, value in agent_env.items())
@@ -127,6 +128,8 @@ class Zet:
             "ZET_PEER_SILENCE_TIMEOUT": str(PEER_SILENCE_TIMEOUT_MS),
             "ZET_ORPHAN_TIMEOUT": str(DEFAULT_ORPHAN_TIMEOUT_S),
         })
+        if self.agent_log is not None:
+            env["ZET_AGENT_LOG"] = str(self.agent_log)
         env.update(overrides)
         return env
 

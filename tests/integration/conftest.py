@@ -10,7 +10,10 @@ from __future__ import annotations
 import os
 import pwd as _pwd
 import shutil
+import re
 import subprocess
+import tempfile
+from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -188,12 +191,44 @@ def installed_agent(binaries: Binaries) -> Path:
     return install_agent(binaries.agent)
 
 
+# How much of the agent's log a failing test's report carries.
+LOG_TAIL_LINES = 200
+
+
+@pytest.fixture(scope="session")
+def agent_log_dir() -> Path:
+    """A directory the test user may create logs in; the suite's own
+    directories are root's alone. Removed with the container."""
+    path = Path(tempfile.mkdtemp(prefix="zet-agent-logs-"))
+    path.chmod(0o777)
+    return path
+
+
 @pytest.fixture
-def zet(binaries: Binaries, installed_agent: Path, ssh_host: SshHost) -> Zet:
+def zet(request, binaries: Binaries, installed_agent: Path, ssh_host: SshHost,
+        agent_log_dir: Path) -> Zet:
     """zet against the test host, with a login profile whose prompt the tests
-    can wait for."""
+    can wait for. Its agents log to a file of their own, which the report of
+    a failed test shows the end of (pytest_runtest_makereport)."""
     ssh_host.write_home_file(".bash_profile", PROFILE)
-    return Zet(client=binaries.client, agent=installed_agent, host=ssh_host)
+    log = agent_log_dir / (re.sub(r"[^\w.-]+", "_", request.node.nodeid) + ".log")
+    request.node.zet_agent_log = log
+    return Zet(client=binaries.client, agent=installed_agent, host=ssh_host,
+               agent_log=log)
+
+
+@pytest.hookimpl(wrapper=True)
+def pytest_runtest_makereport(item, call):
+    report = yield
+    log = getattr(item, "zet_agent_log", None)
+    if report.when == "call" and report.failed and log is not None:
+        try:
+            with open(log, errors="replace") as lines:
+                tail = "".join(deque(lines, LOG_TAIL_LINES))
+        except OSError as error:
+            tail = f"no agent log: {error}\n"
+        report.sections.append((f"zet-agent log, last {LOG_TAIL_LINES} lines", tail))
+    return report
 
 
 @pytest.fixture(scope="session")
