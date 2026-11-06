@@ -1041,7 +1041,7 @@ Workflow собирает статические musl-бинари для `x86_6
 
 **Тест клавиш в полёте.** `test_m6_keys_in_flight`: клиент шлёт клавиши в момент обрыва; реконнект; агент получает все.
 
-**Разделение тестов путей A и B.** `test_m6_path_a_only` (переключатель `ZET_TEST_FORCE_PATH=A`): при коротком разрыве путь B не выбран. `test_m6_path_b_only` (`ZET_TEST_FORCE_PATH=B`): при `ring_overflowed=true` путь A заблокирован.
+**Разделение тестов путей A и B.** `test_m6_path_a_only` (переключатель `ZET_TEST_FORCE_PATH=A`): при коротком разрыве путь B не выбран. `test_m6_path_b_only` (`ZET_TEST_FORCE_PATH=B`): при коротком разрыве клиент получает снимок, и сессия продолжает работать. Переключатель читает агент из окружения (как `ZET_ORPHAN_TIMEOUT`) и передаёт в `SessionLimits::ForcePath`: `A` отключает только выбор B по стоимости (при `ring_overflowed` или устаревшем `stream_gen` путь A невозможен, и остаётся B), `B` выбирает путь B для `GRID_CAPABLE`-пира даже при возможном replay, иное значение — решает стоимость. Сквозные тесты 15-МБ-обрывов закреплены за `A`.
 
 **Soak M6.** Три сессии с разными скоростями вывода; принудительное превышение порога path B каждые 30 мин. RSS ≤ `N × (базовый_агент + 2 × cols × rows × sizeof(Cell) + SCROLLBACK_LIMIT × cols × sizeof(Cell) + DISCONNECT_BUFFER_MAX + SNAPSHOT_MAX_BYTES_peak)` — пиковое: два экранных буфера (main + alt) + scrollback-ring + replay-ring + снимок в полёте. Снимок освобождается после `GridApplied`.
 

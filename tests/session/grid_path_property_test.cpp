@@ -1722,3 +1722,75 @@ TEST_CASE_FIXTURE(
     CHECK(res == "NeedsSnapshot");
     CHECK(r.Agent.State() != ESessionState::Reaped);
 }
+
+// ── ZET_TEST_FORCE_PATH: the hook overrides the cost comparison only ─────────
+
+namespace {
+
+/// Room for a replay above SnapshotEstimateBytes(24, 80) without overflow.
+SessionLimits RoomyLimits(EForcePath force) {
+    auto limits = TinyLimits();
+    limits.ResendMax = RESEND_BUFFER_MAX;
+    limits.DisconnectMax = 2U * 1024U * 1024U;
+    limits.ForcePath = force;
+    return limits;
+}
+
+/// First connection (records the 24x80 size), then `bytes` written while
+/// detached, then a second connection; what that one came to.
+std::string ReconnectAfterWriting(Rig& r, std::size_t bytes) {
+    Reconnect(r, true, wire::PROTOCOL_VERSION_GRID);
+    const std::vector<std::byte> chunk(4096, std::byte{0x7F});
+    for (std::size_t done = 0; done < bytes; done += chunk.size()) {
+        std::ignore = r.Agent.Write(ByteSpan{chunk});
+    }
+    return Reconnect(r, true, wire::PROTOCOL_VERSION_GRID);
+}
+
+}  // namespace
+
+TEST_CASE_FIXTURE(SodiumFixture,
+                  "force path: unset, a replay above the estimate takes B") {
+    Rig r(RoomyLimits(EForcePath::None));
+    CHECK(ReconnectAfterWriting(r, SnapshotEstimateBytes(24, 80) + 4096) ==
+          "NeedsSnapshot");
+}
+
+TEST_CASE_FIXTURE(SodiumFixture,
+                  "force path A: a replay above the estimate stays on A") {
+    Rig r(RoomyLimits(EForcePath::A));
+    CHECK(ReconnectAfterWriting(r, SnapshotEstimateBytes(24, 80) + 4096) ==
+          "no-snapshot");
+}
+
+TEST_CASE_FIXTURE(SodiumFixture,
+                  "force path B: a short replay takes B anyway") {
+    Rig r(RoomyLimits(EForcePath::B));
+    CHECK(ReconnectAfterWriting(r, 16) == "NeedsSnapshot");
+}
+
+TEST_CASE_FIXTURE(SodiumFixture,
+                  "force path unset: a short replay stays on A") {
+    Rig r(RoomyLimits(EForcePath::None));
+    CHECK(ReconnectAfterWriting(r, 16) == "no-snapshot");
+}
+
+TEST_CASE_FIXTURE(SodiumFixture,
+                  "force path A: an overflowed ring still takes B") {
+    auto limits = TinyLimits();
+    limits.ForcePath = EForcePath::A;
+    Rig r(limits);
+    Reconnect(r, true, wire::PROTOCOL_VERSION_GRID);
+    const std::vector<std::byte> chunk(100, std::byte{0xBB});
+    for (int i = 0; i < 100 && r.Agent.AcceptsWrites(); ++i) {
+        std::ignore = r.Agent.Write(ByteSpan{chunk});
+    }
+    CHECK(Reconnect(r, true, wire::PROTOCOL_VERSION_GRID) == "NeedsSnapshot");
+}
+
+TEST_CASE_FIXTURE(SodiumFixture,
+                  "force path B: a non-capable peer still takes A") {
+    Rig r(RoomyLimits(EForcePath::B));
+    Reconnect(r, false, wire::PROTOCOL_VERSION_GRID);
+    CHECK(Reconnect(r, false, wire::PROTOCOL_VERSION_GRID) == "no-snapshot");
+}
