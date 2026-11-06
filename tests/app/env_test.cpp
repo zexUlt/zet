@@ -3,6 +3,7 @@
 #include <doctest/doctest.h>
 
 #include <array>
+#include <cstddef>
 #include <cstdlib>
 #include <string>
 #include <string_view>
@@ -72,5 +73,23 @@ TEST_CASE("SizeFromEnv ignores zero, signs, suffixes and overflow") {
         CAPTURE(bad);
         const ScopedEnv env{bad};
         CHECK_FALSE(SizeFromEnv(NAME).has_value());
+    }
+}
+
+TEST_CASE("SizeFromEnv enforces the upper bound inclusively") {
+    constexpr std::size_t maxValue = 1000;
+    {
+        const ScopedEnv env{"1000"};
+        CHECK(SizeFromEnv(NAME, maxValue) == 1000);
+    }
+    {
+        const ScopedEnv env{"1"};
+        CHECK(SizeFromEnv(NAME, maxValue) == 1);
+    }
+    for (const char* bad :
+         {"1001", "1099511627776", "99999999999999999999999"}) {
+        CAPTURE(bad);
+        const ScopedEnv env{bad};
+        CHECK_FALSE(SizeFromEnv(NAME, maxValue).has_value());
     }
 }

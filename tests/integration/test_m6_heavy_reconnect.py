@@ -33,6 +33,8 @@ DISCONNECT_BUFFER_MAX = 8192
 # `seq 1 BURST_LINES` is about 109 KB: more than ten times the buffer.
 BURST_LINES = 20_000
 ROWS, COLS = 24, 80
+# grid/limits.hpp DEFAULT_SCROLLBACK_LIMIT; the agent runs with the default.
+SCROLLBACK_LIMIT = 1000
 
 # What a snapshot opens with (grid/snapshot.cpp), as in test_m6_paths.py.
 SNAPSHOT_PREAMBLE = b"\x1b[!p\x1b[?1049l\x1b[2J"
@@ -113,7 +115,9 @@ def test_m6_heavy_reconnect(zet: Zet, clean_bashrc, iptables):
         stream = received
         for notice in (LOST_NOTICE, REGAINED_NOTICE, SNAPSHOT_NOTICE, DIVERGED_NOTICE):
             stream = stream.replace(notice, b"")
-        screen = pyte.Screen(COLS, ROWS)
+        # HistoryScreen keeps the lines that scrolled off the top, which is
+        # where a snapshot's scrollback section lands.
+        screen = pyte.HistoryScreen(COLS, ROWS, history=2 * SCROLLBACK_LIMIT)
         pyte.ByteStream(screen).feed(stream)
         rows = [line.rstrip() for line in screen.display]
 
@@ -124,6 +128,16 @@ def test_m6_heavy_reconnect(zet: Zet, clean_bashrc, iptables):
         want = [str(n) for n in range(BURST_LINES - (ROWS - 3), BURST_LINES + 1)]
         assert rows[:ROWS - 2] == want, rows
         assert screen.cursor.y == ROWS - 1, screen.cursor.y
+
+        # The snapshot also carries the agent's scrollback: the last
+        # SCROLLBACK_LIMIT lines above the visible ones (1000 short lines are
+        # a few KiB, so no step of the degrade ladder trims them), oldest
+        # first, and nothing else.
+        history = ["".join(line[x].data for x in range(COLS)).rstrip()
+                   for line in screen.history.top]
+        first_visible = BURST_LINES - (ROWS - 3)
+        want_history = [str(n) for n in range(first_visible - SCROLLBACK_LIMIT, first_visible)]
+        assert history == want_history, (len(history), history[:3], history[-3:])
 
         # The session works after the snapshot.
         terminal.send(_typed('echo "mar""ker=$((6*7))"'))

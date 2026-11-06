@@ -156,7 +156,13 @@ std::optional<Config> ReadConfig(std::span<char*> args) {
         config.Limits.ForcePath =
             *force == "A" ? session::EForcePath::A : session::EForcePath::B;
     }
-    if (const auto max = app::SizeFromEnv("ZET_DISCONNECT_BUFFER_MAX")) {
+    // The agent allocates this much, zero-filled, before it serves anyone, so
+    // the hook is bounded: four times the compiled default (64 MiB) is room
+    // enough to test a larger buffer and nowhere near an allocation failure.
+    constexpr std::size_t disconnectHookMax =
+        4U * session::DISCONNECT_BUFFER_MAX;
+    if (const auto max =
+            app::SizeFromEnv("ZET_DISCONNECT_BUFFER_MAX", disconnectHookMax)) {
         config.Limits.DisconnectMax = *max;
     }
     return config;

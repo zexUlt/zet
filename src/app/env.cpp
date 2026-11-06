@@ -51,7 +51,8 @@ std::optional<Duration> DurationFromEnv(const char* name, EUnit unit) noexcept {
         std::chrono::milliseconds{count});
 }
 
-std::optional<std::size_t> SizeFromEnv(const char* name) noexcept {
+std::optional<std::size_t> SizeFromEnv(const char* name,
+                                       std::size_t max) noexcept {
     // NOLINTNEXTLINE(concurrency-mt-unsafe): read once, before any thread.
     const char* raw = std::getenv(name);
     if (raw == nullptr) {
@@ -62,8 +63,8 @@ std::optional<std::size_t> SizeFromEnv(const char* name) noexcept {
     const auto [end, error] =
         std::from_chars(text.data(), text.data() + text.size(), value);
     if (error != std::errc{} || end != text.data() + text.size() ||
-        value == 0) {
-        Complain(name, text, ", not a positive whole number: ");
+        value == 0 || value > max) {
+        Complain(name, text, ", not a positive whole number within range: ");
         return std::nullopt;
     }
     return value;
