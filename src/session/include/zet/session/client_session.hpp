@@ -82,6 +82,12 @@ public:
         return Streams_.ReceiveOffset();
     }
 
+    /// How much of the client's own stream the agent has acknowledged: what
+    /// it holds for good, and the client may forget.
+    [[nodiscard]] std::uint64_t AckedOffset() const noexcept {
+        return Streams_.AckedOffset();
+    }
+
     /// How the agent's shell ended, once a SessionEnd has arrived. The client
     /// holds the whole of the agent's stream by then (§9), so there is
     /// nothing left to reconnect for.

@@ -311,7 +311,7 @@ TEST_CASE("OnReceipt: the ack offset is the receive offset") {
     REQUIRE(cur.Receive(0, data).has_value());
     CHECK(cur.AckOffset() == 10);
     CHECK(cur.Pending() == 0);
-    cur.MarkDelivered(5);  // no effect: nothing is pending
+    CHECK_FALSE(cur.MarkDelivered(5));  // misuse: nothing is pending
     CHECK(cur.AckOffset() == 10);
 }
 
@@ -321,10 +321,10 @@ TEST_CASE("OnDelivery: the ack offset trails by what is not marked delivered") {
     REQUIRE(cur.Receive(0, data).has_value());
     CHECK(cur.RecvOffset() == 10);
     CHECK(cur.AckOffset() == 0);
-    cur.MarkDelivered(4);
+    CHECK(cur.MarkDelivered(4));
     CHECK(cur.AckOffset() == 4);
     CHECK(cur.Pending() == 6);
-    cur.MarkDelivered(100);  // clamped
+    CHECK(cur.MarkDelivered(6));
     CHECK(cur.AckOffset() == 10);
     CHECK(cur.Pending() == 0);
 }
@@ -334,7 +334,7 @@ TEST_CASE(
     ReceiveCursor cur{0, EInputAck::OnDelivery};
     const auto data = MakeBytes(10);
     REQUIRE(cur.Receive(0, data).has_value());
-    cur.MarkDelivered(4);
+    CHECK(cur.MarkDelivered(4));
     // The peer resends from 4: nothing of it is new, and nothing is pending
     // twice.
     const auto again = cur.Receive(4, ByteSpan{data}.subspan(4));
@@ -359,12 +359,12 @@ TEST_CASE(
     ReceiveCursor cur{0, EInputAck::OnDelivery};
     const auto data = MakeBytes(10);
     REQUIRE(cur.Receive(0, ByteSpan{data}.first(6)).has_value());
-    cur.MarkDelivered(2);
+    CHECK(cur.MarkDelivered(2));
     const auto last = cur.Receive(6, ByteSpan{data}.subspan(6));
     REQUIRE(last.has_value());
     REQUIRE(last->size() == 4);
 
-    cur.Unreceive(last->size());
+    CHECK(cur.Unreceive(last->size()));
     CHECK(cur.RecvOffset() == 6);
     CHECK(cur.AckOffset() == 2);  // unchanged
     CHECK(cur.Pending() == 4);
@@ -378,17 +378,28 @@ TEST_CASE(
     CHECK(cur.Pending() == 8);
 }
 
-TEST_CASE("Unreceive is clamped to what is pending and not for OnReceipt") {
+TEST_CASE("MarkDelivered and Unreceive refuse a count past what is pending") {
     ReceiveCursor cur{0, EInputAck::OnDelivery};
     const auto data = MakeBytes(10);
     REQUIRE(cur.Receive(0, data).has_value());
-    cur.MarkDelivered(7);
-    cur.Unreceive(100);
-    CHECK(cur.RecvOffset() == 7);
-    CHECK(cur.AckOffset() == 7);
+    CHECK(cur.MarkDelivered(7));
 
+    // Nothing changes: no clamping that would hide the miscount.
+    CHECK_FALSE(cur.Unreceive(4));
+    CHECK_FALSE(cur.MarkDelivered(4));
+    CHECK(cur.RecvOffset() == 10);
+    CHECK(cur.AckOffset() == 7);
+    CHECK(cur.Pending() == 3);
+
+    CHECK(cur.Unreceive(3));
+    CHECK(cur.RecvOffset() == 7);
+    CHECK(cur.Pending() == 0);
+    CHECK(cur.MarkDelivered(0));
+
+    // OnReceipt has nothing pending, so any count is a miscount.
     ReceiveCursor receipt;
     REQUIRE(receipt.Receive(0, data).has_value());
-    receipt.Unreceive(5);
+    CHECK_FALSE(receipt.Unreceive(5));
+    CHECK_FALSE(receipt.MarkDelivered(5));
     CHECK(receipt.RecvOffset() == 10);
 }

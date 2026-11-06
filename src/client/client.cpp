@@ -990,6 +990,14 @@ private:
     bool Announced_{false};
     /// When the last live connection was lost; the give-up clock runs from it.
     std::optional<Timestamp> LostSince_;
+    /// What the current connection started from, to tell whether it got
+    /// anywhere: the backoff restarts only if it did (§9).
+    struct ConnectionMark {
+        Timestamp Since;
+        std::uint64_t Received;
+        std::uint64_t Acked;
+    };
+    std::optional<ConnectionMark> Mark_;
     std::optional<std::string> Fatal_;
 
     std::array<std::byte, session::CONNECTION_OUT_SIZE> Out_{};
@@ -1138,7 +1146,16 @@ void Client::Pump(Timestamp now) noexcept {
         }
     }
     if (Connection_ && Connection_->IsLive()) {
-        Attempts_ = 0;
+        // Live is not progress: an agent whose pty queue is full lets the
+        // handshake through and closes on the first frame it cannot take.
+        // The backoff restarts when the agent took our input or the client
+        // took its output, or when the connection outlived a keepalive.
+        if (Mark_ && (Session_.ReceiveOffset() != Mark_->Received ||
+                      Session_.AckedOffset() != Mark_->Acked ||
+                      now - Mark_->Since >=
+                          Options_.Limits.Liveness.KeepaliveInterval)) {
+            Attempts_ = 0;
+        }
         LostSince_.reset();
         if (Announced_) {
             Notice(REGAINED_NOTICE);
@@ -1206,6 +1223,9 @@ void Client::FinishConnecting(Timestamp now) noexcept {
     if (Size_) {
         Connection_->QueueResize(*Size_);
     }
+    Mark_ = ConnectionMark{.Since = now,
+                           .Received = Session_.ReceiveOffset(),
+                           .Acked = Session_.AckedOffset()};
     Link_ = ELink::Up;
     LinkDeadline_ = Deadline{};
 }
@@ -1226,6 +1246,7 @@ void Client::Drop(Timestamp now) noexcept {
         Connection_->Close(now);
         Connection_.reset();
     }
+    Mark_.reset();
     if (SocketWatch_) {
         SocketWatch_->Forget(Poller_);
         SocketWatch_.reset();

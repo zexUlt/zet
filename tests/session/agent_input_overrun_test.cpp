@@ -93,7 +93,7 @@ struct Link2 {
                 moved = true;
             } else if (const auto* d = std::get_if<Deliver>(&*ea)) {
                 if (q.size() + d->Bytes.size() > Limit) {
-                    R.Agent.InputRejected(d->Bytes.size());
+                    CHECK(R.Agent.InputRejected(d->Bytes.size()));
                     Closed = true;
                     return false;
                 }
@@ -156,7 +156,7 @@ TEST_CASE_FIXTURE(SodiumFixture,
     // the pty now takes everything
     for (int round = 0; round < 40; ++round) {
         written.insert(written.end(), q.begin(), q.end());
-        r.Agent.InputDelivered(q.size());
+        CHECK(r.Agent.InputDelivered(q.size()));
         q.clear();
         Link2 l{r, 300000};
         // What is acknowledged is what the pty took, never more.
@@ -165,7 +165,7 @@ TEST_CASE_FIXTURE(SodiumFixture,
         l.Agent.Close(now);
     }
     written.insert(written.end(), q.begin(), q.end());
-    r.Agent.InputDelivered(q.size());
+    CHECK(r.Agent.InputDelivered(q.size()));
     CHECK(std::equal(written.begin(), written.end(), src.begin()));
     CHECK(written == src);
     CHECK(r.Agent.Ref().ReceiveOffset() == src.size());
@@ -183,7 +183,7 @@ TEST_CASE_FIXTURE(SodiumFixture,
     Link2 l{r, 700000};
     CHECK(l.Exchange(now, q));
     CHECK(q == src);
-    r.Agent.InputDelivered(q.size());
+    CHECK(r.Agent.InputDelivered(q.size()));
     l.Idle2(now, q);
     CHECK(r.Agent.Ref().ReceiveOffset() == src.size());
 }
@@ -222,7 +222,7 @@ TEST_CASE_FIXTURE(SodiumFixture,
                         q.begin() + static_cast<std::ptrdiff_t>(take));
                     q.erase(q.begin(),
                             q.begin() + static_cast<std::ptrdiff_t>(take));
-                    r.Agent.InputDelivered(take);
+                    CHECK(r.Agent.InputDelivered(take));
                 }
                 if (rng() % 3 == 0) l.Idle2(now, q);
                 const auto a = r.Agent.Ref().ReceiveOffset();
@@ -235,7 +235,7 @@ TEST_CASE_FIXTURE(SodiumFixture,
         // drain
         for (int i = 0; i < 50 && written.size() < src.size(); ++i) {
             written.insert(written.end(), q.begin(), q.end());
-            r.Agent.InputDelivered(q.size());
+            CHECK(r.Agent.InputDelivered(q.size()));
             q.clear();
             type();
             Link2 l{r, 2048};
@@ -262,7 +262,7 @@ TEST_CASE_FIXTURE(SodiumFixture,
     {
         Link2 l{r, 2048};
         REQUIRE(l.Exchange(now, q));
-        r.Agent.InputDelivered(q.size());  // DiscardPtyInput
+        CHECK(r.Agent.InputDelivered(q.size()));  // DiscardPtyInput
         q.clear();
         l.Idle2(now, q);
         l.Agent.Close(now);

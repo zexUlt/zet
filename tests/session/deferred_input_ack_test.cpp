@@ -132,7 +132,7 @@ TEST_CASE_FIXTURE(SodiumFixture,
     CHECK(ClientRoom(r) == 0);
 
     // The pty takes 100 bytes: the idle Ack says 100, not 512.
-    r.Agent.InputDelivered(100);
+    CHECK(r.Agent.InputDelivered(100));
     link.ExchangePastIdleAck(now, pty);
     CHECK(r.Agent.Ref().ReceiveOffset() == 100);
     CHECK(ClientRoom(r) == 100);
@@ -150,7 +150,7 @@ TEST_CASE_FIXTURE(SodiumFixture,
     link.Exchange(now, pty);
     REQUIRE(pty.size() == input.size());
 
-    r.Agent.InputDelivered(40);
+    CHECK(r.Agent.InputDelivered(40));
     // The shell prints something: the Data frame carries the ack, with no
     // idle delay in between.
     const auto output = Sequence(10, 7);
@@ -197,7 +197,7 @@ TEST_CASE_FIXTURE(SodiumFixture,
             const auto end = pty.begin() + static_cast<std::ptrdiff_t>(take);
             written.insert(written.end(), pty.begin(), end);
             pty.erase(pty.begin(), end);
-            r.Agent.InputDelivered(take);
+            CHECK(r.Agent.InputDelivered(take));
         }
         type();
         link.ExchangePastIdleAck(now, pty);
@@ -226,7 +226,7 @@ TEST_CASE_FIXTURE(SodiumFixture,
         // The pty took 100 of the 300; the agent acknowledges 100.
         written.assign(pty.begin(), pty.begin() + 100);
         pty.erase(pty.begin(), pty.begin() + 100);
-        r.Agent.InputDelivered(100);
+        CHECK(r.Agent.InputDelivered(100));
         link.ExchangePastIdleAck(now, pty);
         link.Agent.Close(now);
     }
@@ -244,7 +244,7 @@ TEST_CASE_FIXTURE(SodiumFixture,
         link.Exchange(now, pty);
         CHECK(pty.size() == before + second.size());
         written.insert(written.end(), pty.begin(), pty.end());
-        r.Agent.InputDelivered(pty.size());
+        CHECK(r.Agent.InputDelivered(pty.size()));
         pty.clear();
         link.ExchangePastIdleAck(now, pty);
         CHECK(pty.empty());

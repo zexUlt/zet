@@ -78,6 +78,7 @@ if(ZET_HAVE_IO)
         client/deliver_test.cpp
         client/escape_test.cpp
         client/read_gate_client_test.cpp
+        client/reconnect_backoff_test.cpp
         client/snapshot_client_test.cpp
         io/clock_test.cpp
         io/fd_test.cpp
