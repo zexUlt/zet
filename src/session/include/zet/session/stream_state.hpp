@@ -171,6 +171,10 @@ public:
     void Kill(ESessionError reason) noexcept;
 
     [[nodiscard]] SendBuffer& Output() noexcept { return Output_; }
+    /// The offset below which the peer has acknowledged our stream.
+    [[nodiscard]] std::uint64_t AckedOffset() const noexcept {
+        return Output_.Base();
+    }
 
     /// The policy the session was given.
     [[nodiscard]] const SessionLimits& Limits() const noexcept {

@@ -448,6 +448,9 @@ private:
     void WritePty() noexcept;
     /// Drops the input the pty will never take and acknowledges it as gone.
     void DiscardPtyInput() noexcept;
+    /// Tells the session the pty took (or the agent dropped) `count` bytes of
+    /// input; a count the session does not recognise is logged.
+    void ConfirmPtyInput(std::uint64_t count) noexcept;
     void ReadSocket(Connection& connection) noexcept;
     void WriteSocket(Connection& connection) noexcept;
     void TakeChild() noexcept;
@@ -761,7 +764,9 @@ void Agent::Pump(Connection& connection, Timestamp now) noexcept {
             if (!PtyInput_.Append(deliver->Bytes)) {
                 // Not received after all: the client resends them from the
                 // acknowledged offset once it is back.
-                Session_.InputRejected(deliver->Bytes.size());
+                if (!Session_.InputRejected(deliver->Bytes.size())) {
+                    Log(log::ELevel::Error, "input accounting out of step");
+                }
                 Log(log::ELevel::Warn, "keystrokes past the pty's queue");
                 connection.Closing = true;
             }
@@ -1005,13 +1010,19 @@ void Agent::WritePty() noexcept {
             return;
         }
         PtyInput_.Consume(*n);
-        Session_.InputDelivered(*n);
+        ConfirmPtyInput(*n);
     }
 }
 
 void Agent::DiscardPtyInput() noexcept {
-    Session_.InputDelivered(PtyInput_.Size());
+    ConfirmPtyInput(PtyInput_.Size());
     PtyInput_.Consume(PtyInput_.Size());
+}
+
+void Agent::ConfirmPtyInput(std::uint64_t count) noexcept {
+    if (!Session_.InputDelivered(count)) {
+        Log(log::ELevel::Error, "input accounting out of step");
+    }
 }
 
 void Agent::ReadSocket(Connection& connection) noexcept {
