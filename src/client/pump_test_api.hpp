@@ -6,6 +6,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <optional>
+#include <string>
 
 #include "zet/core/time.hpp"
 #include "zet/io/tcp.hpp"
@@ -31,6 +32,9 @@ struct SessionTestConfig {
     Duration BackoffMax{std::chrono::milliseconds{20}};
     /// How long to keep reconnecting after the link drops.
     std::optional<Duration> GiveUpAfter{std::chrono::milliseconds{500}};
+    /// Typed before the loop starts, as if it came from the keyboard; at most
+    /// a few bytes. Stdin ends after it.
+    std::string InitialInput{};
 };
 
 struct SessionTestResult {

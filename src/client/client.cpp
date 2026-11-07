@@ -927,6 +927,7 @@ private:
     void StartConnecting(Timestamp now) noexcept;
     void FinishConnecting(Timestamp now) noexcept;
     void Drop(Timestamp now) noexcept;
+    void CreditProgress(Timestamp now) noexcept;
     [[nodiscard]] bool UpdateInterest() noexcept;
     [[nodiscard]] Deadline NextDeadline() const noexcept;
     void Handle(const io::PollEvent& event, Timestamp now) noexcept;
@@ -1000,6 +1001,14 @@ private:
     std::uint8_t PendingSnapshotFlags_{0};
     /// When the last live connection was lost; the give-up clock runs from it.
     std::optional<Timestamp> LostSince_;
+    /// What the current connection started from, to tell whether it got
+    /// anywhere: the backoff restarts only if it did (§9).
+    struct ConnectionMark {
+        Timestamp Since;
+        std::uint64_t Received;
+        std::uint64_t Acked;
+    };
+    std::optional<ConnectionMark> Mark_;
     std::optional<std::string> Fatal_;
 
     std::array<std::byte, session::CONNECTION_OUT_SIZE> Out_{};
@@ -1154,7 +1163,7 @@ void Client::Pump(Timestamp now) noexcept {
         }
     }
     if (Connection_ && Connection_->IsLive()) {
-        Attempts_ = 0;
+        CreditProgress(now);
         LostSince_.reset();
         if (Announced_) {
             Notice(REGAINED_NOTICE);
@@ -1222,8 +1231,28 @@ void Client::FinishConnecting(Timestamp now) noexcept {
     if (Size_) {
         Connection_->QueueResize(*Size_);
     }
+    Mark_ = ConnectionMark{.Since = now,
+                           .Received = Session_.ReceiveOffset(),
+                           .Acked = Session_.AckedOffset()};
     Link_ = ELink::Up;
     LinkDeadline_ = Deadline{};
+}
+
+void Client::CreditProgress(Timestamp now) noexcept {
+    // Live is not progress: an agent whose pty queue is full lets the
+    // handshake through and closes on the first frame it cannot take. The
+    // backoff restarts when the agent took our input or the client took its
+    // output, or when the connection outlived a keepalive (never with
+    // keepalive off: every connection would then count).
+    if (!Mark_ || !Connection_ || !Connection_->IsLive()) {
+        return;
+    }
+    const Duration keepalive = Options_.Limits.Liveness.KeepaliveInterval;
+    if (Session_.ReceiveOffset() != Mark_->Received ||
+        Session_.AckedOffset() != Mark_->Acked ||
+        (keepalive > Duration::zero() && now - Mark_->Since >= keepalive)) {
+        Attempts_ = 0;
+    }
 }
 
 void Client::Drop(Timestamp now) noexcept {
@@ -1233,6 +1262,8 @@ void Client::Drop(Timestamp now) noexcept {
             Announced_ = true;
         }
     }
+    // Progress of the final iteration counts, before the backoff is drawn.
+    CreditProgress(now);
     if (!LostSince_) {
         LostSince_ = now;
     }
@@ -1242,6 +1273,7 @@ void Client::Drop(Timestamp now) noexcept {
         Connection_->Close(now);
         Connection_.reset();
     }
+    Mark_.reset();
     if (SocketWatch_) {
         SocketWatch_->Forget(Poller_);
         SocketWatch_.reset();
@@ -1480,6 +1512,11 @@ SessionTestResult RunSessionForTestImpl(SessionTestConfig config) noexcept {
         clientObj->StdinWatch_ = app::Registration{config.StdinFd, STDIN_TOKEN};
     } else {
         clientObj->InEnded_ = true;
+    }
+    if (config.InitialInput.size() <= clientObj->In_.size()) {
+        std::memcpy(clientObj->In_.data(), config.InitialInput.data(),
+                    config.InitialInput.size());
+        clientObj->InTo_ = config.InitialInput.size();
     }
 
     const int status = clientObj->Run();

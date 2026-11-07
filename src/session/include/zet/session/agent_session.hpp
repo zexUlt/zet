@@ -81,15 +81,18 @@ public:
     /// The pty took (or the agent discarded) the next `count` bytes of the
     /// client's input that a connection delivered. Only now are they
     /// acknowledged; until then the client keeps them for the resend. §9.
-    void InputDelivered(std::uint64_t count) noexcept {
-        Streams_.Input().MarkDelivered(count);
+    /// False if `count` is more than was handed over and not yet confirmed:
+    /// a defect of the caller, and nothing changed. See
+    /// ReceiveCursor::MarkDelivered.
+    [[nodiscard]] bool InputDelivered(std::uint64_t count) noexcept {
+        return Streams_.Input().MarkDelivered(count);
     }
     /// The agent could not queue the `count` bytes the last Deliver event
     /// handed over: they count as not received, and the client's resend after
     /// the reconnect brings them again. Call it before closing the
-    /// connection. §9.
-    void InputRejected(std::uint64_t count) noexcept {
-        Streams_.Input().Unreceive(count);
+    /// connection. §9. False as for InputDelivered.
+    [[nodiscard]] bool InputRejected(std::uint64_t count) noexcept {
+        return Streams_.Input().Unreceive(count);
     }
     [[nodiscard]] bool AcceptsWrites() const noexcept {
         return Streams_.AcceptsWrites();

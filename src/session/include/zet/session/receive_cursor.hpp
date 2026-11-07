@@ -86,9 +86,16 @@ public:
 
     /// The caller is done with the next `count` bytes Receive() returned
     /// (written to the pty, or discarded because the shell is gone).
-    /// OnDelivery only; a count past what is pending is clamped.
-    void MarkDelivered(std::uint64_t count) noexcept {
-        Pending_ -= count < Pending_ ? count : Pending_;
+    /// OnDelivery only. A count past what is pending is a defect in the
+    /// caller, not in the peer: nothing changes and the result is false, since
+    /// the core may not abort (invariant 1) and clamping would hide an
+    /// acknowledgement that covers bytes never received.
+    [[nodiscard]] bool MarkDelivered(std::uint64_t count) noexcept {
+        if (count > Pending_) {
+            return false;
+        }
+        Pending_ -= count;
+        return true;
     }
 
     /// The caller could not take the last `count` bytes Receive() returned
@@ -96,13 +103,16 @@ public:
     /// peer's resend from AckOffset() brings them again instead of Receive()
     /// cutting them as duplicates. Only for bytes MarkDelivered() has not
     /// covered, which is all of them when called right after Receive();
-    /// OnDelivery only, and a count past what is pending is clamped. This and
-    /// Reset() are the only ways RecvOffset() goes down. AckOffset() does not
-    /// change.
-    void Unreceive(std::uint64_t count) noexcept {
-        const std::uint64_t undo = count < Pending_ ? count : Pending_;
-        Pending_ -= undo;
-        RecvOffset_ -= undo;
+    /// OnDelivery only. A count past what is pending changes nothing and
+    /// returns false, as for MarkDelivered(). This and Reset() are the only
+    /// ways RecvOffset() goes down. AckOffset() does not change.
+    [[nodiscard]] bool Unreceive(std::uint64_t count) noexcept {
+        if (count > Pending_) {
+            return false;
+        }
+        Pending_ -= count;
+        RecvOffset_ -= count;
+        return true;
     }
 
     /// Reset the cursor to `offset`. Used when path B (§9 ADR-030) opens a
