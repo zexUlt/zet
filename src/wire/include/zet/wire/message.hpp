@@ -81,6 +81,19 @@ inline constexpr std::size_t MAX_DATA_PAYLOAD = MAX_FRAME - crypto::TAG_SIZE -
 inline constexpr std::size_t GRID_CHUNK_MAX_DATA =
     MAX_FRAME - crypto::TAG_SIZE - sizeof(std::uint8_t) - sizeof(std::uint32_t);
 
+/// What a sender puts in one Data or GridChunk: SEND_FRAME_MAX in place of
+/// MAX_FRAME in the two derivations above. The parsers still accept up to
+/// MAX_DATA_PAYLOAD and GRID_CHUNK_MAX_DATA.
+inline constexpr std::size_t SEND_DATA_PAYLOAD_MAX =
+    SEND_FRAME_MAX - crypto::TAG_SIZE - sizeof(std::uint8_t) -
+    2 * sizeof(std::uint64_t);
+inline constexpr std::size_t SEND_GRID_CHUNK_MAX_DATA =
+    SEND_FRAME_MAX - crypto::TAG_SIZE - sizeof(std::uint8_t) -
+    sizeof(std::uint32_t);
+
+static_assert(SEND_DATA_PAYLOAD_MAX <= MAX_DATA_PAYLOAD);
+static_assert(SEND_GRID_CHUNK_MAX_DATA <= GRID_CHUNK_MAX_DATA);
+
 /// "ZET1", the four bytes after the type byte of every Hello there will ever
 /// be.
 inline constexpr std::array<std::byte, 4> HELLO_MAGIC{

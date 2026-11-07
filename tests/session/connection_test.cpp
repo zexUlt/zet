@@ -123,6 +123,9 @@ struct Link {
     bool RouteToUnknown{false};
     ECut Cut{ECut::None};
     int AgentFramesSent{0};
+    /// The widest frame body either end put on the wire, header excluded.
+    std::size_t MaxAgentBody{0};
+    std::size_t MaxClientBody{0};
     std::optional<SessionError> AgentError;
     std::optional<SessionError> ClientError;
 
@@ -161,6 +164,8 @@ struct Link {
         }
         if (const auto* send = std::get_if<SendFrame>(&*event)) {
             ++AgentFramesSent;
+            MaxAgentBody =
+                std::max(MaxAgentBody, send->Written - wire::HEADER_SIZE);
             // Challenge and AuthOk are the agent's first two frames.
             const bool lost =
                 Cut == ECut::AfterAgentAuthOk && AgentFramesSent > 2;
@@ -189,6 +194,8 @@ struct Link {
             return false;
         }
         if (const auto* send = std::get_if<SendFrame>(&*event)) {
+            MaxClientBody =
+                std::max(MaxClientBody, send->Written - wire::HEADER_SIZE);
             const auto accepted =
                 Agent.OnBytes(ByteSpan{Out}.first(send->Written));
             if (!accepted) {
@@ -1172,25 +1179,59 @@ std::vector<std::byte> DrainAgentWire(Link& link, Timestamp now) {
 }  // namespace
 
 TEST_CASE_FIXTURE(SodiumFixture,
-                  "a frame crawling in slower than the silence limit is not "
-                  "silence, and the stall after it still is") {
-    SessionLimits limits;
-    limits.Liveness = {.KeepaliveInterval = 1s, .PeerSilenceTimeout = 3s};
-    Ends ends{1, 1, limits};
+                  "the agent's replay goes out in frames of at most "
+                  "SEND_FRAME_MAX") {
+    Ends ends;
+    // Written while nobody was connected: the resume replays it from the ring.
+    const auto output = Pattern(60'000, 5);
+    REQUIRE(ends.Agent.Write(ByteSpan{output}) == output.size());
+    Link link{ends, START};
+    link.Shuttle(START);
+    REQUIRE_FALSE(link.AgentError.has_value());
+    REQUIRE_FALSE(link.ClientError.has_value());
+    CHECK(ends.AtTerminal == output);
+    CHECK(link.MaxAgentBody <= wire::SEND_FRAME_MAX);
+    // The cap is the cut, not slack: a frame goes out full.
+    CHECK(link.MaxAgentBody == wire::SEND_FRAME_MAX);
+}
+
+TEST_CASE_FIXTURE(SodiumFixture,
+                  "live output and the client's typed-ahead input go out in "
+                  "frames of at most SEND_FRAME_MAX") {
+    Ends ends;
     Link link{ends, START};
     BringUp(link, START);
+    const auto output = Pattern(60'000, 6);
+    const auto typed = Pattern(50'000, 7);
+    REQUIRE(ends.Agent.Write(ByteSpan{output}) == output.size());
+    REQUIRE(ends.Client.Write(ByteSpan{typed}) == typed.size());
+    link.Shuttle(START + 1ms);
+    CHECK(ends.AtTerminal == output);
+    CHECK(ends.AtPty == typed);
+    CHECK(link.MaxAgentBody == wire::SEND_FRAME_MAX);
+    CHECK(link.MaxClientBody == wire::SEND_FRAME_MAX);
+}
 
-    const auto output = Pattern(40'000, 5);
+TEST_CASE_FIXTURE(SodiumFixture,
+                  "a long transfer over a link just above the silence "
+                  "threshold is not silence, and the stall after it still is") {
+    // Default liveness: 15 s of silence. A 16 KiB frame needs 15 s at about
+    // 1.1 KB/s; the link below gives 1.5 KB/s, so every frame completes in
+    // time and the whole transfer takes far longer than the limit.
+    Ends ends;
+    Link link{ends, START};
+    BringUp(link, START);
+    const auto limit = PEER_SILENCE_TIMEOUT;
+
+    const auto output = Pattern(60'000, 5);
     REQUIRE(ends.Agent.Write(ByteSpan{output}) == output.size());
     const auto wire = DrainAgentWire(link, START);
     REQUIRE(wire.size() > output.size());
 
-    // 1 KiB every 250 ms: the data takes well over twice the silence limit,
-    // and no frame is whole until the last slices.
-    constexpr std::size_t sliceSize = 1024;
+    constexpr std::size_t sliceSize = 150;
     Timestamp now = START;
     for (std::size_t at = 0; at < wire.size(); at += sliceSize) {
-        now = now + 250ms;
+        now = now + 100ms;
         const auto slice =
             ByteSpan{wire}.subspan(at, std::min(sliceSize, wire.size() - at));
         REQUIRE(link.Client.OnBytes(slice));
@@ -1198,17 +1239,46 @@ TEST_CASE_FIXTURE(SodiumFixture,
         }
         REQUIRE_FALSE(link.ClientError.has_value());
     }
-    CHECK(now - START > 2 * limits.Liveness.PeerSilenceTimeout);
+    CHECK(now - START > 2 * limit);
     CHECK(ends.AtTerminal == output);
 
-    // Nothing more arrives: the stall ends the connection on schedule.
-    while (link.PumpClient(now + 3s - 1ms)) {
+    // Nothing more arrives: the stall ends the connection on schedule, from
+    // the last frame that opened.
+    while (link.PumpClient(now + limit - 1s)) {
     }
     CHECK_FALSE(link.ClientError.has_value());
-    while (link.PumpClient(now + 3s)) {
+    while (link.PumpClient(now + limit)) {
     }
     REQUIRE(link.ClientError.has_value());
     CHECK(link.ClientError->Session() == ESessionError::PeerSilent);
+}
+
+TEST_CASE_FIXTURE(SodiumFixture,
+                  "a header and then garbage trickled after authentication "
+                  "is silence: only an opened frame is the peer") {
+    SessionLimits limits;
+    limits.Liveness = {.KeepaliveInterval = 1s, .PeerSilenceTimeout = 3s};
+    Ends ends{1, 1, limits};
+    Link link{ends, START};
+    BringUp(link, START);
+
+    // A header that declares the largest frame, then one byte a second.
+    ByteWriter header{MutableByteSpan{link.Out}.first(wire::HEADER_SIZE)};
+    REQUIRE(wire::WriteFrameHeader(
+        header, wire::FrameHeader{.Length = wire::MAX_FRAME, .Epoch = 1}));
+    REQUIRE(link.Client.OnBytes(ByteSpan{link.Out}.first(wire::HEADER_SIZE)));
+    const std::vector<std::byte> junk(64, std::byte{0x5A});
+    Timestamp now = START;
+    for (std::size_t i = 0; i < junk.size() && !link.ClientError; ++i) {
+        now = now + 1s;
+        REQUIRE(link.Client.OnBytes(ByteSpan{junk}.subspan(i, 1)));
+        while (link.PumpClient(now)) {
+        }
+    }
+    REQUIRE(link.ClientError.has_value());
+    CHECK(link.ClientError->Session() == ESessionError::PeerSilent);
+    // Exactly at the limit counted from the last opened frame, not later.
+    CHECK(now - START == limits.Liveness.PeerSilenceTimeout);
 }
 
 TEST_CASE_FIXTURE(SodiumFixture,

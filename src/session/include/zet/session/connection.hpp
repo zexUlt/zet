@@ -42,6 +42,13 @@ inline constexpr std::size_t CONNECTION_FRAME_STORAGE =
 inline constexpr std::size_t CONNECTION_OUT_SIZE =
     wire::HEADER_SIZE + wire::MAX_FRAME;
 
+/// Room a connection's queue needs for the largest frame Pump emits: header
+/// and a body of SEND_FRAME_MAX. The owners' send gate opens at this, not at
+/// CONNECTION_OUT_SIZE, which is only the width of the buffer Pump writes into
+/// and covers the receive limit. §9.
+inline constexpr std::size_t CONNECTION_SEND_ROOM =
+    wire::HEADER_SIZE + wire::SEND_FRAME_MAX;
+
 /// Room Pump needs in `scratch`: the plaintext of the largest frame, which is
 /// also more than the widest Data a Channel builds.
 inline constexpr std::size_t CONNECTION_SCRATCH_SIZE = wire::MAX_FRAME;
@@ -120,9 +127,7 @@ public:
     ConnectionBase& operator=(ConnectionBase&&) = delete;
 
     /// Takes bytes off the socket. A refusal here is the frame layer's, and
-    /// ends the connection like any other. Once the connection is live, the
-    /// bytes count as hearing the peer at the next Pump, whole frame or not
-    /// (§9).
+    /// ends the connection like any other.
     [[nodiscard]] ChannelResult<void> OnBytes(ByteSpan chunk) noexcept;
 
     /// Whether Resume has gone through and the session's streams flow.
@@ -154,7 +159,7 @@ public:
     void SetReadGate(bool open, Timestamp now) noexcept;
 
     /// Says whether the caller has room in its socket queue for a whole frame
-    /// (CONNECTION_OUT_SIZE): false makes Pump hold back every outgoing frame
+    /// (CONNECTION_SEND_ROOM): false makes Pump hold back every outgoing frame
     /// of a live connection, still taking incoming ones and still failing
     /// with PeerSilent; true lets them go again. The caller applies it before
     /// each Pump, so a resend or snapshot far larger than its queue goes out
@@ -202,12 +207,7 @@ protected:
                                             TOnOpened&& onOpened,
                                             TOnGridSnap&& onGridSnap) noexcept;
 
-    /// Counts the bytes OnBytes took since the last Pump as hearing the peer
-    /// (§9), so a frame that crawls in over a slow link is not silence.
-    void CreditArrivedBytes(Timestamp now) noexcept;
-
     wire::FrameStream Frames_;
-    bool BytesArrived_{false};
     Timestamp Started_;
     std::optional<Channel> Channel_;
     std::optional<SessionError> Failed_;

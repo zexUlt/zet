@@ -47,20 +47,7 @@ ChannelResult<void> ConnectionBase::OnBytes(ByteSpan chunk) noexcept {
     if (auto appended = Frames_.Append(chunk); !appended) {
         return std::unexpected(Fail(SessionError{appended.error()}));
     }
-    // Bytes of an authenticated connection are progress even when no whole
-    // frame has come out of them yet (§9). Before the channel exists the
-    // handshake deadline counts from Started_ and is not moved by any bytes.
-    if (Channel_ && !chunk.empty()) {
-        BytesArrived_ = true;
-    }
     return {};
-}
-
-void ConnectionBase::CreditArrivedBytes(Timestamp now) noexcept {
-    if (BytesArrived_ && Channel_) {
-        Channel_->NoteBytesHeard(now);
-    }
-    BytesArrived_ = false;
 }
 
 Deadline ConnectionBase::NextDeadline() const noexcept {
@@ -145,7 +132,6 @@ ConnectionResult ConnectionBase::PumpLive(Timestamp now, MutableByteSpan out,
                                           MutableByteSpan scratch,
                                           TOnOpened&& onOpened,
                                           TOnGridSnap&& onGridSnap) noexcept {
-    CreditArrivedBytes(now);
     // Incoming first: it can carry an ack that frees room for what we send.
     // A frame that delivered nothing — a bare Ack, a duplicate, a Ping — is
     // not an event of its own, so look further in the same call.
@@ -573,7 +559,6 @@ ConnectionResult AgentConnection::PumpAwaitSnapshot(
     // Process one incoming frame (Resize, keyboard Data, Ping/Pong, Ack), but
     // do not poll — no output goes out until SupplySnapshot clears the ring
     // and starts the grid emission. §9 ADR-030.
-    CreditArrivedBytes(now);
     // Every frame already buffered, like PumpLive: a frame that delivers
     // nothing (a bare Ack, a Ping) must not hide the Resize behind it, because
     // nothing wakes the caller for bytes it has already read.
