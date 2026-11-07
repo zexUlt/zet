@@ -115,6 +115,9 @@ GridPump::DoBuild() noexcept {
         .Bytes = Snap_->Bytes(),
         .ScrollbackLen = static_cast<std::uint32_t>(Snap_->ScrollbackLen()),
         .Flags = Snap_->PossiblyDiverged() ? std::uint8_t{1} : std::uint8_t{0},
+        .Rows = Grid_->Rows(),
+        .Cols = Grid_->Cols(),
+        .Degradation = static_cast<std::uint8_t>(Snap_->Degradation()),
     }};
 }
 

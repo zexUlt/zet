@@ -1,0 +1,124 @@
+name: m6 soak
+
+# The M6 soak criterion from docs/design.md §16: three sessions with different
+# output rates and screen contents, a forced path B every cycle, and each
+# agent's RSS held under a per-agent bound and out of steady growth. Two phases
+# in one job: the main one (default 4 hours, a cut every 30 minutes, the real
+# 16 MiB replay ring) and a fast one (default 1 hour, a cut every 25 seconds
+# against a 64 KiB buffer), which is what catches a leak of one snapshot or one
+# reconnect: it needs hundreds of cycles to show.
+# Separate from CI on purpose — it holds the runner for hours and answers a
+# question (does memory stay bounded across many reconnects) that no
+# per-change run can. It is not a release gate; the 24 hour soak of M8 is.
+#
+# Each phase runs until it has completed seconds / cycle_seconds cycles (8 and
+# 144 by default); the growth check needs at least 8 per phase. A phase with
+# zero seconds is skipped. The two together are capped at 300 minutes so that
+# they and the build fit the 345 minute limit of the job. A weekly run, not the
+# nightly of fuzz-soak: that one is minutes per target, this one five hours of
+# a runner, and a leak of the class this looks for shows over weeks of
+# commits, not between two nights.
+#
+# Dispatch it with short durations to prove a change to the soak itself, for
+# example seconds=0 fast_seconds=600.
+
+on:
+  workflow_dispatch:
+    inputs:
+      seconds:
+        description: Seconds of the main phase (0 skips it)
+        required: false
+        default: "14400"
+      cycle_seconds:
+        description: Seconds between two forced path B cuts
+        required: false
+        default: "1800"
+      fast_seconds:
+        description: Seconds of the fast phase (0 skips it)
+        required: false
+        default: "3600"
+      fast_cycle_seconds:
+        description: Seconds between two cuts of the fast phase
+        required: false
+        default: "25"
+  schedule:
+    - cron: "0 2 * * 0"
+
+permissions:
+  contents: read
+
+# Per ref: a soak of one branch has no reason to wait for another's.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  ZET_APK_CACHE: ${{ github.workspace }}/../apk-cache
+
+jobs:
+  soak:
+    name: soak
+    runs-on: ubuntu-24.04
+    timeout-minutes: 345
+    env:
+      # Through the environment rather than into the run script: a dispatch
+      # input is text someone typed. tools/integration.sh forwards ZET_SOAK_*
+      # to the container; the python side parses them as numbers.
+      ZET_SOAK_SECONDS: ${{ github.event.inputs.seconds || 14400 }}
+      ZET_SOAK_CYCLE_SECONDS: ${{ github.event.inputs.cycle_seconds || 1800 }}
+      ZET_SOAK_FAST_SECONDS: ${{ github.event.inputs.fast_seconds || 3600 }}
+      ZET_SOAK_FAST_CYCLE_SECONDS: ${{ github.event.inputs.fast_cycle_seconds || 25 }}
+      ZET_PYTEST_TARGET: tests/integration/soak_m6.py
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Restore the compiler cache
+        uses: ./.github/actions/ccache
+        with:
+          key: musl-dev
+
+      - name: Restore the Alpine packages
+        uses: ./.github/actions/apk
+
+      - name: Check the settings
+        run: |
+          for value in "$ZET_SOAK_SECONDS" "$ZET_SOAK_CYCLE_SECONDS" \
+                       "$ZET_SOAK_FAST_SECONDS" "$ZET_SOAK_FAST_CYCLE_SECONDS"; do
+            case "$value" in
+              '' | *[!0-9]*)
+                echo "settings must be whole numbers, got '$value'"
+                exit 2
+                ;;
+            esac
+          done
+          # 10# so that a leading zero is not read as octal.
+          total=$((10#$ZET_SOAK_SECONDS + 10#$ZET_SOAK_FAST_SECONDS))
+          if [ "$total" -gt 18000 ]; then
+            echo "seconds + fast_seconds is $total, over the 18000 that fit the job's timeout"
+            exit 2
+          fi
+          if [ "$((10#$ZET_SOAK_CYCLE_SECONDS))" -eq 0 ] || [ "$((10#$ZET_SOAK_FAST_CYCLE_SECONDS))" -eq 0 ]; then
+            echo "a cycle of 0 seconds is not a cycle"
+            exit 2
+          fi
+
+      # faulthandler_timeout is off: its dump after ten minutes is for a hung
+      # test, and this one runs for hours on purpose.
+      - name: Soak
+        run: tools/integration.sh musl-dev -rs -o faulthandler_timeout=0
+
+      - name: Show the summary
+        if: always()
+        run: cat build/soak-m6/*/summary.md >>"$GITHUB_STEP_SUMMARY" || true
+
+      # The series, the snapshot sizes and their zlib ratios are the point of the
+      # run — the compression decision of §18 reads them — so they are kept whatever
+      # the result.
+      - name: Keep the series and the snapshot sizes
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: m6-soak
+          path: build/soak-m6/
+          if-no-files-found: ignore
+          retention-days: 90
