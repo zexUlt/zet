@@ -425,8 +425,13 @@ TEST_CASE_FIXTURE(SodiumFixture,
 
     c2->Run(300);
     rig.PtyPrints(Bytes("Z"));
-    c2->Run(500);
-    CHECK(c2->Delivered == Bytes("Z"));
+    // Wait for the Z itself, not for a fixed time: anything replayed from
+    // before the snapshot would be ahead of it in the stream.
+    const auto z = Bytes("Z");
+    REQUIRE(c2->RunUntil(5000, [&] {
+        return !c2->Delivered.empty() && c2->Delivered.back() == z.front();
+    }));
+    CHECK(c2->Delivered == z);
 }
 
 // ── Agent: bytes fed while waiting for the Resize are not replayed ─────────
@@ -463,8 +468,13 @@ TEST_CASE_FIXTURE(SodiumFixture,
 
     c2->Run(300);
     rig.PtyPrints(Bytes("Z"));
-    c2->Run(500);
-    CHECK(c2->Delivered == Bytes("Z"));
+    // Wait for the Z itself, not for a fixed time: anything replayed from
+    // before the snapshot would be ahead of it in the stream.
+    const auto z = Bytes("Z");
+    REQUIRE(c2->RunUntil(5000, [&] {
+        return !c2->Delivered.empty() && c2->Delivered.back() == z.front();
+    }));
+    CHECK(c2->Delivered == z);
 }
 
 // ── Agent: a reconnect snapshot does not wait out RESIZE_WAIT_TIMEOUT ───────

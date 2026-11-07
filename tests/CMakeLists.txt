@@ -47,6 +47,7 @@ add_executable(zet_tests
     session/grid_violation_test.cpp
     session/grid_path_property_test.cpp
     session/grid_fragmentation_test.cpp
+    session/stale_stream_gen_test.cpp
     session/connection_snapshot_probe_test.cpp
     session/resume_resize_same_read_test.cpp
     session/agent_await_snapshot_test.cpp
