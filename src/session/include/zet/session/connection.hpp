@@ -120,7 +120,9 @@ public:
     ConnectionBase& operator=(ConnectionBase&&) = delete;
 
     /// Takes bytes off the socket. A refusal here is the frame layer's, and
-    /// ends the connection like any other.
+    /// ends the connection like any other. Once the connection is live, the
+    /// bytes count as hearing the peer at the next Pump, whole frame or not
+    /// (§9).
     [[nodiscard]] ChannelResult<void> OnBytes(ByteSpan chunk) noexcept;
 
     /// Whether Resume has gone through and the session's streams flow.
@@ -200,7 +202,12 @@ protected:
                                             TOnOpened&& onOpened,
                                             TOnGridSnap&& onGridSnap) noexcept;
 
+    /// Counts the bytes OnBytes took since the last Pump as hearing the peer
+    /// (§9), so a frame that crawls in over a slow link is not silence.
+    void CreditArrivedBytes(Timestamp now) noexcept;
+
     wire::FrameStream Frames_;
+    bool BytesArrived_{false};
     Timestamp Started_;
     std::optional<Channel> Channel_;
     std::optional<SessionError> Failed_;

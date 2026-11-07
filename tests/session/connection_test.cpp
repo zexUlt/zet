@@ -1147,3 +1147,97 @@ TEST_CASE_FIXTURE(
     // The agent session must not have been modified by the failed attempt.
     CHECK(agent.State() == ESessionState::Detached);
 }
+
+// ── §9: bytes of a frame still on its way are the peer being there ──────
+
+namespace {
+
+/// The agent's next frames, as the bytes it would put on the wire.
+std::vector<std::byte> DrainAgentWire(Link& link, Timestamp now) {
+    std::vector<std::byte> wire;
+    while (true) {
+        auto event = link.Agent.Pump(now, MutableByteSpan{link.Out},
+                                     MutableByteSpan{link.Scratch});
+        REQUIRE(event.has_value());
+        const auto* send = std::get_if<SendFrame>(&*event);
+        if (send == nullptr) {
+            return wire;
+        }
+        wire.insert(
+            wire.end(), link.Out.begin(),
+            link.Out.begin() + static_cast<std::ptrdiff_t>(send->Written));
+    }
+}
+
+}  // namespace
+
+TEST_CASE_FIXTURE(SodiumFixture,
+                  "a frame crawling in slower than the silence limit is not "
+                  "silence, and the stall after it still is") {
+    SessionLimits limits;
+    limits.Liveness = {.KeepaliveInterval = 1s, .PeerSilenceTimeout = 3s};
+    Ends ends{1, 1, limits};
+    Link link{ends, START};
+    BringUp(link, START);
+
+    const auto output = Pattern(40'000, 5);
+    REQUIRE(ends.Agent.Write(ByteSpan{output}) == output.size());
+    const auto wire = DrainAgentWire(link, START);
+    REQUIRE(wire.size() > output.size());
+
+    // 1 KiB every 250 ms: the data takes well over twice the silence limit,
+    // and no frame is whole until the last slices.
+    constexpr std::size_t sliceSize = 1024;
+    Timestamp now = START;
+    for (std::size_t at = 0; at < wire.size(); at += sliceSize) {
+        now = now + 250ms;
+        const auto slice =
+            ByteSpan{wire}.subspan(at, std::min(sliceSize, wire.size() - at));
+        REQUIRE(link.Client.OnBytes(slice));
+        while (link.PumpClient(now)) {
+        }
+        REQUIRE_FALSE(link.ClientError.has_value());
+    }
+    CHECK(now - START > 2 * limits.Liveness.PeerSilenceTimeout);
+    CHECK(ends.AtTerminal == output);
+
+    // Nothing more arrives: the stall ends the connection on schedule.
+    while (link.PumpClient(now + 3s - 1ms)) {
+    }
+    CHECK_FALSE(link.ClientError.has_value());
+    while (link.PumpClient(now + 3s)) {
+    }
+    REQUIRE(link.ClientError.has_value());
+    CHECK(link.ClientError->Session() == ESessionError::PeerSilent);
+}
+
+TEST_CASE_FIXTURE(SodiumFixture,
+                  "bytes trickled before authentication do not extend the "
+                  "handshake deadline") {
+    Ends ends;
+    Link link{ends, START};
+    // The client's first frame, delivered one byte a second.
+    auto event = link.Client.Pump(START, MutableByteSpan{link.Out},
+                                  MutableByteSpan{link.Scratch});
+    REQUIRE(event.has_value());
+    const auto* hello = std::get_if<SendFrame>(&*event);
+    REQUIRE(hello != nullptr);
+    REQUIRE(hello->Written > 8);
+    const std::vector<std::byte> helloBytes(
+        link.Out.begin(),
+        link.Out.begin() + static_cast<std::ptrdiff_t>(hello->Written));
+    Timestamp now = START;
+    std::optional<SessionError> error;
+    for (std::size_t i = 0; i < 8 && !error; ++i) {
+        now = now + 1s;
+        REQUIRE(link.Agent.OnBytes(ByteSpan{helloBytes}.subspan(i, 1)));
+        auto pumped = link.Agent.Pump(now, MutableByteSpan{link.Out},
+                                      MutableByteSpan{link.Scratch});
+        if (!pumped &&
+            pumped.error().Session() == ESessionError::HandshakeTimeout) {
+            error = pumped.error();
+        }
+    }
+    REQUIRE(error.has_value());
+    CHECK(now - START == HANDSHAKE_TIMEOUT);
+}

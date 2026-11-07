@@ -236,6 +236,13 @@ public:
     /// and every other timer are unaffected.
     void SetReadGate(bool open, Timestamp now) noexcept;
 
+    /// Records that bytes of this connection arrived at `now` without a whole
+    /// frame having opened yet: a large frame crawling over a slow link is the
+    /// peer being there. Only opened frames and these arrivals move the
+    /// silence timer; the owner calls it for bytes of the live connection
+    /// only. Keepalives and every other timer are unaffected.
+    void NoteBytesHeard(Timestamp now) noexcept { LastHeard_ = now; }
+
     /// Tells the channel whether its owner has room for another frame. A
     /// caller whose socket queue is full closes the gate: while it is closed
     /// Poll sends nothing (it still enforces the silence limit) and
