@@ -1155,7 +1155,8 @@ TEST_CASE_FIXTURE(
     CHECK(agent.State() == ESessionState::Detached);
 }
 
-// ── §9: bytes of a frame still on its way are the peer being there ──────
+// ── §9: bulk frames are cut to SEND_FRAME_MAX, so a frame opens within the
+// ── silence timeout ─────────────────────────────────────────────────────
 
 namespace {
 
@@ -1177,6 +1178,16 @@ std::vector<std::byte> DrainAgentWire(Link& link, Timestamp now) {
 }
 
 }  // namespace
+
+TEST_CASE("the send gate opens exactly when the largest emitted frame fits") {
+    CHECK_FALSE(HasSendRoom(0));
+    CHECK_FALSE(HasSendRoom(CONNECTION_SEND_ROOM - 1));
+    CHECK(HasSendRoom(CONNECTION_SEND_ROOM));
+    // A queue with less room than a received frame may need still takes what
+    // Pump emits: the gate is not at the width of Pump's buffer.
+    CHECK(HasSendRoom(CONNECTION_OUT_SIZE - 1));
+    CHECK(CONNECTION_SEND_ROOM < CONNECTION_OUT_SIZE);
+}
 
 TEST_CASE_FIXTURE(SodiumFixture,
                   "the agent's replay goes out in frames of at most "
@@ -1281,6 +1292,8 @@ TEST_CASE_FIXTURE(SodiumFixture,
     CHECK(now - START == limits.Liveness.PeerSilenceTimeout);
 }
 
+// Slowloris pin: a peer that trickles bytes before authenticating must not
+// stretch the handshake deadline by looking alive.
 TEST_CASE_FIXTURE(SodiumFixture,
                   "bytes trickled before authentication do not extend the "
                   "handshake deadline") {

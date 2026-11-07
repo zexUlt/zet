@@ -1125,8 +1125,7 @@ void Client::Pump(Timestamp now) noexcept {
         // An input replay can be larger than the queue (up to DisconnectMax
         // against ResendMax plus the slack): frames go in only while a whole
         // one fits, and the rest goes as WriteSocket drains it. §9.
-        Connection_->SetSendGate(SocketOut_.Room() >=
-                                 session::CONNECTION_SEND_ROOM);
+        Connection_->SetSendGate(session::HasSendRoom(SocketOut_.Room()));
         auto result = Connection_->Pump(now, MutableByteSpan{Out_},
                                         MutableByteSpan{Scratch_});
         if (!result) {

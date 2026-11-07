@@ -49,6 +49,14 @@ inline constexpr std::size_t CONNECTION_OUT_SIZE =
 inline constexpr std::size_t CONNECTION_SEND_ROOM =
     wire::HEADER_SIZE + wire::SEND_FRAME_MAX;
 
+static_assert(CONNECTION_SEND_ROOM <= CONNECTION_OUT_SIZE);
+
+/// The owners' send gate: whether a queue with `room` bytes free can take the
+/// largest frame Pump emits. Both Pumps feed SetSendGate with this. §9.
+[[nodiscard]] constexpr bool HasSendRoom(std::size_t room) noexcept {
+    return room >= CONNECTION_SEND_ROOM;
+}
+
 /// Room Pump needs in `scratch`: the plaintext of the largest frame, which is
 /// also more than the widest Data a Channel builds.
 inline constexpr std::size_t CONNECTION_SCRATCH_SIZE = wire::MAX_FRAME;
