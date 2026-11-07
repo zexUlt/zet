@@ -499,8 +499,8 @@ ChannelResult<std::size_t> Channel::PollOnce(Timestamp now, MutableByteSpan out,
                 return std::unexpected(
                     SessionError{EProtoError::BufferTooSmall});
             }
-            const std::size_t maxData =
-                std::min(wire::GRID_CHUNK_MAX_DATA, scratch.size() - CHUNK_HDR);
+            const std::size_t maxData = std::min(wire::SEND_GRID_CHUNK_MAX_DATA,
+                                                 scratch.size() - CHUNK_HDR);
             const std::size_t remaining = ge.TotalLen - ge.BytesSent;
             const std::size_t chunkSize = std::min(maxData, remaining);
             ByteWriter writer{scratch.first(CHUNK_HDR + chunkSize)};
@@ -557,7 +557,7 @@ ChannelResult<std::size_t> Channel::PollOnce(Timestamp now, MutableByteSpan out,
             return std::unexpected(SessionError{EProtoError::BufferTooSmall});
         }
         const std::size_t payloadCap =
-            std::min(wire::MAX_DATA_PAYLOAD, scratch.size() - DATA_HEADER);
+            std::min(wire::SEND_DATA_PAYLOAD_MAX, scratch.size() - DATA_HEADER);
         const std::size_t payloadSize = std::min(payloadCap, SendBuf_.Unsent());
         if (payloadSize > 0) {
             // The writer spans exactly DATA_HEADER bytes, which is what these

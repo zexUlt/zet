@@ -64,6 +64,8 @@ struct Applied {
     std::uint32_t ScrollbackLen{0};
     std::uint8_t Flags{0};
     std::size_t FramesFromAgent{0};
+    /// The widest frame body the agent sent, header excluded.
+    std::size_t MaxBody{0};
 };
 
 /// One connection of the session, both ends, in one thread.
@@ -118,6 +120,8 @@ public:
             REQUIRE(ea.has_value());
             if (const auto* sf = std::get_if<SendFrame>(&*ea)) {
                 ++out.FramesFromAgent;
+                out.MaxBody =
+                    std::max(out.MaxBody, sf->Written - wire::HEADER_SIZE);
                 REQUIRE(Feed(Cc_, R_.Sp, sf->Written));
             }
             auto ec = PumpClient(Cc_, R_.Sp, START);
@@ -170,7 +174,8 @@ private:
 };
 
 std::size_t ChunksFor(std::size_t size) {
-    return (size + wire::GRID_CHUNK_MAX_DATA - 1) / wire::GRID_CHUNK_MAX_DATA;
+    return (size + wire::SEND_GRID_CHUNK_MAX_DATA - 1) /
+           wire::SEND_GRID_CHUNK_MAX_DATA;
 }
 
 }  // namespace
@@ -240,4 +245,22 @@ TEST_CASE_FIXTURE(SodiumFixture,
         CHECK(got.Bytes != Pattern(size, 1));
         CHECK(got.FramesFromAgent == ChunksFor(size) + 2);
     }
+}
+
+// Kills: a GridChunk cut at GRID_CHUNK_MAX_DATA instead of
+// SEND_GRID_CHUNK_MAX_DATA (a frame of up to 256 KiB on a link the silence
+// timer has to wait out).
+
+TEST_CASE_FIXTURE(SodiumFixture,
+                  "fragmentation: no snapshot frame is wider than "
+                  "SEND_FRAME_MAX") {
+    Rig r;
+    PrimeForPathB(r);
+    Link link{r};
+    REQUIRE(link.UntilNeedsSnapshot());
+    const auto snap = Pattern(ONE_MIB, 3);
+    const auto got = link.Deliver(ByteSpan{snap}, 0, 0);
+    REQUIRE(got.Seen);
+    CHECK(got.Bytes == snap);
+    CHECK(got.MaxBody == wire::SEND_FRAME_MAX);
 }
