@@ -7,10 +7,12 @@
 #include <cstdlib>
 #include <string>
 #include <string_view>
+#include <utility>
 
 namespace {
 
 using zet::app::ChoiceFromEnv;
+using zet::app::CountFromEnv;
 using zet::app::SizeFromEnv;
 
 constexpr const char* NAME = "ZET_ENV_TEST_VALUE";
@@ -91,5 +93,26 @@ TEST_CASE("SizeFromEnv enforces the upper bound inclusively") {
         CAPTURE(bad);
         const ScopedEnv env{bad};
         CHECK_FALSE(SizeFromEnv(NAME, maxValue).has_value());
+    }
+}
+
+TEST_CASE("CountFromEnv takes zero and stops at the upper bound") {
+    constexpr std::size_t maxValue = 100;
+    {
+        const ScopedEnv env;
+        CHECK_FALSE(CountFromEnv(NAME, maxValue).has_value());
+    }
+    using Case = std::pair<const char*, std::size_t>;
+    for (const auto& [text, want] :
+         {Case{"0", 0}, Case{"1", 1}, Case{"100", 100}}) {
+        CAPTURE(text);
+        const ScopedEnv env{text};
+        CHECK(CountFromEnv(NAME, maxValue) == want);
+    }
+    for (const char* bad : {"101", "", "-1", "+5", "5k", "1.5", " 7", "7 ",
+                            "99999999999999999999999"}) {
+        CAPTURE(bad);
+        const ScopedEnv env{bad};
+        CHECK_FALSE(CountFromEnv(NAME, maxValue).has_value());
     }
 }

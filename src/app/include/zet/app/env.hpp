@@ -33,6 +33,13 @@ enum class EUnit : std::uint8_t {
     const char* name,
     std::size_t max = std::numeric_limits<std::size_t>::max()) noexcept;
 
+/// `name` read as a whole number in [0, max], or nullopt when it is unset.
+/// Like SizeFromEnv, but for a count where zero is meaningful (a scrollback of
+/// no lines). A sign, a unit suffix, a value above `max` or anything else is
+/// reported on stderr and ignored.
+[[nodiscard]] std::optional<std::size_t> CountFromEnv(const char* name,
+                                                      std::size_t max) noexcept;
+
 /// The entry of `allowed` that `name` equals exactly, or nullopt when it is
 /// unset. Any other value (a lower-case letter, trailing space) is reported on
 /// stderr and ignored, so a typo cannot silently select a different mode.

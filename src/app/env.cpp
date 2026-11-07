@@ -70,6 +70,25 @@ std::optional<std::size_t> SizeFromEnv(const char* name,
     return value;
 }
 
+std::optional<std::size_t> CountFromEnv(const char* name,
+                                        std::size_t max) noexcept {
+    // NOLINTNEXTLINE(concurrency-mt-unsafe): read once, before any thread.
+    const char* raw = std::getenv(name);
+    if (raw == nullptr) {
+        return std::nullopt;
+    }
+    const std::string_view text{raw};
+    std::size_t value = 0;
+    const auto [end, error] =
+        std::from_chars(text.data(), text.data() + text.size(), value);
+    if (error != std::errc{} || end != text.data() + text.size() ||
+        value > max) {
+        Complain(name, text, ", not a whole number within range: ");
+        return std::nullopt;
+    }
+    return value;
+}
+
 std::optional<std::string_view> ChoiceFromEnv(
     const char* name, std::span<const std::string_view> allowed) noexcept {
     // NOLINTNEXTLINE(concurrency-mt-unsafe): read once, before any thread.

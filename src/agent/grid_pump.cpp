@@ -19,8 +19,9 @@ GridPump::GridPump(std::unique_ptr<grid::Grid> grid) noexcept
 GridPump::~GridPump() { delete Snap_; }
 
 grid::GridResult<std::unique_ptr<GridPump>> GridPump::Create(
-    std::uint16_t cols, std::uint16_t rows) noexcept {
-    auto g = grid::Grid::Create(cols, rows);
+    std::uint16_t cols, std::uint16_t rows,
+    std::uint32_t scrollbackLimit) noexcept {
+    auto g = grid::Grid::Create(cols, rows, scrollbackLimit);
     if (!g) {
         return std::unexpected(g.error());
     }
