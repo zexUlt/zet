@@ -115,12 +115,15 @@ void Log(log::ELevel level, std::string_view message,
 
 /// One line per snapshot handed to a connection, for the size statistics of
 /// the M6 soak (design.md §16): the encoded bytes, how many of them are
-/// history, and the degradation flags.
+/// history, the divergence flag, the grid's size and the degrade step.
 void LogSnapshotSupplied(const GridPump::SnapReady& ready) noexcept {
     const std::array fields{
         log::Field::Unsigned("bytes", ready.Bytes.size()),
         log::Field::Unsigned("scrollback_bytes", ready.ScrollbackLen),
-        log::Field::Unsigned("flags", ready.Flags)};
+        log::Field::Unsigned("flags", ready.Flags),
+        log::Field::Unsigned("rows", ready.Rows),
+        log::Field::Unsigned("cols", ready.Cols),
+        log::Field::Unsigned("degradation", ready.Degradation)};
     Log(log::ELevel::Debug, "grid snapshot supplied", fields);
 }
 

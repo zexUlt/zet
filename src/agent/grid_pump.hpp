@@ -62,6 +62,11 @@ public:
         std::span<const std::byte> Bytes;
         std::uint32_t ScrollbackLen{0};
         std::uint8_t Flags{0};
+        /// For the soak's statistics only: the grid's size and which step of
+        /// the degrade ladder (grid::EDegradation) the snapshot needed.
+        std::uint16_t Rows{0};
+        std::uint16_t Cols{0};
+        std::uint8_t Degradation{0};
     };
 
     /// Arms the ground-wait after a NeedsSnapshot event.
