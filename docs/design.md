@@ -1049,6 +1049,8 @@ Workflow собирает статические musl-бинари для `x86_6
 
 **Soak M6.** Три сессии с разными скоростями вывода; принудительное превышение порога path B каждые 30 мин. RSS ≤ `N × (базовый_агент + 2 × cols × rows × sizeof(Cell) + SCROLLBACK_LIMIT × cols × sizeof(Cell) + DISCONNECT_BUFFER_MAX + SNAPSHOT_MAX_BYTES_peak)` — пиковое: два экранных буфера (main + alt) + scrollback-ring + replay-ring + снимок в полёте. Снимок освобождается после `GridApplied`.
 
+Soak лежит в `tests/integration/soak_m6.py` (имя без `test_`, обычный прогон его не собирает) и запускается workflow `.github/workflows/m6-soak.yml`: вручную с входами `seconds` (по умолчанию 14 400), `cycle_seconds` (1800) и `factor` (N, по умолчанию 2), и раз в неделю по расписанию. Релизным гейтом он не является; 24-часовой прогон — M8. Локально: `ZET_PYTEST_TARGET=tests/integration/soak_m6.py ZET_SOAK_SECONDS=360 ZET_SOAK_CYCLE_SECONDS=100 tools/integration.sh musl-dev -o faulthandler_timeout=0`. Три сессии с производителями вывода около 30 Б/с, 7 КБ/с и 600 КБ/с одновременно обрываются через `iptables`, как в тестах выше; пока связи нет, каждая оболочка печатает 22,8 МБ, больше `DISCONNECT_BUFFER_MAX` (по умолчанию, без хука), и клиенты возвращаются по пути B. Границу тест считает из констант исходников (`sizeof(Cell)`, `DEFAULT_SCROLLBACK_LIMIT`, `DISCONNECT_BUFFER_MAX`, `SNAPSHOT_MAX_BYTES`) и `VmRSS` агента сразу после рукопожатия, сверяет с ней `VmHWM` каждого агента на каждой выборке и ищет рост RSS по концам циклов (после двух прогревочных, от пяти точек). Размеры снимков берутся из строки лога агента `grid snapshot supplied` (уровень Debug). Ряды RSS, размеры снимков и сводка выкладываются артефактом `m6-soak`; по ним принимается решение о сжатии (§18).
+
 ---
 
 ## 17. Дорожная карта

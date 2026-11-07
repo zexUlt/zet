@@ -1,0 +1,106 @@
+name: m6 soak
+
+# The M6 soak criterion from docs/design.md §16: three sessions with different
+# output rates, a forced path B (snapshot) every cycle, and the agents' RSS
+# held under N x (base + screens + scrollback + replay ring + snapshot).
+# Separate from CI on purpose — it holds the runner for hours and answers a
+# question (does memory stay bounded across many reconnects) that no
+# per-change run can. It is not a release gate; the 24 hour soak of M8 is.
+#
+# The default of four hours is eight cycles of the default 30 minutes: two to
+# warm up and six for the growth check, which needs five points to judge a
+# trend. It stays well inside the 6 hour limit of a GitHub job, with room for
+# the build. A weekly run, not the nightly of fuzz-soak: that one is minutes
+# per target, this one four hours of a runner, and a leak of the class this
+# looks for shows over weeks of commits, not between two nights.
+#
+# Dispatch it with a short duration to prove a change to the soak itself, for
+# example seconds=600 cycle_seconds=120.
+
+on:
+  workflow_dispatch:
+    inputs:
+      seconds:
+        description: Seconds of soak in all
+        required: false
+        default: "14400"
+      cycle_seconds:
+        description: Seconds between two forced path B cuts
+        required: false
+        default: "1800"
+      factor:
+        description: The N of the RSS bound
+        required: false
+        default: "2"
+  schedule:
+    - cron: "0 2 * * 0"
+
+# Per ref: a soak of one branch has no reason to wait for another's.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  ZET_APK_CACHE: ${{ github.workspace }}/../apk-cache
+
+jobs:
+  soak:
+    name: soak
+    runs-on: ubuntu-24.04
+    timeout-minutes: 345
+    env:
+      # Through the environment rather than into the run script: a dispatch
+      # input is text someone typed. tools/integration.sh forwards ZET_SOAK_*
+      # to the container; the python side parses them as numbers.
+      ZET_SOAK_SECONDS: ${{ github.event.inputs.seconds || 14400 }}
+      ZET_SOAK_CYCLE_SECONDS: ${{ github.event.inputs.cycle_seconds || 1800 }}
+      ZET_SOAK_FACTOR: ${{ github.event.inputs.factor || 2 }}
+      ZET_PYTEST_TARGET: tests/integration/soak_m6.py
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Restore the compiler cache
+        uses: ./.github/actions/ccache
+        with:
+          key: musl-dev
+
+      - name: Restore the Alpine packages
+        uses: ./.github/actions/apk
+
+      - name: Check the settings
+        run: |
+          for value in "$ZET_SOAK_SECONDS" "$ZET_SOAK_CYCLE_SECONDS"; do
+            case "$value" in
+              '' | *[!0-9]*)
+                echo "seconds must be whole numbers, got '$value'"
+                exit 2
+                ;;
+            esac
+          done
+          case "$ZET_SOAK_FACTOR" in
+            '' | *[!0-9.]*)
+              echo "factor must be a number, got '$ZET_SOAK_FACTOR'"
+              exit 2
+              ;;
+          esac
+
+      # faulthandler_timeout is off: its dump after ten minutes is for a hung
+      # test, and this one runs for hours on purpose.
+      - name: Soak
+        run: tools/integration.sh musl-dev -rs -o faulthandler_timeout=0
+
+      - name: Show the summary
+        if: always()
+        run: cat build/soak-m6/summary.md >>"$GITHUB_STEP_SUMMARY" || true
+
+      # The series and the snapshot sizes are the point of the run — the
+      # compression decision of §18 reads them — so they are kept whatever
+      # the result.
+      - name: Keep the series and the snapshot sizes
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: m6-soak
+          path: build/soak-m6/
+          if-no-files-found: ignore
+          retention-days: 90

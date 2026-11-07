@@ -113,6 +113,17 @@ void Log(log::ELevel level, std::string_view message,
     log::Emit(level, message, fields, io::MonotonicNow());
 }
 
+/// One line per snapshot handed to a connection, for the size statistics of
+/// the M6 soak (design.md §16): the encoded bytes, how many of them are
+/// history, and the degradation flags.
+void LogSnapshotSupplied(const GridPump::SnapReady& ready) noexcept {
+    const std::array fields{
+        log::Field::Unsigned("bytes", ready.Bytes.size()),
+        log::Field::Unsigned("scrollback_bytes", ready.ScrollbackLen),
+        log::Field::Unsigned("flags", ready.Flags)};
+    Log(log::ELevel::Debug, "grid snapshot supplied", fields);
+}
+
 struct Config {
     bool PrintVersion{false};
     session::SessionLimits Limits;
@@ -716,6 +727,7 @@ void Agent::TrySupplySnapshot(Timestamp now) noexcept {
     }
 
     const auto& ready = **result;
+    LogSnapshotSupplied(ready);
     SnapWaitConn_->Link.SupplySnapshot(now, ready.Bytes, ready.ScrollbackLen,
                                        ready.Flags);
     // Drop bytes that were fed to the grid but not yet written to the
@@ -805,6 +817,7 @@ void Agent::Pump(Connection& connection, Timestamp now) noexcept {
             if (GridPump_) {
                 if (auto ready =
                         GridPump_->OnNeedsSnapshot(ns->Rows, ns->Cols, now)) {
+                    LogSnapshotSupplied(*ready);
                     connection.Link.SupplySnapshot(
                         now, ready->Bytes, ready->ScrollbackLen, ready->Flags);
                     PtyFrom_ = PtyTo_;
