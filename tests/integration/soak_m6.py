@@ -63,6 +63,9 @@ PRODUCERS = {
 
 # A cycle that takes longer than this to recover is a hang, not a slow run.
 CYCLE_DEADLINE_SECONDS = 300
+# The suite's default of 20 s reaps an agent whose burst takes longer than that
+# to write on a loaded runner; here a cut is as long as CYCLE_DEADLINE_SECONDS.
+ORPHAN_TIMEOUT_SECONDS = 2 * CYCLE_DEADLINE_SECONDS
 # After the last session has recovered: let the agent settle before the sample
 # that stands for the cycle.
 SETTLE_SECONDS = 5
@@ -306,7 +309,7 @@ def test_m6_soak(zet: Zet, clean_bashrc, iptables):
     try:
         for name in PRODUCERS:
             log = OUT / f"agent-{name}.log"
-            terminal = zet.start(ZET_AGENT_LOG=str(log))
+            terminal = zet.start(ZET_AGENT_LOG=str(log), ZET_ORPHAN_TIMEOUT=str(ORPHAN_TIMEOUT_SECONDS))
             terminal.expect(PROMPT)
             agent = parent_of(shell_pid(terminal))
             sessions.append(Session(name, terminal, agent, log))
