@@ -55,7 +55,7 @@ jobs:
       # Through the environment rather than into the run script: a dispatch
       # input is text someone typed. tools/integration.sh forwards ZET_SOAK_*
       # to the container; the python side parses them as numbers.
-      ZET_SOAK_SECONDS: ${{ github.event.inputs.seconds || 420 }}
+      ZET_SOAK_SECONDS: ${{ github.event.inputs.seconds || 480 }}
       ZET_SOAK_CYCLE_SECONDS: ${{ github.event.inputs.cycle_seconds || 120 }}
       ZET_SOAK_FACTOR: ${{ github.event.inputs.factor || 2 }}
       ZET_PYTEST_TARGET: tests/integration/soak_m6.py
