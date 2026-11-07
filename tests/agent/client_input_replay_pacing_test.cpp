@@ -28,6 +28,7 @@
 #include <future>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
 #include <fcntl.h>
@@ -48,6 +49,48 @@ constexpr std::size_t DISCONNECT = 3U * 1024U * 1024U;
 // More than the client's socket queue holds (RESEND + 1 MiB of slack), less
 // than the disconnect buffer.
 constexpr std::size_t INPUT = 2U * 1024U * 1024U + 512U * 1024U;
+
+/// Ends everything the test started, on every exit including a REQUIRE that
+/// throws: a joinable std::thread would terminate the process and the
+/// std::async future would block in its destructor until the client gives up.
+/// Stops the agent (its listener closing is what makes the client give up),
+/// stops the feeder, joins both, and waits for the client with a deadline.
+struct Teardown {
+    std::atomic<bool>& StopAgent;
+    std::atomic<bool>& StopFeeder;
+    const io::SocketAddress& Wake;
+    std::thread& Agent;
+    std::thread& Feeder;
+    std::future<client::SessionTestResult>& Client;
+
+    bool Done{false};
+
+    ~Teardown() { Finish(); }
+
+    /// Idempotent.
+    void Finish() {
+        if (std::exchange(Done, true)) {
+            return;
+        }
+        StopFeeder = true;
+        StopAgent = true;
+        if (Agent.joinable()) {
+            // A connection wakes the agent so it sees the flag.
+            auto waker = io::StartConnect(Wake);
+            std::this_thread::sleep_for(100ms);
+            Agent.join();
+        }
+        if (Feeder.joinable()) {
+            Feeder.join();
+        }
+        // The agent is gone: the client gives up after GiveUpAfter.
+        if (Client.valid() &&
+            Client.wait_for(15s) != std::future_status::ready) {
+            FAIL_CHECK("the client session did not end after the agent left");
+            std::quick_exit(1);  // the future's destructor would block forever
+        }
+    }
+};
 
 }  // namespace
 
@@ -83,9 +126,19 @@ TEST_CASE_FIXTURE(SodiumFixture,
     REQUIRE(errFile.Get() >= 0);
     ::unlink(errPath);
 
+    std::atomic<bool> stop{false};
+    std::atomic<bool> stopFeeder{false};
+    std::thread agent;
+    std::thread feeder;
+    std::future<client::SessionTestResult> clientDone;
+    // Declared before anything can fail, destroyed (and so run) before the
+    // threads and the future it joins.
+    Teardown teardown{stop,  stopFeeder, addresses->Items[0],
+                      agent, feeder,     clientDone};
+
     // Nobody answers on the listener yet: the client is detached and takes
     // the whole input into its session.
-    auto clientDone = std::async(std::launch::async, [&] {
+    clientDone = std::async(std::launch::async, [&] {
         return client::RunSessionForTest(client::SessionTestConfig{
             .Secrets = wire::DeriveSessionSecrets(MakeKey(93)),
             .Limits = limits,
@@ -104,9 +157,9 @@ TEST_CASE_FIXTURE(SodiumFixture,
     for (std::size_t i = 0; i < input.size(); ++i) {
         input[i] = static_cast<std::byte>(i * 131 % 251);
     }
-    std::thread feeder{[&] {
+    feeder = std::thread{[&] {
         ByteSpan rest{input};
-        while (!rest.empty()) {
+        while (!rest.empty() && !stopFeeder) {
             auto w = io::WriteSome(in->Write.Get(), rest);
             if (w) {
                 rest = rest.subspan(*w);
@@ -117,8 +170,7 @@ TEST_CASE_FIXTURE(SodiumFixture,
     }};
     std::this_thread::sleep_for(1500ms);  // the client has read it all
 
-    std::atomic<bool> stop{false};
-    std::thread agent{
+    agent = std::thread{
         [&, l = std::move(*listener), m = std::move(pty->Master)]() mutable {
             std::ignore = RunAgentForTest(AgentTestConfig{
                 .Secrets = DeriveSessionSecrets(MakeKey(93)),
@@ -154,14 +206,8 @@ TEST_CASE_FIXTURE(SodiumFixture,
     errText.resize(static_cast<std::size_t>(errLen));
     CHECK(errText.empty());
 
-    stop = true;
-    // A connection wakes the agent so it sees the flag.
-    auto waker = io::StartConnect(addresses->Items[0]);
-    std::this_thread::sleep_for(100ms);
-    agent.join();
-    // The agent is gone: the client gives up after GiveUpAfter.
-    CHECK(clientDone.wait_for(15s) == std::future_status::ready);
-    feeder.join();
+    // Stops the agent, joins the threads, waits for the client.
+    teardown.Finish();
 
     CHECK(got.size() == input.size());
     CHECK(got == input);

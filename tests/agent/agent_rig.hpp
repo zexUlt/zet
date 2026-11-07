@@ -193,6 +193,13 @@ public:
         }
     }
 
+    /// One turn of the connection: read, pump, write.
+    void Pump() { Step(); }
+
+    /// True once the connection has ended: the socket closed or the frame
+    /// layer failed.
+    [[nodiscard]] bool Ended() const { return Closed || Failed; }
+
     /// Pumps until `done()` or `ms` elapse.
     template <typename TPred>
     bool RunUntil(int ms, TPred done) {
@@ -216,9 +223,13 @@ private:
     void Step() {
         pollfd pf{.fd = Sock_.Get(), .events = POLLIN, .revents = 0};
         ::poll(&pf, 1, 5);
-        if (pf.revents & (POLLIN | POLLHUP)) {
+        // No more than the frame layer takes: a whole frame is worked through
+        // by Pump before the next read.
+        const std::size_t room = std::min<std::size_t>(Cc_.ReadRoom(), 65536);
+        if (room > 0 && (pf.revents & (POLLIN | POLLHUP))) {
             std::array<std::byte, 65536> buf{};
-            auto n = io::ReadSome(Sock_.Get(), MutableByteSpan{buf});
+            auto n =
+                io::ReadSome(Sock_.Get(), MutableByteSpan{buf}.first(room));
             if (n && *n > 0) {
                 std::ignore = Cc_.OnBytes(ByteSpan{buf}.first(*n));
             } else if (!n && !n.error().WouldBlock()) {
@@ -233,7 +244,8 @@ private:
         std::vector<std::byte> outgoing;
         const auto flush = [&] {
             ByteSpan bytes{outgoing};
-            while (!bytes.empty()) {
+            // A peer that hung up gets nothing (a write would raise SIGPIPE).
+            while (!bytes.empty() && !Closed) {
                 auto w = io::WriteSome(Sock_.Get(), bytes);
                 if (!w) {
                     if (w.error().WouldBlock()) {
@@ -308,8 +320,10 @@ struct GridObservation {
 /// slave and writes there what the "shell" prints.
 class AgentRig {
 public:
-    explicit AgentRig(std::uint8_t key)
-        : Lim_(TinyLimits()),
+    explicit AgentRig(std::uint8_t key) : AgentRig(key, TinyLimits()) {}
+
+    AgentRig(std::uint8_t key, SessionLimits limits)
+        : Lim_(limits),
           Cs_(Lim_.DisconnectMax + 256),
           Sess_(DeriveSessionSecrets(MakeKey(key)),
                 SessionStreams{.Storage = MutableByteSpan{Cs_},
@@ -432,11 +446,15 @@ public:
 
     ClientSession& Session() { return Sess_; }
 
-    /// What the shell prints.
+    /// What the shell prints.  A full pty is waited out: the agent drains it.
     void PtyPrints(const std::vector<std::byte>& data) {
         ByteSpan remaining{data};
         while (!remaining.empty()) {
             auto w = io::WriteSome(Slave_.Get(), remaining);
+            if (!w && w.error().WouldBlock()) {
+                SleepMs(1);
+                continue;
+            }
             REQUIRE(w.has_value());
             remaining = remaining.subspan(*w);
         }
