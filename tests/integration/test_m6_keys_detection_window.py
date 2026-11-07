@@ -4,7 +4,7 @@ the client types all through that window. After the reconnect the shell side
 has every key, once and in order (judged by a Reflector).
 
 The design's window is 15 s; the suite shortens the silence timeout, and here
-lengthens it to 5 s so that the keys are typed well inside it.
+lengthens it to 8 s so that the keys are typed well inside it (about 6 s of margin).
 """
 
 from __future__ import annotations
@@ -14,7 +14,7 @@ from harness import wait_until
 from m6_support import (Reflector, SNAPSHOT_NOTICE, drain, key, keys, link_cut,
                         parent_of, shell_pid, wait_client_dropped, wait_recovered)
 
-SILENCE_MS = "5000"
+SILENCE_MS = "8000"
 BATCH = 15
 
 
