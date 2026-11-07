@@ -1126,7 +1126,7 @@ void Client::Pump(Timestamp now) noexcept {
         // against ResendMax plus the slack): frames go in only while a whole
         // one fits, and the rest goes as WriteSocket drains it. §9.
         Connection_->SetSendGate(SocketOut_.Room() >=
-                                 session::CONNECTION_OUT_SIZE);
+                                 session::CONNECTION_SEND_ROOM);
         auto result = Connection_->Pump(now, MutableByteSpan{Out_},
                                         MutableByteSpan{Scratch_});
         if (!result) {

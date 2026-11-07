@@ -14,6 +14,17 @@ inline constexpr std::size_t HEADER_SIZE = 5;
 /// handful of frames, while a peer cannot make us hold more per frame.
 inline constexpr std::uint32_t MAX_FRAME = 256U * 1024U;
 
+/// Upper bound on the body of a bulk frame (Data, GridChunk) this build sends.
+///
+/// Receiving still accepts up to MAX_FRAME, so a peer that sends bigger frames
+/// works. The peer's silence timer moves only when a whole frame opens (§9), so
+/// a frame must arrive within PEER_SILENCE_TIMEOUT: 16 KiB / 15 s leaves the
+/// link usable down to about 1.1 KB/s, where MAX_FRAME would need 17 KB/s.
+/// The per-frame cost (header and tag, 21 bytes) is 0.13% at this size.
+inline constexpr std::uint32_t SEND_FRAME_MAX = 16U * 1024U;
+
+static_assert(SEND_FRAME_MAX <= MAX_FRAME);
+
 /// Upper bound before authentication.
 ///
 /// The handshake is made of short messages, and until the MAC checks out a peer

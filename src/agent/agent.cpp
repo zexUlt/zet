@@ -730,7 +730,7 @@ void Agent::Pump(Connection& connection, Timestamp now) noexcept {
         // ResendMax plus the slack): frames go in only while a whole one fits,
         // and the rest goes as WriteSocket drains it. §9.
         connection.Link.SetSendGate(connection.Output.Room() >=
-                                    session::CONNECTION_OUT_SIZE);
+                                    session::CONNECTION_SEND_ROOM);
         auto result = connection.Link.Pump(now, MutableByteSpan{Out_},
                                            MutableByteSpan{Scratch_});
         if (!result) {
