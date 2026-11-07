@@ -123,6 +123,9 @@ struct Link {
     bool RouteToUnknown{false};
     ECut Cut{ECut::None};
     int AgentFramesSent{0};
+    /// The widest frame body either end put on the wire, header excluded.
+    std::size_t MaxAgentBody{0};
+    std::size_t MaxClientBody{0};
     std::optional<SessionError> AgentError;
     std::optional<SessionError> ClientError;
 
@@ -161,6 +164,8 @@ struct Link {
         }
         if (const auto* send = std::get_if<SendFrame>(&*event)) {
             ++AgentFramesSent;
+            MaxAgentBody =
+                std::max(MaxAgentBody, send->Written - wire::HEADER_SIZE);
             // Challenge and AuthOk are the agent's first two frames.
             const bool lost =
                 Cut == ECut::AfterAgentAuthOk && AgentFramesSent > 2;
@@ -189,6 +194,8 @@ struct Link {
             return false;
         }
         if (const auto* send = std::get_if<SendFrame>(&*event)) {
+            MaxClientBody =
+                std::max(MaxClientBody, send->Written - wire::HEADER_SIZE);
             const auto accepted =
                 Agent.OnBytes(ByteSpan{Out}.first(send->Written));
             if (!accepted) {
@@ -1146,4 +1153,174 @@ TEST_CASE_FIXTURE(
     CHECK_FALSE(agentConn.IsLive());
     // The agent session must not have been modified by the failed attempt.
     CHECK(agent.State() == ESessionState::Detached);
+}
+
+// ── §9: bulk frames are cut to SEND_FRAME_MAX, so a frame opens within the
+// ── silence timeout ─────────────────────────────────────────────────────
+
+namespace {
+
+/// The agent's next frames, as the bytes it would put on the wire.
+std::vector<std::byte> DrainAgentWire(Link& link, Timestamp now) {
+    std::vector<std::byte> wire;
+    while (true) {
+        auto event = link.Agent.Pump(now, MutableByteSpan{link.Out},
+                                     MutableByteSpan{link.Scratch});
+        REQUIRE(event.has_value());
+        const auto* send = std::get_if<SendFrame>(&*event);
+        if (send == nullptr) {
+            return wire;
+        }
+        wire.insert(
+            wire.end(), link.Out.begin(),
+            link.Out.begin() + static_cast<std::ptrdiff_t>(send->Written));
+    }
+}
+
+}  // namespace
+
+TEST_CASE("the send gate opens exactly when the largest emitted frame fits") {
+    CHECK_FALSE(HasSendRoom(0));
+    CHECK_FALSE(HasSendRoom(CONNECTION_SEND_ROOM - 1));
+    CHECK(HasSendRoom(CONNECTION_SEND_ROOM));
+    // A queue with less room than a received frame may need still takes what
+    // Pump emits: the gate is not at the width of Pump's buffer.
+    CHECK(HasSendRoom(CONNECTION_OUT_SIZE - 1));
+    CHECK(CONNECTION_SEND_ROOM < CONNECTION_OUT_SIZE);
+}
+
+TEST_CASE_FIXTURE(SodiumFixture,
+                  "the agent's replay goes out in frames of at most "
+                  "SEND_FRAME_MAX") {
+    Ends ends;
+    // Written while nobody was connected: the resume replays it from the ring.
+    const auto output = Pattern(60'000, 5);
+    REQUIRE(ends.Agent.Write(ByteSpan{output}) == output.size());
+    Link link{ends, START};
+    link.Shuttle(START);
+    REQUIRE_FALSE(link.AgentError.has_value());
+    REQUIRE_FALSE(link.ClientError.has_value());
+    CHECK(ends.AtTerminal == output);
+    CHECK(link.MaxAgentBody <= wire::SEND_FRAME_MAX);
+    // The cap is the cut, not slack: a frame goes out full.
+    CHECK(link.MaxAgentBody == wire::SEND_FRAME_MAX);
+}
+
+TEST_CASE_FIXTURE(SodiumFixture,
+                  "live output and the client's typed-ahead input go out in "
+                  "frames of at most SEND_FRAME_MAX") {
+    Ends ends;
+    Link link{ends, START};
+    BringUp(link, START);
+    const auto output = Pattern(60'000, 6);
+    const auto typed = Pattern(50'000, 7);
+    REQUIRE(ends.Agent.Write(ByteSpan{output}) == output.size());
+    REQUIRE(ends.Client.Write(ByteSpan{typed}) == typed.size());
+    link.Shuttle(START + 1ms);
+    CHECK(ends.AtTerminal == output);
+    CHECK(ends.AtPty == typed);
+    CHECK(link.MaxAgentBody == wire::SEND_FRAME_MAX);
+    CHECK(link.MaxClientBody == wire::SEND_FRAME_MAX);
+}
+
+TEST_CASE_FIXTURE(SodiumFixture,
+                  "a long transfer over a link just above the silence "
+                  "threshold is not silence, and the stall after it still is") {
+    // Default liveness: 15 s of silence. A 16 KiB frame needs 15 s at about
+    // 1.1 KB/s; the link below gives 1.5 KB/s, so every frame completes in
+    // time and the whole transfer takes far longer than the limit.
+    Ends ends;
+    Link link{ends, START};
+    BringUp(link, START);
+    const auto limit = PEER_SILENCE_TIMEOUT;
+
+    const auto output = Pattern(60'000, 5);
+    REQUIRE(ends.Agent.Write(ByteSpan{output}) == output.size());
+    const auto wire = DrainAgentWire(link, START);
+    REQUIRE(wire.size() > output.size());
+
+    constexpr std::size_t sliceSize = 150;
+    Timestamp now = START;
+    for (std::size_t at = 0; at < wire.size(); at += sliceSize) {
+        now = now + 100ms;
+        const auto slice =
+            ByteSpan{wire}.subspan(at, std::min(sliceSize, wire.size() - at));
+        REQUIRE(link.Client.OnBytes(slice));
+        while (link.PumpClient(now)) {
+        }
+        REQUIRE_FALSE(link.ClientError.has_value());
+    }
+    CHECK(now - START > 2 * limit);
+    CHECK(ends.AtTerminal == output);
+
+    // Nothing more arrives: the stall ends the connection on schedule, from
+    // the last frame that opened.
+    while (link.PumpClient(now + limit - 1s)) {
+    }
+    CHECK_FALSE(link.ClientError.has_value());
+    while (link.PumpClient(now + limit)) {
+    }
+    REQUIRE(link.ClientError.has_value());
+    CHECK(link.ClientError->Session() == ESessionError::PeerSilent);
+}
+
+TEST_CASE_FIXTURE(SodiumFixture,
+                  "a header and then garbage trickled after authentication "
+                  "is silence: only an opened frame is the peer") {
+    SessionLimits limits;
+    limits.Liveness = {.KeepaliveInterval = 1s, .PeerSilenceTimeout = 3s};
+    Ends ends{1, 1, limits};
+    Link link{ends, START};
+    BringUp(link, START);
+
+    // A header that declares the largest frame, then one byte a second.
+    ByteWriter header{MutableByteSpan{link.Out}.first(wire::HEADER_SIZE)};
+    REQUIRE(wire::WriteFrameHeader(
+        header, wire::FrameHeader{.Length = wire::MAX_FRAME, .Epoch = 1}));
+    REQUIRE(link.Client.OnBytes(ByteSpan{link.Out}.first(wire::HEADER_SIZE)));
+    const std::vector<std::byte> junk(64, std::byte{0x5A});
+    Timestamp now = START;
+    for (std::size_t i = 0; i < junk.size() && !link.ClientError; ++i) {
+        now = now + 1s;
+        REQUIRE(link.Client.OnBytes(ByteSpan{junk}.subspan(i, 1)));
+        while (link.PumpClient(now)) {
+        }
+    }
+    REQUIRE(link.ClientError.has_value());
+    CHECK(link.ClientError->Session() == ESessionError::PeerSilent);
+    // Exactly at the limit counted from the last opened frame, not later.
+    CHECK(now - START == limits.Liveness.PeerSilenceTimeout);
+}
+
+// Slowloris pin: a peer that trickles bytes before authenticating must not
+// stretch the handshake deadline by looking alive.
+TEST_CASE_FIXTURE(SodiumFixture,
+                  "bytes trickled before authentication do not extend the "
+                  "handshake deadline") {
+    Ends ends;
+    Link link{ends, START};
+    // The client's first frame, delivered one byte a second.
+    auto event = link.Client.Pump(START, MutableByteSpan{link.Out},
+                                  MutableByteSpan{link.Scratch});
+    REQUIRE(event.has_value());
+    const auto* hello = std::get_if<SendFrame>(&*event);
+    REQUIRE(hello != nullptr);
+    REQUIRE(hello->Written > 8);
+    const std::vector<std::byte> helloBytes(
+        link.Out.begin(),
+        link.Out.begin() + static_cast<std::ptrdiff_t>(hello->Written));
+    Timestamp now = START;
+    std::optional<SessionError> error;
+    for (std::size_t i = 0; i < 8 && !error; ++i) {
+        now = now + 1s;
+        REQUIRE(link.Agent.OnBytes(ByteSpan{helloBytes}.subspan(i, 1)));
+        auto pumped = link.Agent.Pump(now, MutableByteSpan{link.Out},
+                                      MutableByteSpan{link.Scratch});
+        if (!pumped &&
+            pumped.error().Session() == ESessionError::HandshakeTimeout) {
+            error = pumped.error();
+        }
+    }
+    REQUIRE(error.has_value());
+    CHECK(now - START == HANDSHAKE_TIMEOUT);
 }

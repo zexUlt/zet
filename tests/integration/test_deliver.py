@@ -31,7 +31,7 @@ from pathlib import Path
 import pytest
 
 from conftest import SHELL_SETUP_ERRORS, SHELL_USERS
-from e2e import PROFILE, PROMPT, SANITIZER_OPTIONS
+from e2e import EXPECT_DEADLINE_SECONDS, PROFILE, PROMPT, SANITIZER_OPTIONS
 from harness import STEP_TIMEOUT_SECONDS, PtyProcess
 from sshhost import CLEAN_BASHRC, NOISY_BASHRC, SSHD, SshHost
 
@@ -603,7 +603,8 @@ def test_remote_argv_has_no_secrets(
 
     def sniff_proc() -> None:
         nonlocal installer_observed
-        while not stop_sniffing.is_set():
+        deadline = time.monotonic() + EXPECT_DEADLINE_SECONDS
+        while not stop_sniffing.is_set() and time.monotonic() < deadline:
             for pid_dir in Path("/proc").iterdir():
                 try:
                     raw = (pid_dir / "cmdline").read_bytes()
