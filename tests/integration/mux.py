@@ -124,13 +124,14 @@ def mux_register(registration_secret: bytes) -> bytes:
 
 
 def read_frame(sock: socket.socket, timeout: float = STEP_TIMEOUT_SECONDS) -> tuple[int, bytes] | None:
-    """One frame's epoch and body, or None at the end of the stream."""
-    sock.settimeout(timeout)
-    header = _read_exactly(sock, HEADER.size)
+    """One frame's epoch and body, or None at the end of the stream. `timeout`
+    bounds each wait and, through `deadline`, the whole frame."""
+    deadline = time.monotonic() + 4 * timeout
+    header = _read_exactly(sock, HEADER.size, timeout, deadline)
     if header is None:
         return None
     length, epoch = HEADER.unpack(header)
-    body = _read_exactly(sock, length)
+    body = _read_exactly(sock, length, timeout, deadline)
     if body is None:
         raise AssertionError(f"the stream ended inside a frame of {length} bytes")
     return epoch, body
@@ -157,9 +158,13 @@ def read_to_end(sock: socket.socket, timeout: float = STEP_TIMEOUT_SECONDS) -> b
     return bytes(received)
 
 
-def _read_exactly(sock: socket.socket, count: int) -> bytes | None:
+def _read_exactly(sock: socket.socket, count: int, timeout: float, deadline: float) -> bytes | None:
     data = bytearray()
     while len(data) < count:
+        left = deadline - time.monotonic()
+        if left <= 0:
+            raise TimeoutError(f"no {count} bytes within {4 * timeout}s, got {len(data)} bytes")
+        sock.settimeout(min(timeout, left))
         try:
             chunk = sock.recv(count - len(data))
         except ConnectionResetError:
