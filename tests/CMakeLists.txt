@@ -104,6 +104,7 @@ if(ZET_HAVE_AGENT)
         agent/agent_sixel_test.cpp
         agent/agent_replay_pacing_test.cpp
         agent/agent_wiring_test.cpp
+        agent/client_input_replay_pacing_test.cpp
         io/activation_test.cpp
         io/daemon_test.cpp
         io/fake_pty.cpp
