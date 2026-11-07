@@ -24,6 +24,9 @@ struct SessionTestConfig {
     io::AddressList Addresses;
     int StdoutFd{STDOUT_FILENO};
     int StderrFd{STDERR_FILENO};
+    /// A non-blocking fd the client reads typed input from; -1 means the
+    /// session has no input (it is ended from the start).
+    int StdinFd{-1};
     bool NoticesInline{false};
     std::uint16_t Ceiling{wire::PROTOCOL_VERSION_GRID};
     Duration BackoffMax{std::chrono::milliseconds{20}};
