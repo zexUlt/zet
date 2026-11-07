@@ -1,39 +1,51 @@
 name: m6 soak
 
 # The M6 soak criterion from docs/design.md §16: three sessions with different
-# output rates, a forced path B (snapshot) every cycle, and the agents' RSS
-# held under N x (base + screens + scrollback + replay ring + snapshot).
+# output rates and screen contents, a forced path B every cycle, and each
+# agent's RSS held under a per-agent bound and out of steady growth. Two phases
+# in one job: the main one (default 4 hours, a cut every 30 minutes, the real
+# 16 MiB replay ring) and a fast one (default 1 hour, a cut every 25 seconds
+# against a 64 KiB buffer), which is what catches a leak of one snapshot or one
+# reconnect: it needs hundreds of cycles to show.
 # Separate from CI on purpose — it holds the runner for hours and answers a
 # question (does memory stay bounded across many reconnects) that no
 # per-change run can. It is not a release gate; the 24 hour soak of M8 is.
 #
-# The default of four hours is eight cycles of the default 30 minutes: two to
-# warm up and six for the growth check, which needs five points to judge a
-# trend. It stays well inside the 6 hour limit of a GitHub job, with room for
-# the build. A weekly run, not the nightly of fuzz-soak: that one is minutes
-# per target, this one four hours of a runner, and a leak of the class this
-# looks for shows over weeks of commits, not between two nights.
+# Each phase runs until it has completed seconds / cycle_seconds cycles (8 and
+# 144 by default); the growth check needs at least 8 per phase. A phase with
+# zero seconds is skipped. The two together are capped at 300 minutes so that
+# they and the build fit the 345 minute limit of the job. A weekly run, not the
+# nightly of fuzz-soak: that one is minutes per target, this one five hours of
+# a runner, and a leak of the class this looks for shows over weeks of
+# commits, not between two nights.
 #
-# Dispatch it with a short duration to prove a change to the soak itself, for
-# example seconds=600 cycle_seconds=120.
+# Dispatch it with short durations to prove a change to the soak itself, for
+# example seconds=0 fast_seconds=600.
 
 on:
   workflow_dispatch:
     inputs:
       seconds:
-        description: Seconds of soak in all
+        description: Seconds of the main phase (0 skips it)
         required: false
         default: "14400"
       cycle_seconds:
         description: Seconds between two forced path B cuts
         required: false
         default: "1800"
-      factor:
-        description: The N of the RSS bound
+      fast_seconds:
+        description: Seconds of the fast phase (0 skips it)
         required: false
-        default: "2"
+        default: "3600"
+      fast_cycle_seconds:
+        description: Seconds between two cuts of the fast phase
+        required: false
+        default: "25"
   schedule:
     - cron: "0 2 * * 0"
+
+permissions:
+  contents: read
 
 # Per ref: a soak of one branch has no reason to wait for another's.
 concurrency:
@@ -54,7 +66,8 @@ jobs:
       # to the container; the python side parses them as numbers.
       ZET_SOAK_SECONDS: ${{ github.event.inputs.seconds || 14400 }}
       ZET_SOAK_CYCLE_SECONDS: ${{ github.event.inputs.cycle_seconds || 1800 }}
-      ZET_SOAK_FACTOR: ${{ github.event.inputs.factor || 2 }}
+      ZET_SOAK_FAST_SECONDS: ${{ github.event.inputs.fast_seconds || 3600 }}
+      ZET_SOAK_FAST_CYCLE_SECONDS: ${{ github.event.inputs.fast_cycle_seconds || 25 }}
       ZET_PYTEST_TARGET: tests/integration/soak_m6.py
     steps:
       - uses: actions/checkout@v4
@@ -69,20 +82,25 @@ jobs:
 
       - name: Check the settings
         run: |
-          for value in "$ZET_SOAK_SECONDS" "$ZET_SOAK_CYCLE_SECONDS"; do
+          for value in "$ZET_SOAK_SECONDS" "$ZET_SOAK_CYCLE_SECONDS" \
+                       "$ZET_SOAK_FAST_SECONDS" "$ZET_SOAK_FAST_CYCLE_SECONDS"; do
             case "$value" in
               '' | *[!0-9]*)
-                echo "seconds must be whole numbers, got '$value'"
+                echo "settings must be whole numbers, got '$value'"
                 exit 2
                 ;;
             esac
           done
-          case "$ZET_SOAK_FACTOR" in
-            '' | *[!0-9.]*)
-              echo "factor must be a number, got '$ZET_SOAK_FACTOR'"
-              exit 2
-              ;;
-          esac
+          # 10# so that a leading zero is not read as octal.
+          total=$((10#$ZET_SOAK_SECONDS + 10#$ZET_SOAK_FAST_SECONDS))
+          if [ "$total" -gt 18000 ]; then
+            echo "seconds + fast_seconds is $total, over the 18000 that fit the job's timeout"
+            exit 2
+          fi
+          if [ "$((10#$ZET_SOAK_CYCLE_SECONDS))" -eq 0 ] || [ "$((10#$ZET_SOAK_FAST_CYCLE_SECONDS))" -eq 0 ]; then
+            echo "a cycle of 0 seconds is not a cycle"
+            exit 2
+          fi
 
       # faulthandler_timeout is off: its dump after ten minutes is for a hung
       # test, and this one runs for hours on purpose.
@@ -91,10 +109,10 @@ jobs:
 
       - name: Show the summary
         if: always()
-        run: cat build/soak-m6/summary.md >>"$GITHUB_STEP_SUMMARY" || true
+        run: cat build/soak-m6/*/summary.md >>"$GITHUB_STEP_SUMMARY" || true
 
-      # The series and the snapshot sizes are the point of the run — the
-      # compression decision of §18 reads them — so they are kept whatever
+      # The series, the snapshot sizes and their zlib ratios are the point of the
+      # run — the compression decision of §18 reads them — so they are kept whatever
       # the result.
       - name: Keep the series and the snapshot sizes
         if: always()
