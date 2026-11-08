@@ -164,6 +164,13 @@ public:
     /// until the connection is live, the channel's afterwards.
     [[nodiscard]] Deadline NextDeadline() const noexcept;
 
+    /// The smoothed round trip of this connection (Channel::Srtt), unset
+    /// until the first sample or before the connection is live. Read-only: the
+    /// client's prediction engine reads it, §9 «RTT».
+    [[nodiscard]] std::optional<Duration> Srtt() const noexcept {
+        return Channel_ ? Channel_->Srtt() : std::nullopt;
+    }
+
     /// Says whether the caller is reading the socket: false while it holds
     /// back because its own consumer is full, true again when it resumes. The
     /// peer-silence timer is suspended while the gate is closed and restarts
@@ -313,6 +320,45 @@ public:
         return Channel_ && Channel_->QueueEchoAck(ack);
     }
 
+    // ── M7: the agent's EchoAck rules (§9, «Предиктивное эхо»). ───────────
+    //
+    // The connection holds the per-connection half: when the last EchoAck was
+    // queued, the one waiting for the send cursor, the first one. The history
+    // of input writes is the session's (AgentSession::InputWritten). The owner
+    // drives it in three steps, all with the time it passes in:
+    //
+    //   1. EchoDeadline()/NextDeadline() says when the oldest unreported write
+    //      is ECHO_TIMEOUT old (and the rate limit allows another EchoAck);
+    //   2. EchoDue(now): the owner reads the pty dry (bounded) and moves what
+    //      it read into the session's output;
+    //   3. SettleEcho(now): input is up to the largest aged write, output is
+    //      up to the end of what the session now holds.
+    //
+    // Pump then sends the EchoAck once the connection's send cursor has
+    // reached that output offset. Nothing here wakes or sends on a connection
+    // that did not negotiate ECHO_ACK.
+
+    /// Says whether the owner's pty read is open. False while read output
+    /// waits to be moved into the session (backpressure, §9): the end of the
+    /// session's output then trails what the program has written, and an
+    /// EchoAck computed on it would deny correct predictions. While it is
+    /// false no EchoAck is settled or sent, and none is due.
+    void SetPtyReadOpen(bool open) noexcept { PtyReadOpen_ = open; }
+
+    /// When the owner should next drain the pty and call SettleEcho; unset
+    /// when no EchoAck can go (not negotiated, not live, snapshot in flight,
+    /// pty read closed, no unreported write).
+    [[nodiscard]] Deadline EchoDeadline() const noexcept;
+    [[nodiscard]] bool EchoDue(Timestamp now) const noexcept {
+        return EchoDeadline().HasExpired(now);
+    }
+
+    /// Computes the EchoAck of this moment. The owner has read the pty first
+    /// (EchoDue) and set SetPtyReadOpen to what it is now. Replaces one that
+    /// was computed but not yet sent; may queue it at once when the send has
+    /// already reached its output offset.
+    void SettleEcho(Timestamp now) noexcept;
+
     /// Returns the earliest of the base deadline and the AwaitSnapshot
     /// deadlines: the Resize wait (RESIZE_WAIT_TIMEOUT, set on every path-B
     /// Resume, with or without a known size), SUPPLY_SNAPSHOT_TIMEOUT, and the
@@ -346,6 +392,14 @@ private:
     [[nodiscard]] ConnectionResult Refuse(SessionError error) noexcept;
     /// Hands the session's SessionEnd, if any, to the live channel.
     void QueueEnd() noexcept;
+    /// Whether an EchoAck may be settled and sent now.
+    [[nodiscard]] bool EchoActive() const noexcept;
+    /// Where the input of the next EchoAck must go past.
+    [[nodiscard]] std::uint64_t EchoFloor() const noexcept;
+    /// Queues the settled EchoAck once the send cursor has reached its output.
+    void ReleaseEcho(Timestamp now) noexcept;
+    /// The first EchoAck of the connection, ahead of its first Data. §9.
+    void QueueFirstEcho(Timestamp now, std::uint64_t outputOffset) noexcept;
 
     EStage Stage_{EStage::AwaitHello};
     /// Hello is copied out of the frame buffer: the caller routes it between
@@ -381,6 +435,12 @@ private:
     /// is received.  If the client does not confirm within GRID_APPLIED_TIMEOUT
     /// the connection is closed (CloseConnection; session stays alive).  §9.
     std::optional<Timestamp> GridAppliedDeadline_{};
+    /// The EchoAck computed by SettleEcho that waits for the send cursor.
+    std::optional<wire::EchoAckMessage> EchoPending_;
+    /// When an EchoAck was last queued on this connection (the first one
+    /// included): the rate limit counts from it.
+    std::optional<Timestamp> EchoQueuedAt_;
+    bool PtyReadOpen_{true};
     std::optional<ResumeAttempt> Attempt_;
     std::optional<SessionHandle> Handle_;
     std::optional<DirectionFrames> Current_;
