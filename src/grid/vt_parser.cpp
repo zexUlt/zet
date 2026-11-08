@@ -95,6 +95,7 @@ void VtParser::FeedByte(std::byte b, Grid& grid) noexcept {
             // Signal that the parser lost sync: the output of the pty
             // may have diverged from what we tracked.
             grid.SetPossiblyDiverged(true);
+            ++BypassLimitCount_;
             return;
         }
         EmitBypassByte(b);

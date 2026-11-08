@@ -264,9 +264,14 @@ std::optional<Options> ReadOptions(std::span<char*> args) {
                     : arg.substr(std::string_view{"--predict="}.size());
             const auto mode = ParsePredict(value);
             if (!mode) {
+                SayError("--predict", "unknown mode '" + SanitizeAscii(value) +
+                                          "' (adaptive, always or never)");
                 return std::nullopt;
             }
             options.Predict = *mode;
+        } else if (arg == "--predict") {
+            SayError("--predict", "needs a mode (adaptive, always or never)");
+            return std::nullopt;
         } else if (arg == "--version") {
             options.PrintVersion = true;
             return options;
@@ -1094,6 +1099,9 @@ private:
     /// An EchoAck has come in this session, or Data has come first: the
     /// agent's answer to ECHO_ACK is known either way (§9).
     bool EchoDecided_{false};
+    /// The mirror was started by a snapshot, before the first EchoAck: it
+    /// shows the terminal exactly, the column included.
+    bool SeededFromSnapshot_{false};
     bool Escaped_{false};
     /// The link went down after it had been live, and the user was told.
     bool Announced_{false};
@@ -1285,6 +1293,11 @@ void Client::PumpEvents(Timestamp now) noexcept {
                 // first means it does not (a 0.3 agent, or ver=1), and the
                 // session goes on as with never.
                 EchoDecided_ = true;
+                if (!Predict_ && Options_.MirrorDump.empty()) {
+                    Mirror_
+                        .reset();  // started for an EchoAck that did not come
+                    SeededFromSnapshot_ = false;
+                }
                 if (Options_.Predict == predict::EDisplayMode::Always) {
                     static_cast<void>(::write(StderrFd_,
                                               NO_ECHO_ACK_NOTICE.data(),
@@ -1319,6 +1332,15 @@ void Client::PumpEvents(Timestamp now) noexcept {
                 return;
             }
             StdoutQueued_ += snap->Bytes.size();
+            if (!Mirror_ && !EchoDecided_ &&
+                Options_.Predict != predict::EDisplayMode::Never) {
+                // The first connection of the session went by path B, and the
+                // first EchoAck, which starts the mirror, comes after the
+                // snapshot: a mirror started then would not know what the
+                // snapshot drew. Start it here, from the snapshot.
+                StartMirror();
+                SeededFromSnapshot_ = Mirror_ != nullptr;
+            }
             if (Mirror_) {
                 if (!Mirror_->ResetFromSnapshot(snap->Bytes)) {
                     LoseMirror();
@@ -1665,6 +1687,11 @@ void Client::StartPredict(std::uint32_t streamGen, Timestamp now) noexcept {
     Overlay_ = std::move(overlay);
     Predict_ = std::make_unique<predict::PredictionEngine>(
         View(), Options_.Predict, streamGen);
+    if (std::exchange(SeededFromSnapshot_, false)) {
+        // The mirror was filled from a snapshot and fed everything since: the
+        // cursor is known as it is after a snapshot.
+        Predict_->OnSnapshot(streamGen, now, View());
+    }
     Predict_->OnOutput(Session_.ReceiveOffset(), now, View());
 }
 
@@ -1677,6 +1704,14 @@ void Client::OnEchoAcked(const wire::EchoAckMessage& ack,
         if (!EchoDecided_) {
             EchoDecided_ = true;
             StartPredict(ack.StreamGen, now);
+        } else if (Predict_ && Mirror_) {
+            // A new connection: what was predicted for input the agent had
+            // before it began will get no EchoAck of its own.
+            Predict_->OnBaseline(
+                predict::EchoAck{.StreamGen = ack.StreamGen,
+                                 .OutputOffset = ack.OutputOffset,
+                                 .InputOffset = ack.InputOffset},
+                now, View());
         }
         return;
     }
@@ -1764,6 +1799,7 @@ void Client::LoseMirror() noexcept {
     Predict_.reset();
     Overlay_.reset();
     Mirror_.reset();
+    SeededFromSnapshot_ = false;
 }
 
 void Client::StartMirror() noexcept {
@@ -1805,8 +1841,15 @@ void Client::Resize() noexcept {
         Connection_->QueueResize(*Size_);
     }
     if (Size_ && Mirror_) {
-        // Taken off by the grid the overlay was drawn on, before the resize.
-        if (!TakeOffOverlay()) {
+        // Taken off by the grid the overlay was drawn on, before the resize,
+        // and only where the terminal's reflow cannot have moved what is
+        // restored: otherwise the glyphs stay, as the program's redraw (it
+        // gets the same SIGWINCH) will repaint them, and no byte is written.
+        if (Overlay_ && Predict_ && Overlay_->Drawn() &&
+            !Overlay_->UndoSurvivesResize(View(), Size_->Cols)) {
+            Overlay_->Forget();
+            Predict_->ClearDrawn();
+        } else if (!TakeOffOverlay()) {
             LoseMirror();
             return;
         }
@@ -1819,11 +1862,13 @@ void Client::Resize() noexcept {
 }
 
 int Client::Finish(int status) noexcept {
-    static_cast<void>(TakeOffOverlay(STDOUT_SNAPSHOT_CEILING));
-    if (Fatal_) {
+    const bool wasDrawn = Overlay_ && Overlay_->Drawn();
+    const bool undone = TakeOffOverlay(STDOUT_SNAPSHOT_CEILING) && wasDrawn;
+    if (Fatal_ && undone) {
         // The loop below leaves the queue alone after a failure, but the
         // predicted glyphs must not be left on the user's screen: one try,
-        // without waiting.
+        // without waiting. Only when there is an undo to get out: with no
+        // overlay a failure leaves the queue as it always did.
         while (!Stdout_.Empty()) {
             const auto n = io::WriteSome(StdoutFd_, Stdout_.Front());
             if (!n) {

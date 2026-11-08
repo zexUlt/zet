@@ -57,6 +57,14 @@ public:
     /// be as it was when they were drawn; empty when nothing is drawn.
     [[nodiscard]] ByteSpan BuildUndo(const MirrorView& mirror) noexcept;
 
+    /// Whether BuildUndo, written after the terminal has been resized to
+    /// `newCols` wide, still puts every cell right (design.md §9). Not when a
+    /// column the restore addresses no longer exists, and not when the row
+    /// may be wrapped: the terminal reflows it and the row, the column or both
+    /// are not the mirror's any more. The caller then calls Forget().
+    [[nodiscard]] bool UndoSurvivesResize(const MirrorView& mirror,
+                                          std::uint16_t newCols) const noexcept;
+
     /// The bytes that turn what is drawn into what the engine shows now, or
     /// empty when nothing changes. Draws only where the mirror says the
     /// terminal will take it (Ground, main screen, no deferred wrap, no insert

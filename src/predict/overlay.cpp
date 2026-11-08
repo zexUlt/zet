@@ -1,5 +1,6 @@
 #include "zet/predict/overlay.hpp"
 
+#include <algorithm>
 #include <new>
 
 #include "zet/grid/cell.hpp"
@@ -78,13 +79,19 @@ void End(grid::EscWriter& w, grid::Pen& pen, const grid::Grid& g,
     if (!g.ModeSet(grid::EMode::SyncOutput)) w.WriteLiteral("\x1b[?2026l");
 }
 
-/// A cell as the mirror has it. An empty cell goes through ECH with the
-/// background of the cell, not a space: a space would change what a selection
-/// copies.
+/// A cell as the mirror has it, a wide glyph whole. An empty cell goes through
+/// ECH with the background of the cell, not a space: a space would change what
+/// a selection copies.
 void Restore(grid::EscWriter& w, grid::Pen& pen, const grid::Grid& g,
              std::uint16_t row, std::uint16_t col) noexcept {
+    // The half of a wide glyph is put back by writing the glyph whole, from
+    // its head: the terminal has the glyph broken, or something in its place.
+    if (g.CellAt(row, col).Width == 0 && col > 0 &&
+        g.CellAt(row, static_cast<std::uint16_t>(col - 1)).Width == 2) {
+        --col;
+    }
     const grid::Cell& cell = g.CellAt(row, col);
-    if (cell.Width != 1) return;  // not a cell the overlay draws over
+    if (cell.Width == 0) return;  // nothing the mirror can say about it
     Column(w, col);
     grid::EmitSgr(w, pen, cell);
     if (cell.Codepoint == 0) {
@@ -128,6 +135,33 @@ ByteSpan Overlay::BuildUndo(const MirrorView& mirror) noexcept {
     return ByteSpan{Buf_.data(), w.Pos};
 }
 
+bool Overlay::UndoSurvivesResize(const MirrorView& mirror,
+                                 std::uint16_t newCols) const noexcept {
+    if (!Drawn()) return true;
+    const grid::Grid& g = mirror.Screen;
+    const std::uint16_t width = std::min(g.Cols(), newCols);
+    if (g.CursorCol() >= width) return false;
+    // The terminal may reflow a row that continues into another. The mirror
+    // keeps no wrap flags; a row whose last column holds text, or that follows
+    // one, may be wrapped, and a row the mirror does not know the one above
+    // is taken as not continued (the row is not known at all, ADR-037).
+    const auto filled = [&g](std::uint16_t row) {
+        return !IsBlank(
+            g.CellAt(row, static_cast<std::uint16_t>(g.Cols() - 1)));
+    };
+    for (std::size_t i = 0; i < Drawn_.Count; ++i) {
+        const Placed& p = Drawn_.Cells[i];
+        if (p.Row >= g.Rows() || p.Col >= width) return false;
+        if (filled(p.Row) || (p.Row > 0 && filled(p.Row - 1))) return false;
+    }
+    if (g.CursorRow() < g.Rows() &&
+        (filled(g.CursorRow()) ||
+         (g.CursorRow() > 0 && filled(g.CursorRow() - 1)))) {
+        return false;
+    }
+    return true;
+}
+
 ByteSpan Overlay::BuildUpdate(const PredictionEngine& engine,
                               const MirrorView& mirror) noexcept {
     Pending_ = EPending::None;
@@ -157,13 +191,20 @@ ByteSpan Overlay::BuildUpdate(const PredictionEngine& engine,
                 continue;
             }
             const grid::Cell& cell = g.CellAt(p.Row, p.Col);
+            // Never on a wide glyph or the half of one, whatever the engine
+            // thinks of the cell: the terminal has a glyph there that a narrow
+            // one would break.
+            if (cell.Width != 1 ||
+                (p.Col > 0 &&
+                 g.CellAt(p.Row, static_cast<std::uint16_t>(p.Col - 1)).Width ==
+                     2)) {
+                continue;
+            }
             const bool under = underline && p.Codepoint != 0;
             // The terminal already shows it, the program's echo is there: a
             // second drawing would change nothing but the colours.
-            const bool shown =
-                cell.Width == 1 &&
-                (p.Codepoint == 0 ? IsBlank(cell)
-                                  : cell.Codepoint == p.Codepoint);
+            const bool shown = p.Codepoint == 0 ? IsBlank(cell)
+                                                : cell.Codepoint == p.Codepoint;
             if (shown && !under) continue;
             if (Next_.Count >= Next_.Cells.size()) break;
             Next_.Cells[Next_.Count++] =

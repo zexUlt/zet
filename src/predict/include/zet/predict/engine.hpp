@@ -108,6 +108,14 @@ public:
     void OnEchoAck(const EchoAck& ack, Timestamp now,
                    const MirrorView& mirror) noexcept;
 
+    /// The first EchoAck of a connection: a baseline, not a verdict. What the
+    /// agent had read when it began says nothing of the pty, but predictions
+    /// for input up to `ack.InputOffset` will never be settled by an EchoAck
+    /// (on path A their echo arrives in the replay, which no ack follows), so
+    /// they are dropped, silently: no verdict, no glitch, no epoch change.
+    void OnBaseline(const EchoAck& ack, Timestamp now,
+                    const MirrorView& mirror) noexcept;
+
     /// A snapshot opened generation `streamGen` and was applied: everything
     /// is dropped and the engine rebases on the mirror, which may be a new
     /// object. A snapshot sets the cursor absolutely, so the column is known.
@@ -262,6 +270,7 @@ private:
     std::uint64_t LastColumnSet_{0};
     std::uint64_t LastUnknown_{0};
     std::uint64_t LastDcsApc_{0};
+    std::uint64_t LastBypassLimit_{0};
 
     // The run of correct echoes in one epoch, last glyph included. An epoch
     // is confirmed by the second correct echo in a row of a glyph different

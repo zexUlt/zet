@@ -56,6 +56,9 @@ struct Rig {
     /// An EchoAck for everything fed and sent so far.
     void Ack() { E.OnEchoAck(EchoAck{Gen, Out, In}, Now, View()); }
 
+    /// The first EchoAck of a connection: a baseline for everything so far.
+    void Baseline() { E.OnBaseline(EchoAck{Gen, Out, In}, Now, View()); }
+
     void Advance(std::chrono::milliseconds d) { Now += d; }
 
     /// Type, let the agent echo, ack: the prompt-and-one-key start that

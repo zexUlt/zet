@@ -116,6 +116,14 @@ public:
         return DcsApcCount_;
     }
 
+    /// Number of times the parser gave up on a DCS/OSC/APC/PM/SOS string at
+    /// BYPASS_LIMIT_BYTES and went to Ground. The real terminal is still
+    /// inside the string, and what it is given next is read as the string's
+    /// text (the prediction engine, design.md §9). Monotonic, survives Reset.
+    [[nodiscard]] std::uint64_t BypassLimitCount() const noexcept {
+        return BypassLimitCount_;
+    }
+
     /// Whether the UTF-8 decoder is in the middle of a character: bytes
     /// written to the terminal now would split it (the overlay, design.md §9).
     [[nodiscard]] bool Utf8Pending() const noexcept {
@@ -192,6 +200,7 @@ private:
     // Statistics
     std::uint64_t UnknownSeqCount_{0};
     std::uint64_t DcsApcCount_{0};
+    std::uint64_t BypassLimitCount_{0};
 };
 
 }  // namespace zet::grid

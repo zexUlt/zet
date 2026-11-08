@@ -21,8 +21,10 @@
 
 #include <fcntl.h>
 #include <poll.h>
+#include <pthread.h>
 #include <termios.h>
 #include <unistd.h>
+#include <csignal>
 
 #include <algorithm>
 #include <array>
@@ -227,6 +229,21 @@ struct ScreenOf {
     }
 };
 
+/// Holds SIGWINCH back from the threads this one starts, so that a signal sent
+/// to the process waits for the client's signalfd.
+struct BlockWinch {
+    BlockWinch() {
+        sigset_t set;
+        sigemptyset(&set);
+        sigaddset(&set, SIGWINCH);
+        ::pthread_sigmask(SIG_BLOCK, &set, &Old);
+    }
+    ~BlockWinch() { ::pthread_sigmask(SIG_SETMASK, &Old, nullptr); }
+    BlockWinch(const BlockWinch&) = delete;
+    BlockWinch& operator=(const BlockWinch&) = delete;
+    sigset_t Old{};
+};
+
 class ClientRig {
 public:
     struct Options {
@@ -234,6 +251,16 @@ public:
         std::uint16_t Ceiling{wire::PROTOCOL_VERSION_GRID};
         /// How long the client keeps reconnecting once the agent is gone.
         std::chrono::milliseconds GiveUp{1500};
+        /// Notices go to stdout, through the overlay's undo, as on a tty.
+        bool NoticesInline{false};
+        /// Reconnect path (ZET_TEST_FORCE_PATH).
+        session::EForcePath ForcePath{session::EForcePath::None};
+        /// Answers SIGWINCH; empty means the tty, which the test has none.
+        std::function<std::optional<wire::ResizeMessage>()> SizeSource{};
+        /// Stdout is a regular file, which the poller refuses to watch: the
+        /// client fails ("the terminal went away") as soon as it has bytes
+        /// queued for it, and its queue is then as Finish finds it.
+        bool StdoutIsFile{false};
     };
 
     ClientRig(std::uint8_t seed, Options options)
@@ -241,6 +268,7 @@ public:
         Limits_ = TinyLimits();
         Limits_.ResendMax = 65536;
         Limits_.DisconnectMax = 65536;
+        Limits_.ForcePath = Options_.ForcePath;
 
         auto pty = io::OpenPty();
         REQUIRE(pty.has_value());
@@ -276,6 +304,16 @@ public:
         REQUIRE(io::SetNonBlocking(out->Write.Get()).has_value());
         StdoutRead_ = std::move(out->Read);
         StdoutWrite_ = std::move(out->Write);
+        if (Options_.StdoutIsFile) {
+            char path[] = "/tmp/zet_predict_stdout_XXXXXX";
+            io::UniqueFd file{::mkstemp(path)};
+            REQUIRE(file.Get() >= 0);
+            io::UniqueFd reader{::open(path, O_RDONLY)};
+            REQUIRE(reader.Get() >= 0);
+            ::unlink(path);
+            StdoutWrite_ = std::move(file);
+            StdoutRead_ = std::move(reader);
+        }
         char errPath[] = "/tmp/zet_predict_stderr_XXXXXX";
         Stderr_ = io::UniqueFd{::mkstemp(errPath)};
         REQUIRE(Stderr_.Get() >= 0);
@@ -308,12 +346,13 @@ public:
                 .StdoutFd = StdoutWrite_.Get(),
                 .StderrFd = Stderr_.Get(),
                 .StdinFd = StdinRead_.Get(),
-                .NoticesInline = false,
+                .NoticesInline = Options_.NoticesInline,
                 .Ceiling = Options_.Ceiling,
                 .BackoffMax = 20ms,
                 .GiveUpAfter = Options_.GiveUp,
                 .Predict = Options_.Mode,
                 .OverlayLog = LogPath_,
+                .SizeSource = Options_.SizeSource,
             });
         });
     }
@@ -427,7 +466,12 @@ public:
             char* end = nullptr;
             const auto offset = std::strtoull(text.c_str() + at, &end, 10);
             const auto length = std::strtoull(end, &end, 10);
-            all.push_back({offset, length});
+            // The client logs an insert when it queues it and writes it a turn
+            // later: one that has not reached Out_ yet is not seen yet, or a
+            // test reading its bytes would find them cut short.
+            if (offset + length <= Out_.size()) {
+                all.push_back({offset, length});
+            }
             at = static_cast<std::size_t>(end - text.c_str()) + 1;
         }
         return all;
@@ -453,6 +497,15 @@ public:
     }
 
     [[nodiscard]] SpyProxy& Proxy() { return *Proxy_; }
+
+    /// The client session has ended on its own.
+    [[nodiscard]] bool ClientEnded() {
+        return Client_.valid() &&
+               Client_.wait_for(0ms) == std::future_status::ready;
+    }
+
+    /// How the client session ended; valid after Finish.
+    [[nodiscard]] int ClientStatus() const { return Status_; }
 
     /// What the client wrote to its stderr.
     [[nodiscard]] std::string ErrText() const {
@@ -500,6 +553,7 @@ public:
                     std::quick_exit(1);
                 }
             }
+            Status_ = Client_.get().Status;
         }
         Drain();
     }
@@ -541,6 +595,7 @@ private:
     std::thread Agent_;
     std::future<client::SessionTestResult> Client_;
     bool Done_{false};
+    int Status_{-1};
 };
 
 }  // namespace

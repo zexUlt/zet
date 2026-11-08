@@ -338,6 +338,7 @@ void PredictionEngine::Rebase(const MirrorView& mirror) noexcept {
     LastColumnSet_ = g.ColumnSetCount();
     LastUnknown_ = mirror.Parser.UnknownSeqCount();
     LastDcsApc_ = mirror.Parser.DcsApcCount();
+    LastBypassLimit_ = mirror.Parser.BypassLimitCount();
 }
 
 bool PredictionEngine::OutputIsPredictedEcho(
@@ -386,6 +387,12 @@ void PredictionEngine::Observe(const MirrorView& mirror) noexcept {
         reset = true;
         untrust = true;
     }
+    // The parser gave up on a string at its limit: the terminal is still
+    // inside it, which is as unknown as a DCS.
+    if (mirror.Parser.BypassLimitCount() != LastBypassLimit_) {
+        reset = true;
+        untrust = true;
+    }
     const bool gained = g.ColumnSetCount() != LastColumnSet_;
     const bool unsolicited = !reset && !OutputIsPredictedEcho(mirror);
 
@@ -428,6 +435,20 @@ void PredictionEngine::OnSnapshot(std::uint32_t streamGen, Timestamp now,
     ResetAll();
     Trusted_ = true;
     Drain(now, mirror);
+}
+
+void PredictionEngine::OnBaseline(const EchoAck& ack, Timestamp now,
+                                  const MirrorView& /*mirror*/) noexcept {
+    if (Mode_ == EDisplayMode::Never) return;
+    // Before Cull: the age of a prediction that is dropped here must not count
+    // as a glitch.
+    std::size_t kept = 0;
+    for (std::size_t i = 0; i < Count_; ++i) {
+        if (Preds_[i].InputEnd > ack.InputOffset) Preds_[kept++] = Preds_[i];
+    }
+    Count_ = kept;
+    if (Cursor_ && Cursor_->InputEnd <= ack.InputOffset) Cursor_.reset();
+    Cull(now);
 }
 
 void PredictionEngine::OnResize(Timestamp now,

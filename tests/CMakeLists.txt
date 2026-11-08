@@ -24,6 +24,9 @@ add_executable(zet_tests
     grid/snapshot_mutant_test.cpp
     predict/overlay_bytes_test.cpp
     predict/overlay_terminal_test.cpp
+    predict/overlay_review_test.cpp
+    predict/overlay_reserve_test.cpp
+    predict/predict_baseline_drop_test.cpp
     predict/predict_ack_test.cpp
     predict/predict_backspace_test.cpp
     predict/predict_boundary_test.cpp
@@ -109,6 +112,8 @@ if(ZET_HAVE_IO)
         app/byte_queue_test.cpp
         app/env_test.cpp
         client/deliver_test.cpp
+        client/client_flags_test.cpp
+        client/client_flags_message_test.cpp
         client/escape_test.cpp
         client/mirror_loop_test.cpp
         client/mirror_test.cpp
@@ -141,6 +146,10 @@ if(ZET_HAVE_AGENT)
         agent/client_predict_off_test.cpp
         agent/client_predict_overlay_test.cpp
         agent/client_predict_password_test.cpp
+        agent/client_predict_wiring_test.cpp
+        agent/client_predict_never_fatal_test.cpp
+        agent/client_predict_seed_test.cpp
+        agent/client_predict_resize_reflow_test.cpp
         agent/client_input_ring_stall_test.cpp
         io/activation_test.cpp
         io/daemon_test.cpp
