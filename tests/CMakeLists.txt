@@ -128,9 +128,11 @@ if(ZET_HAVE_AGENT)
         agent/agent_input_queue_test.cpp
         agent/agent_ground_timeout_test.cpp
         agent/agent_sixel_test.cpp
+        agent/agent_pty_move_stall_test.cpp
         agent/agent_replay_pacing_test.cpp
         agent/agent_wiring_test.cpp
         agent/client_input_replay_pacing_test.cpp
+        agent/client_input_ring_stall_test.cpp
         io/activation_test.cpp
         io/daemon_test.cpp
         io/fake_pty.cpp
