@@ -21,6 +21,7 @@ cd "$root" || exit 2
 readonly PORTABLE=(
     src/client
     src/app
+    src/grid
     src/io/clock.cpp
     src/io/errno.cpp
     src/io/fd.cpp

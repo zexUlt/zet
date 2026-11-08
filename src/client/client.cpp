@@ -25,12 +25,14 @@
 
 #include "deliver.hpp"
 #include "escape.hpp"
+#include "mirror.hpp"
 #include "zet/app/byte_queue.hpp"
 #include "zet/app/env.hpp"
 #include "zet/app/registration.hpp"
 #include "zet/core/shell_quote.hpp"
 #include "zet/core/version.hpp"
 #include "zet/crypto/crypto.hpp"
+#include "zet/grid/snapshot.hpp"
 #include "zet/io/clock.hpp"
 #include "zet/io/fd.hpp"
 #include "zet/io/poller.hpp"
@@ -186,6 +188,10 @@ struct Options {
     /// it. Production offers the default ceiling and always the TLV.
     std::uint16_t Ceiling{wire::PROTOCOL_VERSION_MAX};
     bool GridCapable{true};
+    /// Test hook ZET_TEST_MIRROR_DUMP: keep the mirror grid (§9, M7) and write
+    /// its snapshot to this path on exit. Empty means no mirror: nothing else
+    /// asks for one yet, and without it the client does no extra work.
+    std::string MirrorDump;
 };
 
 /// What of the local environment goes to the shell on the far side: the
@@ -252,6 +258,10 @@ std::optional<Options> ReadOptions(std::span<char*> args) {
     static constexpr std::array<std::string_view, 1> ONLY_ONE{"1"};
     if (app::ChoiceFromEnv("ZET_TEST_NO_GRID_CAPABLE", ONLY_ONE)) {
         options.GridCapable = false;
+    }
+    if (const char* dump = ::getenv("ZET_TEST_MIRROR_DUMP");
+        dump != nullptr && dump[0] != '\0') {
+        options.MirrorDump = dump;
     }
     return options;
 }
@@ -916,7 +926,11 @@ public:
           Size_(TerminalSize()),
           NoticesInline_(SameFile(STDOUT_FILENO, STDERR_FILENO)),
           Ceiling_(options.Ceiling),
-          GridCapable_(options.GridCapable) {}
+          GridCapable_(options.GridCapable) {
+        if (!options.MirrorDump.empty()) {
+            StartMirror();
+        }
+    }
 
     /// Runs the session; the result is zet's exit status.
     [[nodiscard]] int Run() noexcept;
@@ -956,6 +970,8 @@ private:
     void WriteSocket(Timestamp now) noexcept;
     void Resize() noexcept;
     void Notice(std::string_view text) noexcept;
+    void StartMirror() noexcept;
+    void WriteMirrorDump() noexcept;
     [[nodiscard]] Duration Backoff() noexcept;
     [[nodiscard]] int Finish(int status) noexcept;
 
@@ -1005,6 +1021,10 @@ private:
     uint16_t Ceiling_{wire::PROTOCOL_VERSION_MAX};
     /// Whether Hello carries GRID_CAPABLE.
     bool GridCapable_{true};
+
+    /// What the local terminal has been sent, as a grid; null when nothing
+    /// wants it or it could not be kept in step (§9, M7).
+    std::unique_ptr<Mirror> Mirror_;
 
     struct PendingSnapshotInfo {
         std::uint32_t StreamGen{0};
@@ -1154,6 +1174,9 @@ void Client::Pump(Timestamp now) noexcept {
                 Drop(now);
                 return;
             }
+            if (Mirror_) {
+                Mirror_->Feed(deliver->Bytes);
+            }
         } else if (const auto* ended = std::get_if<session::Ended>(&event)) {
             Ended_ = ended->End;
             return;
@@ -1168,6 +1191,9 @@ void Client::Pump(Timestamp now) noexcept {
                 Connection_->DenyApply(snap->StreamGen);
                 Drop(now);
                 return;
+            }
+            if (Mirror_ && !Mirror_->ResetFromSnapshot(snap->Bytes)) {
+                Mirror_.reset();
             }
             PendingSnapshot_ =
                 PendingSnapshotInfo{.StreamGen = snap->StreamGen};
@@ -1465,13 +1491,51 @@ void Client::Notice(std::string_view text) noexcept {
         static_cast<void>(::write(StderrFd_, text.data(), text.size()));
     } else if (!Stdout_.Append(bytes)) {
         // The terminal is far behind; the notice is not worth stalling for.
+    } else if (Mirror_) {
+        Mirror_->Feed(bytes);
     }
+}
+
+void Client::StartMirror() noexcept {
+    // Before the terminal's size is known the mirror starts at the usual
+    // 80x24; a later Resize sets it right.
+    const auto cols = Size_ ? Size_->Cols : std::uint16_t{80};
+    const auto rows = Size_ ? Size_->Rows : std::uint16_t{24};
+    Mirror_ = Mirror::Create(cols, rows);
+}
+
+void Client::WriteMirrorDump() noexcept {
+    if (!Mirror_ || Options_.MirrorDump.empty()) {
+        return;
+    }
+    auto snapshot = grid::Snapshot::Create(Mirror_->Screen());
+    if (!snapshot) {
+        return;
+    }
+    const std::unique_ptr<grid::Snapshot> owned(*snapshot);
+    const int fd =
+        ::open(Options_.MirrorDump.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0600);
+    if (fd < 0) {
+        return;
+    }
+    ByteSpan rest = owned->Bytes();
+    while (!rest.empty()) {
+        const auto n = ::write(fd, rest.data(), rest.size());
+        if (n <= 0) {
+            break;
+        }
+        rest = rest.subspan(static_cast<std::size_t>(n));
+    }
+    ::close(fd);
 }
 
 void Client::Resize() noexcept {
     Size_ = TerminalSize();
     if (Size_ && Connection_) {
         Connection_->QueueResize(*Size_);
+    }
+    if (Size_ && Mirror_ && !Mirror_->Resize(Size_->Cols, Size_->Rows)) {
+        Mirror_.reset();
     }
 }
 
@@ -1488,6 +1552,7 @@ int Client::Finish(int status) noexcept {
             WriteStdout();
         }
     }
+    WriteMirrorDump();
     // Closing the connection is how the agent learns it can go (§9).
     const Timestamp now = io::MonotonicNow();
     if (Connection_) {
@@ -1512,6 +1577,7 @@ SessionTestResult RunSessionForTestImpl(SessionTestConfig config) noexcept {
     Options opts;
     opts.Limits = config.Limits;
     opts.BackoffMax = config.BackoffMax;
+    opts.MirrorDump = config.MirrorDump;
 
     session::BootstrapResult br;
     br.Secrets = std::move(config.Secrets);
@@ -1520,6 +1586,12 @@ SessionTestResult RunSessionForTestImpl(SessionTestConfig config) noexcept {
         std::make_unique<Client>(opts, std::move(br), config.Addresses,
                                  std::move(*maybePoller), config.GiveUpAfter);
 
+    if (config.InitialSize) {
+        clientObj->Size_ = config.InitialSize;
+    }
+    if (!opts.MirrorDump.empty()) {
+        clientObj->StartMirror();
+    }
     clientObj->StdoutFd_ = config.StdoutFd;
     clientObj->StderrFd_ = config.StderrFd;
     clientObj->NoticesInline_ = config.NoticesInline;
