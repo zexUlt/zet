@@ -5,6 +5,7 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <optional>
 #include <string>
 
@@ -42,6 +43,10 @@ struct SessionTestConfig {
     /// The terminal size the client starts with, as if SIGWINCH had never
     /// come; the tests have no terminal to ask.
     std::optional<wire::ResizeMessage> InitialSize{};
+    /// Asked for the terminal's size on SIGWINCH instead of the tty, which
+    /// the tests do not have; empty means the real one. Called on the
+    /// client's thread.
+    std::function<std::optional<wire::ResizeMessage>()> SizeSource{};
 };
 
 struct SessionTestResult {

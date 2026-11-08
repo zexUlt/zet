@@ -9,10 +9,13 @@
 #include <doctest/doctest.h>
 
 #include <poll.h>
+#include <pthread.h>
+#include <signal.h>
 #include <unistd.h>
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <csignal>
 #include <cstddef>
@@ -20,6 +23,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <fstream>
+#include <functional>
 #include <future>
 #include <iterator>
 #include <memory>
@@ -271,6 +275,7 @@ struct RunOptions {
     std::optional<wire::ResizeMessage> InitialSize{};
     /// stderr is the terminal too: notices go into the stdout queue.
     bool NoticesInline{false};
+    std::function<std::optional<wire::ResizeMessage>()> SizeSource{};
 };
 
 /// The client under test, on its own thread, against a loopback listener.
@@ -303,6 +308,7 @@ public:
             .GiveUpAfter = options.GiveUpAfter,
             .MirrorDump = options.MirrorDump,
             .InitialSize = options.InitialSize,
+            .SizeSource = std::move(options.SizeSource),
         };
         Result_ = std::async(
             std::launch::async, [config = std::move(config)]() mutable {
@@ -499,8 +505,10 @@ struct DumpPath {
 
 /// What a grid of the terminal's size, with no history, holds after `parts`
 /// fed in order: the mirror's expected state.
-std::vector<std::byte> ReferenceDump(std::span<const ByteSpan> parts) {
-    auto created = grid::Grid::Create(COLS, ROWS, 0);
+std::vector<std::byte> ReferenceDump(std::span<const ByteSpan> parts,
+                                     std::uint16_t cols = COLS,
+                                     std::uint16_t rows = ROWS) {
+    auto created = grid::Grid::Create(cols, rows, 0);
     REQUIRE(created.has_value());
     const std::unique_ptr<grid::Grid> g(*created);
     grid::VtParser parser;
@@ -534,6 +542,23 @@ void WriteChunks(ClientRun& run, AgentSide& agent, AgentLink& link,
         REQUIRE(run.PumpUntil(link, [&] { return run.Out.size() >= wanted; }));
     }
 }
+
+/// Holds SIGWINCH back from the thread that makes it, and from the client
+/// thread that inherits the mask, so that a raised one waits for the client's
+/// signalfd instead of being ignored.
+struct BlockWinch {
+    BlockWinch() {
+        sigset_t set;
+        ::sigemptyset(&set);
+        ::sigaddset(&set, SIGWINCH);
+        ::pthread_sigmask(SIG_BLOCK, &set, &Old);
+    }
+    ~BlockWinch() { ::pthread_sigmask(SIG_SETMASK, &Old, nullptr); }
+    BlockWinch(const BlockWinch&) = delete;
+    BlockWinch& operator=(const BlockWinch&) = delete;
+
+    sigset_t Old{};
+};
 
 }  // namespace
 
@@ -695,5 +720,124 @@ TEST_CASE_FIXTURE(SodiumFixture,
     CHECK(run.Out == Concat(ToVector(AsBytes(stale)), ByteSpan{second}));
 
     const std::array<ByteSpan, 1> parts{ByteSpan{second}};
+    CHECK(dump.Read() == ReferenceDump(parts));
+}
+
+TEST_CASE_FIXTURE(SodiumFixture,
+                  "a terminal resize resizes the mirror to the new size") {
+    constexpr std::uint16_t newCols = 20;
+    constexpr std::uint16_t newRows = 6;
+    const BlockWinch block;
+    AgentSide agent{76, SessionLimits{}, false};
+    DumpPath dump;
+    std::atomic<bool> asked{false};
+    ClientRun run{
+        agent,
+        {.MirrorDump = dump.Path,
+         .InitialSize =
+             wire::ResizeMessage{
+                 .Rows = ROWS, .Cols = COLS, .XPixel = 0, .YPixel = 0},
+         .SizeSource = [&asked] {
+             asked = true;
+             return std::optional{wire::ResizeMessage{
+                 .Rows = newRows, .Cols = newCols, .XPixel = 0, .YPixel = 0}};
+         }}};
+    AgentLink& link = run.AcceptLive();
+
+    // kill, not raise: raise targets this thread, which blocks the signal.
+    REQUIRE(::kill(::getpid(), SIGWINCH) == 0);
+    REQUIRE(run.PumpUntil(link, [&] { return asked.load(); }));
+    // The client is single-threaded: what it delivers from here on comes
+    // after the resize.
+    const std::array<std::string, 1> chunks{Stream()};
+    WriteChunks(run, agent, link, chunks);
+    CHECK(EndCleanly(run, agent, link).Status == 0);
+
+    const std::array<ByteSpan, 1> parts{AsBytes(chunks[0])};
+    CHECK(dump.Read() == ReferenceDump(parts, newCols, newRows));
+    CHECK(dump.Read() != ReferenceDump(parts));
+}
+
+TEST_CASE_FIXTURE(SodiumFixture,
+                  "a snapshot flagged as diverged mirrors both notices") {
+    AgentSide agent{77, TinyLimits(), true};
+    DumpPath dump;
+    ClientRun run{
+        agent,
+        {.MirrorDump = dump.Path,
+         .InitialSize =
+             wire::ResizeMessage{
+                 .Rows = ROWS, .Cols = COLS, .XPixel = 0, .YPixel = 0},
+         .NoticesInline = true}};
+    AgentLink& link = run.AcceptLive();
+    const std::string snap = "\x1b[2Jsnapshot";
+    constexpr std::uint8_t possiblyDiverged = 0x01;
+    REQUIRE(link.Supply(AsBytes(snap), possiblyDiverged));
+    const std::array<std::string, 1> after{"after"};
+    WriteChunks(run, agent, link, after);
+    CHECK(EndCleanly(run, agent, link).Status == 0);
+
+    const std::string out{reinterpret_cast<const char*>(run.Out.data()),
+                          run.Out.size()};
+    REQUIRE(out.find("zet: screen restored") != std::string::npos);
+    REQUIRE(out.find("the restored screen may differ") != std::string::npos);
+    const std::array<ByteSpan, 1> parts{ByteSpan{run.Out}};
+    CHECK(dump.Read() == ReferenceDump(parts));
+}
+
+TEST_CASE_FIXTURE(SodiumFixture,
+                  "the notices for a lost and a regained link reach the "
+                  "mirror") {
+    AgentSide agent{78, SessionLimits{}, false};
+    DumpPath dump;
+    ClientRun run{
+        agent,
+        {.GiveUpAfter = 5s,
+         .MirrorDump = dump.Path,
+         .InitialSize =
+             wire::ResizeMessage{
+                 .Rows = ROWS, .Cols = COLS, .XPixel = 0, .YPixel = 0},
+         .NoticesInline = true}};
+    AgentLink& first = run.AcceptLive();
+    const std::array<std::string, 1> before{"before"};
+    WriteChunks(run, agent, first, before);
+    first.Cut();
+
+    AgentLink& link = run.AcceptLive();
+    const std::string regained = "zet: reconnected";
+    const auto seen = [&](const std::string& text) {
+        const std::string out{reinterpret_cast<const char*>(run.Out.data()),
+                              run.Out.size()};
+        return out.find(text) != std::string::npos;
+    };
+    REQUIRE(run.PumpUntil(link, [&] { return seen(regained); }));
+    const std::array<std::string, 1> after{"after"};
+    WriteChunks(run, agent, link, after);
+    CHECK(EndCleanly(run, agent, link).Status == 0);
+
+    REQUIRE(seen("zet: connection lost"));
+    const std::array<ByteSpan, 1> parts{ByteSpan{run.Out}};
+    CHECK(dump.Read() == ReferenceDump(parts));
+}
+
+TEST_CASE_FIXTURE(SodiumFixture,
+                  "output delivered a single byte at a time reaches the "
+                  "mirror") {
+    AgentSide agent{79, SessionLimits{}, false};
+    DumpPath dump;
+    ClientRun run{agent,
+                  {.MirrorDump = dump.Path,
+                   .InitialSize = wire::ResizeMessage{
+                       .Rows = ROWS, .Cols = COLS, .XPixel = 0, .YPixel = 0}}};
+    AgentLink& link = run.AcceptLive();
+
+    const std::string stream = "ab\x1b[3;4Hcd\x1b[1mef";
+    std::vector<std::string> chunks;
+    for (const char c : stream) chunks.emplace_back(1, c);
+    WriteChunks(run, agent, link, chunks);
+    CHECK(EndCleanly(run, agent, link).Status == 0);
+    CHECK(run.Out == ToVector(AsBytes(stream)));
+
+    const std::array<ByteSpan, 1> parts{AsBytes(stream)};
     CHECK(dump.Read() == ReferenceDump(parts));
 }
