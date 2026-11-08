@@ -297,6 +297,16 @@ public:
         return Channel_ && Channel_->EchoAckNegotiated();
     }
 
+    /// Whether the Hello carried a GRID_CAPABLE / ECHO_ACK TLV with the value
+    /// 1. Read pre-auth, so only a test looks at them before the handshake
+    /// finishes; the channel gets them after Resume has opened.
+    [[nodiscard]] bool HelloOffersGridCapable() const noexcept {
+        return HelloGridCapable_;
+    }
+    [[nodiscard]] bool HelloOffersEchoAck() const noexcept {
+        return HelloEchoAck_;
+    }
+
     /// Queues an EchoAck for the next Pump, replacing one not yet sent.
     /// Returns false, queueing nothing, unless EchoAckNegotiated. §9 ADR-036.
     [[nodiscard]] bool QueueEchoAck(const wire::EchoAckMessage& ack) noexcept {
