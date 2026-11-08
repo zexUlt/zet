@@ -291,3 +291,51 @@ TEST_CASE(
     // Nothing should be written over a correct echo.
     CHECK(c.Draws == before);
 }
+
+TEST_CASE(
+    "review: a restore puts a wide glyph back whole, from its head, when the "
+    "mirror has it where a prediction was drawn") {
+    Client c(30, 5, EDisplayMode::Always);
+    c.Start();
+    c.Key("c");  // predicted at column 4, over the cell after 'B'
+    REQUIRE(c.O->Drawn());
+    // The mirror takes a wide glyph over columns 3-4 without the overlay
+    // having been taken off first (a path the client does not take, but the
+    // restore must not leave half a glyph if it ever finds one): the drawn
+    // cell is the right half.
+    c.R.Output("\x1b[4G\xe4\xb8\xad");
+    REQUIRE(c.R.G->CellAt(0, 4).Width == 0);
+    c.Ref.Feed("\x1b[4G\xe4\xb8\xad");
+    c.Undo();
+    CHECK(c.Real.G->CellAt(0, 3).Codepoint == 0x4E2D);
+    CHECK(c.Real.G->CellAt(0, 3).Width == 2);
+}
+
+TEST_CASE(
+    "review: a narrowing resize that keeps the cursor but drops a drawn "
+    "column is not undone") {
+    Client c(30, 5, EDisplayMode::Always);
+    c.Start();
+    c.Key("c");  // columns 4 and 5, the mirror's cursor at column 4
+    c.Key("d");
+    REQUIRE(c.O->Drawn());
+    REQUIRE(c.R.G->CursorCol() == 4);
+    const std::size_t before = c.Written;
+    c.Resize(5, 5);  // column 5 is gone, column 4 is not
+    CHECK(c.Written == before);
+    CHECK_FALSE(c.O->Drawn());
+}
+
+TEST_CASE(
+    "review: a narrowing resize that drops the cursor's column but no drawn "
+    "one is not undone") {
+    Client c(30, 5, EDisplayMode::Always);
+    c.Start();
+    c.Key("\x7f");  // the erase of 'B' at column 3, the cursor at column 4
+    REQUIRE(c.O->Drawn());
+    REQUIRE(c.R.G->CursorCol() == 4);
+    const std::size_t before = c.Written;
+    c.Resize(4, 5);  // the restore would end by moving to column 4
+    CHECK(c.Written == before);
+    CHECK_FALSE(c.O->Drawn());
+}
