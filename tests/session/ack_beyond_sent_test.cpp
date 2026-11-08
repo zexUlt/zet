@@ -220,7 +220,7 @@ TEST_CASE("ResetSendNext: resume offset into the unsent tail closes") {
     CHECK(buf.SendNext() == SENT);
 }
 
-TEST_CASE("after a rewind the new connection may ack only what it resent") {
+TEST_CASE("after a rewind an ack up to the highest sealed offset is honest") {
     std::array<std::byte, 16> storage{};
     SendBuffer buf{MutableByteSpan{storage}};
     const std::vector<std::byte> data(BUFFERED, std::byte{1});
@@ -229,12 +229,78 @@ TEST_CASE("after a rewind the new connection may ack only what it resent") {
 
     // The peer holds 2: the new connection resends from 2.
     REQUIRE(buf.ResetSendNext(2).has_value());
-    CHECK(buf.Acknowledge(2).has_value());
-    // Bytes 2..8 were sent on the old connection, but not on this one: the
-    // peer cannot hold them yet.
-    CHECK_FALSE(buf.Acknowledge(5).has_value());
-    buf.AdvanceSendNext(3);
-    CHECK(buf.Acknowledge(5).has_value());
+    // Bytes 2..8 were sealed on the old connection and may have landed after
+    // the peer quoted 2: acking them is not a lie, and the cursor follows.
+    REQUIRE(buf.Acknowledge(5).has_value());
+    CHECK(buf.Base() == 5);
+    CHECK(buf.SendNext() == 5);
+    // Above the highest sealed offset still is.
+    CHECK_FALSE(buf.Acknowledge(9).has_value());
+    // And a second resume is bounded by the same mark, not by the cursor.
+    REQUIRE(buf.ResetSendNext(2 + 6).has_value());
+}
+
+TEST_CASE("Acknowledge clamps SendNext to the new Base") {
+    std::array<std::byte, 32> storage{};
+    SendBuffer buf{MutableByteSpan{storage}};
+    const std::vector<std::byte> data(20, std::byte{1});
+    REQUIRE(buf.Append(ByteSpan{data}) == data.size());
+    buf.AdvanceSendNext(15);
+    // Rewound to 5: the peer held 5 when it resumed.
+    REQUIRE(buf.ResetSendNext(5).has_value());
+
+    // It now acks 15, sealed on the old connection: the cursor must not stay
+    // below Base, where CopyOut has nothing to give.
+    REQUIRE(buf.Acknowledge(15).has_value());
+    CHECK(buf.Base() == 15);
+    CHECK(buf.SendNext() == 15);
+    CHECK(buf.SendNext() >= buf.Base());
+}
+
+TEST_CASE(
+    "resend after an ack above the rewound cursor yields each byte once") {
+    std::array<std::byte, 32> storage{};
+    SendBuffer buf{MutableByteSpan{storage}};
+    std::vector<std::byte> data(20);
+    for (std::size_t i = 0; i < data.size(); ++i) {
+        data.at(i) = static_cast<std::byte>(i);
+    }
+    REQUIRE(buf.Append(ByteSpan{data}) == data.size());
+    buf.AdvanceSendNext(12);
+    REQUIRE(buf.ResetSendNext(3).has_value());
+    REQUIRE(buf.Acknowledge(9).has_value());
+
+    // What the peer holds is [0, 9); the resend continues at 9 and reaches End
+    // without a hole or a repeat.
+    std::vector<std::byte> resent;
+    while (buf.Unsent() > 0) {
+        std::array<std::byte, 4> chunk{};
+        const auto out = buf.CopyOut(buf.SendNext(), MutableByteSpan{chunk});
+        REQUIRE_FALSE(out.empty());
+        resent.insert(resent.end(), out.begin(), out.end());
+        buf.AdvanceSendNext(out.size());
+    }
+    CHECK(resent == std::vector<std::byte>(data.begin() + 9, data.end()));
+    CHECK(buf.SendNext() == 20);
+}
+
+TEST_CASE("a new generation forgets what was sealed in the old one") {
+    std::array<std::byte, 16> storage{};
+    SendBuffer buf{MutableByteSpan{storage}};
+    const std::vector<std::byte> data(BUFFERED, std::byte{1});
+    REQUIRE(buf.Append(ByteSpan{data}) == BUFFERED);
+    buf.AdvanceSendNext(SENT);
+
+    buf.NewGeneration();
+    REQUIRE(buf.Append(ByteSpan{data}) == BUFFERED);
+    // Nothing of the new generation is sealed: SENT would have been honest in
+    // the old one, and is a lie now.
+    const auto ack = buf.Acknowledge(SENT);
+    REQUIRE_FALSE(ack.has_value());
+    CHECK(ack.error() == ESessionError::AckBeyondSent);
+    const auto resume = buf.ResetSendNext(SENT);
+    REQUIRE_FALSE(resume.has_value());
+    CHECK(resume.error() == ESessionError::AckBeyondSent);
 }
 
 // Channel: both roles, bare Ack and Ack inside Data -------------------------

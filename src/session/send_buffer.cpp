@@ -10,7 +10,8 @@ SendBuffer::SendBuffer(MutableByteSpan storage,
     : Storage_(storage),
       Base_(initialBase),
       End_(initialBase),
-      SendNext_(initialBase) {}
+      SendNext_(initialBase),
+      Sealed_(initialBase) {}
 
 std::size_t SendBuffer::Size() const noexcept {
     return static_cast<std::size_t>(End_ - Base_);
@@ -57,16 +58,22 @@ SessionResult<void> SendBuffer::Acknowledge(std::uint64_t ackOffset) noexcept {
         // nothing to do.  §9: "значение меньше уже присланного игнорируется".
         return {};
     }
-    if (ackOffset > SendNext_) {
+    if (ackOffset > Sealed_) {
         // Peer claims to have received bytes we never sent (appended but not
         // yet sealed into a Data frame counts as not sent).  §7:
         // "больше, чем отправитель вообще отправил — CloseConnection".
-        // SendNext is the right bound across reconnects too: ResetSendNext
-        // rewinds it to the peer's own resume offset, and the peer can only
-        // have received what was sealed since.
+        // Sealed_, not SendNext_: the cursor rewinds on a resume, while
+        // frames sealed on the old connection may still land at the peer
+        // after it quoted its offset, so it can honestly hold more than the
+        // rewound cursor.
         return std::unexpected(ESessionError::AckBeyondSent);
     }
     Base_ = ackOffset;
+    // A rewound cursor can lag behind what the peer honestly holds (bytes
+    // sealed on the previous connection): keep it in [Base, End].
+    if (SendNext_ < Base_) {
+        SendNext_ = Base_;
+    }
     return {};
 }
 
@@ -101,15 +108,16 @@ MutableByteSpan SendBuffer::CopyOut(std::uint64_t fromOffset,
 
 SessionResult<void> SendBuffer::ResetSendNext(
     std::uint64_t peerRecvOffset) noexcept {
-    // Checked against the cursor as it stood on the previous connection: it
-    // is the highest offset ever sealed, and a peer cannot have received more.
-    if (peerRecvOffset > SendNext_) {
+    // Checked against the highest offset ever sealed in this generation, not
+    // the cursor: a peer cannot have received more, and a second resume may
+    // quote more than the cursor the first one rewound to.
+    if (peerRecvOffset > Sealed_) {
         return std::unexpected(ESessionError::AckBeyondSent);
     }
     if (peerRecvOffset < Base_) {
         return std::unexpected(ESessionError::PeerBehindBuffer);
     }
-    // Within [Base, SendNext], so the acknowledgement cannot fail.
+    // Within [Base, Sealed], so the acknowledgement cannot fail.
     std::ignore = Acknowledge(peerRecvOffset);
     SendNext_ = peerRecvOffset;
     return {};
@@ -119,6 +127,7 @@ void SendBuffer::AdvanceSendNext(std::size_t count) noexcept {
     const std::uint64_t next = SendNext_ + static_cast<std::uint64_t>(count);
     // Clamp to End_ so SendNext never overshoots.
     SendNext_ = (next > End_) ? End_ : next;
+    Sealed_ = std::max(Sealed_, SendNext_);
 }
 
 void SendBuffer::NewGeneration() noexcept {
@@ -130,6 +139,7 @@ void SendBuffer::NewGeneration() noexcept {
     Base_ = 0;
     End_ = 0;
     SendNext_ = 0;
+    Sealed_ = 0;
     RingOverflowed_ = false;
 }
 
