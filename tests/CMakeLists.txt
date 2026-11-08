@@ -22,6 +22,16 @@ add_executable(zet_tests
     grid/snapshot_size_test.cpp
     grid/snapshot_400x300_test.cpp
     grid/snapshot_mutant_test.cpp
+    predict/predict_ack_test.cpp
+    predict/predict_backspace_test.cpp
+    predict/predict_cap_test.cpp
+    predict/predict_column_trust_test.cpp
+    predict/grid_counters_test.cpp
+    predict/predict_epoch_test.cpp
+    predict/predict_input_test.cpp
+    predict/predict_password_test.cpp
+    predict/predict_tentative_test.cpp
+    predict/predict_trigger_test.cpp
     core/byte_reader_test.cpp
     core/byte_writer_test.cpp
     core/log_test.cpp
@@ -72,6 +82,7 @@ target_link_libraries(zet_tests PRIVATE
     zet::wire
     zet::session
     zet::grid
+    zet::predict
     zet::compile_options
     doctest::doctest
 )

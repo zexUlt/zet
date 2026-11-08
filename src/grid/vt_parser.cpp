@@ -379,6 +379,7 @@ void VtParser::EmitBypassByte(std::byte byt) noexcept {
 }
 
 void VtParser::EmitBypassStart() noexcept {
+    if (!InOsc_) ++DcsApcCount_;
     if (BypassFn_) BypassFn_(EBypassEvent::Start, std::byte{0}, BypassCtx_);
 }
 

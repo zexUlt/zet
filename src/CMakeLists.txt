@@ -3,6 +3,7 @@ add_subdirectory(crypto)
 add_subdirectory(wire)
 add_subdirectory(session)
 add_subdirectory(grid)
+add_subdirectory(predict)
 
 # zet_io and the client build on Linux and macOS (design.md §10, §12): the
 # Poller has an epoll and a kqueue backend. The agent, which owns the pty and

@@ -214,6 +214,7 @@ void Grid::PushScrollback(std::uint16_t row) noexcept {
 
 void Grid::ScrollRegionUp(std::uint16_t n, bool push) noexcept {
     if (n == 0) return;
+    ++ScrollCount_;
     const std::uint16_t regionHeight =
         static_cast<std::uint16_t>(ScrollBot_ - ScrollTop_ + 1);
     if (n > regionHeight) n = regionHeight;
@@ -237,6 +238,7 @@ void Grid::ScrollRegionUp(std::uint16_t n, bool push) noexcept {
 
 void Grid::ScrollRegionDown(std::uint16_t n) noexcept {
     if (n == 0) return;
+    ++ScrollCount_;
     const std::uint16_t regionHeight =
         static_cast<std::uint16_t>(ScrollBot_ - ScrollTop_ + 1);
     if (n > regionHeight) n = regionHeight;
@@ -351,12 +353,16 @@ void Grid::PutChar(char32_t cp, int width) noexcept {
 }
 
 void Grid::CarriageReturn() noexcept {
+    ++ColumnSetCount_;
     CursorCol_ = 0;
     PendingWrap_ = false;
 }
 
 void Grid::LineFeed() noexcept {
-    if (ModeSet(EMode::Lnm)) CursorCol_ = 0;
+    if (ModeSet(EMode::Lnm)) {
+        ++ColumnSetCount_;
+        CursorCol_ = 0;
+    }
     PendingWrap_ = false;
     if (CursorRow_ == ScrollBot_) {
         ScrollRegionUp(1);
@@ -477,6 +483,7 @@ void Grid::MoveCursorLeft(std::uint16_t n) noexcept {
 }
 
 void Grid::MoveCursorTo(std::uint16_t row1, std::uint16_t col1) noexcept {
+    ++ColumnSetCount_;
     PendingWrap_ = false;
     const std::uint16_t rowOff = ModeSet(EMode::Decom) ? ScrollTop_ : 0;
     const std::uint16_t maxRow = ModeSet(EMode::Decom)
@@ -494,6 +501,7 @@ void Grid::MoveCursorTo(std::uint16_t row1, std::uint16_t col1) noexcept {
 }
 
 void Grid::MoveCursorToCol(std::uint16_t col1) noexcept {
+    ++ColumnSetCount_;
     PendingWrap_ = false;
     CursorCol_ = ClampCol(col1 > 0 ? static_cast<std::uint16_t>(col1 - 1) : 0);
 }
@@ -513,11 +521,13 @@ void Grid::MoveCursorToRow(std::uint16_t row1) noexcept {
 
 void Grid::CursorNextLine(std::uint16_t n) noexcept {
     MoveCursorDown(n);
+    ++ColumnSetCount_;
     CursorCol_ = 0;
 }
 
 void Grid::CursorPrevLine(std::uint16_t n) noexcept {
     MoveCursorUp(n);
+    ++ColumnSetCount_;
     CursorCol_ = 0;
 }
 
@@ -1135,6 +1145,7 @@ void Grid::Reset(bool hard) noexcept {
 
     if (hard) {
         // RIS: full reset — clear screen, scrollback, cursor, saved cursors.
+        ++ColumnSetCount_;
         CursorRow_ = 0;
         CursorCol_ = 0;
         PendingWrap_ = false;

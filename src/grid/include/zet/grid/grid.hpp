@@ -125,6 +125,23 @@ public:
     }
     [[nodiscard]] bool PendingWrap() const noexcept { return PendingWrap_; }
 
+    /// Monotonic counters for observers that must notice what a stretch of
+    /// output did without replaying it (the prediction engine, design.md §9).
+    /// They count events, never reset, and are not part of the grid's state:
+    /// snapshots and the differential tests do not see them.
+    ///
+    /// ScrollCount: every time rows shifted (LF/IND/RI at a margin, SU/SD,
+    /// IL/DL).
+    [[nodiscard]] std::uint64_t ScrollCount() const noexcept {
+        return ScrollCount_;
+    }
+    /// ColumnSetCount: every time the cursor column was set absolutely, so a
+    /// caller that lost track of it knows it again: CR, CUP/HVP, CHA, CNL/CPL,
+    /// LF under LNM and RIS.
+    [[nodiscard]] std::uint64_t ColumnSetCount() const noexcept {
+        return ColumnSetCount_;
+    }
+
     [[nodiscard]] std::uint16_t ScrollTop() const noexcept {
         return ScrollTop_;
     }
@@ -416,6 +433,9 @@ private:
     int LastPrintedWidth_{1};
 
     bool PossiblyDiverged_{false};
+
+    std::uint64_t ScrollCount_{0};
+    std::uint64_t ColumnSetCount_{0};
 };
 
 }  // namespace zet::grid

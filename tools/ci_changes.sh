@@ -59,6 +59,13 @@ while IFS= read -r path; do
         tests/grid/*)
             need test integration coverage checks macos ;;
 
+        # The prediction engine: sans-I/O, built on the grid, fuzzed.
+        src/predict/*)
+            need test coverage checks macos fuzz ;;
+
+        tests/predict/*)
+            need test coverage checks macos ;;
+
         # zet_io and the layer above it: what the client and the agent are
         # made of. Not the fuzzers', not the coverage gate's.
         src/io/* | src/app/* | src/client/*)
