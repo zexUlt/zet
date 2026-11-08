@@ -349,12 +349,16 @@ std::size_t CountOf(std::string_view haystack, std::string_view needle) {
 TEST_CASE_FIXTURE(
     SodiumFixture,
     "a client that stops reading for its terminal is not cut for silence") {
+    // Built before the client exists: filling 32 MiB takes about a second
+    // under sanitizers on a loaded machine, and the agent end says nothing
+    // while the test thread does it, which is longer than SILENCE. For the
+    // same reason the 32 MiB comparisons come after Finish, not before it.
+    const auto stream = Pattern(STREAM_BYTES);
     Rig rig;
     rig.Accept();
     REQUIRE(rig.UntilLive(3s));
 
     // The terminal does not drain: nobody reads the stdout pipe.
-    const auto stream = Pattern(STREAM_BYTES);
     const auto written = rig.Session.Write(ByteSpan{stream});
     REQUIRE(written.has_value());
     REQUIRE(*written == stream.size());
@@ -367,20 +371,20 @@ TEST_CASE_FIXTURE(
 
     // The terminal comes back.
     rig.Drain(stream.size());
-    CHECK(rig.Received.size() == stream.size());
-    CHECK(rig.Received == stream);
-
     CHECK(rig.Finish() == 0);
     CHECK(rig.Notices().find(LOST_PREFIX) == std::string::npos);
+    CHECK(rig.Received.size() == stream.size());
+    CHECK(rig.Received == stream);
 }
 
 TEST_CASE_FIXTURE(
     SodiumFixture,
     "a reconnect completes its handshake while the terminal is full") {
+    // Built before the client exists, and compared after Finish, as above.
+    const auto stream = Pattern(STREAM_BYTES);
     Rig rig;
     rig.Accept();
     REQUIRE(rig.UntilLive(3s));
-    const auto stream = Pattern(STREAM_BYTES);
     REQUIRE(rig.Session.Write(ByteSpan{stream}).has_value());
     REQUIRE(rig.Stall(STALL));
     REQUIRE(rig.Peer->Backlogged());
@@ -395,7 +399,7 @@ TEST_CASE_FIXTURE(
     REQUIRE(rig.UntilLive(3s));
 
     rig.Drain(stream.size());
-    CHECK(rig.Received == stream);
     CHECK(rig.Finish() == 0);
     CHECK(CountOf(rig.Notices(), LOST_PREFIX) == 1);
+    CHECK(rig.Received == stream);
 }
