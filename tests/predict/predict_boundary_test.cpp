@@ -33,15 +33,15 @@ void Glitchy(Rig& r) {
 TEST_CASE("a full ack queue keeps the newest ack, which covers the input") {
     Rig r(40, 4, EDisplayMode::Always);
     r.Prompt();
-    r.Type("a");
+    r.Type("ab");
     const std::uint64_t waitFor = r.Out + 5;
     // Sixteen acks that cover nothing, then one that covers the keystroke.
     for (std::size_t i = 0; i < ECHO_ACK_PENDING_MAX; ++i) {
         r.E.OnEchoAck(EchoAck{0, waitFor, 0}, r.Now, r.View());
     }
     r.E.OnEchoAck(EchoAck{0, waitFor, r.In}, r.Now, r.View());
-    REQUIRE(r.Count() == 1);
-    r.Output("a    ");
+    REQUIRE(r.Count() == 2);
+    r.Output("ab   ");
     CHECK(r.Count() == 0);
     CHECK(r.E.ConfirmedEpoch() == 1);
 }
@@ -52,13 +52,13 @@ TEST_CASE(
     r.Prompt();
     r.Type("a");
     // From generation 1, naming output not yet read and input not yet typed.
-    r.E.OnEchoAck(EchoAck{1, 1, r.In + 1}, r.Now, r.View());
+    r.E.OnEchoAck(EchoAck{1, 2, r.In + 2}, r.Now, r.View());
     r.E.OnSnapshot(1, r.Now, r.View());
     r.Gen = 1;
     r.Out = 0;
-    r.Type("b");
-    REQUIRE(r.Count() == 1);
-    r.Output("b");
+    r.Type("bc");
+    REQUIRE(r.Count() == 2);
+    r.Output("bc");
     CHECK(r.Count() == 0);
     CHECK(r.E.ConfirmedEpoch() > 0);
 }

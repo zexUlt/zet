@@ -84,7 +84,7 @@ TEST_CASE("backspace with text to the right of the cursor is not predicted") {
 TEST_CASE("the echo of a backspace is checked and earns nothing") {
     Rig r(20, 4, EDisplayMode::Always);
     r.Prompt();
-    r.Confirm("a");
+    r.ConfirmEpoch();
     r.Type("b");
     r.Output("b");
     r.Type("\x7f");
@@ -99,7 +99,7 @@ TEST_CASE("the echo of a backspace is checked and earns nothing") {
 TEST_CASE("a backspace the program ignores is a misprediction") {
     Rig r(20, 4, EDisplayMode::Always);
     r.Prompt();
-    r.Confirm("a");
+    r.ConfirmEpoch();
     r.Type("b");
     r.Output("b");
     r.Type("\x7f");

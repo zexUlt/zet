@@ -22,7 +22,9 @@
 //   8. echo-off model (the header's mode byte, bit 2): the mirror gets
 //      prompts and unsolicited output but never a lowercase letter, and the
 //      keystrokes are lowercase letters or controls, so no echo ever happens;
-//      then no epoch is ever confirmed and no prediction is ever visible
+//      then no epoch is ever confirmed and no prediction is ever visible.
+//      Some output is wrapped as a prompt on another row (DECSC / row 9 /
+//      DECRC, or CNL-style down and CUU+CHA back)
 //
 // Input: 3 header bytes (columns, rows, mode), then operations: one byte
 // selecting the operation, one byte giving the operand length, the operand.
@@ -176,7 +178,25 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data,
 
         switch (op) {
             case 0:  // agent output
-                mirror->Feed(echoOff ? shown.data() : p, n);
+                if (echoOff && arg(0) % 4 == 0) {
+                    // A prompt on another row, the cursor saved and put back
+                    // (DECSC/DECRC), or the row below and back up.
+                    static constexpr std::uint8_t SAVE[] = {
+                        0x1B, '7', 0x1B, '[', '9', ';', '1', 'H'};
+                    static constexpr std::uint8_t BELOW[] = {0x1B, '[', 'B',
+                                                             '\r'};
+                    static constexpr std::uint8_t BACK[] = {0x1B, '8'};
+                    static constexpr std::uint8_t UP[] = {0x1B, '[', 'A', 0x1B,
+                                                          '[',  '5', 'G'};
+                    const bool save = arg(1) % 2 == 0;
+                    mirror->Feed(save ? SAVE : BELOW,
+                                 save ? sizeof(SAVE) : sizeof(BELOW));
+                    mirror->Feed(shown.data(), n);
+                    mirror->Feed(save ? BACK : UP,
+                                 save ? sizeof(BACK) : sizeof(UP));
+                } else {
+                    mirror->Feed(echoOff ? shown.data() : p, n);
+                }
                 out += n;
                 engine.OnOutput(out, now, mirror->View());
                 break;

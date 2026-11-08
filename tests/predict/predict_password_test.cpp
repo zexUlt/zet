@@ -51,7 +51,7 @@ TEST_CASE("typing at a silent prompt is never visible") {
         CHECK(r.Count() == 0);
 
         // Enter, and the next prompt echoes again: the first key after it is
-        // invisible and the second shows, as the design accepts.
+        // invisible, the second too, the third shows (design.md M7).
         r.Type("\r");
         r.Output("\r\n$ ");
         r.Type("l");
@@ -59,6 +59,10 @@ TEST_CASE("typing at a silent prompt is never visible") {
         r.Output("l");
         r.Ack();
         r.Type("s");
+        CHECK_FALSE(r.AnyVisible());
+        r.Output("s");
+        r.Ack();
+        r.Type(" ");
         CHECK(r.AnyVisible());
     }
 }
@@ -66,7 +70,7 @@ TEST_CASE("typing at a silent prompt is never visible") {
 TEST_CASE("keys typed ahead of a silent prompt do not show either") {
     Rig r(40, 4, EDisplayMode::Always);
     r.Prompt();
-    r.Confirm("a");
+    r.ConfirmEpoch();
     r.Type("\r");
     // Typed before the program's reply arrived, in a fresh epoch.
     r.Type("pw");
@@ -80,7 +84,7 @@ TEST_CASE("keys typed ahead of a silent prompt do not show either") {
 TEST_CASE("a silent prompt costs no glitch") {
     Rig r(40, 4, EDisplayMode::Adaptive);
     r.Prompt();
-    r.Confirm("a");
+    r.ConfirmEpoch();
     r.Type("\r");
     r.Output("\r\nPassword: ");
     r.Prompt("\rPassword: ");

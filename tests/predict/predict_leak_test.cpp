@@ -24,11 +24,11 @@ TEST_CASE(
         Rig r(40, 4, mode);
         r.E.OnSrtt(std::chrono::milliseconds(300), r.Now);
         r.Prompt();
-        r.Confirm("a");
+        r.ConfirmEpoch();
         r.Type("\r");      // e.g. `make && sudo make install`
         r.Output("\r\n");  // the command starts and runs long
-        r.Type("x");       // the user pokes a key; the tty echoes it
-        r.Output("x");
+        r.Type("xy");      // the user pokes keys; the tty echoes them
+        r.Output("xy");
         r.Ack();
         REQUIRE(r.E.ConfirmedEpoch() >= r.E.PredictionEpoch());
         r.Output(
@@ -43,7 +43,7 @@ TEST_CASE(
 TEST_CASE("a prompt overwriting the row from the left also raises the epoch") {
     Rig r(40, 4, EDisplayMode::Always);
     r.Prompt();
-    r.Confirm("a");
+    r.ConfirmEpoch();
     const auto before = r.E.PredictionEpoch();
     r.Output("\rPassword: ");
     CHECK(r.E.PredictionEpoch() > before);
@@ -67,7 +67,7 @@ TEST_CASE("a cursor jump or an erase in the cursor row raises the epoch") {
 TEST_CASE("output that changes nothing in the cursor row keeps the epoch") {
     Rig r(40, 4, EDisplayMode::Always);
     r.Prompt();
-    r.Confirm("a");
+    r.ConfirmEpoch();
     const auto before = r.E.PredictionEpoch();
     r.Output("\x1b[31m");  // a colour: no cell, no cursor
     r.Output("");
@@ -80,7 +80,7 @@ TEST_CASE(
         Rig r(40, 4, mode);
         r.E.OnSrtt(std::chrono::milliseconds(300), r.Now);
         r.Prompt();
-        r.Confirm("a");
+        r.ConfirmEpoch();
         const auto epoch = r.E.PredictionEpoch();
         for (char c : std::string_view("bcdefgh")) {
             r.Type(std::string_view(&c, 1));
@@ -98,7 +98,7 @@ TEST_CASE(
 TEST_CASE("an echo that arrives in pieces keeps the epoch") {
     Rig r(40, 4, EDisplayMode::Always);
     r.Prompt();
-    r.Confirm("a");
+    r.ConfirmEpoch();
     const auto epoch = r.E.PredictionEpoch();
     r.Type("b");
     r.Type("c");
@@ -130,7 +130,7 @@ TEST_CASE(
         Rig r(40, 4, mode);
         r.E.OnSrtt(std::chrono::milliseconds(300), r.Now);
         r.Prompt();
-        r.Confirm("a");
+        r.ConfirmEpoch();
         r.Type("\r");
         r.Output("\r\n");
         r.Prompt("\rPassword: ");
@@ -166,14 +166,14 @@ TEST_CASE("mask glyphs of all three kinds earn no credit") {
 TEST_CASE("an ordinary glyph still earns credit") {
     Rig r(40, 4, EDisplayMode::Always);
     r.Prompt();
-    r.Confirm("a");
+    r.ConfirmEpoch();
     CHECK(r.E.ConfirmedEpoch() > 0);
 }
 
 TEST_CASE("wrong visible prediction is gone at the first covering ack") {
     Rig r(40, 4, EDisplayMode::Always);
     r.Prompt();
-    r.Confirm("a");
+    r.ConfirmEpoch();
     r.Type("b");  // epoch 1 confirmed: visible
     REQUIRE(r.AnyVisible());
     r.Type("c");
@@ -188,7 +188,7 @@ TEST_CASE("wrong visible prediction is gone at the first covering ack") {
 TEST_CASE("ack before output, silent prompt") {
     Rig r(40, 4, EDisplayMode::Always);
     r.Prompt();
-    r.Confirm("a");
+    r.ConfirmEpoch();
     r.Type("x");
     REQUIRE(r.AnyVisible());
     r.E.OnEchoAck(EchoAck{0, r.Out + 3, r.In}, r.Now, r.View());
@@ -200,7 +200,7 @@ TEST_CASE("ack before output, silent prompt") {
 TEST_CASE("snapshot mid typing hides later keys") {
     Rig r(40, 4, EDisplayMode::Always);
     r.Prompt();
-    r.Confirm("a");
+    r.ConfirmEpoch();
     r.Type("b");
     REQUIRE(r.AnyVisible());
     r.G = MakeGrid(40, 4);
@@ -216,7 +216,7 @@ TEST_CASE("snapshot mid typing hides later keys") {
 TEST_CASE("resize mid typing hides later keys") {
     Rig r(40, 4, EDisplayMode::Always);
     r.Prompt();
-    r.Confirm("a");
+    r.ConfirmEpoch();
     r.Type("b");
     (void)r.G->Resize(30, 4);
     r.E.OnResize(r.Now, r.View());

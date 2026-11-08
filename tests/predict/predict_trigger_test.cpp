@@ -164,7 +164,7 @@ TEST_CASE("a visible misprediction turns display on at low SRTT") {
     Rig r = Adaptive();
     r.Prompt();
     Srtt(r, 10);
-    r.Confirm("a");
+    r.ConfirmEpoch();
     CHECK_FALSE(r.E.ShowPredictions());
     r.Type("b");
     r.Output("Z");
@@ -182,6 +182,9 @@ TEST_CASE("always shows confirmed epochs at once, never nothing") {
     a.Output("x");
     a.Ack();
     a.Type("y");
+    a.Output("y");
+    a.Ack();
+    a.Type("z");
     CHECK(a.AnyVisible());
 
     Rig n(40, 4, EDisplayMode::Never);

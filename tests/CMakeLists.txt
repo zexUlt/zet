@@ -31,6 +31,7 @@ add_executable(zet_tests
     predict/predict_epoch_test.cpp
     predict/predict_input_test.cpp
     predict/predict_leak_test.cpp
+    predict/predict_leak_screen_test.cpp
     predict/predict_password_test.cpp
     predict/predict_tentative_test.cpp
     predict/predict_trigger_test.cpp

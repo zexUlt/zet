@@ -66,6 +66,13 @@ struct Rig {
         Ack();
     }
 
+    /// Two echoed keys of different glyphs: the least that confirms an epoch
+    /// (design.md M7). Leaves the cursor two columns on.
+    void ConfirmEpoch() {
+        Confirm("a");
+        Confirm("A");
+    }
+
     /// A prompt: CR makes the column known.
     void Prompt(std::string_view s = "\r$ ") { Output(s); }
 

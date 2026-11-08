@@ -74,8 +74,9 @@ struct CursorPrediction {
 /// Prediction lives in epochs. A prediction is visible only when its epoch is
 /// at most `ConfirmedEpoch()`; any event the engine does not model raises the
 /// current epoch ("becomes tentative"), and an epoch is confirmed when one of
-/// its predictions is found correct. Nothing about passwords is special: with
-/// echo off no epoch is ever confirmed.
+/// its predictions is found correct twice in a row with different glyphs.
+/// Nothing about passwords is special: with echo off no epoch is ever
+/// confirmed.
 ///
 /// Call order, per event, by the client:
 ///   input to the agent        OnInput
@@ -198,14 +199,20 @@ private:
 
     // Mirror side.
     void Observe(const MirrorView& mirror) noexcept;
-    /// Whether what changed in the cursor row since the last look is nothing
-    /// but the echo of outstanding predictions. Anything else printed there
-    /// (a prompt, a cursor jump, an erase) may be a prompt with echo off.
+    /// Whether what changed on the screen since the last look is nothing but
+    /// the echo of outstanding predictions: the cells that changed (Grid::
+    /// CellChangeCount) are all explained by predictions the mirror now
+    /// shows, and the cursor is where the echo leaves it or where it was.
+    /// Anything else (a prompt on any row, a redraw that differs, a cursor
+    /// jump) may be a prompt with echo off.
     [[nodiscard]] bool OutputIsPredictedEcho(const MirrorView& mirror) noexcept;
     void Rebase(const MirrorView& mirror) noexcept;
     void Drain(Timestamp now, const MirrorView& mirror) noexcept;
     void Reconcile(std::uint64_t inputOffset, Timestamp now,
                    const MirrorView& mirror) noexcept;
+    /// A correct echo of a glyph that was not there: one more step of the
+    /// streak that confirms an epoch.
+    void CreditEcho(const Prediction& p, Timestamp now) noexcept;
     void ReconcileCursor(std::uint64_t inputOffset,
                          const grid::Grid& g) noexcept;
     void Cull(Timestamp now) noexcept;
@@ -243,12 +250,19 @@ private:
     std::uint16_t LastRows_{0};
     std::uint16_t LastRow_{0};
     std::uint16_t LastCol_{0};
-    std::uint64_t LastRowHash_{0};
+    std::uint64_t LastCellChanges_{0};
     bool LastAlt_{false};
     std::uint64_t LastScroll_{0};
     std::uint64_t LastColumnSet_{0};
     std::uint64_t LastUnknown_{0};
     std::uint64_t LastDcsApc_{0};
+
+    // The run of correct echoes in one epoch, last glyph included. An epoch
+    // is confirmed by the second correct echo in a row of a glyph different
+    // from the one before; a mismatch ends the run.
+    std::uint32_t StreakEpoch_{0};
+    bool InStreak_{false};
+    char32_t StreakGlyph_{0};
 
     // Display state.
     std::optional<Duration> Srtt_;

@@ -19,7 +19,7 @@ struct Ready {
     Rig R{20, 5, EDisplayMode::Always};
     Ready() {
         R.Prompt();
-        R.Confirm("a");
+        R.ConfirmEpoch();
         R.Type("b");
     }
 };
@@ -212,7 +212,7 @@ TEST_CASE("a change of cursor row resets") {
 TEST_CASE("a scroll resets") {
     Rig r(20, 3, EDisplayMode::Always);
     r.Prompt("\r\n\n\r$ ");  // cursor on the bottom row
-    r.Confirm("a");
+    r.ConfirmEpoch();
     r.Type("b");
     REQUIRE(r.G->CursorRow() == 2);
     CheckOutputResets(r, "\x1b[S");  // scroll up; the cursor stays on its row
@@ -221,7 +221,7 @@ TEST_CASE("a scroll resets") {
 TEST_CASE("a scroll at the bottom by line feed resets") {
     Rig r(20, 3, EDisplayMode::Always);
     r.Prompt("\r\n\n\r$ ");
-    r.Confirm("a");
+    r.ConfirmEpoch();
     r.Type("b");
     CheckOutputResets(r, "\n");
 }

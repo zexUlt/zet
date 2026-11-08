@@ -19,13 +19,19 @@ TEST_CASE("the first epoch is invisible until a check confirms it") {
     CHECK(r.E.Predictions()[0].Codepoint == U'a');
     CHECK_FALSE(r.AnyVisible());
 
+    // One correct echo is not enough: a mask glyph would give it too.
     r.Output("a");
     r.Ack();
-    CHECK(r.E.ConfirmedEpoch() == 1);
+    CHECK(r.E.ConfirmedEpoch() == 0);
     CHECK(r.Count() == 0);
+    r.Type("b");
+    CHECK_FALSE(r.AnyVisible());
+    r.Output("b");
+    r.Ack();
+    CHECK(r.E.ConfirmedEpoch() == 1);
 
     // The next key of the same epoch is visible at once.
-    r.Type("b");
+    r.Type("c");
     REQUIRE(r.Count() == 1);
     CHECK(r.E.Predictions()[0].Epoch == 1);
     CHECK(r.AnyVisible());
@@ -77,7 +83,7 @@ TEST_CASE("killing an epoch kills the epochs above it") {
 TEST_CASE("a wrong prediction in a visible epoch drops everything and counts") {
     Rig r(20, 4, EDisplayMode::Always);
     r.Prompt();
-    r.Confirm("a");
+    r.ConfirmEpoch();
     r.Type("b");
     r.Type("c");
     REQUIRE(r.Count() == 2);
@@ -85,7 +91,7 @@ TEST_CASE("a wrong prediction in a visible epoch drops everything and counts") {
     const auto epoch = r.E.PredictionEpoch();
 
     r.Output("Z");  // not "b"
-    r.E.OnEchoAck(EchoAck{0, r.Out, 2}, r.Now, r.View());
+    r.E.OnEchoAck(EchoAck{0, r.Out, 3}, r.Now, r.View());
     CHECK(r.Count() == 0);
     CHECK_FALSE(r.E.Cursor().has_value());
     CHECK(r.E.GlitchTrigger() == GLITCH_REPAIR_COUNT);
@@ -123,10 +129,10 @@ TEST_CASE("an empty cell and a typed space confirm nothing") {
 TEST_CASE("the predicted cursor is checked against the mirror's cursor") {
     Rig r(20, 4, EDisplayMode::Always);
     r.Prompt();
-    r.Confirm("a");
+    r.ConfirmEpoch();
     r.Type("b");
     REQUIRE(r.E.Cursor().has_value());
-    CHECK(r.E.Cursor()->Col == 4);
+    CHECK(r.E.Cursor()->Col == 5);
 
     r.Output("b");
     r.Ack();
@@ -137,7 +143,7 @@ TEST_CASE("the predicted cursor is checked against the mirror's cursor") {
 TEST_CASE("a wrong cursor in a visible epoch is a glitch") {
     Rig r(20, 4, EDisplayMode::Always);
     r.Prompt();
-    r.Confirm("a");
+    r.ConfirmEpoch();
     r.Type("b");
     // The cell is right, the cursor is not: the program also moved it.
     r.Output("b\x1b[9G");
@@ -152,10 +158,11 @@ TEST_CASE("typing over a predicted cell replaces its prediction") {
     r.Type("a");
     r.Type("\x7f");
     r.Type("b");
+    r.Type("c");
     // One cell, one prediction: the intermediate states are never compared.
-    REQUIRE(r.Count() == 1);
+    REQUIRE(r.Count() == 2);
     CHECK(r.E.Predictions()[0].Codepoint == U'b');
-    r.Output("b");
+    r.Output("bc");
     r.Ack();
     CHECK(r.E.ConfirmedEpoch() == 1);
 }
