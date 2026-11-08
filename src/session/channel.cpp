@@ -831,6 +831,12 @@ bool Channel::StartGrid(ByteSpan snapshot, std::uint8_t flags,
     GridAwaitingApplied_ = true;
     GridExpectedAppliedGen_ = streamGen;
     AwaitingSnapshotSupply_ = false;
+    // An EchoAck queued while the snapshot was awaited names the old
+    // generation; the client would reject it after GridEnd. Drop it and let
+    // the agent re-queue for the new one (§9, M7: first ack after path B is
+    // (new generation, 0, I)). QueueEchoAck stays open while awaiting: the
+    // agent need not know whether the snapshot has arrived yet.
+    PendingEchoAck_.reset();
     GridEmitting_->Snapshot = snapshot;
     GridEmitting_->StreamGen = streamGen;
     GridEmitting_->TotalLen = static_cast<std::uint32_t>(snapshot.size());

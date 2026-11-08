@@ -493,4 +493,33 @@ TEST_CASE_FIXTURE(SodiumFixture,
     CHECK_FALSE(rig.Relay().has_value());
 }
 
+// An EchoAck queued while the snapshot is awaited names the old generation.
+// StartGrid drops it: the agent re-queues for the new one, so the first ack
+// after path B is (new generation, 0, I) and a legitimate agent never trips
+// the client's generation check.
+TEST_CASE_FIXTURE(
+    SodiumFixture,
+    "an EchoAck queued before StartGrid is dropped at StartGrid") {
+    Rig rig;
+    const std::array<std::byte, Rig::SNAPSHOT_SIZE> snapshot{};
+    rig.Agent.SuppressDataUntilGrid();
+    REQUIRE(rig.Agent.QueueEchoAck(
+        EchoAckMessage{.StreamGen = 0, .OutputOffset = 0, .InputOffset = 0}));
+    REQUIRE(rig.Agent.StartGrid(ByteSpan{snapshot}, 0, 1, 0));
+    for (int i = 0; i < 3; ++i) {
+        const auto grid = rig.Relay();
+        REQUIRE(grid.has_value());
+        REQUIRE(grid->has_value());
+    }
+    // Nothing stale follows GridEnd.
+    CHECK_FALSE(rig.Relay().has_value());
+
+    REQUIRE(rig.Agent.QueueEchoAck(
+        EchoAckMessage{.StreamGen = 1, .OutputOffset = 0, .InputOffset = 0}));
+    const auto echo = rig.Relay();
+    REQUIRE(echo.has_value());
+    REQUIRE(echo->has_value());
+    CHECK(std::holds_alternative<DeliveredEchoAck>(**echo));
+}
+
 }  // namespace
