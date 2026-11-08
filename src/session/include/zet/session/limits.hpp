@@ -65,6 +65,30 @@ inline constexpr Duration KEEPALIVE_INTERVAL = std::chrono::seconds{5};
 /// false cut costs a reconnect, never a byte.
 inline constexpr Duration PEER_SILENCE_TIMEOUT = std::chrono::seconds{15};
 
+/// How long the agent lets input lie in the pty before it reports the output
+/// read since as the program's answer to it (EchoAck, §9 "Предиктивное эхо").
+/// The figure is mosh's (`ECHO_TIMEOUT`, completeterminal.h:61): a program
+/// that answers faster has written its echo by then.
+inline constexpr Duration ECHO_TIMEOUT = std::chrono::milliseconds{50};
+
+/// The least time between two EchoAcks of one connection (mosh's
+/// `SEND_INTERVAL_MIN`). It bites on autorepeat and paste only: a single
+/// keystroke is never held back. §9.
+inline constexpr Duration ECHO_ACK_INTERVAL_MIN = std::chrono::milliseconds{20};
+
+/// How many (end of written input, moment of the write) pairs the agent keeps
+/// for the EchoAck. When they run out the last one is replaced by the newest:
+/// the acknowledgement comes later, never earlier. §9.
+inline constexpr std::size_t ECHO_HISTORY_MAX = 64;
+
+/// How old the last RTT sample may be before the channel adds a Ping to the
+/// next send of input (§9, «RTT»).
+inline constexpr Duration RTT_PROBE_INTERVAL = std::chrono::seconds{1};
+
+/// A Ping answered after longer than this says nothing about the path (a
+/// suspended peer, as in mosh) and is not a sample. §9, «RTT».
+inline constexpr Duration RTT_SAMPLE_MAX = std::chrono::seconds{5};
+
 /// Path B (§9 ADR-030): how long to wait for the client's first Resize after
 /// Resume before using the last known terminal size for the grid snapshot.
 inline constexpr Duration RESIZE_WAIT_TIMEOUT = std::chrono::seconds{2};

@@ -3,10 +3,12 @@
 // One AgentConnection over one AgentSession is driven the way a hostile or
 // buggy client would drive it: bytes in chunks cut from the input, interleaved
 // with time advances and the owner's calls (Pump, Write, InputDelivered,
-// SupplySnapshot, SetReadGate, SetSendGate, OnTimer, Close). session_fuzz and
-// session_fuzz_v2 start after the handshake and talk to a Channel; this one
-// starts at the first byte of the connection and covers the stage machine
-// around it: Hello, routing, the handshake, Resume, path B and the live stage.
+// SupplySnapshot, SetReadGate, SetSendGate, OnTimer, Close, and the EchoAck
+// calls of the agent loop: InputWritten, EchoDue/SettleEcho, SetPtyReadOpen).
+// session_fuzz and session_fuzz_v2 start after the handshake and talk to a
+// Channel; this one starts at the first byte of the connection and covers the
+// stage machine around it: Hello, routing, the handshake, Resume, path B and
+// the live stage.
 //
 // Reaching the live stage
 // -----------------------
@@ -25,7 +27,7 @@
 // Input layout: byte 0 = mode (bits 0-1), ceiling 1 (bit 2), GRID_CAPABLE
 // (bit 3), auto-acknowledge of delivered input (bit 4), ForcePath::B (bit 5,
 // which puts a GRID_CAPABLE peer on path B), output written before the
-// connection (bit 6). Then operations, the
+// connection (bit 6), ECHO_ACK offered in Hello (bit 7). Then operations, the
 // opcode being the low 4 bits of the first byte of each:
 //
 //  00 cs nn [nn B]   Raw       — feed nn bytes as they are; cs picks the chunk
@@ -38,10 +40,14 @@
 //  04 b              ReadGate  — SetReadGate(b & 1)
 //  05 b              SendGate  — SetSendGate(b & 1)
 //  06 nn             Write     — the shell prints nn bytes
-//  07 ff             AckInput  — InputDelivered for ff/255 of what is pending
+//  07 ff             AckInput  — for ff/255 of what is pending: InputWritten
+//                                (ff odd, the pty took it at the current time)
+//                                or InputDelivered (ff even, discarded)
 //  08 hi lo          Supply    — SupplySnapshot of (hi:lo) % 8193 bytes
 //  09                OwnerTimer — AgentSession::OnTimer
 //  0A                Close     — Close(now); the run ends
+//  0B                EchoTimer — if EchoDue(now): SettleEcho(now)
+//  0C b              PtyRead   — SetPtyReadOpen(b & 1)
 //
 // Properties (each violation → __builtin_trap())
 // -----------------------------------------------
@@ -66,6 +72,12 @@
 //  C8  Events only an agent produces: never Ended, ApplySnapshot or
 //      SessionOverflowed. NeedsSession is asked once.
 //  C9  After Close the session is not Live.
+//  C10 Every EchoAck the agent sends (seen in mode 2, where the harness opens
+//      the agent's frames) is one the connection may send: only when ECHO_ACK
+//      was offered and the version is 2; never between GridBegin and GridEnd;
+//      stream_gen is the generation the connection is in; output_offset is at
+//      most what the agent has sent of that generation; the fields never
+//      decrease within a generation (input_offset never at all).
 
 #include <algorithm>
 #include <array>
@@ -235,7 +247,19 @@ struct Rig {
     std::uint64_t LastReceiveOffset{0};
     std::uint64_t Pattern{0};
 
-    Rig(std::uint16_t ceiling, bool autoAck, EForcePath force)
+    // C10: what the agent's frames have shown so far.
+    bool EchoOffered{false};
+    std::uint16_t Ceiling{0};
+    bool InGrid{false};
+    std::uint32_t Gen{0};
+    std::uint64_t SentEnd{0};
+    // The most a hostile peer has acknowledged in the current generation: an
+    // acknowledgment past what was sent moves the send cursor all the same, and
+    // output_offset may then name it. The peer that lied is the one it hurts.
+    std::uint64_t PeerClaim{0};
+    std::optional<wire::EchoAckMessage> LastAck;
+
+    Rig(std::uint16_t ceiling, bool autoAck, EForcePath force, bool echoOffered)
         : Session(Secrets(),
                   SessionStreams{.Storage = MutableByteSpan{AgentStore},
                                  .Now = Now,
@@ -249,7 +273,9 @@ struct Rig {
                                            .DisconnectMax = STREAM_STORAGE}}),
           Agent(MutableByteSpan{G_AGENT_FRAMES}, Now, ceiling),
           Initial(ViewOf(Session)),
-          AutoAck(autoAck) {}
+          AutoAck(autoAck),
+          EchoOffered(echoOffered),
+          Ceiling(ceiling) {}
 };
 
 void CheckInvariants(Rig& rig) noexcept {
@@ -288,6 +314,74 @@ void OnPumpError(Rig& rig, const SessionError& error) noexcept {
     }
 }
 
+// C10. A frame the harness could not parse is C5's business, not this one's.
+void SniffAgentMessage(Rig& rig, ByteSpan body) noexcept {
+    zet::ByteReader reader{body};
+    const auto type = wire::ParseMessageType(reader);
+    if (!type) {
+        return;
+    }
+    switch (*type) {
+        case wire::EMessageType::Data: {
+            const auto data = wire::ParseData(reader);
+            if (data) {
+                rig.SentEnd = std::max<std::uint64_t>(
+                    rig.SentEnd, data->Offset + data->Payload.size());
+            }
+            break;
+        }
+        case wire::EMessageType::GridBegin: {
+            const auto begin = wire::ParseGridBegin(reader);
+            if (begin) {
+                rig.InGrid = true;
+                rig.Gen = begin->StreamGen;
+                rig.SentEnd = 0;
+                rig.PeerClaim = 0;
+                rig.LastAck.reset();
+            }
+            break;
+        }
+        case wire::EMessageType::GridEnd:
+            rig.InGrid = false;
+            break;
+        case wire::EMessageType::EchoAck: {
+            const auto ack = wire::ParseEchoAck(reader);
+            REQUIRE(ack.has_value());
+            REQUIRE(rig.EchoOffered &&
+                    rig.Ceiling == wire::PROTOCOL_VERSION_MAX);
+            REQUIRE(!rig.InGrid);
+            REQUIRE(ack->StreamGen == rig.Gen);
+            REQUIRE(ack->OutputOffset <= std::max(rig.SentEnd, rig.PeerClaim));
+            if (rig.LastAck) {
+                REQUIRE(ack->OutputOffset >= rig.LastAck->OutputOffset);
+                REQUIRE(ack->InputOffset >= rig.LastAck->InputOffset);
+            }
+            rig.LastAck = *ack;
+            break;
+        }
+        default:
+            break;
+    }
+}
+
+// C10: what the injected plaintext of the peer claims to have received.
+void NotePeerClaim(Rig& rig, ByteSpan payload) noexcept {
+    zet::ByteReader reader{payload};
+    const auto type = wire::ParseMessageType(reader);
+    if (!type) {
+        return;
+    }
+    if (*type == wire::EMessageType::Data) {
+        if (const auto data = wire::ParseData(reader)) {
+            rig.PeerClaim = std::max(rig.PeerClaim, data->Ack);
+        }
+    } else if (*type == wire::EMessageType::Ack) {
+        if (const auto ack = wire::ParseAck(reader)) {
+            rig.PeerClaim = std::max(rig.PeerClaim, ack->Ack);
+        }
+    }
+}
+
 // Reads what the agent put in G_OUT. `toClient` is told about the cleartext
 // frames the real client has to see; the sealed ones go through the opener.
 template <typename TToClient>
@@ -306,8 +400,10 @@ void OnAgentFrame(Rig& rig, std::size_t written, TToClient&& toClient) {
     // C5
     const auto view = wire::ReadFrame(frame, wire::MAX_FRAME);
     REQUIRE(view.has_value() && view->Consumed == written);
-    REQUIRE(rig.FromAgent->Open(MutableByteSpan{G_OPEN_SCRATCH}, *view)
-                .has_value());
+    const auto body =
+        rig.FromAgent->Open(MutableByteSpan{G_OPEN_SCRATCH}, *view);
+    REQUIRE(body.has_value());
+    SniffAgentMessage(rig, *body);
 }
 
 // Pump until Idle or an error. Returns true if it ended on an error.
@@ -347,7 +443,7 @@ bool PumpWith(Rig& rig, TToClient&& toClient) {
             rig.Delivered += deliver->Bytes.size();
             if (rig.AutoAck) {
                 const auto pending = rig.Delivered - rig.Marked;
-                REQUIRE(rig.Session.InputDelivered(pending));
+                REQUIRE(rig.Session.InputWritten(pending, rig.Now));
                 rig.Marked = rig.Delivered;
             }
         } else if (std::holds_alternative<Idle>(*event)) {
@@ -415,7 +511,9 @@ void Handshake(Rig& rig, std::uint8_t mode, bool gridCapable,
                             MutableByteSpan{G_CLIENT_FRAMES},
                             rig.Now,
                             gridCapable,
-                            ceiling};
+                            ceiling,
+                            {},
+                            rig.EchoOffered};
     unsigned sent = 0;
     const unsigned limit = mode == 1 ? 1 : CLIENT_HANDSHAKE_FRAMES;
     bool agentDone = false;
@@ -488,7 +586,8 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data,
     const bool gridCapable = (*config & 0x08U) != 0;
 
     Rig rig{ceiling, (*config & 0x10U) != 0,
-            (*config & 0x20U) != 0 ? EForcePath::B : EForcePath::None};
+            (*config & 0x20U) != 0 ? EForcePath::B : EForcePath::None,
+            (*config & 0x80U) != 0};
     if ((*config & 0x40U) != 0) {
         // The shell printed while nobody was connected, so that Resume has
         // something to replay or to supersede with a snapshot.
@@ -557,6 +656,7 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data,
                 const auto written =
                     rig.ToAgent->Seal(MutableByteSpan{sealed}, *payload);
                 if (written) {
+                    NotePeerClaim(rig, *payload);
                     Feed(rig, ByteSpan{sealed}.first(*written), *selector);
                 }
                 break;
@@ -624,7 +724,9 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data,
                 const auto pending = rig.Delivered - rig.Marked;
                 const auto count = pending * *fraction / 255U;
                 // C4
-                REQUIRE(rig.Session.InputDelivered(count));
+                REQUIRE(((*fraction & 1U) != 0
+                             ? rig.Session.InputWritten(count, rig.Now)
+                             : rig.Session.InputDelivered(count)));
                 rig.Marked += count;
                 break;
             }
@@ -648,6 +750,19 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data,
                 rig.Agent.Close(rig.Now);
                 rig.Closed = true;
                 break;
+            case 0x0B:
+                if (rig.Agent.EchoDue(rig.Now)) {
+                    rig.Agent.SettleEcho(rig.Now);
+                }
+                break;
+            case 0x0C: {
+                const auto open = reader.ReadU8();
+                if (!open) {
+                    break;
+                }
+                rig.Agent.SetPtyReadOpen((*open & 1U) != 0);
+                break;
+            }
             default:
                 Pump(rig);
                 break;

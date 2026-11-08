@@ -61,7 +61,7 @@ HandshakeNonce MakeNonce(std::uint64_t counter) {
 const Timestamp START = Timestamp::FromNanos(1'000'000'000);
 
 /// Tiny limits for tests: ring overflows quickly.
-SessionLimits TinyLimits() {
+[[maybe_unused]] SessionLimits TinyLimits() {
     return SessionLimits{
         .ResendMax = 512,
         .DisconnectMax = 512,
