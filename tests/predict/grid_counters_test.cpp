@@ -66,3 +66,63 @@ TEST_CASE("DCS and APC count once each, OSC not at all") {
     CHECK(Run("\x1b_x\x1b\\").Dcs == 1);
     CHECK(Run("\x1b]0;t\x07").Dcs == 0);
 }
+
+namespace {
+
+/// Cells changed by `second` after `first` had been fed.
+std::uint64_t Changed(std::string_view first, std::string_view second,
+                      int cols = 20, int rows = 3) {
+    auto g = MakeGrid(cols, rows);
+    zet::grid::VtParser p;
+    p.Feed(Bytes(first).data(), first.size(), *g);
+    const std::uint64_t before = g->CellChangeCount();
+    p.Feed(Bytes(second).data(), second.size(), *g);
+    return g->CellChangeCount() - before;
+}
+
+}  // namespace
+
+TEST_CASE("a cell that gets other content counts, the same content does not") {
+    CHECK(Changed("", "a") == 1);
+    CHECK(Changed("", "abc") == 3);
+    CHECK(Changed("abc", "\rabc") == 0);  // identical rewrite
+    CHECK(Changed("abc", "\rabd") == 1);
+    CHECK(Changed("abc", "\r\x1b[1mabc") == 3);  // attributes are content
+    CHECK(Changed("abc", "\r\x1b[31mabc") == 3);
+}
+
+TEST_CASE("an empty cell and a space are the same content") {
+    CHECK(Changed("", "   ") == 0);
+    CHECK(Changed("ab", "\b \b") == 1);
+    CHECK(Changed("", "\x1b[K") == 0);
+    CHECK(Changed("ab", "\r\x1b[K") == 2);
+    CHECK(Changed("ab", "\x1b[K") == 0);
+}
+
+TEST_CASE("erases and shifts count the cells they change") {
+    CHECK(Changed("abc", "\x1b[2K") == 3);
+    CHECK(Changed("abc", "\x1b[2J") == 3);
+    CHECK(Changed("abc", "\r\x1b[2P") == 3);  // abc -> c + blanks
+    CHECK(Changed("abc", "\r\x1b[2@") == 5);  // abc -> blank blank abc
+}
+
+TEST_CASE("wide glyphs count both cells, a wide overwrite counts once more") {
+    CHECK(Changed("", "\xE4\xBD\xA0") == 2);
+    CHECK(Changed("\xE4\xBD\xA0", "\r\xE5\xA5\xBD") == 1);  // head only
+    CHECK(Changed("\xE4\xBD\xA0", "\r\xE4\xBD\xA0") == 0);
+}
+
+TEST_CASE("cells of another row count, and so does the alternate screen") {
+    CHECK(Changed("",
+                  "\x1b"
+                  "7\x1b[3;1HPass\x1b"
+                  "8") == 4);
+    // Entering the alternate screen changes no cell by itself; what is
+    // written there is counted.
+    CHECK(Changed("abc", "\x1b[?47h") == 0);
+    CHECK(Changed("abc", "\x1b[?47hxy\x1b[?47l") == 2);
+}
+
+TEST_CASE("scrolling moves rows without counting them, only the blanked ones") {
+    CHECK(Changed("abc\r\n\r\n\r\n", "\n") == 0);
+}
