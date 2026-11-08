@@ -25,7 +25,8 @@ mapfile -t objects < <(find "$build" \
     -o -path "*zet_wire.dir*" -name '*.o' \
     -o -path "*zet_session.dir*" -name '*.o' \
     -o -path "*zet_crypto.dir*" -name '*.o' \
-    -o -path "*zet_grid.dir*" -name '*.o' 2>/dev/null | sort)
+    -o -path "*zet_grid.dir*" -name '*.o' \
+    -o -path "*zet_predict.dir*" -name '*.o' 2>/dev/null | sort)
 
 if [ ${#objects[@]} -eq 0 ]; then
     echo "no core object files in $build — build first" >&2

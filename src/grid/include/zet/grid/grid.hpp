@@ -125,6 +125,36 @@ public:
     }
     [[nodiscard]] bool PendingWrap() const noexcept { return PendingWrap_; }
 
+    /// Monotonic counters for observers that must notice what a stretch of
+    /// output did without replaying it (the prediction engine, design.md §9).
+    /// They count events, never reset, and are not part of the grid's state:
+    /// snapshots and the differential tests do not see them.
+    ///
+    /// ScrollCount: every time rows shifted (LF/IND/RI at a margin, SU/SD,
+    /// IL/DL).
+    [[nodiscard]] std::uint64_t ScrollCount() const noexcept {
+        return ScrollCount_;
+    }
+    /// ColumnSetCount: every time the cursor column was set absolutely, so a
+    /// caller that lost track of it knows it again: CR, CUP/HVP, CHA, CNL/CPL,
+    /// LF under LNM and RIS.
+    [[nodiscard]] std::uint64_t ColumnSetCount() const noexcept {
+        return ColumnSetCount_;
+    }
+
+    /// CellChangeCount: every time a cell of either screen buffer was stored
+    /// with content that differs from what it held: glyph (an empty cell and a
+    /// space are the same glyph), width, attributes or colours. Writing the
+    /// same content again does not count; a cell that changes twice counts
+    /// twice. Counted: printing, erases (ED/EL/ECH), ICH/DCH, and the blanking
+    /// of orphaned halves of wide glyphs. Not counted: rows moving as a whole
+    /// (scrolling, see ScrollCount; only the cells they blank count), the
+    /// scrollback, resize and snapshot loading, and switching between the
+    /// screens (a switch alone changes no cell).
+    [[nodiscard]] std::uint64_t CellChangeCount() const noexcept {
+        return CellChangeCount_;
+    }
+
     [[nodiscard]] std::uint16_t ScrollTop() const noexcept {
         return ScrollTop_;
     }
@@ -329,6 +359,8 @@ private:
     void CopyCells(Cell* dst, const Cell* src, std::uint16_t count) noexcept;
     void MoveCells(Cell* dst, const Cell* src, std::uint16_t count) noexcept;
     void BlankCell(Cell& cell) noexcept;
+    /// `dst = value`, counted in CellChangeCount_ when the content differs.
+    void StoreCell(Cell& dst, const Cell& value) noexcept;
     void PenToCell(Cell& cell) noexcept;
     [[nodiscard]] Line& ActiveLine(std::uint16_t row) noexcept;
     [[nodiscard]] const Line& ActiveLine(std::uint16_t row) const noexcept;
@@ -416,6 +448,10 @@ private:
     int LastPrintedWidth_{1};
 
     bool PossiblyDiverged_{false};
+
+    std::uint64_t ScrollCount_{0};
+    std::uint64_t ColumnSetCount_{0};
+    std::uint64_t CellChangeCount_{0};
 };
 
 }  // namespace zet::grid

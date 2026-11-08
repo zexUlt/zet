@@ -108,6 +108,14 @@ public:
         return UnknownSeqCount_;
     }
 
+    /// Number of DCS, SOS, PM and APC strings started since construction
+    /// (OSC is not counted). After one of them the cursor may have moved in
+    /// ways the grid does not model (sixel), which is what the prediction
+    /// engine needs to know (design.md §9). Monotonic, survives Reset.
+    [[nodiscard]] std::uint64_t DcsApcCount() const noexcept {
+        return DcsApcCount_;
+    }
+
     /// Byte counter in the current bypass sequence.  Resets at each new
     /// DCS/OSC/APC/PM/SOS.  Reaching BYPASS_LIMIT_BYTES forces Ground.
     [[nodiscard]] std::size_t BypassBytes() const noexcept {
@@ -177,6 +185,7 @@ private:
 
     // Statistics
     std::uint64_t UnknownSeqCount_{0};
+    std::uint64_t DcsApcCount_{0};
 };
 
 }  // namespace zet::grid

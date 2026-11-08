@@ -139,13 +139,36 @@ const Line* Grid::ScrollbackLine(std::uint32_t idx) const noexcept {
     return &HistoryLines_[ring];
 }
 
+namespace {
+
+/// Whether two cells look the same: same glyph (an empty cell and a space are
+/// the same glyph), width, attributes and colours.
+bool SameContent(const Cell& a, const Cell& b) noexcept {
+    const auto glyph = [](const Cell& c) noexcept {
+        return c.Codepoint == U' ' ? char32_t{0} : c.Codepoint;
+    };
+    return glyph(a) == glyph(b) && a.Width == b.Width && a.Attrs == b.Attrs &&
+           a.FgKind == b.FgKind && a.BgKind == b.BgKind && a.Fg[0] == b.Fg[0] &&
+           a.Fg[1] == b.Fg[1] && a.Fg[2] == b.Fg[2] && a.Bg[0] == b.Bg[0] &&
+           a.Bg[1] == b.Bg[1] && a.Bg[2] == b.Bg[2] && a.AttrEx == b.AttrEx &&
+           a.UlIdx == b.UlIdx;
+}
+
+}  // namespace
+
+void Grid::StoreCell(Cell& dst, const Cell& value) noexcept {
+    if (!SameContent(dst, value)) ++CellChangeCount_;
+    dst = value;
+}
+
 void Grid::BlankCell(Cell& cell) noexcept {
-    cell = Cell{};
+    Cell blank{};
     // A blank cell inherits the current pen bg (for ED/EL erase-to-BG).
-    cell.BgKind = PenBgKind_;
-    cell.Bg[0] = PenBg_[0];
-    cell.Bg[1] = PenBg_[1];
-    cell.Bg[2] = PenBg_[2];
+    blank.BgKind = PenBgKind_;
+    blank.Bg[0] = PenBg_[0];
+    blank.Bg[1] = PenBg_[1];
+    blank.Bg[2] = PenBg_[2];
+    StoreCell(cell, blank);
 }
 
 void Grid::PenToCell(Cell& cell) noexcept {
@@ -176,9 +199,10 @@ void Grid::CopyCells(Cell* dst, const Cell* src, std::uint16_t count) noexcept {
 
 void Grid::MoveCells(Cell* dst, const Cell* src, std::uint16_t count) noexcept {
     if (dst < src) {
-        for (std::uint16_t i = 0; i < count; ++i) dst[i] = src[i];
+        for (std::uint16_t i = 0; i < count; ++i) StoreCell(dst[i], src[i]);
     } else if (dst > src) {
-        for (std::uint16_t i = count; i > 0; --i) dst[i - 1] = src[i - 1];
+        for (std::uint16_t i = count; i > 0; --i)
+            StoreCell(dst[i - 1], src[i - 1]);
     }
 }
 
@@ -214,6 +238,7 @@ void Grid::PushScrollback(std::uint16_t row) noexcept {
 
 void Grid::ScrollRegionUp(std::uint16_t n, bool push) noexcept {
     if (n == 0) return;
+    ++ScrollCount_;
     const std::uint16_t regionHeight =
         static_cast<std::uint16_t>(ScrollBot_ - ScrollTop_ + 1);
     if (n > regionHeight) n = regionHeight;
@@ -237,6 +262,7 @@ void Grid::ScrollRegionUp(std::uint16_t n, bool push) noexcept {
 
 void Grid::ScrollRegionDown(std::uint16_t n) noexcept {
     if (n == 0) return;
+    ++ScrollCount_;
     const std::uint16_t regionHeight =
         static_cast<std::uint16_t>(ScrollBot_ - ScrollTop_ + 1);
     if (n > regionHeight) n = regionHeight;
@@ -305,23 +331,29 @@ void Grid::PutChar(char32_t cp, int width) noexcept {
     if (CursorCol_ > 0) {
         Cell& left =
             CellAt(CursorRow_, static_cast<std::uint16_t>(CursorCol_ - 1));
-        if (left.Width == 2) left.Width = 1;
+        if (left.Width == 2) {
+            left.Width = 1;
+            ++CellChangeCount_;
+        }
     }
 
     // D2: if writing over a wide head, blank its continuation to prevent an
     // orphan continuation cell (width==0 with no preceding width==2).
     {
         Cell& cur = CellAt(CursorRow_, CursorCol_);
-        if (cur.Width == 2 && CursorCol_ + 1 < Cols_) {
+        // (A wide glyph over it rewrites the continuation below anyway.)
+        if (width == 1 && cur.Width == 2 && CursorCol_ + 1 < Cols_) {
             BlankCell(
                 CellAt(CursorRow_, static_cast<std::uint16_t>(CursorCol_ + 1)));
         }
     }
 
     Cell& cell = CellAt(CursorRow_, CursorCol_);
-    PenToCell(cell);
-    cell.Codepoint = cp;
-    cell.Width = static_cast<std::uint8_t>(width);
+    Cell written = cell;
+    PenToCell(written);
+    written.Codepoint = cp;
+    written.Width = static_cast<std::uint8_t>(width);
+    StoreCell(cell, written);
 
     if (width == 2 && CursorCol_ + 1 < Cols_) {
         Cell& cont =
@@ -334,8 +366,9 @@ void Grid::PutChar(char32_t cp, int width) noexcept {
             BlankCell(
                 CellAt(CursorRow_, static_cast<std::uint16_t>(CursorCol_ + 2)));
         }
-        cont = Cell{};
-        cont.Width = 0;
+        Cell tail{};
+        tail.Width = 0;
+        StoreCell(cont, tail);
     }
 
     LastPrintedChar_ = cp;
@@ -351,12 +384,16 @@ void Grid::PutChar(char32_t cp, int width) noexcept {
 }
 
 void Grid::CarriageReturn() noexcept {
+    ++ColumnSetCount_;
     CursorCol_ = 0;
     PendingWrap_ = false;
 }
 
 void Grid::LineFeed() noexcept {
-    if (ModeSet(EMode::Lnm)) CursorCol_ = 0;
+    if (ModeSet(EMode::Lnm)) {
+        ++ColumnSetCount_;
+        CursorCol_ = 0;
+    }
     PendingWrap_ = false;
     if (CursorRow_ == ScrollBot_) {
         ScrollRegionUp(1);
@@ -477,6 +514,7 @@ void Grid::MoveCursorLeft(std::uint16_t n) noexcept {
 }
 
 void Grid::MoveCursorTo(std::uint16_t row1, std::uint16_t col1) noexcept {
+    ++ColumnSetCount_;
     PendingWrap_ = false;
     const std::uint16_t rowOff = ModeSet(EMode::Decom) ? ScrollTop_ : 0;
     const std::uint16_t maxRow = ModeSet(EMode::Decom)
@@ -494,6 +532,7 @@ void Grid::MoveCursorTo(std::uint16_t row1, std::uint16_t col1) noexcept {
 }
 
 void Grid::MoveCursorToCol(std::uint16_t col1) noexcept {
+    ++ColumnSetCount_;
     PendingWrap_ = false;
     CursorCol_ = ClampCol(col1 > 0 ? static_cast<std::uint16_t>(col1 - 1) : 0);
 }
@@ -513,11 +552,13 @@ void Grid::MoveCursorToRow(std::uint16_t row1) noexcept {
 
 void Grid::CursorNextLine(std::uint16_t n) noexcept {
     MoveCursorDown(n);
+    ++ColumnSetCount_;
     CursorCol_ = 0;
 }
 
 void Grid::CursorPrevLine(std::uint16_t n) noexcept {
     MoveCursorUp(n);
+    ++ColumnSetCount_;
     CursorCol_ = 0;
 }
 
@@ -1135,6 +1176,7 @@ void Grid::Reset(bool hard) noexcept {
 
     if (hard) {
         // RIS: full reset — clear screen, scrollback, cursor, saved cursors.
+        ++ColumnSetCount_;
         CursorRow_ = 0;
         CursorCol_ = 0;
         PendingWrap_ = false;

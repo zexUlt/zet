@@ -46,6 +46,7 @@ zet_add_fuzzer(mux_fuzz zet::session zet::crypto)
 zet_add_fuzzer(probe_fuzz zet::wire)
 zet_add_fuzzer(grid_fuzz zet::grid)
 zet_add_fuzzer(snapshot_fuzz zet::grid)
+zet_add_fuzzer(predict_fuzz zet::predict)
 
 # One line per target: name, binary, seed corpus. file(GENERATE) is what
 # resolves $<TARGET_FILE>, so the runner never has to guess where the generator

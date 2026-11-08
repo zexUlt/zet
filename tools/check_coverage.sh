@@ -20,6 +20,7 @@ readonly GATED_TARGETS=(
     "zet_wire:src/wire"
     "zet_session:src/session"
     "zet_grid:src/grid"
+    "zet_predict:src/predict"
 )
 
 root=$(cd "$(dirname "$0")/.." && pwd)
