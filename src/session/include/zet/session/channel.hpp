@@ -331,6 +331,20 @@ public:
         return EchoAckEnabled_ && Version_ >= wire::PROTOCOL_VERSION_GRID;
     }
 
+    /// Client side, read-only views of what the EchoAck checks compare
+    /// against, for tests and fuzzers: the previous accepted EchoAck, the
+    /// generation Data is received in, and whether a snapshot is mid-reception.
+    [[nodiscard]] const std::optional<wire::EchoAckMessage>& LastEchoAck()
+        const noexcept {
+        return LastEchoAck_;
+    }
+    [[nodiscard]] std::uint32_t AgentStreamGen() const noexcept {
+        return AgentStreamGen_;
+    }
+    [[nodiscard]] bool GridReceiving() const noexcept {
+        return GridReceiving_.has_value();
+    }
+
     /// Agent side: queue an EchoAck for the next Poll. A later call replaces
     /// one not yet sent. Poll holds it back while a snapshot is being emitted
     /// or awaited from SupplySnapshot, and sends it ahead of Data. Whether it

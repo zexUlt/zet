@@ -46,9 +46,26 @@
 //  0C              NewGeneration — Agent.SendBuffer.NewGeneration() (path B
 //                                  ring reset); P2 Base-monotonicity is
 //                                  exempted for this step
-//  0D gg oo ii     QueueEchoAck  — Agent.QueueEchoAck({gg, oo, ii}); the
-//                                  frame is polled and discarded like any
-//                                  other (EchoAck is enabled on both ends)
+//  0D gg oo ii     QueueEchoAck  — Agent.QueueEchoAck({gg, oo, ii}), the
+//                                  values as given: hostile to the witness
+//                                  (EchoAck is enabled on all channels)
+//  0E              PathB         — what AgentConnection::SupplySnapshot does:
+//                                  NewGeneration, generation + 1, StartGrid.
+//                                  Skipped while a grid is in flight
+//  0F oo ii        QueueLegitEchoAck — an EchoAck a correct agent could send:
+//                                  current generation, output no further than
+//                                  the agent has sent in it, input no further
+//                                  than the client wrote, neither going back
+//
+// The witness
+// -----------
+// A third Channel, a second client, receives every frame the agent polls (op
+// 03), in order. It sees what a real client would see, so a correct agent
+// must never make it fail (P12). The agent is correct only while no op of the
+// hostile kind has run: 05 (client frames the real client never sent), 09 and
+// 0C (a grid or a generation reset on their own), 0D (arbitrary values). Those
+// clear `witnessExact`; the witness keeps receiving, but its errors are no
+// longer a finding.
 //
 // Properties (each violation → __builtin_trap())
 // -----------------------------------------------
@@ -68,8 +85,16 @@
 //  P9  The agent sends SessionEnd only with its SendBuffer empty: nothing
 //      unsent and nothing unacknowledged (§9).
 // P10  After DeliveredGridSnapshot RecvCursor is exactly 0 (§9).
-// P11  A delivered EchoAck never claims output beyond the client's receive
-//      offset or input beyond its send buffer's End (§7).
+// P11  EchoAck on the client under injection (§7): a delivered one names the
+//      generation Data is received in, claims output no further than the
+//      receive offset and input no further than the send buffer's End, does
+//      not go back from the previous one (input always, output within a
+//      generation), does not arrive between GridBegin and GridEnd, and is the
+//      one the channel now remembers. A rejected frame, of any type, leaves
+//      LastEchoAck and the generation as they were.
+// P12  The witness never fails on the agent's frames while `witnessExact`:
+//      a correct agent, a stale EchoAck dropped at StartGrid included, never
+//      trips a violation.
 
 #include <algorithm>
 #include <array>
@@ -290,12 +315,46 @@ void CheckProperties(const Snapshot& before, const SendBuffer& clientSend,
     }
 }
 
+// P11: what a client under injection may and may not do with an EchoAck.
+void CheckEchoAck(const Channel& chan, const SendBuffer& sendBuf,
+                  const ReceiveCursor& cursor,
+                  const ChannelResult<IncomingEvent>& result,
+                  const std::optional<wire::EchoAckMessage>& lastBefore,
+                  std::uint32_t genBefore) noexcept {
+    if (!result) {
+        // A rejected frame changes nothing the EchoAck checks rest on.
+        if (chan.LastEchoAck() != lastBefore ||
+            chan.AgentStreamGen() != genBefore) {
+            __builtin_trap();
+        }
+        return;
+    }
+    const auto* echo = std::get_if<DeliveredEchoAck>(&*result);
+    if (echo == nullptr) {
+        return;
+    }
+    const wire::EchoAckMessage& ack = echo->Ack;
+    if (ack.StreamGen != chan.AgentStreamGen() ||
+        ack.OutputOffset > cursor.RecvOffset() ||
+        ack.InputOffset > sendBuf.End() || chan.GridReceiving()) {
+        __builtin_trap();
+    }
+    if (lastBefore.has_value() &&
+        (ack.InputOffset < lastBefore->InputOffset ||
+         (ack.StreamGen == lastBefore->StreamGen &&
+          ack.OutputOffset < lastBefore->OutputOffset))) {
+        __builtin_trap();
+    }
+    if (chan.LastEchoAck() != ack) {
+        __builtin_trap();
+    }
+}
+
 // Process a ChannelResult from Receive() and apply property checks.
 // Returns true if a DeliveredGridSnapshot was received (RecvCursor reset to 0).
 [[nodiscard]] bool HandleReceiveResult(
     const ChannelResult<IncomingEvent>& result, StreamRecord& rec,
-    std::uint64_t oldRecvOffset, const ReceiveCursor& cursor,
-    const SendBuffer& sendBuf) noexcept {
+    std::uint64_t oldRecvOffset, const ReceiveCursor& cursor) noexcept {
     if (!result) {
         // P6.
         if (result.error().Disposition() == zet::EDisposition::KillSession) {
@@ -327,13 +386,6 @@ void CheckProperties(const Snapshot& before, const SendBuffer& clientSend,
         rec = StreamRecord{};
         return true;
     }
-    if (const auto* echo = std::get_if<DeliveredEchoAck>(&*result)) {
-        // P11.
-        if (echo->Ack.OutputOffset > cursor.RecvOffset() ||
-            echo->Ack.InputOffset > sendBuf.End()) {
-            __builtin_trap();
-        }
-    }
     // DeliveredResize, DeliveredSessionEnd, DeliveredGridApplied,
     // DeliveredNothing: no stream-record or cursor invariants to check.
     return false;
@@ -344,8 +396,8 @@ void CheckProperties(const Snapshot& before, const SendBuffer& clientSend,
 [[nodiscard]] bool DoInject(Timestamp now, InjectSealer& injector,
                             Channel& chan, ByteSpan plain, StreamRecord& rec,
                             const ReceiveCursor& cursor,
-                            const SendBuffer& sendBuf,
-                            std::vector<std::byte>& scratch) noexcept {
+                            std::vector<std::byte>& scratch,
+                            const SendBuffer* clientSend = nullptr) noexcept {
     const std::uint64_t oldRecvOffset = cursor.RecvOffset();
     const auto frame = injector.Seal(plain);
     if (!frame) {
@@ -356,7 +408,12 @@ void CheckProperties(const Snapshot& before, const SendBuffer& clientSend,
     if (scratch.size() < wire::MAX_FRAME) {
         scratch.resize(wire::MAX_FRAME);
     }
+    const std::optional<wire::EchoAckMessage> lastBefore = chan.LastEchoAck();
+    const std::uint32_t genBefore = chan.AgentStreamGen();
     const auto result = chan.Receive(now, *frame, MutableByteSpan{scratch});
+    if (clientSend != nullptr) {
+        CheckEchoAck(chan, *clientSend, cursor, result, lastBefore, genBefore);
+    }
     if (!plain.empty() && (static_cast<unsigned>(plain[0]) == 0x16)) {
         ++g_gb_inj;
         if (result)
@@ -368,7 +425,7 @@ void CheckProperties(const Snapshot& before, const SendBuffer& clientSend,
         ++g_gc_ok;
     if (!plain.empty() && result && (static_cast<unsigned>(plain[0]) == 0x18))
         ++g_ge_ok;
-    return HandleReceiveResult(result, rec, oldRecvOffset, cursor, sendBuf);
+    return HandleReceiveResult(result, rec, oldRecvOffset, cursor);
 }
 
 }  // namespace
@@ -426,6 +483,27 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data,
     // neither a violation to receive nor impossible to send.
     clientChan.EnableEchoAck();
     agentChan.EnableEchoAck();
+
+    // The witness: a client that gets every frame the agent polls (header).
+    std::array<std::byte, SEND_BUF_SIZE> witnessSendStore{};
+    SendBuffer witnessSendBuf{MutableByteSpan{witnessSendStore}, 0};
+    ReceiveCursor witnessRecvCursor{0};
+    static std::array<std::byte, wire::SNAPSHOT_MAX_BYTES> witnessSnapStore{};
+    Channel witnessChan{kKeys,
+                        ERole::Client,
+                        witnessSendBuf,
+                        witnessRecvCursor,
+                        now,
+                        FUZZ_FRAME_LIMIT,
+                        wire::MAX_BYTES_PER_EPOCH,
+                        {},
+                        wire::PROTOCOL_VERSION_GRID,
+                        MutableByteSpan{witnessSnapStore}};
+    witnessChan.EnableEchoAck();
+    bool witnessExact = true;
+    // The generation the agent is in, and the last EchoAck op 0F queued.
+    std::uint32_t agentGen = 0;
+    std::optional<wire::EchoAckMessage> lastLegit;
 
     // Injection sealers: same keys as Channel internals, independent counters.
     // Client sends c2s (ClientToServer); agent sends s2c (ServerToClient).
@@ -488,6 +566,7 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data,
                 const std::size_t taken =
                     clientSendBuf.Append(ByteSpan{buf}.first(want));
                 clientSendRef += taken;
+                std::ignore = witnessSendBuf.Append(ByteSpan{buf}.first(want));
                 break;
             }
             // ── 01: AppendAgent ──────────────────────────────────────────
@@ -543,6 +622,19 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data,
                         __builtin_trap();
                     }
                 }
+                if (n && *n > 0) {
+                    // P12.
+                    const auto view =
+                        ReadFrame(ByteSpan{pollOut}.first(*n), wire::MAX_FRAME);
+                    if (!view) {
+                        __builtin_trap();
+                    }
+                    const auto relayed = witnessChan.Receive(
+                        now, *view, MutableByteSpan{recvScratch});
+                    if (!relayed && witnessExact) {
+                        __builtin_trap();
+                    }
+                }
                 // P9.
                 if (!endWasSent && agentChan.SessionEndSent() &&
                     agentSendBuf.Size() != 0) {
@@ -564,8 +656,8 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data,
                     break;
                 }
                 if (DoInject(now, s2cInject, clientChan, *payload,
-                             clientRecvRec, clientRecvCursor, clientSendBuf,
-                             recvScratch)) {
+                             clientRecvRec, clientRecvCursor, recvScratch,
+                             &clientSendBuf)) {
                     // P1 carve-out: DeliveredGridSnapshot reset cursor to 0.
                     before.ClientRecvOffset = 0;
                 }
@@ -584,8 +676,9 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data,
                 if (!payload) {
                     break;
                 }
+                witnessExact = false;
                 if (DoInject(now, c2sInject, agentChan, *payload, agentRecvRec,
-                             agentRecvCursor, agentSendBuf, recvScratch)) {
+                             agentRecvCursor, recvScratch)) {
                     // P1 carve-out: DeliveredGridSnapshot reset cursor to 0.
                     before.AgentRecvOffset = 0;
                 }
@@ -643,6 +736,7 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data,
                     std::byte{0x47}, std::byte{0x52}, std::byte{0x49},
                     std::byte{0x44}, std::byte{0x01}, std::byte{0x02},
                     std::byte{0x03}, std::byte{0x04}};
+                witnessExact = false;
                 std::ignore = agentChan.StartGrid(
                     ByteSpan{kSnap}, 0, static_cast<std::uint32_t>(*genByte),
                     0);
@@ -667,6 +761,7 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data,
             case 0x0C: {
                 // Simulate path B ring reset. Base/SendNext/End reset to 0;
                 // P2 monotonicity is exempted for this one step.
+                witnessExact = false;
                 agentSendBuf.NewGeneration();
                 CheckProperties(before, clientSendBuf, agentSendBuf,
                                 clientRecvCursor, agentRecvCursor,
@@ -681,11 +776,62 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data,
                 if (!genByte || !outByte || !inByte) {
                     break;
                 }
+                witnessExact = false;
                 std::ignore = agentChan.QueueEchoAck(wire::EchoAckMessage{
                     .StreamGen = *genByte,
                     .OutputOffset = *outByte,
                     .InputOffset = *inByte,
                 });
+                break;
+            }
+            // ── 0E: PathB ─────────────────────────────────────────────────
+            case 0x0E: {
+                // What AgentConnection::SupplySnapshot does on path B. Not
+                // while a grid is in flight: a correct agent waits for
+                // GridApplied, which this fuzzer's client never sends the
+                // agent in the witness's stead.
+                if (agentChan.GridInFlight()) {
+                    break;
+                }
+                static const std::array<std::byte, 8> PATH_B_SNAP{
+                    std::byte{0x47}, std::byte{0x52}, std::byte{0x49},
+                    std::byte{0x44}, std::byte{0x0A}, std::byte{0x0B},
+                    std::byte{0x0C}, std::byte{0x0D}};
+                agentSendBuf.NewGeneration();
+                ++agentGen;
+                if (!agentChan.StartGrid(ByteSpan{PATH_B_SNAP}, 0, agentGen,
+                                         0)) {
+                    __builtin_trap();
+                }
+                CheckProperties(before, clientSendBuf, agentSendBuf,
+                                clientRecvCursor, agentRecvCursor,
+                                /*generationReset=*/true);
+                continue;
+            }
+            // ── 0F: QueueLegitEchoAck ─────────────────────────────────────
+            case 0x0F: {
+                const auto outByte = reader.ReadU8();
+                const auto inByte = reader.ReadU8();
+                if (!outByte || !inByte) {
+                    break;
+                }
+                wire::EchoAckMessage ack{
+                    .StreamGen = agentGen,
+                    .OutputOffset = std::min<std::uint64_t>(
+                        *outByte, agentSendBuf.SendNext()),
+                    .InputOffset =
+                        std::min<std::uint64_t>(*inByte, witnessSendBuf.End())};
+                if (lastLegit.has_value()) {
+                    ack.InputOffset =
+                        std::max(ack.InputOffset, lastLegit->InputOffset);
+                    if (lastLegit->StreamGen == ack.StreamGen) {
+                        ack.OutputOffset =
+                            std::max(ack.OutputOffset, lastLegit->OutputOffset);
+                    }
+                }
+                if (agentChan.QueueEchoAck(ack)) {
+                    lastLegit = ack;
+                }
                 break;
             }
             default:
