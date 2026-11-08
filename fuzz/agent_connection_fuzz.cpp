@@ -79,13 +79,13 @@
 //      the agent's frames) is one the connection may send: only when ECHO_ACK
 //      was offered and the version is 2; never between GridBegin and GridEnd;
 //      stream_gen is the generation the connection is in; output_offset is at
-//      most what the agent has sent of that generation; the fields never
-//      decrease within a generation (input_offset never at all, across
-//      generations too). Also: input_offset is 0 or the end of an input write
-//      the pty took (InputWritten, not InputDelivered) at least ECHO_TIMEOUT
-//      before; the first EchoAck of a negotiated connection precedes its first
-//      Data; two EchoAcks are at least ECHO_ACK_INTERVAL_MIN apart (checked
-//      while no send gate has held a frame back).
+//      most the highest end of a Data the agent has sealed in that generation;
+//      the fields never decrease within a generation (input_offset never at
+//      all, across generations too). Also: input_offset is 0 or the end of an
+//      input write the pty took (InputWritten, not InputDelivered) at least
+//      ECHO_TIMEOUT before; the first EchoAck of a negotiated connection
+//      precedes its first Data; two EchoAcks are at least ECHO_ACK_INTERVAL_MIN
+//      apart (checked while no send gate has held a frame back).
 //  C11 After SettleEcho(now) the EchoAck is not due again at `now`: a due
 //      deadline the settle cannot satisfy is a spin of the agent loop.
 
@@ -262,11 +262,9 @@ struct Rig {
     std::uint16_t Ceiling{0};
     bool InGrid{false};
     std::uint32_t Gen{0};
+    // The highest end of any Data of the generation, across connections: a
+    // resend after a rewind does not lower it.
     std::uint64_t SentEnd{0};
-    // The most a hostile peer has acknowledged in the current generation: an
-    // acknowledgment past what was sent moves the send cursor all the same, and
-    // output_offset may then name it. The peer that lied is the one it hurts.
-    std::uint64_t PeerClaim{0};
     std::optional<wire::EchoAckMessage> LastAck;
     // Across generations: input_offset never goes back.
     std::uint64_t LastInput{0};
@@ -368,7 +366,6 @@ void SniffAgentMessage(Rig& rig, ByteSpan body) noexcept {
                 rig.InGrid = true;
                 rig.Gen = begin->StreamGen;
                 rig.SentEnd = 0;
-                rig.PeerClaim = 0;
                 rig.LastAck.reset();
             }
             break;
@@ -383,7 +380,7 @@ void SniffAgentMessage(Rig& rig, ByteSpan body) noexcept {
                     rig.Ceiling == wire::PROTOCOL_VERSION_MAX);
             REQUIRE(!rig.InGrid);
             REQUIRE(ack->StreamGen == rig.Gen);
-            REQUIRE(ack->OutputOffset <= std::max(rig.SentEnd, rig.PeerClaim));
+            REQUIRE(ack->OutputOffset <= rig.SentEnd);
             if (rig.LastAck) {
                 REQUIRE(ack->OutputOffset >= rig.LastAck->OutputOffset);
                 REQUIRE(ack->InputOffset >= rig.LastAck->InputOffset);
@@ -413,24 +410,6 @@ void SniffAgentMessage(Rig& rig, ByteSpan body) noexcept {
         }
         default:
             break;
-    }
-}
-
-// C10: what the injected plaintext of the peer claims to have received.
-void NotePeerClaim(Rig& rig, ByteSpan payload) noexcept {
-    zet::ByteReader reader{payload};
-    const auto type = wire::ParseMessageType(reader);
-    if (!type) {
-        return;
-    }
-    if (*type == wire::EMessageType::Data) {
-        if (const auto data = wire::ParseData(reader)) {
-            rig.PeerClaim = std::max(rig.PeerClaim, data->Ack);
-        }
-    } else if (*type == wire::EMessageType::Ack) {
-        if (const auto ack = wire::ParseAck(reader)) {
-            rig.PeerClaim = std::max(rig.PeerClaim, ack->Ack);
-        }
     }
 }
 
@@ -709,7 +688,6 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data,
                 const auto written =
                     rig.ToAgent->Seal(MutableByteSpan{sealed}, *payload);
                 if (written) {
-                    NotePeerClaim(rig, *payload);
                     Feed(rig, ByteSpan{sealed}.first(*written), *selector);
                 }
                 break;
