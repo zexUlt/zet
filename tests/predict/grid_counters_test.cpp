@@ -126,3 +126,8 @@ TEST_CASE("cells of another row count, and so does the alternate screen") {
 TEST_CASE("scrolling moves rows without counting them, only the blanked ones") {
     CHECK(Changed("abc\r\n\r\n\r\n", "\n") == 0);
 }
+
+TEST_CASE("overwriting the tail of a wide glyph counts the head and the tail") {
+    // head turns narrow (1), the continuation cell becomes 'x' (1)
+    CHECK(Changed("\xE4\xBD\xA0", "\x1b[1;2Hx", 10, 2) == 2);
+}

@@ -244,3 +244,78 @@ TEST_CASE("zsh-autosuggestions grey tail: not predicted (second step)") {
     r.Type("c");
     CHECK_FALSE(r.AnyVisible());
 }
+
+// --- Round 3: echoes that are not on the screen for the user ---------------
+
+namespace {
+
+/// A prompt whose program echoes the keys with `sgr` active, then two
+/// distinct keys and a third one. True if the third is drawn.
+bool EchoWithSgrShows(const char* sgr) {
+    Rig r(60, 4, EDisplayMode::Always);
+    r.Prompt();
+    r.Output(sgr);
+    r.Confirm("p");
+    r.Confirm("q");
+    r.Type("r");
+    return r.AnyVisible();
+}
+
+}  // namespace
+
+TEST_CASE("LEAK: a concealed (SGR 8) echo does not confirm an epoch") {
+    CHECK_FALSE(EchoWithSgrShows("\x1b[8m"));
+}
+
+TEST_CASE("LEAK: an echo in its own palette colour does not confirm") {
+    CHECK_FALSE(EchoWithSgrShows("\x1b[30;40m"));
+    CHECK_FALSE(EchoWithSgrShows("\x1b[38;5;7;48;5;7m"));
+}
+
+TEST_CASE("LEAK: an echo in its own truecolor does not confirm") {
+    CHECK_FALSE(EchoWithSgrShows("\x1b[38;2;9;8;7;48;2;9;8;7m"));
+}
+
+TEST_CASE("an ordinary coloured echo still confirms an epoch") {
+    CHECK(EchoWithSgrShows("\x1b[31m"));
+    CHECK(EchoWithSgrShows("\x1b[31;44m"));
+    CHECK(EchoWithSgrShows("\x1b[38;2;9;8;7;48;2;9;8;8m"));
+    CHECK(EchoWithSgrShows("\x1b[38;5;7;48;5;8m"));
+}
+
+// An echo before a silent prompt must not pair with a mask glyph after it.
+TEST_CASE("LEAK: a streak glyph from before a silent prompt does not pair") {
+    Rig r(60, 4, EDisplayMode::Always);
+    r.Prompt();
+    r.Confirm("a");
+    r.Output("\rPassword: ");
+    r.Type("*");
+    r.Output("*");  // the mask equals the first typed key
+    r.Ack();
+    r.Type("s");
+    CHECK_FALSE(r.AnyVisible());
+}
+
+TEST_CASE("LEAK: the same in adaptive mode at high SRTT") {
+    Rig r(60, 4, EDisplayMode::Adaptive);
+    r.E.OnSrtt(std::chrono::milliseconds(300), r.Now);
+    r.Prompt();
+    r.Confirm("a");
+    r.Output("\rPassword: ");
+    r.Type("#");
+    r.Output("#");
+    r.Ack();
+    r.Type("s");
+    CHECK_FALSE(r.AnyVisible());
+}
+
+// The budget is exact: one changed cell that no prediction explains raises
+// the epoch.
+TEST_CASE("a single unexplained cell change raises the epoch") {
+    Rig r(60, 4, EDisplayMode::Always);
+    r.Prompt();
+    r.ConfirmEpoch();
+    const auto e = r.E.PredictionEpoch();
+    r.Output("\x1b[1;1H#\x1b[1;5H");
+    CHECK(r.E.PredictionEpoch() > e);
+}

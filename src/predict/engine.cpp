@@ -19,6 +19,12 @@ constexpr bool IsBlank(char32_t cp) noexcept { return cp == 0 || cp == U' '; }
 /// glyph are never a match for anything we predict.
 char32_t Held(const grid::Cell& c) noexcept {
     if (c.Width != 1) return NOT_A_GLYPH;
+    // Concealed text, or text in its own background colour, is not on the
+    // screen for the user: it is no echo and must not confirm an epoch.
+    if ((c.Attrs & grid::EAttr::Invisible) != 0) return NOT_A_GLYPH;
+    if (c.FgKind == c.BgKind && c.FgKind != grid::EColorKind::Default &&
+        c.Fg[0] == c.Bg[0] && c.Fg[1] == c.Bg[1] && c.Fg[2] == c.Bg[2])
+        return NOT_A_GLYPH;
     return IsBlank(c.Codepoint) ? 0 : c.Codepoint;
 }
 
@@ -383,12 +389,15 @@ void PredictionEngine::Observe(const MirrorView& mirror) noexcept {
     const bool gained = g.ColumnSetCount() != LastColumnSet_;
     const bool unsolicited = !reset && !OutputIsPredictedEcho(mirror);
 
+    // Output nobody predicted ends the run of echoes, bump or no bump: a
+    // glyph echoed before a silent prompt must not pair with one after it.
+    if (unsolicited) InStreak_ = false;
     Rebase(mirror);
     if (reset) {
         ResetAll();
     } else if (unsolicited && (Count_ > 0 || Epoch_ <= Confirmed_)) {
-        // An epoch nobody confirmed and holding nothing cannot become
-        // visible by itself, so raising it would only renumber it.
+        // An epoch nobody confirmed and holding nothing is not visible, so
+        // raising it would only renumber it; the streak is reset above.
         BecomeTentative();
     }
     // Losing the column wins over regaining it in the same stretch of output:
