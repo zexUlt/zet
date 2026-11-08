@@ -360,6 +360,49 @@ ChannelResult<IncomingEvent> Channel::Receive(
             return DeliveredGridApplied{.StreamGen = msg->StreamGen};
         }
 
+        case wire::EMessageType::EchoAck: {
+            // ver=2 only, and only to a client that sent ECHO_ACK. §7.
+            if (!EchoAckNegotiated()) {
+                return std::unexpected(
+                    SessionError{EProtoError::UnexpectedMessage});
+            }
+            // The agent's to say; an agent hearing it is out of step.
+            if (Role_ != ERole::Client) {
+                break;
+            }
+            const auto msg = wire::ParseEchoAck(reader);
+            if (!msg) {
+                return std::unexpected(SessionError{msg.error()});
+            }
+            // Violation: between GridBegin and GridEnd, where output offsets
+            // are about to restart. §7 violation table.
+            if (GridReceiving_.has_value()) {
+                return std::unexpected(
+                    SessionError{EProtoError::UnexpectedMessage});
+            }
+            // Violation: a generation other than the one Data is received in,
+            // or an offset the client has not reached: output in that
+            // generation, input in the whole session (it is never reset).
+            if (msg->StreamGen != AgentStreamGen_ ||
+                msg->OutputOffset > RecvCursor_.RecvOffset() ||
+                msg->InputOffset > SendBuf_.End()) {
+                return std::unexpected(
+                    SessionError{EProtoError::MalformedField});
+            }
+            // Violation: a step back from the previous EchoAck. Input is
+            // compared across generations, output only within one. A repeat
+            // is allowed.
+            if (LastEchoAck_.has_value() &&
+                (msg->InputOffset < LastEchoAck_->InputOffset ||
+                 (msg->StreamGen == LastEchoAck_->StreamGen &&
+                  msg->OutputOffset < LastEchoAck_->OutputOffset))) {
+                return std::unexpected(
+                    SessionError{EProtoError::MalformedField});
+            }
+            LastEchoAck_ = *msg;
+            return DeliveredEchoAck{.Ack = *msg};
+        }
+
         // Resume is the one sealed message that is not the channel's: the
         // connection opens it before a Channel exists. The rest are handshake
         // messages, which belong to cleartext frames.
@@ -533,6 +576,29 @@ ChannelResult<std::size_t> Channel::PollOnce(Timestamp now, MutableByteSpan out,
                 GridAwaitingApplied_ = true;
                 return *n;
             }
+        }
+    }
+
+    // Priority 2: (Agent) EchoAck — after the snapshot, so that on path B the
+    // first one follows GridEnd, and before Data, so that the first one of a
+    // connection precedes its first Data. Not while a snapshot is still to be
+    // supplied (one being emitted returned above): the generation it names is
+    // not the client's yet.
+    // §9 ADR-036.
+    if (Role_ == ERole::Agent && PendingEchoAck_.has_value() &&
+        !AwaitingSnapshotSupply_) {
+        // type(1) + stream_gen(4) + output_offset(8) + input_offset(8).
+        std::array<std::byte,
+                   1 + sizeof(std::uint32_t) + 2 * sizeof(std::uint64_t)>
+            plain{};
+        ByteWriter writer{MutableByteSpan{plain}};
+        if (wire::WriteEchoAck(writer, *PendingEchoAck_)) {
+            const auto n = SealInto(out, ByteSpan{plain}.first(writer.Size()));
+            if (!n) {
+                return std::unexpected(n.error());
+            }
+            PendingEchoAck_.reset();
+            return *n;
         }
     }
 
@@ -765,6 +831,12 @@ bool Channel::StartGrid(ByteSpan snapshot, std::uint8_t flags,
     GridAwaitingApplied_ = true;
     GridExpectedAppliedGen_ = streamGen;
     AwaitingSnapshotSupply_ = false;
+    // An EchoAck queued while the snapshot was awaited names the old
+    // generation; the client would reject it after GridEnd. Drop it and let
+    // the agent re-queue for the new one (§9, M7: first ack after path B is
+    // (new generation, 0, I)). QueueEchoAck stays open while awaiting: the
+    // agent need not know whether the snapshot has arrived yet.
+    PendingEchoAck_.reset();
     GridEmitting_->Snapshot = snapshot;
     GridEmitting_->StreamGen = streamGen;
     GridEmitting_->TotalLen = static_cast<std::uint32_t>(snapshot.size());
@@ -780,6 +852,14 @@ void Channel::QueueGridApplied(std::uint32_t streamGen) noexcept {
         return;
     }
     PendingGridApplied_ = streamGen;
+}
+
+bool Channel::QueueEchoAck(const wire::EchoAckMessage& ack) noexcept {
+    if (Role_ != ERole::Agent || !EchoAckNegotiated()) {
+        return false;
+    }
+    PendingEchoAck_ = ack;
+    return true;
 }
 
 void Channel::SuppressDataUntilGrid() noexcept {

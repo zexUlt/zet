@@ -139,14 +139,15 @@ ClientHandshake::ClientHandshake(SessionId id, crypto::Key auth,
                                  crypto::Key connectionSeed,
                                  HandshakeNonce clientNonce,
                                  const NonceMemory& seen, std::uint16_t ceiling,
-                                 bool gridCapable) noexcept
+                                 bool gridCapable, bool echoAck) noexcept
     : Id_(id),
       Auth_(std::move(auth)),
       ConnectionSeed_(std::move(connectionSeed)),
       ClientNonce_(clientNonce),
       Seen_(seen),
       Ceiling_(ceiling),
-      GridCapable_(gridCapable) {}
+      GridCapable_(gridCapable),
+      EchoAck_(echoAck) {}
 
 PreAuthResult<std::size_t> ClientHandshake::Start(
     MutableByteSpan out) noexcept {
@@ -183,6 +184,18 @@ PreAuthResult<std::size_t> ClientHandshake::StartStep(
         if (auto appended = hello.Options.Append(
                 TlvOption{.Type = TLV_GRID_CAPABLE,
                           .Value = ByteSpan{GRID_CAPABLE_VALUE}});
+            !appended) {
+            return std::unexpected(Fail(appended.error()));
+        }
+    }
+
+    // ECHO_ACK is meaningful only at ver=2, so a ceiling below it does not
+    // offer it (§9, predictive echo). Same value as GRID_CAPABLE.
+    if (EchoAck_ && Ceiling_ >= PROTOCOL_VERSION_GRID) {
+        static constexpr std::array<std::byte, 2> ECHO_ACK_VALUE{std::byte{0},
+                                                                 std::byte{1}};
+        if (auto appended = hello.Options.Append(TlvOption{
+                .Type = TLV_ECHO_ACK, .Value = ByteSpan{ECHO_ACK_VALUE}});
             !appended) {
             return std::unexpected(Fail(appended.error()));
         }

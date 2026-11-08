@@ -197,10 +197,13 @@ public:
     /// signalling that this client can receive grid snapshots. §7 ADR-035.
     /// `ceiling` caps the version negotiated in Hello; default is
     /// PROTOCOL_VERSION_MAX. Tests that need ver=1 pass PROTOCOL_VERSION_MIN.
-    ClientResumeAttempt(
-        ClientSession& session, wire::HandshakeNonce clientNonce,
-        bool gridCapable = false,
-        std::uint16_t ceiling = wire::PROTOCOL_VERSION_MAX) noexcept;
+    /// `echoAck` includes ECHO_ACK in the Hello TLV when the ceiling is 2 or
+    /// more, asking the agent for EchoAck. §9 ADR-036.
+    ClientResumeAttempt(ClientSession& session,
+                        wire::HandshakeNonce clientNonce,
+                        bool gridCapable = false,
+                        std::uint16_t ceiling = wire::PROTOCOL_VERSION_MAX,
+                        bool echoAck = false) noexcept;
 
     ClientResumeAttempt(const ClientResumeAttempt&) = delete;
     ClientResumeAttempt& operator=(const ClientResumeAttempt&) = delete;

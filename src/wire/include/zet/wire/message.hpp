@@ -56,6 +56,10 @@ enum class EMessageType : std::uint8_t {
     GridEnd = 0x18,
     GridApplied = 0x19,
 
+    // Echo acknowledgement for predictive echo (ver=2 only, §7, §9). Agent to
+    // client, and only to a client that sent the ECHO_ACK TLV.
+    EchoAck = 0x1A,
+
     // The local socket between zet-muxd and the agents (§6): cleartext, and on
     // /run/zet/mux.sock only. On TCP the handshake and the channel refuse
     // them like the bootstrap's.
@@ -371,6 +375,19 @@ struct GridAppliedMessage {
         default;
 };
 
+/// The agent's claim that output of generation `StreamGen` up to
+/// `OutputOffset` was read from the pty once the input up to `InputOffset` had
+/// lain there ECHO_TIMEOUT (ver=2 only, §7, §9). Exactly 20 bytes of body; the
+/// session state machine checks the claim against the stream.
+struct EchoAckMessage {
+    std::uint32_t StreamGen{0};
+    std::uint64_t OutputOffset{0};
+    std::uint64_t InputOffset{0};
+
+    [[nodiscard]] friend bool operator==(
+        const EchoAckMessage&, const EchoAckMessage&) noexcept = default;
+};
+
 /// Reads the byte every frame body opens with.
 ///
 /// Parse* below pick up where this left off: dispatching on the type is what
@@ -572,6 +589,11 @@ struct HelloPeek {
     ByteReader& reader) noexcept;
 [[nodiscard]] ProtoResult<void> WriteGridApplied(
     ByteWriter& writer, const GridAppliedMessage& message) noexcept;
+
+[[nodiscard]] ProtoResult<EchoAckMessage> ParseEchoAck(
+    ByteReader& reader) noexcept;
+[[nodiscard]] ProtoResult<void> WriteEchoAck(
+    ByteWriter& writer, const EchoAckMessage& message) noexcept;
 
 /// Appends a GRID_CAPABLE TLV (type 0x0003, length 2, value 1) to `out`.
 [[nodiscard]] ProtoResult<std::size_t> AppendGridCapableTlv(

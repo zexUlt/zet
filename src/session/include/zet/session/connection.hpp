@@ -119,9 +119,15 @@ struct ApplySnapshot {
     std::uint8_t Flags{0};
 };
 
+/// A validated EchoAck arrived (§7, §9). Client only; the checks against the
+/// stream are the channel's (DeliveredEchoAck).
+struct EchoAcked {
+    wire::EchoAckMessage Ack;
+};
+
 using ConnectionEvent =
     std::variant<NeedsSession, SendFrame, Deliver, Resized, Ended, Idle,
-                 NeedsSnapshot, ApplySnapshot, SessionOverflowed>;
+                 NeedsSnapshot, ApplySnapshot, SessionOverflowed, EchoAcked>;
 
 using ConnectionResult = ChannelResult<ConnectionEvent>;
 
@@ -285,6 +291,28 @@ public:
     /// SupplySnapshot are no longer needed. §9 ADR-030.
     [[nodiscard]] bool GridEmissionDone() const noexcept;
 
+    /// Whether the client's Hello carried ECHO_ACK and the version is 2, so
+    /// that EchoAck may go out on this connection. False until live. §9.
+    [[nodiscard]] bool EchoAckNegotiated() const noexcept {
+        return Channel_ && Channel_->EchoAckNegotiated();
+    }
+
+    /// Whether the Hello carried a GRID_CAPABLE / ECHO_ACK TLV with the value
+    /// 1. Read pre-auth, so only a test looks at them before the handshake
+    /// finishes; the channel gets them after Resume has opened.
+    [[nodiscard]] bool HelloOffersGridCapable() const noexcept {
+        return HelloGridCapable_;
+    }
+    [[nodiscard]] bool HelloOffersEchoAck() const noexcept {
+        return HelloEchoAck_;
+    }
+
+    /// Queues an EchoAck for the next Pump, replacing one not yet sent.
+    /// Returns false, queueing nothing, unless EchoAckNegotiated. §9 ADR-036.
+    [[nodiscard]] bool QueueEchoAck(const wire::EchoAckMessage& ack) noexcept {
+        return Channel_ && Channel_->QueueEchoAck(ack);
+    }
+
     /// Returns the earliest of the base deadline and the AwaitSnapshot
     /// deadlines: the Resize wait (RESIZE_WAIT_TIMEOUT, set on every path-B
     /// Resume, with or without a known size), SUPPLY_SNAPSHOT_TIMEOUT, and the
@@ -329,6 +357,8 @@ private:
     /// Whether the client's Hello carried a valid GRID_CAPABLE TLV. Read
     /// pre-auth but trusted only after SetGridInfo is called post-auth. §7.
     bool HelloGridCapable_{false};
+    /// Likewise for ECHO_ACK; handed to the Channel once Resume has opened.
+    bool HelloEchoAck_{false};
     /// True once PumpAwaitSnapshot has returned NeedsSnapshot once.  Avoids a
     /// busy-loop: the first call informs the caller a snapshot is needed;
     /// subsequent calls return Idle until the snapshot is supplied. §9.
@@ -369,11 +399,15 @@ public:
     /// `snapshotBuf` is the caller-owned buffer for incoming grid snapshots
     /// (§1: no allocation in the core). Must be at least
     /// wire::SNAPSHOT_MAX_BYTES when path B may be used; pass {} otherwise.
+    /// `echoAck` includes ECHO_ACK in the Hello TLV (only with a ceiling of 2
+    /// or more) and makes the connection check the EchoAcks it then gets,
+    /// reported as EchoAcked. §9 ADR-036.
     ClientConnection(ClientSession& session, wire::HandshakeNonce clientNonce,
                      MutableByteSpan frameStorage, Timestamp now,
                      bool gridCapable = false,
                      std::uint16_t ceiling = wire::PROTOCOL_VERSION_MAX,
-                     MutableByteSpan snapshotBuf = {}) noexcept;
+                     MutableByteSpan snapshotBuf = {},
+                     bool echoAck = false) noexcept;
 
     /// As AgentConnection::Pump. The first call writes Hello.
     [[nodiscard]] ConnectionResult Pump(Timestamp now, MutableByteSpan out,
@@ -416,6 +450,8 @@ private:
     ClientResumeAttempt Attempt_;
     std::optional<ClientSessionHandle> Handle_;
     std::optional<wire::ResizeMessage> PendingResize_;
+    /// Whether Hello carried ECHO_ACK; handed to the Channel when it opens.
+    bool EchoAck_{false};
     /// Set when Pump returns ApplySnapshot; cleared by ConfirmApply/DenyApply.
     std::optional<std::uint32_t> PendingApplyGen_{};
 };

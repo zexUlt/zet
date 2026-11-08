@@ -150,6 +150,8 @@ ProtoResult<void> ParseAny(ByteSpan bytes) {
             return Discard(ParseGridEnd(reader));
         case EMessageType::GridApplied:
             return Discard(ParseGridApplied(reader));
+        case EMessageType::EchoAck:
+            return Discard(ParseEchoAck(reader));
         case EMessageType::MuxRegister:
             return Discard(ParseMuxRegister(reader));
         case EMessageType::MuxRegistered:
@@ -611,10 +613,10 @@ TEST_CASE("bytes past the last field of a fixed message are malformed") {
 
 TEST_CASE("a type byte outside the registry is unknown") {
     // 0x00 is not assigned, 0x08 is the first free one of the bootstrap
-    // range (§7), 0x1A the first unassigned session type after the Grid
-    // block (0x16–0x19), 0xFF is past everything.
+    // range (§7), 0x1B the first unassigned session type after EchoAck
+    // (0x1A), 0xFF is past everything.
     for (const std::uint8_t type :
-         std::array<std::uint8_t, 4>{0x00, 0x08, 0x1A, 0xFF}) {
+         std::array<std::uint8_t, 4>{0x00, 0x08, 0x1B, 0xFF}) {
         CAPTURE(type);
         const std::vector<std::byte> bytes{std::byte{type}};
         ByteReader reader{ByteSpan{bytes}};
@@ -666,7 +668,7 @@ TEST_CASE("nothing a handshake message can say reaps the session") {
     }
 
     for (const std::uint8_t type :
-         std::array<std::uint8_t, 4>{0x00, 0x08, 0x1A, 0xFF}) {
+         std::array<std::uint8_t, 4>{0x00, 0x08, 0x1B, 0xFF}) {
         corpus.push_back({std::byte{type}});
     }
 

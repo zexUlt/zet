@@ -98,10 +98,11 @@ void ClientSessionHandle::SetStreamGen(std::uint32_t gen) noexcept {
 ClientResumeAttempt::ClientResumeAttempt(ClientSession& session,
                                          wire::HandshakeNonce clientNonce,
                                          bool gridCapable,
-                                         std::uint16_t ceiling) noexcept
+                                         std::uint16_t ceiling,
+                                         bool echoAck) noexcept
     : Session_(&session),
       Shake_(session.Id_, Clone(session.Auth_), Clone(session.Seed_),
-             clientNonce, session.Seen_, ceiling, gridCapable) {}
+             clientNonce, session.Seen_, ceiling, gridCapable, echoAck) {}
 
 wire::PreAuthResult<std::size_t> ClientResumeAttempt::Start(
     MutableByteSpan out) noexcept {
