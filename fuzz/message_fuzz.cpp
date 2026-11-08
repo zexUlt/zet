@@ -110,6 +110,11 @@ void CheckDisposition(EProtoError error) noexcept {
     return left.StreamGen == right.StreamGen;
 }
 
+[[nodiscard]] bool Same(const EchoAckMessage& left,
+                        const EchoAckMessage& right) noexcept {
+    return left == right;
+}
+
 [[nodiscard]] bool Same(const BootstrapOfferMessage& left,
                         const BootstrapOfferMessage& right) noexcept {
     return left.VersionMin == right.VersionMin &&
@@ -354,6 +359,9 @@ void ParseBody(ByteSpan input) noexcept {
         case EMessageType::GridApplied:
             ParseThenRoundTrip(reader, *type, ParseGridApplied,
                                WriteGridApplied);
+            return;
+        case EMessageType::EchoAck:
+            ParseThenRoundTrip(reader, *type, ParseEchoAck, WriteEchoAck);
             return;
         case EMessageType::MuxRegister:
             ParseThenRoundTrip(reader, *type, ParseMuxRegister,
