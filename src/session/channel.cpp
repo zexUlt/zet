@@ -186,7 +186,21 @@ ChannelResult<IncomingEvent> Channel::Receive(
                 return std::unexpected(SessionError{msg.error()});
             }
             // We sent a Ping; the peer echoed it. Hearing it is the point,
-            // and Receive has noted that already.
+            // and Receive has noted that already. Our own, unanswered Ping
+            // also gives a round-trip sample; one of another token is not
+            // ours to measure. §9, «RTT».
+            if (OutstandingPing_ && msg->Token == OutstandingPing_->Token) {
+                const Duration rtt = now - OutstandingPing_->SentAt;
+                OutstandingPing_.reset();
+                // A longer wait says the peer slept, not how far it is.
+                if (rtt >= Duration::zero() && rtt <= RTT_SAMPLE_MAX) {
+                    // SRTT = (1 - alpha) * SRTT + alpha * rtt, RFC 6298 §2.3.
+                    Srtt_ = Srtt_ ? (*Srtt_ * (SRTT_ALPHA_DEN - 1) + rtt) /
+                                        SRTT_ALPHA_DEN
+                                  : rtt;
+                    LastRttSampleAt_ = now;
+                }
+            }
             return DeliveredNothing{};
         }
 
@@ -602,6 +616,18 @@ ChannelResult<std::size_t> Channel::PollOnce(Timestamp now, MutableByteSpan out,
         }
     }
 
+    // Priority 2c: (Client) a Ping to measure the round trip, ahead of the
+    // input it rides with: the sample then does not include the time the
+    // agent spends on that input. §9, «RTT».
+    // Only at ver >= 2, where the client's prediction engine can exist (the
+    // design's table: ver=1 behaves as `never`); the agent's EchoAck is not a
+    // condition, the Pong of an agent without it answers as well. §9.
+    if (Role_ == ERole::Client && RttProbeEnabled_ &&
+        Version_ >= wire::PROTOCOL_VERSION_GRID && SendBuf_.Unsent() > 0 &&
+        RttProbeDue(now)) {
+        return SealPing(now, out);
+    }
+
     // Priority 3: Data from the send cursor. A Data frame always carries the
     // current receive offset as a piggybacked Ack, so sending Data also
     // acknowledges the peer's stream. §9.
@@ -718,20 +744,36 @@ ChannelResult<std::size_t> Channel::PollOnce(Timestamp now, MutableByteSpan out,
     // the peer's silence timer hears us through an idle session. §9.
     if (Liveness_.KeepaliveInterval > Duration::zero() &&
         now >= LastSent_ + Liveness_.KeepaliveInterval) {
-        // type(1) + token(8).
-        const wire::PingMessage ping{.Token = NextPingToken_};
-        const auto n = SealControl<1 + sizeof(std::uint64_t)>(
-            out, [&ping](ByteWriter& writer) {
-                return wire::WritePing(writer, ping);
-            });
-        if (!n) {
-            return std::unexpected(n.error());
-        }
-        ++NextPingToken_;
-        return *n;
+        return SealPing(now, out);
     }
 
     return 0;
+}
+
+ChannelResult<std::size_t> Channel::SealPing(Timestamp now,
+                                             MutableByteSpan out) noexcept {
+    // type(1) + token(8).
+    const wire::PingMessage ping{.Token = NextPingToken_};
+    const auto n = SealControl<1 + sizeof(std::uint64_t)>(
+        out,
+        [&ping](ByteWriter& writer) { return wire::WritePing(writer, ping); });
+    if (!n) {
+        return std::unexpected(n.error());
+    }
+    // The newest Ping is the one measured; an older one still unanswered is
+    // given up.
+    OutstandingPing_ = OutstandingPing{.Token = NextPingToken_, .SentAt = now};
+    ++NextPingToken_;
+    return *n;
+}
+
+bool Channel::RttProbeDue(Timestamp now) const noexcept {
+    // One Ping at a time. An answer that has not come in RTT_SAMPLE_MAX would
+    // be thrown away anyway, so it does not hold the next probe back.
+    if (OutstandingPing_ && now - OutstandingPing_->SentAt <= RTT_SAMPLE_MAX) {
+        return false;
+    }
+    return !LastRttSampleAt_ || now - *LastRttSampleAt_ >= RTT_PROBE_INTERVAL;
 }
 
 Deadline Channel::NextDeadline() const noexcept {

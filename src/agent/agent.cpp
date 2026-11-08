@@ -82,6 +82,13 @@ constexpr std::string_view DEFAULT_TERM = "xterm-256color";
 
 constexpr std::size_t EVENTS_PER_WAIT = 32;
 
+/// How many reads off the pty one EchoAck settlement may spend on reading it
+/// dry (§9, «Предиктивное эхо»). A read takes up to PTY_READ_CHUNK (64 KiB), so
+/// the bound is 4 MiB: far more than a program answers a keystroke with, and a
+/// bound against one that never stops writing. When it is hit with the pty not
+/// dry the settlement is put off, not made on a stale end of output.
+constexpr std::size_t ECHO_DRAIN_READS_MAX = 64;
+
 constexpr std::uint64_t LISTENER_TOKEN = 1;
 constexpr std::uint64_t PTY_TOKEN = 2;
 constexpr std::uint64_t SIGNAL_TOKEN = 3;
@@ -458,13 +465,25 @@ private:
     void Handle(const io::PollEvent& event) noexcept;
     void AcceptAll() noexcept;
     void Adopt(io::UniqueFd socket, ByteSpan prefix) noexcept;
-    void ReadPty() noexcept;
+    /// One read off the pty into PtyRead_; true if it brought bytes.
+    bool ReadPty() noexcept;
+    /// Reads the pty until it has nothing more (or the session stops taking
+    /// output, or the bound) and moves what it read into the session, so that
+    /// the end of the session's output is where the program had got to.
+    /// False only when the bound ended it with the pty not known to be dry.
+    bool DrainPty() noexcept;
+    /// Sets the pty-read gate of every connection to what UpdateInterest will
+    /// do, and settles the EchoAcks that are due. §9.
+    void ServiceEchoAcks(Timestamp now) noexcept;
     void WritePty() noexcept;
     /// Drops the input the pty will never take and acknowledges it as gone.
     void DiscardPtyInput() noexcept;
     /// Tells the session the pty took (or the agent dropped) `count` bytes of
     /// input; a count the session does not recognise is logged.
     void ConfirmPtyInput(std::uint64_t count) noexcept;
+    /// As ConfirmPtyInput, for bytes the pty took: the session also keeps the
+    /// moment, for the EchoAck.
+    void ConfirmPtyWrite(std::uint64_t count) noexcept;
     void ReadSocket(Connection& connection) noexcept;
     void WriteSocket(Connection& connection) noexcept;
     void TakeChild() noexcept;
@@ -607,8 +626,13 @@ int Agent::RunLoop(std::optional<Timestamp> giveUpAt) noexcept {
                 log::Field::Signed("status", ChildStatus_->Value)};
             Log(log::ELevel::Info, "the shell has ended", fields);
         }
+        ServiceEchoAcks(now);
         for (auto& connection : Connections_) {
             Pump(*connection, now);
+        }
+        // The gate as UpdateInterest and the deadline below will see it.
+        for (auto& connection : Connections_) {
+            connection->Link.SetPtyReadOpen(PtyFrom_ == PtyTo_);
         }
         DropClosed(now);
         if (EndDelivered_) {
@@ -995,9 +1019,9 @@ void Agent::Adopt(io::UniqueFd socket, ByteSpan prefix) noexcept {
     Log(log::ELevel::Info, "connection handed over");
 }
 
-void Agent::ReadPty() noexcept {
+bool Agent::ReadPty() noexcept {
     if (PtyEnded_ || PtyTo_ != 0) {
-        return;
+        return false;
     }
     const auto n = io::ReadPty(Child_.Master.Get(),
                                MutableByteSpan{PtyRead_}.first(PTY_READ_CHUNK));
@@ -1005,14 +1029,58 @@ void Agent::ReadPty() noexcept {
         if (!n.error().WouldBlock()) {
             PtyEnded_ = true;
         }
-        return;
+        return false;
     }
     if (*n == 0) {
         PtyEnded_ = true;
-        return;
+        return false;
     }
     PtyFrom_ = 0;
     PtyTo_ = *n;
+    return true;
+}
+
+bool Agent::DrainPty() noexcept {
+    MovePtyOutput();
+    for (std::size_t reads = 0; reads < ECHO_DRAIN_READS_MAX; ++reads) {
+        // Bytes the session would not take stay in PtyRead_ and keep the read
+        // closed; nothing more can be read until they are moved.
+        if (PtyFrom_ != PtyTo_ || !ReadPty()) {
+            return true;
+        }
+        MovePtyOutput();
+    }
+    return false;
+}
+
+void Agent::ServiceEchoAcks(Timestamp now) noexcept {
+    bool drained = false;
+    bool dry = true;
+    for (auto& connection : Connections_) {
+        if (connection->Closing) {
+            continue;
+        }
+        session::AgentConnection& link = connection->Link;
+        link.SetPtyReadOpen(PtyFrom_ == PtyTo_);
+        if (!link.EchoDue(now)) {
+            continue;
+        }
+        // The program's echo to the input that has lain in the pty for
+        // ECHO_TIMEOUT is in the pty by now: read it before computing where
+        // the output is. One drain serves every connection of this turn.
+        if (!drained) {
+            dry = DrainPty();
+            drained = true;
+        }
+        link.SetPtyReadOpen(PtyFrom_ == PtyTo_);
+        if (!dry) {
+            // The pty still had more when the bound ended the drain: the end
+            // of the output lags the echo. The EchoAck stays due, so the next
+            // turn drains further instead of settling on a stale O.
+            continue;
+        }
+        link.SettleEcho(now);
+    }
 }
 
 void Agent::WritePty() noexcept {
@@ -1026,7 +1094,7 @@ void Agent::WritePty() noexcept {
             return;
         }
         PtyInput_.Consume(*n);
-        ConfirmPtyInput(*n);
+        ConfirmPtyWrite(*n);
     }
 }
 
@@ -1037,6 +1105,12 @@ void Agent::DiscardPtyInput() noexcept {
 
 void Agent::ConfirmPtyInput(std::uint64_t count) noexcept {
     if (!Session_.InputDelivered(count)) {
+        Log(log::ELevel::Error, "input accounting out of step");
+    }
+}
+
+void Agent::ConfirmPtyWrite(std::uint64_t count) noexcept {
+    if (!Session_.InputWritten(count, io::MonotonicNow())) {
         Log(log::ELevel::Error, "input accounting out of step");
     }
 }

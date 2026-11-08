@@ -326,6 +326,12 @@ public:
     /// ver=2 counts, whatever was called here.
     void EnableEchoAck() noexcept { EchoAckEnabled_ = true; }
 
+    /// Lets the client add a Ping to the input it sends when the last RTT
+    /// sample is old (RTT_PROBE_INTERVAL). Off by default, so a connection
+    /// that does not use the figure sends the frames it always did; at ver=1
+    /// it stays off whatever was called. Client only; the agent never probes.
+    void EnableRttProbe() noexcept { RttProbeEnabled_ = true; }
+
     /// Whether EchoAck may be exchanged on this connection.
     [[nodiscard]] bool EchoAckNegotiated() const noexcept {
         return EchoAckEnabled_ && Version_ >= wire::PROTOCOL_VERSION_GRID;
@@ -352,6 +358,16 @@ public:
     /// caller's rule, not the channel's. Returns false, queueing nothing, when
     /// the role or the negotiation does not allow one.
     [[nodiscard]] bool QueueEchoAck(const wire::EchoAckMessage& ack) noexcept;
+
+    // ── M7: round-trip time (§9, «RTT», ADR-038). ──────────────────────────
+
+    /// The smoothed round trip of this connection's Ping/Pong exchanges, per
+    /// RFC 6298 (alpha = 1/8, the first sample taken as it is). Unset until a
+    /// Pong has answered a Ping of this channel within RTT_SAMPLE_MAX. Only
+    /// the owner's reading of the figure; nothing on the wire depends on it.
+    [[nodiscard]] std::optional<Duration> Srtt() const noexcept {
+        return Srtt_;
+    }
 
 private:
     /// Poll without the liveness bookkeeping around it.
@@ -393,9 +409,28 @@ private:
     bool ReadGateClosed_{false};
     /// The owner has no room for a frame; Poll sends nothing.
     bool SendGateClosed_{false};
-    /// The token of the next keepalive Ping. Its value means nothing to the
-    /// peer, which only echoes it.
+    /// The token of the next Ping. Its value means nothing to the peer, which
+    /// only echoes it.
     std::uint64_t NextPingToken_{1};
+
+    // ── M7 round-trip measurement. §9. ─────────────────────────────────────
+    /// The one Ping of this channel that no Pong has answered: a later Ping
+    /// replaces it, and a Pong with another token measures nothing.
+    struct OutstandingPing {
+        std::uint64_t Token{0};
+        Timestamp SentAt;
+    };
+    std::optional<OutstandingPing> OutstandingPing_;
+    std::optional<Duration> Srtt_;
+    std::optional<Timestamp> LastRttSampleAt_;
+    bool RttProbeEnabled_{false};
+
+    /// Whether a Ping should ride along with the Data about to go out: the
+    /// client's own probe, so that samples keep coming while the user types.
+    [[nodiscard]] bool RttProbeDue(Timestamp now) const noexcept;
+    /// Seals a Ping with the next token and remembers it as outstanding.
+    [[nodiscard]] ChannelResult<std::size_t> SealPing(
+        Timestamp now, MutableByteSpan out) noexcept;
 
     LivenessLimits Liveness_;
 

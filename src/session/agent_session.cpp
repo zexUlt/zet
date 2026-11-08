@@ -148,6 +148,14 @@ std::optional<wire::SessionEndMessage> SessionHandle::EndedWith()
     return Session_->End_;
 }
 
+const EchoHistory& SessionHandle::Echo() const noexcept {
+    return Session_->Echo_;
+}
+
+void SessionHandle::ConfirmEcho(std::uint64_t input) noexcept {
+    Session_->Echo_.Confirm(input);
+}
+
 void SessionHandle::SetGridInfo(std::uint16_t ver, bool gridCapable) noexcept {
     // Called right after ConfirmResume, before Attach — IsCurrent() is not yet
     // meaningful here.  The caller (AgentConnection) ensures this is only

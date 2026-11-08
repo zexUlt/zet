@@ -75,13 +75,104 @@ void ConnectionBase::SetSendGate(bool open) noexcept {
 // ── AgentConnection ────────────────────────────────────────────────────
 
 Deadline AgentConnection::NextDeadline() const noexcept {
-    return Earliest(
-        Earliest(Earliest(ConnectionBase::NextDeadline(),
-                          ResizeWaitDeadline_ ? Deadline{*ResizeWaitDeadline_}
-                                              : Deadline{}),
-                 SupplySnapshotDeadline_ ? Deadline{*SupplySnapshotDeadline_}
-                                         : Deadline{}),
-        GridAppliedDeadline_ ? Deadline{*GridAppliedDeadline_} : Deadline{});
+    const auto of = [](const std::optional<Timestamp>& at) {
+        return at ? Deadline{*at} : Deadline{};
+    };
+    Deadline next = ConnectionBase::NextDeadline();
+    for (const Deadline d :
+         {of(ResizeWaitDeadline_), of(SupplySnapshotDeadline_),
+          of(GridAppliedDeadline_), EchoDeadline()}) {
+        next = Earliest(next, d);
+    }
+    return next;
+}
+
+// ── AgentConnection: EchoAck (§9, «Предиктивное эхо») ──────────────────
+
+bool AgentConnection::EchoActive() const noexcept {
+    // A snapshot in flight (GridBegin sent, GridApplied not yet in) is not
+    // active: the generation EchoAck would name is not the client's yet, and
+    // the first EchoAck of the new one is queued by SupplySnapshot.
+    return !Failed_ && Stage_ == EStage::Live && Channel_ && Handle_ &&
+           PtyReadOpen_ && Channel_->EchoAckNegotiated() &&
+           !Channel_->GridInFlight() && Handle_->IsCurrent();
+}
+
+std::uint64_t AgentConnection::EchoFloor() const noexcept {
+    return EchoPending_ ? EchoPending_->InputOffset
+                        : Handle_->Echo().Confirmed();
+}
+
+Deadline AgentConnection::EchoDeadline() const noexcept {
+    if (!EchoActive()) {
+        return Deadline{};
+    }
+    const Deadline aged = Handle_->Echo().NextDeadline(EchoFloor());
+    if (!aged.IsSet() || !EchoQueuedAt_) {
+        return aged;
+    }
+    // No more often than ECHO_ACK_INTERVAL_MIN: the later of the two moments.
+    return Deadline{
+        std::max(aged.At(), *EchoQueuedAt_ + ECHO_ACK_INTERVAL_MIN)};
+}
+
+void AgentConnection::SettleEcho(Timestamp now) noexcept {
+    if (!EchoActive()) {
+        return;
+    }
+    if (EchoQueuedAt_ && now < *EchoQueuedAt_ + ECHO_ACK_INTERVAL_MIN) {
+        return;
+    }
+    // Input past the previous EchoAck of this connection, or nothing to say.
+    const auto input = Handle_->Echo().Aged(EchoFloor(), now);
+    if (!input) {
+        return;
+    }
+    // Output: all the pty gave up to now, which the owner has moved into the
+    // session. The send cursor may still be behind it; ReleaseEcho waits.
+    EchoPending_ = wire::EchoAckMessage{.StreamGen = Handle_->SessionGen(),
+                                        .OutputOffset = Handle_->Output().End(),
+                                        .InputOffset = *input};
+    ReleaseEcho(now);
+}
+
+void AgentConnection::ReleaseEcho(Timestamp now) noexcept {
+    if (!EchoPending_ || !EchoActive()) {
+        return;
+    }
+    // No stale-generation check: the generation only changes in
+    // SupplySnapshot, and QueueFirstEcho drops EchoPending_ there.
+    // The client must have every byte up to output_offset before the EchoAck:
+    // it checks the offset against what it received. The channel sends an
+    // EchoAck ahead of Data, so the cursor has to be there already.
+    if (Handle_->Output().SendNext() < EchoPending_->OutputOffset) {
+        return;
+    }
+    if (!Channel_->QueueEchoAck(*EchoPending_)) {
+        return;
+    }
+    Handle_->ConfirmEcho(EchoPending_->InputOffset);
+    EchoQueuedAt_ = now;
+    EchoPending_.reset();
+}
+
+void AgentConnection::QueueFirstEcho(Timestamp now,
+                                     std::uint64_t outputOffset) noexcept {
+    EchoPending_.reset();
+    if (!Channel_ || !Channel_->EchoAckNegotiated()) {
+        return;
+    }
+    // The reference point of the connection: the generation it starts in, the
+    // output the client already holds, and the input already reported. It
+    // asserts nothing about the pty, so it needs no wait. Whatever input is
+    // still unreported follows in the next one.
+    const wire::EchoAckMessage first{
+        .StreamGen = Handle_->SessionGen(),
+        .OutputOffset = outputOffset,
+        .InputOffset = Handle_->Echo().Confirmed()};
+    if (Channel_->QueueEchoAck(first)) {
+        EchoQueuedAt_ = now;
+    }
 }
 
 // ── ConnectionBase ─────────────────────────────────────────────────────
@@ -251,6 +342,7 @@ ConnectionResult AgentConnection::Pump(Timestamp now, MutableByteSpan out,
                 return Refuse(ESessionError::HandshakeTimeout);
             }
             QueueEnd();
+            ReleaseEcho(now);
             auto result = PumpLive(
                 now, out, scratch, [] {},
                 [](const DeliveredGridSnapshot&)
@@ -547,6 +639,9 @@ ConnectionResult AgentConnection::PumpResume(Timestamp now, MutableByteSpan out,
     }
     Stage_ = EStage::Live;
     QueueEnd();
+    // The reference point goes first, ahead of the resend: the client holds
+    // the output up to what it reported in Resume, and the send resumes there.
+    QueueFirstEcho(now, Handle_->Output().SendNext());
     // Straight on: the resend is waiting, and an Idle here would tell the
     // caller there is nothing to do until the client speaks again.
     auto result = PumpLive(
@@ -674,6 +769,9 @@ void AgentConnection::SupplySnapshot(Timestamp now, ByteSpan snapshot,
     GridAppliedDeadline_ = now + GRID_APPLIED_TIMEOUT;
     Stage_ = EStage::Live;
     QueueEnd();
+    // StartGrid dropped an EchoAck of the old generation; the connection's
+    // first one names the new: offset 0, the snapshot holds everything before.
+    QueueFirstEcho(now, 0);
 }
 
 bool AgentConnection::GridEmissionDone() const noexcept {
@@ -858,7 +956,10 @@ ConnectionResult ClientConnection::SendResume(Timestamp now,
                      now, Handle_->Liveness(), NegotiatedVersion_, SnapshotBuf_,
                      baseline);
     if (EchoAck_) {
+        // The prediction engine is the user of the RTT, and offers ECHO_ACK
+        // with it; a client that does not keeps its frames as they were.
         Channel_->EnableEchoAck();
+        Channel_->EnableRttProbe();
     }
     if (PendingResize_) {
         Channel_->QueueResize(*PendingResize_);

@@ -9,6 +9,7 @@ add_library(zet_session STATIC
     stream_state.cpp
     receive_cursor.cpp
     channel.cpp
+    echo_history.cpp
 )
 add_library(zet::session ALIAS zet_session)
 

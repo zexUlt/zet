@@ -57,6 +57,9 @@ add_executable(zet_tests
     session/channel_probe94c_test.cpp
     session/echo_ack_hostile_test.cpp
     session/echo_ack_negotiation_test.cpp
+    session/echo_history_test.cpp
+    session/channel_rtt_test.cpp
+    session/agent_echo_ack_test.cpp
     wire/armor_test.cpp
     wire/echo_ack_test.cpp
     wire/probe_test.cpp
@@ -106,6 +109,7 @@ endif()
 
 if(ZET_HAVE_AGENT)
     target_sources(zet_tests PRIVATE
+        agent/agent_echo_ack_wiring_test.cpp
         agent/agent_failed_grid_resize_test.cpp
         agent/agent_input_queue_test.cpp
         agent/agent_ground_timeout_test.cpp

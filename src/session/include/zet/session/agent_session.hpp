@@ -4,7 +4,9 @@
 #include <optional>
 
 #include "zet/core/bytes.hpp"
+#include "zet/core/time.hpp"
 #include "zet/crypto/crypto.hpp"
+#include "zet/session/echo_history.hpp"
 #include "zet/session/error.hpp"
 #include "zet/session/stream_state.hpp"
 #include "zet/wire/handshake.hpp"
@@ -87,6 +89,20 @@ public:
     [[nodiscard]] bool InputDelivered(std::uint64_t count) noexcept {
         return Streams_.Input().MarkDelivered(count);
     }
+    /// As InputDelivered, for input the pty took at `now`: the agent also
+    /// remembers the pair «end of the input, moment» that the EchoAck is
+    /// computed from (§9, «Предиктивное эхо»). Input the agent discarded
+    /// is InputDelivered, not this: nobody will echo it.
+    [[nodiscard]] bool InputWritten(std::uint64_t count,
+                                    Timestamp now) noexcept {
+        if (!InputDelivered(count)) {
+            return false;
+        }
+        if (count > 0) {
+            Echo_.Record(Streams_.Input().AckOffset(), now);
+        }
+        return true;
+    }
     /// The agent could not queue the `count` bytes the last Deliver event
     /// handed over: they count as not received, and the client's resend after
     /// the reconnect brings them again. Call it before closing the
@@ -143,6 +159,9 @@ private:
     wire::NonceMemory Seen_;
     StreamState Streams_;
     std::optional<wire::SessionEndMessage> End_;
+    /// The pairs EchoAck is computed from. Per session: input is never reset,
+    /// and what a connection did not name, the next one does. §9.
+    EchoHistory Echo_;
 
     // ── M6 per-session grid state (§9 ADR-035) ─────────────────────────────
     /// Whether the current connection is v2 without GRID_CAPABLE. When true,
@@ -232,6 +251,13 @@ public:
     /// stream is acknowledged, if the shell is gone.
     [[nodiscard]] std::optional<wire::SessionEndMessage> EndedWith()
         const noexcept;
+
+    // ── M7: the input history behind EchoAck (§9). ─────────────────────────
+
+    /// See EchoHistory.
+    [[nodiscard]] const EchoHistory& Echo() const noexcept;
+    /// An EchoAck naming input up to `input` was queued: spends those pairs.
+    void ConfirmEcho(std::uint64_t input) noexcept;
 
     // ── M6: grid helpers. Called by AgentConnection after auth. ────────────
 
