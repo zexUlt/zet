@@ -22,10 +22,13 @@ add_executable(zet_tests
     grid/snapshot_size_test.cpp
     grid/snapshot_400x300_test.cpp
     grid/snapshot_mutant_test.cpp
+    predict/overlay_bytes_test.cpp
+    predict/overlay_terminal_test.cpp
     predict/predict_ack_test.cpp
     predict/predict_backspace_test.cpp
     predict/predict_boundary_test.cpp
     predict/predict_cap_test.cpp
+    predict/predict_deadline_test.cpp
     predict/predict_column_trust_test.cpp
     predict/grid_counters_test.cpp
     predict/predict_epoch_test.cpp
@@ -131,6 +134,10 @@ if(ZET_HAVE_AGENT)
         agent/agent_replay_pacing_test.cpp
         agent/agent_wiring_test.cpp
         agent/client_input_replay_pacing_test.cpp
+        agent/client_predict_baseline_test.cpp
+        agent/client_predict_off_test.cpp
+        agent/client_predict_overlay_test.cpp
+        agent/client_predict_password_test.cpp
         io/activation_test.cpp
         io/daemon_test.cpp
         io/fake_pty.cpp

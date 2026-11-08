@@ -116,6 +116,12 @@ public:
         return DcsApcCount_;
     }
 
+    /// Whether the UTF-8 decoder is in the middle of a character: bytes
+    /// written to the terminal now would split it (the overlay, design.md §9).
+    [[nodiscard]] bool Utf8Pending() const noexcept {
+        return Utf8Remaining_ != 0;
+    }
+
     /// Byte counter in the current bypass sequence.  Resets at each new
     /// DCS/OSC/APC/PM/SOS.  Reaching BYPASS_LIMIT_BYTES forces Ground.
     [[nodiscard]] std::size_t BypassBytes() const noexcept {

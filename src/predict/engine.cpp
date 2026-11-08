@@ -554,6 +554,21 @@ void PredictionEngine::OnTick(Timestamp now) noexcept {
     Cull(now);
 }
 
+std::optional<Timestamp> PredictionEngine::NextDeadline() const noexcept {
+    if (Mode_ == EDisplayMode::Never || Count_ == 0) return std::nullopt;
+    // Cull measures from the oldest prediction, the first of the list.
+    const Timestamp created = Preds_[0].Created;
+    std::optional<Timestamp> next;
+    const auto consider = [&](Duration threshold) {
+        const Timestamp at = created + threshold;
+        if (!next || at < *next) next = at;
+    };
+    // The stages Cull has not reached: each moves Glitch_ up, and only then.
+    if (Glitch_ < GLITCH_REPAIR_COUNT) consider(GLITCH_THRESHOLD);
+    if (Glitch_ < 2 * GLITCH_REPAIR_COUNT) consider(GLITCH_FLAG_THRESHOLD);
+    return next;
+}
+
 bool PredictionEngine::AnyDrawn() const noexcept {
     for (std::size_t i = 0; i < Count_; ++i) {
         if (Preds_[i].Drawn) return true;

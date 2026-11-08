@@ -117,7 +117,7 @@ class Zet:
 
     def argv(self, agent_env: dict[str, str]) -> list[str]:
         settings = " ".join(f"{name}={value}" for name, value in agent_env.items())
-        return [str(self.client), "--agent", str(self.agent),
+        return [str(self.client), "--predict=never", "--agent", str(self.agent),
                 "--ssh-arg", "-F", "--ssh-arg", str(self.host.config),
                 "--ssh-arg", f"-oSetEnv={settings}",
                 self.host.alias]

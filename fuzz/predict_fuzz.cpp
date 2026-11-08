@@ -5,10 +5,18 @@
 // generation), resizes, snapshots that replace the mirror object, SRTT
 // samples, drawn marks and the passage of time.
 //
-// The terminal-grid assertions of §16 (the overlay leaves a second grid equal
-// to the mirror, inserts start in Ground, no DECSC) need the overlay builder,
-// which arrives with the overlay in step 5 and extends this target then. What
-// the engine alone owes is asserted after every step:
+// The overlay builder runs the way the client runs it: the overlay is taken
+// off before every piece of bytes, the bytes go to the mirror and to a second
+// grid that plays the terminal, and what is visible is drawn after them. The
+// terminal grid gets exactly what the client would queue for stdout. Asserted
+// after the engine's own invariants below:
+//   a. after every restore the terminal grid equals the mirror: every cell,
+//      the cursor, the pen's attributes and kinds, cursor visibility
+//   b. every insert begins when the terminal's parser is in Ground and not in
+//      the middle of a UTF-8 character
+//   c. no overlay byte string holds DECSC, DECRC, ESC [ s or ESC [ u
+//   d. the overlay never changes the mirror (the hash check at the end)
+// What the engine alone owes is asserted after every step:
 //   1. at most PREDICTIONS_MAX predictions, memory bounded by construction
 //   2. a visible prediction belongs to an epoch not above confirmed_epoch
 //   3. epochs: 1 <= prediction's <= current; confirmed <= current; neither the
@@ -39,6 +47,7 @@
 #include "zet/grid/grid.hpp"
 #include "zet/grid/vt_parser.hpp"
 #include "zet/predict/engine.hpp"
+#include "zet/predict/overlay.hpp"
 
 using namespace zet;
 using namespace zet::predict;
@@ -77,6 +86,53 @@ std::uint8_t NoLowercase(std::uint8_t b) {
 }
 
 [[noreturn]] void Fail() { __builtin_trap(); }
+
+bool Blank(const grid::Cell& c) {
+    return c.Codepoint == 0 || c.Codepoint == U' ';
+}
+
+// The terminal shows what the mirror shows. Blank is blank: ECH leaves an
+// empty cell where the mirror may have held a space, and the screens look the
+// same.
+bool SameScreen(const grid::Grid& a, const grid::Grid& b) {
+    if (a.Cols() != b.Cols() || a.Rows() != b.Rows()) return false;
+    if (a.CursorRow() != b.CursorRow() || a.CursorCol() != b.CursorCol()) {
+        return false;
+    }
+    if (a.PenAttrs() != b.PenAttrs() || a.PenFgKind() != b.PenFgKind() ||
+        a.PenBgKind() != b.PenBgKind()) {
+        return false;
+    }
+    if (a.ModeSet(grid::EMode::Dectcem) != b.ModeSet(grid::EMode::Dectcem)) {
+        return false;
+    }
+    for (std::uint16_t r = 0; r < a.Rows(); ++r) {
+        for (std::uint16_t c = 0; c < a.Cols(); ++c) {
+            const grid::Cell& x = a.CellAt(r, c);
+            const grid::Cell& y = b.CellAt(r, c);
+            if (Blank(x) != Blank(y)) return false;
+            if (!Blank(x) && x.Codepoint != y.Codepoint) return false;
+            if (x.Attrs != y.Attrs || x.FgKind != y.FgKind ||
+                x.BgKind != y.BgKind) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+bool Has(ByteSpan b, std::initializer_list<unsigned char> seq) {
+    const std::size_t n = seq.size();
+    for (std::size_t i = 0; i + n <= b.size(); ++i) {
+        std::size_t k = 0;
+        for (const unsigned char want : seq) {
+            if (static_cast<unsigned char>(b[i + k]) != want) break;
+            ++k;
+        }
+        if (k == n) return true;
+    }
+    return false;
+}
 
 void Check(bool ok) {
     if (!ok) Fail();
@@ -150,6 +206,10 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data,
 
     auto mirror = std::make_unique<Mirror>(cols, rows);
     if (!mirror->G) return 0;
+    auto term = std::make_unique<Mirror>(cols, rows);
+    if (!term->G) return 0;
+    auto overlay = Overlay::Create();
+    if (!overlay) return 0;
 
     Timestamp now = Timestamp::FromNanos(1'000'000'000);
     PredictionEngine engine(mirror->View(), mode);
@@ -157,6 +217,31 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data,
     std::uint64_t out = 0;
     std::uint32_t gen = 0;
     Seen seen;
+
+    // The client's order around every piece of bytes.
+    const auto undo = [&] {
+        const ByteSpan b = overlay->BuildUndo(mirror->View());
+        if (b.empty()) return;
+        Check(!Has(b, {0x1B, '7'}) && !Has(b, {0x1B, '8'}) &&
+              !Has(b, {0x1B, '[', 's'}) && !Has(b, {0x1B, '[', 'u'}));
+        term->P.Feed(b.data(), b.size(), *term->G);
+        overlay->Commit(engine);
+        Check(SameScreen(*term->G, *mirror->G));
+    };
+    const auto draw = [&] {
+        const ByteSpan b = overlay->BuildUpdate(engine, mirror->View());
+        if (b.empty()) return;
+        Check(term->P.State() == grid::EParserState::Ground &&
+              !term->P.Utf8Pending());
+        Check(!Has(b, {0x1B, '7'}) && !Has(b, {0x1B, '8'}) &&
+              !Has(b, {0x1B, '[', 's'}) && !Has(b, {0x1B, '[', 'u'}));
+        term->P.Feed(b.data(), b.size(), *term->G);
+        overlay->Commit(engine);
+    };
+    const auto feed = [&](const std::uint8_t* d, std::size_t n) {
+        mirror->Feed(d, n);
+        term->Feed(d, n);
+    };
 
     std::size_t i = 3;
     while (i + 1 < size) {
@@ -189,13 +274,14 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data,
                     static constexpr std::uint8_t UP[] = {0x1B, '[', 'A', 0x1B,
                                                           '[',  '5', 'G'};
                     const bool save = arg(1) % 2 == 0;
-                    mirror->Feed(save ? SAVE : BELOW,
-                                 save ? sizeof(SAVE) : sizeof(BELOW));
-                    mirror->Feed(shown.data(), n);
-                    mirror->Feed(save ? BACK : UP,
-                                 save ? sizeof(BACK) : sizeof(UP));
+                    undo();
+                    feed(save ? SAVE : BELOW,
+                         save ? sizeof(SAVE) : sizeof(BELOW));
+                    feed(shown.data(), n);
+                    feed(save ? BACK : UP, save ? sizeof(BACK) : sizeof(UP));
                 } else {
-                    mirror->Feed(echoOff ? shown.data() : p, n);
+                    undo();
+                    feed(echoOff ? shown.data() : p, n);
                 }
                 out += n;
                 engine.OnOutput(out, now, mirror->View());
@@ -224,7 +310,9 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data,
             case 3: {  // the local terminal is resized
                 const auto c = static_cast<std::uint16_t>(arg(0) % 60 + 1);
                 const auto r = static_cast<std::uint16_t>(arg(1) % 10 + 1);
+                undo();
                 if (mirror->G->Resize(c, r).has_value()) {
+                    if (!term->G->Resize(c, r).has_value()) return 0;
                     engine.OnResize(now, mirror->View());
                 }
                 break;
@@ -234,9 +322,16 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data,
                     static_cast<std::uint16_t>(arg(0) % 60 + 2),
                     static_cast<std::uint16_t>(arg(1) % 10 + 1));
                 if (!fresh->G) break;
-                fresh->Feed((echoOff ? shown.data() : p) + (n > 2 ? 2 : n),
-                            n > 2 ? n - 2 : 0);
+                auto fresh2 = std::make_unique<Mirror>(fresh->G->Cols(),
+                                                       fresh->G->Rows());
+                if (!fresh2->G) break;
+                undo();
+                const std::uint8_t* body =
+                    (echoOff ? shown.data() : p) + (n > 2 ? 2 : n);
+                fresh->Feed(body, n > 2 ? n - 2 : 0);
+                fresh2->Feed(body, n > 2 ? n - 2 : 0);
                 mirror = std::move(fresh);
+                term = std::move(fresh2);
                 ++gen;
                 out = 0;
                 engine.OnSnapshot(gen, now, mirror->View());
@@ -264,6 +359,7 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data,
                 engine.OnTick(now);
                 break;
         }
+        draw();
         CheckInvariants(engine, *mirror->G, seen);
         if (echoOff) {
             Check(engine.ConfirmedEpoch() == 0);

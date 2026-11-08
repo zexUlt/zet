@@ -123,6 +123,12 @@ public:
     /// Time passed with nothing else happening.
     void OnTick(Timestamp now) noexcept;
 
+    /// When OnTick next changes something with nothing else happening: the
+    /// moment the oldest prediction has gone unconfirmed for long enough to
+    /// count as a glitch (GLITCH_THRESHOLD, GLITCH_FLAG_THRESHOLD). Unset when
+    /// there is no such moment. The client adds it to its poll deadline.
+    [[nodiscard]] std::optional<Timestamp> NextDeadline() const noexcept;
+
     // --- State -------------------------------------------------------------
 
     [[nodiscard]] EDisplayMode Mode() const noexcept { return Mode_; }

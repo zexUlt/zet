@@ -1,5 +1,6 @@
 add_library(zet_predict STATIC
     engine.cpp
+    overlay.cpp
 )
 add_library(zet::predict ALIAS zet_predict)
 
