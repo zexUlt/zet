@@ -26,6 +26,7 @@
 #include <thread>
 #include <vector>
 
+#include <fcntl.h>
 #include <poll.h>
 #include <sys/ioctl.h>
 #include <termios.h>
@@ -458,6 +459,18 @@ public:
             REQUIRE(w.has_value());
             remaining = remaining.subspan(*w);
         }
+    }
+
+    /// What the shell prints, as much as the pty takes now; returns how much
+    /// that was. For a test that must not block on an agent that has stalled.
+    std::size_t PtyPrintsSome(ByteSpan data) {
+        // The slave is blocking; a stalled agent must not block the test.
+        const int flags = ::fcntl(Slave_.Get(), F_GETFL);
+        if ((flags & O_NONBLOCK) == 0) {
+            ::fcntl(Slave_.Get(), F_SETFL, flags | O_NONBLOCK);
+        }
+        const auto w = io::WriteSome(Slave_.Get(), data);
+        return w ? *w : 0;
     }
 
     std::uint16_t Port{0};

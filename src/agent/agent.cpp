@@ -610,6 +610,19 @@ int Agent::RunLoop(std::optional<Timestamp> giveUpAt) noexcept {
         for (auto& connection : Connections_) {
             Pump(*connection, now);
         }
+        // An Ack taken by Pump may have freed ring room that the output left
+        // in PtyRead_ can now use. The pty read gate is closed while that
+        // output sits there, so no event would wake the loop to move it: move
+        // it now, and take another turn only if it did move, since the bytes
+        // moved need a Pump. (The remaining count, not PtyFrom_: a move that
+        // drains it resets both offsets.)
+        if (PtyFrom_ != PtyTo_) {
+            const std::size_t pending = PtyTo_ - PtyFrom_;
+            MovePtyOutput();
+            if (PtyTo_ - PtyFrom_ != pending) {
+                continue;
+            }
+        }
         DropClosed(now);
         if (EndDelivered_) {
             Log(log::ELevel::Info, "the client has the whole session; done");
