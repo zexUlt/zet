@@ -53,6 +53,9 @@ struct Prediction {
     std::uint32_t Epoch{0};
     /// Set by the overlay builder when the cell is on the terminal.
     bool Drawn{false};
+    /// The mirror was seen holding the predicted glyph here, as the echo of
+    /// this keystroke: the cell's change is already accounted for.
+    bool Echoed{false};
     Timestamp Created;
 };
 
@@ -195,6 +198,10 @@ private:
 
     // Mirror side.
     void Observe(const MirrorView& mirror) noexcept;
+    /// Whether what changed in the cursor row since the last look is nothing
+    /// but the echo of outstanding predictions. Anything else printed there
+    /// (a prompt, a cursor jump, an erase) may be a prompt with echo off.
+    [[nodiscard]] bool OutputIsPredictedEcho(const MirrorView& mirror) noexcept;
     void Rebase(const MirrorView& mirror) noexcept;
     void Drain(Timestamp now, const MirrorView& mirror) noexcept;
     void Reconcile(std::uint64_t inputOffset, Timestamp now,
@@ -235,6 +242,8 @@ private:
     std::uint16_t LastCols_{0};
     std::uint16_t LastRows_{0};
     std::uint16_t LastRow_{0};
+    std::uint16_t LastCol_{0};
+    std::uint64_t LastRowHash_{0};
     bool LastAlt_{false};
     std::uint64_t LastScroll_{0};
     std::uint64_t LastColumnSet_{0};

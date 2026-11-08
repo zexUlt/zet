@@ -308,7 +308,7 @@ TEST_CASE("output that changes nothing relevant leaves predictions alone") {
     const auto before = t.R.Count();
     const auto epoch = t.R.E.PredictionEpoch();
     t.R.Output("\x1b[1m");  // SGR
-    t.R.Output("a");        // the echo of the first key
+    t.R.Output("b");        // the echo of the predicted key
     CHECK(t.R.Count() == before);
     CHECK(t.R.E.PredictionEpoch() == epoch);
 }

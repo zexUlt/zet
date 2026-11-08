@@ -19,10 +19,15 @@
 //   6. glitch count bounded; `never` predicts nothing
 //   7. the engine does not touch the mirror (cells and cursor unchanged by
 //      engine calls: checked by hashing around a call that only reads)
+//   8. echo-off model (the header's mode byte, bit 2): the mirror gets
+//      prompts and unsolicited output but never a lowercase letter, and the
+//      keystrokes are lowercase letters or controls, so no echo ever happens;
+//      then no epoch is ever confirmed and no prediction is ever visible
 //
 // Input: 3 header bytes (columns, rows, mode), then operations: one byte
 // selecting the operation, one byte giving the operand length, the operand.
 
+#include <array>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -53,6 +58,21 @@ struct Mirror {
     }
     MirrorView View() { return MirrorView{*G, P}; }
 };
+
+// The echo-off model: typed printable bytes become lowercase letters, and
+// the mirror never receives one or a non-ASCII byte (output and snapshot
+// bytes are masked and uppercased), so
+// nothing it shows can equal a typed key.
+std::uint8_t TypedKey(std::uint8_t b) {
+    return (b >= 0x20 && b < 0x7F) ? static_cast<std::uint8_t>('a' + b % 26)
+                                   : b;
+}
+
+std::uint8_t NoLowercase(std::uint8_t b) {
+    b &= 0x7FU;
+    return (b >= 'a' && b <= 'z') ? static_cast<std::uint8_t>(b - 'a' + 'A')
+                                  : b;
+}
 
 [[noreturn]] void Fail() { __builtin_trap(); }
 
@@ -124,6 +144,7 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data,
     const auto cols = static_cast<std::uint16_t>(data[0] % 60 + 2);
     const auto rows = static_cast<std::uint16_t>(data[1] % 10 + 1);
     const auto mode = static_cast<EDisplayMode>(data[2] % 3);
+    const bool echoOff = (data[2] / 3) % 2 == 1;
 
     auto mirror = std::make_unique<Mirror>(cols, rows);
     if (!mirror->G) return 0;
@@ -146,17 +167,25 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data,
         auto arg = [&](std::size_t k) -> std::uint8_t {
             return k < n ? p[k] : 0;
         };
+        std::array<std::uint8_t, 24> shown{};  // what the echo-off mirror gets
+        std::array<std::uint8_t, 24> typed{};
+        for (std::size_t k = 0; k < n; ++k) {
+            shown[k] = NoLowercase(p[k]);
+            typed[k] = TypedKey(p[k]);
+        }
 
         switch (op) {
             case 0:  // agent output
-                mirror->Feed(p, n);
+                mirror->Feed(echoOff ? shown.data() : p, n);
                 out += n;
                 engine.OnOutput(out, now, mirror->View());
                 break;
             case 1:  // keystrokes
                 in += n;
-                engine.OnInput({reinterpret_cast<const std::byte*>(p), n}, in,
-                               now, mirror->View());
+                engine.OnInput({reinterpret_cast<const std::byte*>(
+                                    echoOff ? typed.data() : p),
+                                n},
+                               in, now, mirror->View());
                 break;
             case 2: {  // EchoAck: current, early, short on input, other gen
                 const std::uint64_t dO = arg(0) % 8;
@@ -185,7 +214,8 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data,
                     static_cast<std::uint16_t>(arg(0) % 60 + 2),
                     static_cast<std::uint16_t>(arg(1) % 10 + 1));
                 if (!fresh->G) break;
-                fresh->Feed(p + (n > 2 ? 2 : n), n > 2 ? n - 2 : 0);
+                fresh->Feed((echoOff ? shown.data() : p) + (n > 2 ? 2 : n),
+                            n > 2 ? n - 2 : 0);
                 mirror = std::move(fresh);
                 ++gen;
                 out = 0;
@@ -215,6 +245,12 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data,
                 break;
         }
         CheckInvariants(engine, *mirror->G, seen);
+        if (echoOff) {
+            Check(engine.ConfirmedEpoch() == 0);
+            for (const Prediction& pr : engine.Predictions()) {
+                Check(!engine.IsVisible(pr));
+            }
+        }
     }
 
     // The engine reads the mirror and never writes it: a call that only reads

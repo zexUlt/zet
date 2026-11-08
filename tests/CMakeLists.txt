@@ -24,11 +24,13 @@ add_executable(zet_tests
     grid/snapshot_mutant_test.cpp
     predict/predict_ack_test.cpp
     predict/predict_backspace_test.cpp
+    predict/predict_boundary_test.cpp
     predict/predict_cap_test.cpp
     predict/predict_column_trust_test.cpp
     predict/grid_counters_test.cpp
     predict/predict_epoch_test.cpp
     predict/predict_input_test.cpp
+    predict/predict_leak_test.cpp
     predict/predict_password_test.cpp
     predict/predict_tentative_test.cpp
     predict/predict_trigger_test.cpp

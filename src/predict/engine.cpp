@@ -26,6 +26,33 @@ constexpr char32_t Normalized(char32_t cp) noexcept {
     return IsBlank(cp) ? 0 : cp;
 }
 
+/// The glyphs a program prints for every key of a hidden line (pwfeedback,
+/// getpass with stars). A typed key that matches one proves nothing about
+/// echo: the program would print it for any key.
+constexpr bool IsMaskGlyph(char32_t cp) noexcept {
+    return cp == U'*' || cp == 0x2022 || cp == 0x25CF;
+}
+
+/// One cell's share of a row hash: 0 for an empty cell, so that the hash is
+/// a sum over the cells that hold something and a cell's change is an
+/// addition and a subtraction.
+std::uint64_t CellTerm(std::uint16_t col, char32_t v) noexcept {
+    if (v == 0) return 0;
+    std::uint64_t x = (static_cast<std::uint64_t>(col) << 32) | v;
+    x += 0x9E3779B97F4A7C15ULL;
+    x = (x ^ (x >> 30)) * 0xBF58476D1CE4E5B9ULL;
+    x = (x ^ (x >> 27)) * 0x94D049BB133111EBULL;
+    return x ^ (x >> 31);
+}
+
+std::uint64_t RowHash(const grid::Grid& g, std::uint16_t row) noexcept {
+    if (row >= g.Rows()) return 0;
+    std::uint64_t h = 0;
+    for (std::uint16_t c = 0; c < g.Cols(); ++c)
+        h += CellTerm(c, Held(g.CellAt(row, c)));
+    return h;
+}
+
 }  // namespace
 
 PredictionEngine::PredictionEngine(const MirrorView& mirror, EDisplayMode mode,
@@ -325,11 +352,38 @@ void PredictionEngine::Rebase(const MirrorView& mirror) noexcept {
     LastCols_ = g.Cols();
     LastRows_ = g.Rows();
     LastRow_ = g.CursorRow();
+    LastCol_ = g.CursorCol();
+    LastRowHash_ = RowHash(g, g.CursorRow());
     LastAlt_ = g.IsAltScreen();
     LastScroll_ = g.ScrollCount();
     LastColumnSet_ = g.ColumnSetCount();
     LastUnknown_ = mirror.Parser.UnknownSeqCount();
     LastDcsApc_ = mirror.Parser.DcsApcCount();
+}
+
+bool PredictionEngine::OutputIsPredictedEcho(
+    const MirrorView& mirror) noexcept {
+    const grid::Grid& g = mirror.Screen;
+    const std::uint16_t row = g.CursorRow();
+    const std::uint16_t col = g.CursorCol();
+    // The row hash as it would be if exactly the predictions the mirror now
+    // shows had been echoed; a prediction not echoed (yet) changes nothing.
+    std::uint64_t expected = LastRowHash_;
+    bool cursorOk = col == LastCol_;
+    for (std::size_t i = 0; i < Count_; ++i) {
+        Prediction& p = Preds_[i];
+        if (p.Row != row || p.Col >= g.Cols()) continue;
+        const char32_t want = Normalized(p.Codepoint);
+        if (Held(g.CellAt(p.Row, p.Col)) != want) continue;
+        // An echo seen at an earlier look is already in the last hash.
+        if (!p.Echoed) {
+            expected +=
+                CellTerm(p.Col, want) - CellTerm(p.Col, Normalized(p.Prior));
+            p.Echoed = true;
+        }
+        if (p.Codepoint != 0 ? col == p.Col + 1 : col == p.Col) cursorOk = true;
+    }
+    return cursorOk && expected == RowHash(g, row);
 }
 
 void PredictionEngine::Observe(const MirrorView& mirror) noexcept {
@@ -353,9 +407,16 @@ void PredictionEngine::Observe(const MirrorView& mirror) noexcept {
         untrust = true;
     }
     const bool gained = g.ColumnSetCount() != LastColumnSet_;
+    const bool unsolicited = !reset && !OutputIsPredictedEcho(mirror);
 
     Rebase(mirror);
-    if (reset) ResetAll();
+    if (reset) {
+        ResetAll();
+    } else if (unsolicited && (Count_ > 0 || Epoch_ <= Confirmed_)) {
+        // An epoch nobody confirmed and holding nothing cannot become
+        // visible by itself, so raising it would only renumber it.
+        BecomeTentative();
+    }
     // Losing the column wins over regaining it in the same stretch of output:
     // the order inside it is not known, and a wrong column is what costs.
     if (untrust) {
@@ -440,9 +501,11 @@ void PredictionEngine::Reconcile(std::uint64_t inputOffset, Timestamp now,
         }
         if (Held(g.CellAt(p.Row, p.Col)) == Normalized(p.Codepoint)) {
             // Right. Only a glyph that was not already there proves the echo
-            // works: empty cells match too easily (mosh, CorrectNoCredit).
+            // works: empty cells match too easily (mosh, CorrectNoCredit), and
+            // a mask glyph is what a hidden line prints for any key.
             if (Normalized(p.Codepoint) != 0 &&
-                Normalized(p.Prior) != Normalized(p.Codepoint)) {
+                Normalized(p.Prior) != Normalized(p.Codepoint) &&
+                !IsMaskGlyph(p.Codepoint)) {
                 Confirmed_ = std::max(Confirmed_, p.Epoch);
                 if (Glitch_ > 0 && now - p.Created < GLITCH_THRESHOLD &&
                     (!LastQuick_ ||
