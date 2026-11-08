@@ -549,8 +549,8 @@ void WriteChunks(ClientRun& run, AgentSide& agent, AgentLink& link,
 struct BlockWinch {
     BlockWinch() {
         sigset_t set;
-        ::sigemptyset(&set);
-        ::sigaddset(&set, SIGWINCH);
+        sigemptyset(&set);
+        sigaddset(&set, SIGWINCH);
         ::pthread_sigmask(SIG_BLOCK, &set, &Old);
     }
     ~BlockWinch() { ::pthread_sigmask(SIG_SETMASK, &Old, nullptr); }

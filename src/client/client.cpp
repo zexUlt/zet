@@ -193,6 +193,9 @@ struct Options {
     /// its snapshot to this path on exit. Empty means no mirror: nothing else
     /// asks for one yet, and without it the client does no extra work.
     std::string MirrorDump;
+    /// Test seam (SessionTestConfig::SizeSource): stands in for the tty when
+    /// SIGWINCH asks for the terminal's size. Empty in production.
+    std::function<std::optional<wire::ResizeMessage>()> SizeSource;
 };
 
 /// What of the local environment goes to the shell on the far side: the
@@ -1010,8 +1013,6 @@ private:
     int StdinFd_{STDIN_FILENO};
     app::Registration StdoutWatch_;
     std::optional<wire::ResizeMessage> Size_;
-    /// Test seam: stands in for the tty when SIGWINCH asks for the size.
-    std::function<std::optional<wire::ResizeMessage>()> SizeSource_;
     /// stderr is the terminal stdout writes to: a notice then goes in line
     /// with the output, whole, instead of a write that a full, non-blocking
     /// terminal would cut short.
@@ -1533,7 +1534,7 @@ void Client::WriteMirrorDump() noexcept {
 }
 
 void Client::Resize() noexcept {
-    Size_ = SizeSource_ ? SizeSource_() : TerminalSize();
+    Size_ = Options_.SizeSource ? Options_.SizeSource() : TerminalSize();
     if (Size_ && Connection_) {
         Connection_->QueueResize(*Size_);
     }
@@ -1581,6 +1582,7 @@ SessionTestResult RunSessionForTestImpl(SessionTestConfig config) noexcept {
     opts.Limits = config.Limits;
     opts.BackoffMax = config.BackoffMax;
     opts.MirrorDump = config.MirrorDump;
+    opts.SizeSource = std::move(config.SizeSource);
 
     session::BootstrapResult br;
     br.Secrets = std::move(config.Secrets);
@@ -1592,7 +1594,6 @@ SessionTestResult RunSessionForTestImpl(SessionTestConfig config) noexcept {
     if (config.InitialSize) {
         clientObj->Size_ = config.InitialSize;
     }
-    clientObj->SizeSource_ = std::move(config.SizeSource);
     if (!opts.MirrorDump.empty()) {
         clientObj->StartMirror();
     }
