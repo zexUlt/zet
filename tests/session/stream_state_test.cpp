@@ -81,6 +81,8 @@ TEST_CASE_FIXTURE(Fixture, "a live session holds back at the resend ceiling") {
     CHECK(*taken == RESEND_MAX);
     CHECK_FALSE(state.AcceptsWrites());
 
+    // Only bytes already sealed into Data can be acknowledged.
+    state.Output().AdvanceSendNext(4);
     REQUIRE(state.Output().Acknowledge(4).has_value());
     CHECK(state.AcceptsWrites());
 }
@@ -145,6 +147,8 @@ TEST_CASE_FIXTURE(Fixture,
                   "attaching resends from what the peer says it holds") {
     StreamState state{Streams(), EDetachedOverflow::Reap};
     REQUIRE(state.Write(ByteSpan{Bytes(10)}) == 10);
+    // A previous connection sealed all ten; the peer got six of them.
+    state.Output().AdvanceSendNext(10);
 
     REQUIRE(state.Attach(6).has_value());
     CHECK(state.Output().SendNext() == 6);
@@ -156,6 +160,7 @@ TEST_CASE_FIXTURE(Fixture,
                   "an offset the stream cannot honour refuses the attach") {
     StreamState state{Streams(), EDetachedOverflow::Reap};
     REQUIRE(state.Write(ByteSpan{Bytes(10)}) == 10);
+    state.Output().AdvanceSendNext(10);
 
     const auto ahead = state.Attach(11);
     REQUIRE_FALSE(ahead.has_value());

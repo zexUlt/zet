@@ -151,6 +151,7 @@ TEST_CASE("ack at end drains the ring") {
     Fill(data, 10);
     REQUIRE(buf.Append(ByteSpan{data}) > 0);
 
+    buf.AdvanceSendNext(10);
     const auto result = buf.Acknowledge(10);
     REQUIRE(result.has_value());
     CHECK(buf.Base() == 10);
@@ -166,6 +167,7 @@ TEST_CASE("ack in the middle trims and frees room") {
     Fill(data, 10);
     REQUIRE(buf.Append(ByteSpan{data}) > 0);
 
+    buf.AdvanceSendNext(10);
     const auto result = buf.Acknowledge(6);
     REQUIRE(result.has_value());
     CHECK(buf.Base() == 6);
@@ -255,6 +257,7 @@ TEST_CASE("ring wrap-around: append, ack, fill across the seam") {
     CHECK(buf.Append(ByteSpan{first}) == 6);
 
     // Acknowledge 4 bytes: ring now holds [4, 6) at physical positions 4..5.
+    buf.AdvanceSendNext(6);
     REQUIRE(buf.Acknowledge(4).has_value());
     CHECK(buf.Base() == 4);
     CHECK(buf.Size() == 2);
@@ -293,6 +296,7 @@ TEST_CASE("ring wrap-around at every starting position") {
         if (startPos > 0) {
             std::vector<std::byte> pad(startPos, std::byte{0xFF});
             CHECK(buf.Append(ByteSpan{pad}) == startPos);
+            buf.AdvanceSendNext(startPos);
             REQUIRE(buf.Acknowledge(startPos).has_value());
         }
         CHECK(buf.Base() == startPos);
@@ -381,6 +385,7 @@ TEST_CASE("a peer resuming below its own acknowledgement cannot be served") {
     std::vector<std::byte> data;
     Fill(data, 20);
     REQUIRE(buf.Append(ByteSpan{data}) > 0);
+    buf.AdvanceSendNext(20);
     REQUIRE(buf.Acknowledge(10).has_value());
 
     // Bytes 5..10 were trimmed when the ack came. Resending from 10 would
@@ -389,8 +394,8 @@ TEST_CASE("a peer resuming below its own acknowledgement cannot be served") {
     REQUIRE_FALSE(behind.has_value());
     CHECK(behind.error() == ESessionError::PeerBehindBuffer);
     CHECK(buf.Base() == 10);
-    // The cursor stays where the acknowledgement left it.
-    CHECK(buf.SendNext() == 10);
+    // The refused attach leaves the cursor alone.
+    CHECK(buf.SendNext() == 20);
 }
 
 TEST_CASE("a peer resuming past what was sent is refused, not clamped") {
@@ -404,22 +409,6 @@ TEST_CASE("a peer resuming past what was sent is refused, not clamped") {
     REQUIRE_FALSE(ahead.has_value());
     CHECK(ahead.error() == ESessionError::AckBeyondSent);
     CHECK(buf.Base() == 0);
-}
-
-TEST_CASE("Acknowledge clamps SendNext to new Base") {
-    std::array<std::byte, 32> storage{};
-    SendBuffer buf{MutableByteSpan{storage}};
-
-    std::vector<std::byte> data;
-    Fill(data, 20);
-    REQUIRE(buf.Append(ByteSpan{data}) > 0);
-    // Advance send cursor to 5.
-    buf.AdvanceSendNext(5);
-
-    // Ack past SendNext: SendNext must move up to base.
-    REQUIRE(buf.Acknowledge(15).has_value());
-    CHECK(buf.SendNext() == 15);
-    CHECK(buf.SendNext() >= buf.Base());
 }
 
 // Disconnect-buffer-overflow path -----------------------------------------
@@ -493,6 +482,9 @@ TEST_CASE("property: SendBuffer byte contents match std::vector reference") {
                 std::uniform_int_distribution<std::uint64_t> ackDist(buf.Base(),
                                                                      buf.End());
                 const std::uint64_t ackOffset = ackDist(rng);
+                // The ack must not exceed what was sent: seal everything.
+                buf.AdvanceSendNext(
+                    static_cast<std::size_t>(buf.End() - buf.SendNext()));
                 REQUIRE(buf.Acknowledge(ackOffset).has_value());
 
                 const std::size_t trimmed =
@@ -576,6 +568,11 @@ TEST_CASE("property: sender-receiver pipeline with random retransmits") {
             const auto chunk = sender.CopyOut(
                 fromOffset, MutableByteSpan{chunkBuf}.first(chunkLen));
             REQUIRE(chunk.size() == chunkLen);
+            // Those bytes are now on the wire.
+            if (fromOffset + chunkLen > sender.SendNext()) {
+                sender.AdvanceSendNext(static_cast<std::size_t>(
+                    fromOffset + chunkLen - sender.SendNext()));
+            }
 
             // Deliver to simulated receiver (inline ReceiveCursor logic so
             // this test is self-contained).

@@ -318,6 +318,9 @@ TEST_CASE_FIXTURE(SodiumFixture,
     REQUIRE(one.Attach(0));
     CHECK(session.State() == ESessionState::Live);
     CHECK(one.Output().SendNext() == 0);
+    // The first connection sealed the whole of it before the socket went
+    // half-open.
+    one.Output().AdvanceSendNext(12);
     client.MoveOn();
 
     // The client changed networks; the old socket is still half-open.

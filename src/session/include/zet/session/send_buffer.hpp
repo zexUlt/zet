@@ -29,8 +29,15 @@ namespace zet::session {
 /// peer_recv_offset from the Resume message; CopyOut() + AdvanceSendNext()
 /// then step through the retransmit window.  §9.
 ///
+/// **Sealed.**  SendNext rewinds on a resume, so it cannot bound what a peer
+/// may honestly acknowledge: frames sealed on the old connection can still
+/// land after the peer quoted its offset.  The buffer therefore keeps the
+/// highest offset ever sealed in the generation; acks and resume offsets are
+/// checked against it, and NewGeneration() zeroes it.
+///
 /// Invariants maintained at every call boundary:
 ///   Base  <= SendNext <= End
+///   SendNext <= Sealed <= End
 ///   End   - Base      <= Storage.size()
 class SendBuffer {
 public:
@@ -54,9 +61,11 @@ public:
 
     /// Acknowledge the cumulative stream up to `ackOffset`.
     ///   ackOffset <  Base  → ignored (late duplicate ack, harmless).
-    ///   ackOffset >  End   → AckBeyondSent: the peer claims to have received
-    ///                        bytes we never sent. §9 / error.hpp.
-    ///   otherwise          → trims [Base, ackOffset) from the ring.
+    ///   ackOffset >  Sealed → AckBeyondSent: the peer claims to have
+    ///                        received bytes we never sent (appended but not
+    ///                        yet sealed counts as unsent). §7 / error.hpp.
+    ///   otherwise          → trims [Base, ackOffset) from the ring and lifts
+    ///                        a rewound SendNext to the new Base.
     [[nodiscard]] SessionResult<void> Acknowledge(
         std::uint64_t ackOffset) noexcept;
 
@@ -75,7 +84,8 @@ public:
     /// reconnect (peer_recv_offset from the handshake), §9. The offset is
     /// cumulative, so it also acknowledges everything below it.
     ///
-    /// Nothing is clamped. Above End the peer claims bytes we never sent —
+    /// Nothing is clamped. Above Sealed (the highest offset sealed in this
+    /// generation, across earlier resets) the peer claims bytes we never sent —
     /// AckBeyondSent. Below Base it asks for bytes it acknowledged before and
     /// we have since dropped — PeerBehindBuffer. Resending from Base instead
     /// would leave a hole the receiver refuses as StreamGap, and the session
@@ -125,8 +135,8 @@ public:
     }
 
     /// Open a new output generation. Increments SessionGen, resets Base, End
-    /// and SendNext to 0, and clears RingOverflowed. Called when path B is
-    /// chosen; input offsets are unaffected.
+    /// SendNext and Sealed to 0, and clears RingOverflowed. Called when path B
+    /// is chosen; input offsets are unaffected.
     void NewGeneration() noexcept;
 
 private:
@@ -134,6 +144,10 @@ private:
     std::uint64_t Base_{0};
     std::uint64_t End_{0};
     std::uint64_t SendNext_{0};
+    /// Highest offset ever sealed into Data in this generation. SendNext_
+    /// rewinds on a resume; this does not. The bound for what a peer may
+    /// honestly acknowledge or resume at.
+    std::uint64_t Sealed_{0};
     bool RingOverflowed_{false};
     std::uint32_t SessionGen_{0};
 };
