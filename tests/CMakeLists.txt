@@ -55,7 +55,10 @@ add_executable(zet_tests
     session/channel_v1_violation_test.cpp
     session/connection_probe94c_test.cpp
     session/channel_probe94c_test.cpp
+    session/echo_ack_hostile_test.cpp
+    session/echo_ack_negotiation_test.cpp
     wire/armor_test.cpp
+    wire/echo_ack_test.cpp
     wire/probe_test.cpp
     wire/frame_test.cpp
     wire/handshake_test.cpp

@@ -38,10 +38,11 @@ inline constexpr std::uint32_t MAX_HANDSHAKE_FRAME = 4U * 1024U;
 ///
 /// v1 is the M1–M5 base; v2 (PROTOCOL_VERSION_GRID) adds Resume with
 /// stream_gen, the Grid snapshot messages and the GRID_CAPABLE TLV (§5, §7,
-/// ADR-035). PROTOCOL_VERSION_MAX is the default ceiling advertised in Hello
-/// and is 2: the agent and client binaries serve and apply grid snapshots.
-/// A peer capped at v1 (an older binary, or a test passing PROTOCOL_VERSION_MIN
-/// as the ceiling) still negotiates v1 (§9, ADR-035).
+/// ADR-035), and with M7 EchoAck and the ECHO_ACK TLV (ADR-036).
+/// PROTOCOL_VERSION_MAX is the default ceiling advertised in Hello and is 2:
+/// the agent and client binaries serve and apply grid snapshots. A peer capped
+/// at v1 (an older binary, or a test passing PROTOCOL_VERSION_MIN as the
+/// ceiling) still negotiates v1 (§9, ADR-035).
 inline constexpr std::uint16_t PROTOCOL_VERSION_MIN = 1;
 inline constexpr std::uint16_t PROTOCOL_VERSION_MAX = 2;
 inline constexpr std::uint16_t PROTOCOL_VERSION_GRID = 2;
@@ -74,5 +75,12 @@ inline constexpr std::uint32_t SNAPSHOT_MAX_BYTES = 4U * 1024U * 1024U;
 /// grid-unaware and falls back to SessionEnd(kind=2) on overflow. Checked only
 /// after successful authentication and only when the negotiated version is 2.
 inline constexpr std::uint16_t TLV_GRID_CAPABLE = 0x0003;
+
+/// TLV type for the ECHO_ACK option in Hello (§7, TLV registry): the client
+/// understands EchoAck and asks for it (§9, predictive echo). Non-critical.
+/// Checked only after successful authentication and only when the negotiated
+/// version is 2; unlike GRID_CAPABLE it holds for one connection, not the
+/// session.
+inline constexpr std::uint16_t TLV_ECHO_ACK = 0x0004;
 
 }  // namespace zet::wire

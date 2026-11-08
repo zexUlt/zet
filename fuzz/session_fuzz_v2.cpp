@@ -46,6 +46,9 @@
 //  0C              NewGeneration — Agent.SendBuffer.NewGeneration() (path B
 //                                  ring reset); P2 Base-monotonicity is
 //                                  exempted for this step
+//  0D gg oo ii     QueueEchoAck  — Agent.QueueEchoAck({gg, oo, ii}); the
+//                                  frame is polled and discarded like any
+//                                  other (EchoAck is enabled on both ends)
 //
 // Properties (each violation → __builtin_trap())
 // -----------------------------------------------
@@ -65,6 +68,8 @@
 //  P9  The agent sends SessionEnd only with its SendBuffer empty: nothing
 //      unsent and nothing unacknowledged (§9).
 // P10  After DeliveredGridSnapshot RecvCursor is exactly 0 (§9).
+// P11  A delivered EchoAck never claims output beyond the client's receive
+//      offset or input beyond its send buffer's End (§7).
 
 #include <algorithm>
 #include <array>
@@ -289,7 +294,8 @@ void CheckProperties(const Snapshot& before, const SendBuffer& clientSend,
 // Returns true if a DeliveredGridSnapshot was received (RecvCursor reset to 0).
 [[nodiscard]] bool HandleReceiveResult(
     const ChannelResult<IncomingEvent>& result, StreamRecord& rec,
-    std::uint64_t oldRecvOffset, const ReceiveCursor& cursor) noexcept {
+    std::uint64_t oldRecvOffset, const ReceiveCursor& cursor,
+    const SendBuffer& sendBuf) noexcept {
     if (!result) {
         // P6.
         if (result.error().Disposition() == zet::EDisposition::KillSession) {
@@ -321,6 +327,13 @@ void CheckProperties(const Snapshot& before, const SendBuffer& clientSend,
         rec = StreamRecord{};
         return true;
     }
+    if (const auto* echo = std::get_if<DeliveredEchoAck>(&*result)) {
+        // P11.
+        if (echo->Ack.OutputOffset > cursor.RecvOffset() ||
+            echo->Ack.InputOffset > sendBuf.End()) {
+            __builtin_trap();
+        }
+    }
     // DeliveredResize, DeliveredSessionEnd, DeliveredGridApplied,
     // DeliveredNothing: no stream-record or cursor invariants to check.
     return false;
@@ -331,6 +344,7 @@ void CheckProperties(const Snapshot& before, const SendBuffer& clientSend,
 [[nodiscard]] bool DoInject(Timestamp now, InjectSealer& injector,
                             Channel& chan, ByteSpan plain, StreamRecord& rec,
                             const ReceiveCursor& cursor,
+                            const SendBuffer& sendBuf,
                             std::vector<std::byte>& scratch) noexcept {
     const std::uint64_t oldRecvOffset = cursor.RecvOffset();
     const auto frame = injector.Seal(plain);
@@ -354,7 +368,7 @@ void CheckProperties(const Snapshot& before, const SendBuffer& clientSend,
         ++g_gc_ok;
     if (!plain.empty() && result && (static_cast<unsigned>(plain[0]) == 0x18))
         ++g_ge_ok;
-    return HandleReceiveResult(result, rec, oldRecvOffset, cursor);
+    return HandleReceiveResult(result, rec, oldRecvOffset, cursor, sendBuf);
 }
 
 }  // namespace
@@ -407,6 +421,11 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data,
                       wire::MAX_BYTES_PER_EPOCH,
                       {},
                       wire::PROTOCOL_VERSION_GRID};
+
+    // Both ends asked for and understand EchoAck (§7); at ver=2 it is then
+    // neither a violation to receive nor impossible to send.
+    clientChan.EnableEchoAck();
+    agentChan.EnableEchoAck();
 
     // Injection sealers: same keys as Channel internals, independent counters.
     // Client sends c2s (ClientToServer); agent sends s2c (ServerToClient).
@@ -545,7 +564,8 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data,
                     break;
                 }
                 if (DoInject(now, s2cInject, clientChan, *payload,
-                             clientRecvRec, clientRecvCursor, recvScratch)) {
+                             clientRecvRec, clientRecvCursor, clientSendBuf,
+                             recvScratch)) {
                     // P1 carve-out: DeliveredGridSnapshot reset cursor to 0.
                     before.ClientRecvOffset = 0;
                 }
@@ -565,7 +585,7 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data,
                     break;
                 }
                 if (DoInject(now, c2sInject, agentChan, *payload, agentRecvRec,
-                             agentRecvCursor, recvScratch)) {
+                             agentRecvCursor, agentSendBuf, recvScratch)) {
                     // P1 carve-out: DeliveredGridSnapshot reset cursor to 0.
                     before.AgentRecvOffset = 0;
                 }
@@ -652,6 +672,21 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data,
                                 clientRecvCursor, agentRecvCursor,
                                 /*generationReset=*/true);
                 continue;
+            }
+            // ── 0D: QueueEchoAck ──────────────────────────────────────────
+            case 0x0D: {
+                const auto genByte = reader.ReadU8();
+                const auto outByte = reader.ReadU8();
+                const auto inByte = reader.ReadU8();
+                if (!genByte || !outByte || !inByte) {
+                    break;
+                }
+                std::ignore = agentChan.QueueEchoAck(wire::EchoAckMessage{
+                    .StreamGen = *genByte,
+                    .OutputOffset = *outByte,
+                    .InputOffset = *inByte,
+                });
+                break;
             }
             default:
                 break;

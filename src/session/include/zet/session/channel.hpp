@@ -75,9 +75,20 @@ struct DeliveredGridApplied {
     std::uint32_t StreamGen{0};
 };
 
+/// A validated EchoAck from the agent. Client only (§7, §9).
+///
+/// The fields were checked against the stream: the generation is the one Data
+/// is received in, the output offset is no further than the client received
+/// there, the input offset no further than it wrote, and neither went back
+/// since the previous EchoAck of this connection.
+struct DeliveredEchoAck {
+    wire::EchoAckMessage Ack;
+};
+
 using IncomingEvent =
     std::variant<DeliveredData, DeliveredResize, DeliveredSessionEnd,
-                 DeliveredGridSnapshot, DeliveredGridApplied, DeliveredNothing>;
+                 DeliveredGridSnapshot, DeliveredGridApplied, DeliveredEchoAck,
+                 DeliveredNothing>;
 
 /// The sealed, post-authentication traffic of one connection, symmetric for
 /// client and agent. §9.
@@ -208,10 +219,10 @@ public:
     /// Fails with PeerSilent, before writing anything, once nothing has been
     /// heard for PeerSilenceTimeout.
     ///
-    /// Priority: Pong > Data (with piggybacked Ack) > SessionEnd > Resize >
-    /// bare Ack > keepalive Ping.
-    /// §9: "кумулятивные ACK ... пиггибэком в заголовке plaintext каждого
-    /// кадра данных плюс отдельным Ack при простое дольше 200 мс".
+    /// Priority: Pong > EchoAck > Data (with piggybacked Ack) > SessionEnd >
+    /// Resize > bare Ack > keepalive Ping. §9: "кумулятивные ACK ... пиггибэком
+    /// в заголовке plaintext каждого кадра данных плюс отдельным Ack при
+    /// простое дольше 200 мс".
     [[nodiscard]] ChannelResult<std::size_t> Poll(
         Timestamp now, MutableByteSpan out, MutableByteSpan scratch) noexcept;
 
@@ -307,6 +318,27 @@ public:
     /// bytes that belong to the old generation.  StartGrid clears the flag.
     void SuppressDataUntilGrid() noexcept;
 
+    // ── M7: echo-ack (§7, §9 ADR-036). ─────────────────────────────────────
+
+    /// Records that this connection's Hello carried ECHO_ACK: the client sent
+    /// it, or the agent read it from the authenticated Hello. Without it an
+    /// EchoAck is a violation on the client and unsendable on the agent. Only
+    /// ver=2 counts, whatever was called here.
+    void EnableEchoAck() noexcept { EchoAckEnabled_ = true; }
+
+    /// Whether EchoAck may be exchanged on this connection.
+    [[nodiscard]] bool EchoAckNegotiated() const noexcept {
+        return EchoAckEnabled_ && Version_ >= wire::PROTOCOL_VERSION_GRID;
+    }
+
+    /// Agent side: queue an EchoAck for the next Poll. A later call replaces
+    /// one not yet sent. Poll holds it back while a snapshot is being emitted
+    /// or awaited from SupplySnapshot, and sends it ahead of Data. Whether it
+    /// is due (the send reached `OutputOffset`, the rate limit) is the
+    /// caller's rule, not the channel's. Returns false, queueing nothing, when
+    /// the role or the negotiation does not allow one.
+    [[nodiscard]] bool QueueEchoAck(const wire::EchoAckMessage& ack) noexcept;
+
 private:
     /// Poll without the liveness bookkeeping around it.
     [[nodiscard]] ChannelResult<std::size_t> PollOnce(
@@ -401,6 +433,14 @@ private:
     std::optional<std::uint32_t> PendingGridApplied_;
 
     std::uint16_t Version_{wire::PROTOCOL_VERSION_MIN};
+
+    /// ECHO_ACK was in this connection's Hello. See EnableEchoAck. §7.
+    bool EchoAckEnabled_{false};
+    /// Client side: the previous EchoAck of this connection, which the next
+    /// one is checked against. §7.
+    std::optional<wire::EchoAckMessage> LastEchoAck_;
+    /// Agent side: the EchoAck to send on the next Poll. §9.
+    std::optional<wire::EchoAckMessage> PendingEchoAck_;
 
     /// A Resize queued by QueueResize, to be sent on the next Poll. Replaces
     /// any previous value that has not yet been sent. §9.

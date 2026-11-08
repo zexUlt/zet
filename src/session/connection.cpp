@@ -163,6 +163,9 @@ ConnectionResult ConnectionBase::PumpLive(Timestamp now, MutableByteSpan out,
             }
             return Ended{.End = end->End};
         }
+        if (const auto* echo = std::get_if<DeliveredEchoAck>(&*event)) {
+            return EchoAcked{.Ack = echo->Ack};
+        }
         if (const auto* snap = std::get_if<DeliveredGridSnapshot>(&*event)) {
             // Agent side: DeliveredGridSnapshot should never arrive; the
             // channel already closed the connection on that violation.
@@ -311,20 +314,27 @@ ConnectionResult AgentConnection::PumpHello() noexcept {
     HelloSize_ = frame.Body.size();
     HelloId_ = *id;
 
-    // Extract GRID_CAPABLE TLV pre-auth; trusted only after SetGridInfo
-    // confirms the handshake (§7, TLV registry). Re-parse the stored Hello
-    // so we don't rely on frame.Body staying valid across Pumps.
+    // Extract GRID_CAPABLE and ECHO_ACK TLVs pre-auth; trusted only after the
+    // handshake confirms them (SetGridInfo, EnableEchoAck; §7, TLV registry).
+    // Re-parse the stored Hello so we don't rely on frame.Body staying valid
+    // across Pumps.
     {
         ByteReader helloReader{ByteSpan{Hello_}.first(HelloSize_)};
         std::ignore = wire::ParseMessageType(helloReader);  // skip type byte
         if (auto hello = wire::ParseHello(helloReader); hello) {
             for (const auto& opt : hello->Options.Options()) {
-                if (opt.Type == wire::TLV_GRID_CAPABLE &&
-                    opt.Value.size() == 2) {
-                    ByteReader vr{opt.Value};
-                    if (auto v = vr.ReadU16BE(); v && *v == 1) {
-                        HelloGridCapable_ = true;
-                    }
+                if (opt.Value.size() != 2) {
+                    continue;
+                }
+                ByteReader vr{opt.Value};
+                const auto v = vr.ReadU16BE();
+                if (!v || *v != 1) {
+                    continue;
+                }
+                if (opt.Type == wire::TLV_GRID_CAPABLE) {
+                    HelloGridCapable_ = true;
+                } else if (opt.Type == wire::TLV_ECHO_ACK) {
+                    HelloEchoAck_ = true;
                 }
             }
         }
@@ -488,6 +498,9 @@ ConnectionResult AgentConnection::PumpResume(Timestamp now, MutableByteSpan out,
         // Prevent Poll from sending stale pre-NewGeneration Data frames while
         // waiting for SupplySnapshot to clear the ring. §9 ADR-030.
         Channel_->SuppressDataUntilGrid();
+        if (HelloEchoAck_) {
+            Channel_->EnableEchoAck();
+        }
         Stage_ = EStage::AwaitSnapshot;
         SupplySnapshotDeadline_ = now + SUPPLY_SNAPSHOT_TIMEOUT;
         // Wait for the client's post-Resume Resize before reporting dimensions
@@ -529,6 +542,9 @@ ConnectionResult AgentConnection::PumpResume(Timestamp now, MutableByteSpan out,
     Channel_.emplace(std::move(chosen), Handle_->Output(), Handle_->Input(),
                      now, Handle_->Liveness(), NegotiatedVersion_,
                      SnapshotBuf_);
+    if (HelloEchoAck_) {
+        Channel_->EnableEchoAck();
+    }
     Stage_ = EStage::Live;
     QueueEnd();
     // Straight on: the resend is waiting, and an Idle here would tell the
@@ -688,10 +704,12 @@ ClientConnection::ClientConnection(ClientSession& session,
                                    wire::HandshakeNonce clientNonce,
                                    MutableByteSpan frameStorage, Timestamp now,
                                    bool gridCapable, std::uint16_t ceiling,
-                                   MutableByteSpan snapshotBuf) noexcept
+                                   MutableByteSpan snapshotBuf,
+                                   bool echoAck) noexcept
     : ConnectionBase(frameStorage, now, ceiling, snapshotBuf),
       Session_(session),
-      Attempt_(session, clientNonce, gridCapable, ceiling) {}
+      Attempt_(session, clientNonce, gridCapable, ceiling, echoAck),
+      EchoAck_(echoAck) {}
 
 void ClientConnection::QueueResize(wire::ResizeMessage size) noexcept {
     if (Channel_) {
@@ -839,6 +857,9 @@ ConnectionResult ClientConnection::SendResume(Timestamp now,
     Channel_.emplace(std::move(frames), Handle_->Output(), Handle_->Input(),
                      now, Handle_->Liveness(), NegotiatedVersion_, SnapshotBuf_,
                      baseline);
+    if (EchoAck_) {
+        Channel_->EnableEchoAck();
+    }
     if (PendingResize_) {
         Channel_->QueueResize(*PendingResize_);
         PendingResize_.reset();

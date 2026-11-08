@@ -83,6 +83,7 @@ ProtoResult<EMessageType> ParseMessageType(ByteReader& reader) noexcept {
         case EMessageType::GridChunk:
         case EMessageType::GridEnd:
         case EMessageType::GridApplied:
+        case EMessageType::EchoAck:
         case EMessageType::MuxRegister:
         case EMessageType::MuxRegistered:
         case EMessageType::MuxRefused:
@@ -1098,6 +1099,40 @@ ProtoResult<void> WriteGridApplied(ByteWriter& writer,
         return type;
     }
     return writer.WriteU32BE(message.StreamGen);
+}
+
+ProtoResult<EchoAckMessage> ParseEchoAck(ByteReader& reader) noexcept {
+    auto gen = reader.ReadU32BE();
+    if (!gen) {
+        return std::unexpected(gen.error());
+    }
+    auto output = reader.ReadU64BE();
+    if (!output) {
+        return std::unexpected(output.error());
+    }
+    auto input = reader.ReadU64BE();
+    if (!input) {
+        return std::unexpected(input.error());
+    }
+    if (auto rest = RequireExhausted(reader); !rest) {
+        return std::unexpected(rest.error());
+    }
+    return EchoAckMessage{
+        .StreamGen = *gen, .OutputOffset = *output, .InputOffset = *input};
+}
+
+ProtoResult<void> WriteEchoAck(ByteWriter& writer,
+                               const EchoAckMessage& message) noexcept {
+    if (auto type = WriteMessageType(writer, EMessageType::EchoAck); !type) {
+        return type;
+    }
+    if (auto gen = writer.WriteU32BE(message.StreamGen); !gen) {
+        return gen;
+    }
+    if (auto output = writer.WriteU64BE(message.OutputOffset); !output) {
+        return output;
+    }
+    return writer.WriteU64BE(message.InputOffset);
 }
 
 ProtoResult<std::size_t> AppendGridCapableTlv(MutableByteSpan out) noexcept {
