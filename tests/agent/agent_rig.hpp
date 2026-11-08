@@ -496,6 +496,15 @@ public:
         }
     }
 
+    /// What the shell prints, as much as the pty takes now; returns how much
+    /// that was. For a test that must not block on an agent that has stalled.
+    std::size_t PtyPrintsSome(ByteSpan data) {
+        // The slave is blocking; a stalled agent must not block the test.
+        REQUIRE(io::SetNonBlocking(Slave_.Get()).has_value());
+        const auto w = io::WriteSome(Slave_.Get(), data);
+        return w ? *w : 0;
+    }
+
     std::uint16_t Port{0};
     GridObservation Seen;
 

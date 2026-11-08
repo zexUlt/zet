@@ -1152,6 +1152,19 @@ int Client::Run() noexcept {
         FeedStdin();
         if (Link_ == ELink::Up) {
             Pump(now);
+            // An Ack taken by Pump may have freed ring room that the input
+            // left in In_ can now use. Stdin is not watched while In_ holds
+            // bytes, so no event would wake the loop to feed it: feed it now,
+            // and take another turn only if it did move, since the bytes fed
+            // need a Pump. (The remaining count, not InFrom_: a feed that
+            // drains In_ resets both offsets.)
+            if (InFrom_ != InTo_) {
+                const std::size_t pending = InTo_ - InFrom_;
+                FeedStdin();
+                if (InTo_ - InFrom_ != pending) {
+                    continue;
+                }
+            }
         }
         Tick();
         if (Ended_) {
