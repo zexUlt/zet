@@ -26,7 +26,6 @@
 #include <thread>
 #include <vector>
 
-#include <fcntl.h>
 #include <poll.h>
 #include <sys/ioctl.h>
 #include <termios.h>
@@ -501,10 +500,7 @@ public:
     /// that was. For a test that must not block on an agent that has stalled.
     std::size_t PtyPrintsSome(ByteSpan data) {
         // The slave is blocking; a stalled agent must not block the test.
-        const int flags = ::fcntl(Slave_.Get(), F_GETFL);
-        if ((flags & O_NONBLOCK) == 0) {
-            ::fcntl(Slave_.Get(), F_SETFL, flags | O_NONBLOCK);
-        }
+        REQUIRE(io::SetNonBlocking(Slave_.Get()).has_value());
         const auto w = io::WriteSome(Slave_.Get(), data);
         return w ? *w : 0;
     }
