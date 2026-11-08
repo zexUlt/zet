@@ -83,9 +83,10 @@ constexpr std::string_view DEFAULT_TERM = "xterm-256color";
 constexpr std::size_t EVENTS_PER_WAIT = 32;
 
 /// How many reads off the pty one EchoAck settlement may spend on reading it
-/// dry (§9, «Предиктивное эхо»). A master read returns a few KiB at most, so
-/// this is a fraction of a MiB: more than a program answers a keystroke with,
-/// and a bound against one that never stops writing.
+/// dry (§9, «Предиктивное эхо»). A read takes up to PTY_READ_CHUNK (64 KiB), so
+/// the bound is 4 MiB: far more than a program answers a keystroke with, and a
+/// bound against one that never stops writing. When it is hit with the pty not
+/// dry the settlement is put off, not made on a stale end of output.
 constexpr std::size_t ECHO_DRAIN_READS_MAX = 64;
 
 constexpr std::uint64_t LISTENER_TOKEN = 1;
@@ -466,10 +467,11 @@ private:
     void Adopt(io::UniqueFd socket, ByteSpan prefix) noexcept;
     /// One read off the pty into PtyRead_; true if it brought bytes.
     bool ReadPty() noexcept;
-    /// Reads the pty until it has nothing more (or the bound, or the session
-    /// stops taking output) and moves what it read into the session, so that
+    /// Reads the pty until it has nothing more (or the session stops taking
+    /// output, or the bound) and moves what it read into the session, so that
     /// the end of the session's output is where the program had got to.
-    void DrainPty() noexcept;
+    /// False only when the bound ended it with the pty not known to be dry.
+    bool DrainPty() noexcept;
     /// Sets the pty-read gate of every connection to what UpdateInterest will
     /// do, and settles the EchoAcks that are due. §9.
     void ServiceEchoAcks(Timestamp now) noexcept;
@@ -1038,20 +1040,22 @@ bool Agent::ReadPty() noexcept {
     return true;
 }
 
-void Agent::DrainPty() noexcept {
+bool Agent::DrainPty() noexcept {
     MovePtyOutput();
     for (std::size_t reads = 0; reads < ECHO_DRAIN_READS_MAX; ++reads) {
         // Bytes the session would not take stay in PtyRead_ and keep the read
         // closed; nothing more can be read until they are moved.
         if (PtyFrom_ != PtyTo_ || !ReadPty()) {
-            break;
+            return true;
         }
         MovePtyOutput();
     }
+    return false;
 }
 
 void Agent::ServiceEchoAcks(Timestamp now) noexcept {
     bool drained = false;
+    bool dry = true;
     for (auto& connection : Connections_) {
         if (connection->Closing) {
             continue;
@@ -1065,10 +1069,16 @@ void Agent::ServiceEchoAcks(Timestamp now) noexcept {
         // ECHO_TIMEOUT is in the pty by now: read it before computing where
         // the output is. One drain serves every connection of this turn.
         if (!drained) {
-            DrainPty();
+            dry = DrainPty();
             drained = true;
         }
         link.SetPtyReadOpen(PtyFrom_ == PtyTo_);
+        if (!dry) {
+            // The pty still had more when the bound ended the drain: the end
+            // of the output lags the echo. The EchoAck stays due, so the next
+            // turn drains further instead of settling on a stale O.
+            continue;
+        }
         link.SettleEcho(now);
     }
 }

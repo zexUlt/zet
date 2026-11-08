@@ -328,8 +328,8 @@ public:
 
     /// Lets the client add a Ping to the input it sends when the last RTT
     /// sample is old (RTT_PROBE_INTERVAL). Off by default, so a connection
-    /// that does not use the figure sends the frames it always did. Client
-    /// only; the agent never probes.
+    /// that does not use the figure sends the frames it always did; at ver=1
+    /// it stays off whatever was called. Client only; the agent never probes.
     void EnableRttProbe() noexcept { RttProbeEnabled_ = true; }
 
     /// Whether EchoAck may be exchanged on this connection.
@@ -367,11 +367,6 @@ public:
     /// the owner's reading of the figure; nothing on the wire depends on it.
     [[nodiscard]] std::optional<Duration> Srtt() const noexcept {
         return Srtt_;
-    }
-    /// When the last sample was taken, for tests and the owner's staleness
-    /// checks.
-    [[nodiscard]] std::optional<Timestamp> LastRttSampleAt() const noexcept {
-        return LastRttSampleAt_;
     }
 
 private:

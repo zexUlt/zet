@@ -48,6 +48,9 @@
 //  0A                Close     — Close(now); the run ends
 //  0B                EchoTimer — if EchoDue(now): SettleEcho(now)
 //  0C b              PtyRead   — SetPtyReadOpen(b & 1)
+//  0D dd             Tick      — Advance by dd ms: the spacing of two EchoAcks
+//                                (ECHO_ACK_INTERVAL_MIN, 20 ms) is below the
+//                                50 ms step of Advance
 //
 // Properties (each violation → __builtin_trap())
 // -----------------------------------------------
@@ -77,7 +80,14 @@
 //      was offered and the version is 2; never between GridBegin and GridEnd;
 //      stream_gen is the generation the connection is in; output_offset is at
 //      most what the agent has sent of that generation; the fields never
-//      decrease within a generation (input_offset never at all).
+//      decrease within a generation (input_offset never at all, across
+//      generations too). Also: input_offset is 0 or the end of an input write
+//      the pty took (InputWritten, not InputDelivered) at least ECHO_TIMEOUT
+//      before; the first EchoAck of a negotiated connection precedes its first
+//      Data; two EchoAcks are at least ECHO_ACK_INTERVAL_MIN apart (checked
+//      while no send gate has held a frame back).
+//  C11 After SettleEcho(now) the EchoAck is not due again at `now`: a due
+//      deadline the settle cannot satisfy is a spin of the agent loop.
 
 #include <algorithm>
 #include <array>
@@ -258,6 +268,17 @@ struct Rig {
     // output_offset may then name it. The peer that lied is the one it hurts.
     std::uint64_t PeerClaim{0};
     std::optional<wire::EchoAckMessage> LastAck;
+    // Across generations: input_offset never goes back.
+    std::uint64_t LastInput{0};
+    // The ends of the input writes the pty took, with the moment of each.
+    std::vector<std::pair<std::uint64_t, Timestamp>> Writes;
+    bool SawEcho{false};
+    // Send times of the EchoAcks, for the spacing. A frame held back by a
+    // closed send gate leaves the send time later than the moment it was
+    // queued, so a gate closing taints the spacing of this and the next one.
+    std::optional<Timestamp> LastAckAt;
+    bool GateClosedSinceAck{false};
+    bool PrevAckDelayed{false};
 
     Rig(std::uint16_t ceiling, bool autoAck, EForcePath force, bool echoOffered)
         : Session(Secrets(),
@@ -277,6 +298,13 @@ struct Rig {
           EchoOffered(echoOffered),
           Ceiling(ceiling) {}
 };
+
+// C10: the input the pty took just now, `count` bytes ending at Marked.
+void NoteWrite(Rig& rig, std::uint64_t count) {
+    if (count > 0) {
+        rig.Writes.emplace_back(rig.Marked, rig.Now);
+    }
+}
 
 void CheckInvariants(Rig& rig) noexcept {
     // C3
@@ -324,6 +352,10 @@ void SniffAgentMessage(Rig& rig, ByteSpan body) noexcept {
     switch (*type) {
         case wire::EMessageType::Data: {
             const auto data = wire::ParseData(reader);
+            if (rig.EchoOffered && rig.Ceiling == wire::PROTOCOL_VERSION_MAX) {
+                // The first EchoAck of the connection goes before any Data.
+                REQUIRE(rig.SawEcho);
+            }
             if (data) {
                 rig.SentEnd = std::max<std::uint64_t>(
                     rig.SentEnd, data->Offset + data->Payload.size());
@@ -357,6 +389,26 @@ void SniffAgentMessage(Rig& rig, ByteSpan body) noexcept {
                 REQUIRE(ack->InputOffset >= rig.LastAck->InputOffset);
             }
             rig.LastAck = *ack;
+            rig.SawEcho = true;
+            // The input is what the pty took, and it lay there ECHO_TIMEOUT.
+            REQUIRE(ack->InputOffset >= rig.LastInput);
+            rig.LastInput = ack->InputOffset;
+            if (ack->InputOffset != 0) {
+                const auto write = std::find_if(
+                    rig.Writes.begin(), rig.Writes.end(),
+                    [&](const auto& w) { return w.first == ack->InputOffset; });
+                REQUIRE(write != rig.Writes.end());
+                REQUIRE(rig.Now - write->second >= zet::session::ECHO_TIMEOUT);
+            }
+            // The spacing, where the send time is the queue time.
+            if (rig.LastAckAt && !rig.PrevAckDelayed &&
+                !rig.GateClosedSinceAck) {
+                REQUIRE(rig.Now - *rig.LastAckAt >=
+                        zet::session::ECHO_ACK_INTERVAL_MIN);
+            }
+            rig.PrevAckDelayed = rig.GateClosedSinceAck;
+            rig.GateClosedSinceAck = false;
+            rig.LastAckAt = rig.Now;
             break;
         }
         default:
@@ -445,6 +497,7 @@ bool PumpWith(Rig& rig, TToClient&& toClient) {
                 const auto pending = rig.Delivered - rig.Marked;
                 REQUIRE(rig.Session.InputWritten(pending, rig.Now));
                 rig.Marked = rig.Delivered;
+                NoteWrite(rig, pending);
             }
         } else if (std::holds_alternative<Idle>(*event)) {
             CheckInvariants(rig);
@@ -692,6 +745,9 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data,
                     break;
                 }
                 rig.Agent.SetSendGate((*open & 1U) != 0);
+                if ((*open & 1U) == 0) {
+                    rig.GateClosedSinceAck = true;
+                }
                 rig.SendGateClosedLive = (*open & 1U) == 0 && Live(rig) ? true
                                          : (*open & 1U) != 0
                                              ? false
@@ -728,6 +784,9 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data,
                              ? rig.Session.InputWritten(count, rig.Now)
                              : rig.Session.InputDelivered(count)));
                 rig.Marked += count;
+                if ((*fraction & 1U) != 0) {
+                    NoteWrite(rig, count);
+                }
                 break;
             }
             case 0x08: {
@@ -740,6 +799,9 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data,
                     ((std::size_t{*high} << 8U) | *low) % (SNAPSHOT_STORE + 1);
                 rig.Agent.SupplySnapshot(
                     rig.Now, ByteSpan{G_SNAPSHOT}.first(length), 0, 0);
+                // The loop pumps right after: the EchoAck that opens the
+                // generation is sent at the moment it is queued.
+                Pump(rig);
                 break;
             }
             case 0x09:
@@ -753,6 +815,10 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data,
             case 0x0B:
                 if (rig.Agent.EchoDue(rig.Now)) {
                     rig.Agent.SettleEcho(rig.Now);
+                    // C11
+                    REQUIRE(!rig.Agent.EchoDue(rig.Now));
+                    // The loop sends what the settle queued at once.
+                    Pump(rig);
                 }
                 break;
             case 0x0C: {
@@ -761,6 +827,14 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data,
                     break;
                 }
                 rig.Agent.SetPtyReadOpen((*open & 1U) != 0);
+                break;
+            }
+            case 0x0D: {
+                const auto delta = reader.ReadU8();
+                if (!delta) {
+                    break;
+                }
+                rig.Now += std::chrono::milliseconds{*delta};
                 break;
             }
             default:

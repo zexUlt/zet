@@ -109,6 +109,7 @@ endif()
 
 if(ZET_HAVE_AGENT)
     target_sources(zet_tests PRIVATE
+        agent/agent_echo_ack_wiring_test.cpp
         agent/agent_failed_grid_resize_test.cpp
         agent/agent_input_queue_test.cpp
         agent/agent_ground_timeout_test.cpp

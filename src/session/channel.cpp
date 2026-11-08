@@ -194,7 +194,10 @@ ChannelResult<IncomingEvent> Channel::Receive(
                 OutstandingPing_.reset();
                 // A longer wait says the peer slept, not how far it is.
                 if (rtt >= Duration::zero() && rtt <= RTT_SAMPLE_MAX) {
-                    Srtt_ = Srtt_ ? (*Srtt_ * 7 + rtt) / 8 : rtt;
+                    // SRTT = (1 - alpha) * SRTT + alpha * rtt, RFC 6298 §2.3.
+                    Srtt_ = Srtt_ ? (*Srtt_ * (SRTT_ALPHA_DEN - 1) + rtt) /
+                                        SRTT_ALPHA_DEN
+                                  : rtt;
                     LastRttSampleAt_ = now;
                 }
             }
@@ -616,7 +619,11 @@ ChannelResult<std::size_t> Channel::PollOnce(Timestamp now, MutableByteSpan out,
     // Priority 2c: (Client) a Ping to measure the round trip, ahead of the
     // input it rides with: the sample then does not include the time the
     // agent spends on that input. §9, «RTT».
-    if (Role_ == ERole::Client && RttProbeEnabled_ && SendBuf_.Unsent() > 0 &&
+    // Only at ver >= 2, where the client's prediction engine can exist (the
+    // design's table: ver=1 behaves as `never`); the agent's EchoAck is not a
+    // condition, the Pong of an agent without it answers as well. §9.
+    if (Role_ == ERole::Client && RttProbeEnabled_ &&
+        Version_ >= wire::PROTOCOL_VERSION_GRID && SendBuf_.Unsent() > 0 &&
         RttProbeDue(now)) {
         return SealPing(now, out);
     }

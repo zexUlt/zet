@@ -421,6 +421,9 @@ TEST_CASE_FIXTURE(SodiumFixture,
     l.Settle(t0 + ECHO_TIMEOUT);
     CHECK(l.Order.empty());
     CHECK(l.Acks.size() == 1);
+    // The EchoAck is settled and waits: the input it reports is no longer
+    // unreported, so nothing is due (else the loop would spin on it).
+    CHECK_FALSE(l.Agent->EchoDeadline().IsSet());
 
     l.Agent->SetSendGate(true);
     l.Exchange(t0 + 60ms);
@@ -507,6 +510,31 @@ TEST_CASE_FIXTURE(SodiumFixture,
     l.Settle(l.Agent->EchoDeadline().At());
     REQUIRE(l.Acks.size() == 2);
     CHECK(l.Acks[1].In == 1);
+}
+
+TEST_CASE_FIXTURE(SodiumFixture,
+                  "the first EchoAck counts for the interval: the second "
+                  "waits ECHO_ACK_INTERVAL_MIN after it") {
+    EchoLink l{Roomy()};
+    const Timestamp t0 = START + 100ms;
+    l.Type(t0, "a");
+    l.Acks.clear();
+    l.AckAt.clear();
+    // The input is older than ECHO_TIMEOUT when the connection comes up.
+    const Timestamp t1 = t0 + ECHO_TIMEOUT + 10ms;
+    l.Reconnect(t1);
+    REQUIRE(l.Acks.size() == 1);
+    CHECK(l.Acks[0] == Ack{0, 0, 0});
+
+    REQUIRE(l.Agent->EchoDeadline().IsSet());
+    CHECK(l.Agent->EchoDeadline().At() == t1 + ECHO_ACK_INTERVAL_MIN);
+    l.Settle(t1);
+    l.Settle(t1 + ECHO_ACK_INTERVAL_MIN - 1ms);
+    CHECK(l.Acks.size() == 1);
+    l.Settle(t1 + ECHO_ACK_INTERVAL_MIN);
+    REQUIRE(l.Acks.size() == 2);
+    CHECK(l.Acks[1].In == 1);
+    CHECK(l.AckAt[1] - l.AckAt[0] >= ECHO_ACK_INTERVAL_MIN);
 }
 
 TEST_CASE_FIXTURE(SodiumFixture, "a superseded connection settles nothing") {

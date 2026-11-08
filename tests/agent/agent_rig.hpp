@@ -171,12 +171,14 @@ using namespace std::chrono_literals;
 /// One ClientConnection over a TCP socket to the agent under test.
 class TestClient {
 public:
-    TestClient(ClientSession& session, std::uint64_t nonce, io::UniqueFd sock)
+    /// `echoAck`: offers ECHO_ACK in the Hello, as a client with prediction.
+    TestClient(ClientSession& session, std::uint64_t nonce, io::UniqueFd sock,
+               bool echoAck = false)
         : Sock_(std::move(sock)),
           Cc_(session, MakeNonce(nonce), MutableByteSpan{Frames_},
               io::MonotonicNow(),
               /*capable=*/true, PROTOCOL_VERSION_GRID,
-              MutableByteSpan{SnapBuf_}) {}
+              MutableByteSpan{SnapBuf_}, echoAck) {}
 
     void QueueResize(std::uint16_t rows, std::uint16_t cols) {
         Cc_.QueueResize(ResizeMessage{.Rows = rows, .Cols = cols});
@@ -214,6 +216,12 @@ public:
 
     std::vector<std::byte> Delivered;
     std::vector<std::vector<std::byte>> Snapshots;
+    /// The EchoAcks received, in order.
+    std::vector<EchoAckMessage> EchoAcks;
+    /// True: the client still reads and pumps, but nothing it produces goes
+    /// to the agent, not even its idle Ack. A test then knows that whatever
+    /// the agent does next, it does on its own timers.
+    bool Mute{false};
     /// Frames sent since the client went Live: the Resume, then the Resize.
     int LiveFramesSent{0};
     bool Closed{false};
@@ -243,6 +251,9 @@ private:
         // when a real client's socket is not drained between its frames.
         std::vector<std::byte> outgoing;
         const auto flush = [&] {
+            if (Mute) {
+                outgoing.clear();
+            }
             ByteSpan bytes{outgoing};
             // A peer that hung up gets nothing (a write would raise SIGPIPE).
             while (!bytes.empty() && !Closed) {
@@ -280,6 +291,10 @@ private:
             if (const auto* d = std::get_if<Deliver>(&*r)) {
                 Delivered.insert(Delivered.end(), d->Bytes.begin(),
                                  d->Bytes.end());
+                continue;
+            }
+            if (const auto* ea = std::get_if<EchoAcked>(&*r)) {
+                EchoAcks.push_back(ea->Ack);
                 continue;
             }
             if (const auto* as = std::get_if<ApplySnapshot>(&*r)) {
@@ -322,7 +337,9 @@ class AgentRig {
 public:
     explicit AgentRig(std::uint8_t key) : AgentRig(key, TinyLimits()) {}
 
-    AgentRig(std::uint8_t key, SessionLimits limits)
+    /// `inputToPty`: the client's input is written to the pty (read it with
+    /// PtyInput) instead of dropped as for a shell that has gone.
+    AgentRig(std::uint8_t key, SessionLimits limits, bool inputToPty = false)
         : Lim_(limits),
           Cs_(Lim_.DisconnectMax + 256),
           Sess_(DeriveSessionSecrets(MakeKey(key)),
@@ -338,6 +355,9 @@ public:
         REQUIRE(::tcgetattr(Slave_.Get(), &t) == 0);
         ::cfmakeraw(&t);
         REQUIRE(::tcsetattr(Slave_.Get(), TCSANOW, &t) == 0);
+        if (inputToPty) {
+            REQUIRE(io::SetNonBlocking(Slave_.Get()).has_value());
+        }
 
         auto listener = io::ListenTcp(0);
         REQUIRE(listener.has_value());
@@ -346,7 +366,7 @@ public:
         // A joined thread rather than std::async: the async state is ready
         // before its thread has freed its own bookkeeping, and a test that
         // ends in that window is reported as a leak.
-        Thread_ = std::thread([this, key, l = std::move(*listener),
+        Thread_ = std::thread([this, key, inputToPty, l = std::move(*listener),
                                m = std::move(pty->Master)]() mutable {
             Result_ = RunAgentForTest(AgentTestConfig{
                 .Secrets = DeriveSessionSecrets(MakeKey(key)),
@@ -375,6 +395,7 @@ public:
                         }
                     },
                 .Stop = &Stop_,
+                .InputToPty = inputToPty,
             });
         });
     }
@@ -401,10 +422,25 @@ public:
         return !client.Snapshots.empty();
     }
 
-    std::unique_ptr<TestClient> Connect() {
+    std::unique_ptr<TestClient> Connect(bool echoAck = false) {
         auto sock = TcpConnect(Port);
         REQUIRE(sock.Get() != -1);
-        return std::make_unique<TestClient>(Sess_, ++Nonces_, std::move(sock));
+        return std::make_unique<TestClient>(Sess_, ++Nonces_, std::move(sock),
+                                            echoAck);
+    }
+
+    /// What the shell has read since the last call (needs inputToPty).
+    std::vector<std::byte> PtyInput() {
+        std::vector<std::byte> got;
+        std::array<std::byte, 4096> buf{};
+        for (;;) {
+            auto n = io::ReadSome(Slave_.Get(), MutableByteSpan{buf});
+            if (!n || *n == 0) {
+                return got;
+            }
+            got.insert(got.end(), buf.begin(),
+                       buf.begin() + static_cast<std::ptrdiff_t>(*n));
+        }
     }
 
     /// A client that sends `rows × cols`, goes Live, and is then dropped once

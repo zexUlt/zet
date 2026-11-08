@@ -75,17 +75,16 @@ void ConnectionBase::SetSendGate(bool open) noexcept {
 // ── AgentConnection ────────────────────────────────────────────────────
 
 Deadline AgentConnection::NextDeadline() const noexcept {
-    return Earliest(
-        Earliest(
-            Earliest(
-                Earliest(ConnectionBase::NextDeadline(),
-                         ResizeWaitDeadline_ ? Deadline{*ResizeWaitDeadline_}
-                                             : Deadline{}),
-                SupplySnapshotDeadline_ ? Deadline{*SupplySnapshotDeadline_}
-                                        : Deadline{}),
-            GridAppliedDeadline_ ? Deadline{*GridAppliedDeadline_}
-                                 : Deadline{}),
-        EchoDeadline());
+    const auto of = [](const std::optional<Timestamp>& at) {
+        return at ? Deadline{*at} : Deadline{};
+    };
+    Deadline next = ConnectionBase::NextDeadline();
+    for (const Deadline d :
+         {of(ResizeWaitDeadline_), of(SupplySnapshotDeadline_),
+          of(GridAppliedDeadline_), EchoDeadline()}) {
+        next = Earliest(next, d);
+    }
+    return next;
 }
 
 // ── AgentConnection: EchoAck (§9, «Предиктивное эхо») ──────────────────
@@ -141,10 +140,8 @@ void AgentConnection::ReleaseEcho(Timestamp now) noexcept {
     if (!EchoPending_ || !EchoActive()) {
         return;
     }
-    if (EchoPending_->StreamGen != Handle_->SessionGen()) {
-        EchoPending_.reset();
-        return;
-    }
+    // No stale-generation check: the generation only changes in
+    // SupplySnapshot, and QueueFirstEcho drops EchoPending_ there.
     // The client must have every byte up to output_offset before the EchoAck:
     // it checks the offset against what it received. The channel sends an
     // EchoAck ahead of Data, so the cursor has to be there already.

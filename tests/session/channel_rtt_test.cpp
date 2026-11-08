@@ -30,15 +30,16 @@ SessionLimits Limits(Duration keepalive = Duration{0}) {
 }
 
 struct RttLink {
-    explicit RttLink(Rig& rig, bool echo = true)
+    explicit RttLink(Rig& rig, bool echo = true,
+                     std::uint16_t ceiling = wire::PROTOCOL_VERSION_MAX)
         : R(rig),
-          Agent{MutableByteSpan{rig.Sp.AgentFrames}, START},
+          Agent{MutableByteSpan{rig.Sp.AgentFrames}, START, ceiling},
           Client{rig.Client,
                  MakeNonce(++rig.Nonces),
                  MutableByteSpan{rig.Sp.ClientFrames},
                  START,
                  true,
-                 wire::PROTOCOL_VERSION_MAX,
+                 ceiling,
                  MutableByteSpan{rig.Sp.SnapshotBuf},
                  echo} {
         REQUIRE(
@@ -265,6 +266,15 @@ TEST_CASE_FIXTURE(SodiumFixture,
                   "a client that did not offer ECHO_ACK sends no probe") {
     Rig r{Limits()};
     RttLink link{r, false};
+    REQUIRE(r.Client.Write(ONE_BYTE) == 1);
+    CHECK(link.ClientSends(START + 10ms).size() == 1);
+}
+
+TEST_CASE_FIXTURE(SodiumFixture,
+                  "at ver=1 the client sends no probe even if it offered "
+                  "ECHO_ACK") {
+    Rig r{Limits()};
+    RttLink link{r, true, wire::PROTOCOL_VERSION_MIN};
     REQUIRE(r.Client.Write(ONE_BYTE) == 1);
     CHECK(link.ClientSends(START + 10ms).size() == 1);
 }

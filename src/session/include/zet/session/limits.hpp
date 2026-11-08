@@ -85,6 +85,11 @@ inline constexpr std::size_t ECHO_HISTORY_MAX = 64;
 /// next send of input (§9, «RTT»).
 inline constexpr Duration RTT_PROBE_INTERVAL = std::chrono::seconds{1};
 
+/// The smoothing of the round-trip estimate, as the denominator of RFC 6298's
+/// alpha (1/8, §2.3): each sample moves SRTT by an eighth of its distance. The
+/// RFC's value, kept because it is the one TCP and mosh have tuned.
+inline constexpr std::int64_t SRTT_ALPHA_DEN = 8;
+
 /// A Ping answered after longer than this says nothing about the path (a
 /// suspended peer, as in mosh) and is not a sample. §9, «RTT».
 inline constexpr Duration RTT_SAMPLE_MAX = std::chrono::seconds{5};
