@@ -57,16 +57,16 @@ SessionResult<void> SendBuffer::Acknowledge(std::uint64_t ackOffset) noexcept {
         // nothing to do.  §9: "значение меньше уже присланного игнорируется".
         return {};
     }
-    if (ackOffset > End_) {
-        // Peer claims to have received bytes we never appended.  §9:
+    if (ackOffset > SendNext_) {
+        // Peer claims to have received bytes we never sent (appended but not
+        // yet sealed into a Data frame counts as not sent).  §7:
         // "больше, чем отправитель вообще отправил — CloseConnection".
+        // SendNext is the right bound across reconnects too: ResetSendNext
+        // rewinds it to the peer's own resume offset, and the peer can only
+        // have received what was sealed since.
         return std::unexpected(ESessionError::AckBeyondSent);
     }
     Base_ = ackOffset;
-    // Keep SendNext in [Base, End]: it cannot lag behind the acked window.
-    if (SendNext_ < Base_) {
-        SendNext_ = Base_;
-    }
     return {};
 }
 
@@ -101,13 +101,15 @@ MutableByteSpan SendBuffer::CopyOut(std::uint64_t fromOffset,
 
 SessionResult<void> SendBuffer::ResetSendNext(
     std::uint64_t peerRecvOffset) noexcept {
-    if (peerRecvOffset > End_) {
+    // Checked against the cursor as it stood on the previous connection: it
+    // is the highest offset ever sealed, and a peer cannot have received more.
+    if (peerRecvOffset > SendNext_) {
         return std::unexpected(ESessionError::AckBeyondSent);
     }
     if (peerRecvOffset < Base_) {
         return std::unexpected(ESessionError::PeerBehindBuffer);
     }
-    // Within [Base, End], so the acknowledgement cannot fail.
+    // Within [Base, SendNext], so the acknowledgement cannot fail.
     std::ignore = Acknowledge(peerRecvOffset);
     SendNext_ = peerRecvOffset;
     return {};

@@ -54,8 +54,9 @@ public:
 
     /// Acknowledge the cumulative stream up to `ackOffset`.
     ///   ackOffset <  Base  → ignored (late duplicate ack, harmless).
-    ///   ackOffset >  End   → AckBeyondSent: the peer claims to have received
-    ///                        bytes we never sent. §9 / error.hpp.
+    ///   ackOffset >  SendNext → AckBeyondSent: the peer claims to have
+    ///                        received bytes we never sent (appended but not
+    ///                        yet sealed counts as unsent). §7 / error.hpp.
     ///   otherwise          → trims [Base, ackOffset) from the ring.
     [[nodiscard]] SessionResult<void> Acknowledge(
         std::uint64_t ackOffset) noexcept;
@@ -75,7 +76,8 @@ public:
     /// reconnect (peer_recv_offset from the handshake), §9. The offset is
     /// cumulative, so it also acknowledges everything below it.
     ///
-    /// Nothing is clamped. Above End the peer claims bytes we never sent —
+    /// Nothing is clamped. Above SendNext (the highest offset sealed before
+    /// the reset) the peer claims bytes we never sent —
     /// AckBeyondSent. Below Base it asks for bytes it acknowledged before and
     /// we have since dropped — PeerBehindBuffer. Resending from Base instead
     /// would leave a hole the receiver refuses as StreamGap, and the session

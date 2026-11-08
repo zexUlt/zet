@@ -43,6 +43,7 @@ add_executable(zet_tests
     core/time_test.cpp
     core/version_test.cpp
     crypto/crypto_test.cpp
+    session/ack_beyond_sent_test.cpp
     session/agent_session_test.cpp
     session/bootstrap_test.cpp
     session/client_session_test.cpp
