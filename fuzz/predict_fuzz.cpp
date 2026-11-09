@@ -85,6 +85,13 @@ std::uint8_t NoLowercase(std::uint8_t b) {
                                   : b;
 }
 
+// REP repeats the last character the terminal printed, and what the overlay
+// printed after the program's last character is not the program's (design.md
+// §18): the terminal grid would repeat the overlay's glyph, the mirror the
+// program's. Not what this target checks, so REP's final byte is left out of
+// the bytes it generates.
+std::uint8_t NoRep(std::uint8_t b) { return b == 'b' ? std::uint8_t{'B'} : b; }
+
 [[noreturn]] void Fail() { __builtin_trap(); }
 
 bool Blank(const grid::Cell& c) {
@@ -256,9 +263,11 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data,
         };
         std::array<std::uint8_t, 24> shown{};  // what the echo-off mirror gets
         std::array<std::uint8_t, 24> typed{};
+        std::array<std::uint8_t, 24> plain{};  // what the echo-on mirror gets
         for (std::size_t k = 0; k < n; ++k) {
             shown[k] = NoLowercase(p[k]);
             typed[k] = TypedKey(p[k]);
+            plain[k] = NoRep(p[k]);
         }
 
         switch (op) {
@@ -281,7 +290,7 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data,
                     feed(save ? BACK : UP, save ? sizeof(BACK) : sizeof(UP));
                 } else {
                     undo();
-                    feed(echoOff ? shown.data() : p, n);
+                    feed(echoOff ? shown.data() : plain.data(), n);
                 }
                 out += n;
                 engine.OnOutput(out, now, mirror->View());
@@ -289,7 +298,7 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data,
             case 1:  // keystrokes
                 in += n;
                 engine.OnInput({reinterpret_cast<const std::byte*>(
-                                    echoOff ? typed.data() : p),
+                                    echoOff ? typed.data() : plain.data()),
                                 n},
                                in, now, mirror->View());
                 break;
@@ -327,7 +336,7 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data,
                 if (!fresh2->G) break;
                 undo();
                 const std::uint8_t* body =
-                    (echoOff ? shown.data() : p) + (n > 2 ? 2 : n);
+                    (echoOff ? shown.data() : plain.data()) + (n > 2 ? 2 : n);
                 fresh->Feed(body, n > 2 ? n - 2 : 0);
                 fresh2->Feed(body, n > 2 ? n - 2 : 0);
                 mirror = std::move(fresh);
