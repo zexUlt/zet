@@ -339,3 +339,22 @@ TEST_CASE(
     CHECK(c.Written == before);
     CHECK_FALSE(c.O->Drawn());
 }
+
+TEST_CASE(
+    "review: nothing is drawn over a wide head the grid has broken (a narrow "
+    "cell that holds a wide codepoint)") {
+    Client c(30, 5, EDisplayMode::Always);
+    c.Start();
+    c.Key("c");  // predicted at column 4, confirmed epoch
+    REQUIRE(c.O->Drawn());
+    // The program puts a wide glyph on columns 4-5, then overwrites its tail:
+    // the grid keeps the codepoint in a narrow cell. Put back, the terminal
+    // would print it two columns wide and wipe column 5. The prediction stays
+    // up (unexplained output only raises the epoch), over the broken head.
+    c.Agent("\x1b[5G\xe4\xb8\xad\x1b[6Gx\x1b[5G");
+    REQUIRE(c.R.G->CellAt(0, 4).Width == 1);
+    REQUIRE(c.R.G->CellAt(0, 4).Codepoint == 0x4E2D);
+    c.Undo();
+    CHECK(SameText(*c.Real.G, *c.Ref.G));
+    CHECK(c.Real.G->CellAt(0, 5).Codepoint == U'x');
+}

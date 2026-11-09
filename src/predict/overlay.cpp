@@ -6,6 +6,7 @@
 #include "zet/grid/cell.hpp"
 #include "zet/grid/grid.hpp"
 #include "zet/grid/sgr.hpp"
+#include "zet/grid/unicode.hpp"
 
 namespace zet::predict {
 
@@ -193,8 +194,11 @@ ByteSpan Overlay::BuildUpdate(const PredictionEngine& engine,
             const grid::Cell& cell = g.CellAt(p.Row, p.Col);
             // Never on a wide glyph or the half of one, whatever the engine
             // thinks of the cell: the terminal has a glyph there that a narrow
-            // one would break.
+            // one would break. A head the grid has broken (a narrow cell that
+            // holds a wide codepoint, its tail overwritten) is one too: put
+            // back, the terminal would print it two columns wide.
             if (cell.Width != 1 ||
+                (cell.Codepoint != 0 && grid::Wcwidth(cell.Codepoint) == 2) ||
                 (p.Col > 0 &&
                  g.CellAt(p.Row, static_cast<std::uint16_t>(p.Col - 1)).Width ==
                      2)) {
