@@ -6,14 +6,19 @@
 // samples, drawn marks and the passage of time.
 //
 // The overlay builder runs the way the client runs it: the overlay is taken
-// off before every piece of bytes, the bytes go to the mirror and to a second
-// grid that plays the terminal, and what is visible is drawn after them. The
-// terminal grid gets exactly what the client would queue for stdout. Asserted
-// after the engine's own invariants below:
-//   a. after every restore the terminal grid equals the mirror: every cell,
-//      the cursor, the pen's attributes and kinds, cursor visibility
-//   b. every insert begins when the terminal's parser is in Ground and not in
-//      the middle of a UTF-8 character
+// off before every piece of bytes, the bytes go to the mirror and to a grid
+// that plays the terminal ("Real"), and what is visible is drawn after them.
+// Real gets exactly what the client would queue for stdout. A third grid
+// ("Ref") gets the agent's bytes only: the terminal as it would be without
+// the overlay. Real and Ref start with the same content, which the mirror does
+// not have: the local shell's lines above row N, the cursor on row N (the
+// header's bytes say what and where), and the mirror starts blank at row 0 as
+// the client creates it. A snapshot clears all three first, as its preamble
+// does. Asserted after the engine's own invariants below:
+//   a. after every restore Real equals Ref: every cell, the cursor, the pen's
+//      attributes and kinds, cursor visibility, the character REP repeats
+//   b. every insert begins when Real's parser is in Ground and not in the
+//      middle of a UTF-8 character
 //   c. no overlay byte string holds DECSC, DECRC, ESC [ s or ESC [ u
 //   d. the overlay never changes the mirror (the hash check at the end)
 // What the engine alone owes is asserted after every step:
@@ -34,8 +39,9 @@
 //      Some output is wrapped as a prompt on another row (DECSC / row 9 /
 //      DECRC, or CNL-style down and CUU+CHA back)
 //
-// Input: 3 header bytes (columns, rows, mode), then operations: one byte
-// selecting the operation, one byte giving the operand length, the operand.
+// Input: 3 header bytes (columns, rows, mode; what is left of them says the
+// pre-zet row N and the text above it), then operations: one byte selecting the
+// operation, one byte giving the operand length, the operand.
 
 #include <array>
 #include <chrono>
@@ -85,29 +91,23 @@ std::uint8_t NoLowercase(std::uint8_t b) {
                                   : b;
 }
 
-// REP repeats the last character the terminal printed, and what the overlay
-// printed after the program's last character is not the program's (design.md
-// §18): the terminal grid would repeat the overlay's glyph, the mirror the
-// program's. Not what this target checks, so REP's final byte is left out of
-// the bytes it generates.
-std::uint8_t NoRep(std::uint8_t b) { return b == 'b' ? std::uint8_t{'B'} : b; }
-
 [[noreturn]] void Fail() { __builtin_trap(); }
 
 bool Blank(const grid::Cell& c) {
     return c.Codepoint == 0 || c.Codepoint == U' ';
 }
 
-// The terminal shows what the mirror shows. Blank is blank: ECH leaves an
-// empty cell where the mirror may have held a space, and the screens look the
-// same.
+// The terminal shows what it would without the overlay. Blank is blank: ECH
+// leaves an empty cell where the mirror may have held a space, and the screens
+// look the same.
 bool SameScreen(const grid::Grid& a, const grid::Grid& b) {
     if (a.Cols() != b.Cols() || a.Rows() != b.Rows()) return false;
     if (a.CursorRow() != b.CursorRow() || a.CursorCol() != b.CursorCol()) {
         return false;
     }
     if (a.PenAttrs() != b.PenAttrs() || a.PenFgKind() != b.PenFgKind() ||
-        a.PenBgKind() != b.PenBgKind()) {
+        a.PenBgKind() != b.PenBgKind() ||
+        a.LastPrinted().Codepoint != b.LastPrinted().Codepoint) {
         return false;
     }
     if (a.ModeSet(grid::EMode::Dectcem) != b.ModeSet(grid::EMode::Dectcem)) {
@@ -126,6 +126,29 @@ bool SameScreen(const grid::Grid& a, const grid::Grid& b) {
         }
     }
     return true;
+}
+
+// What the terminal showed before zet started: the shell's lines on the rows
+// above `row`, the cursor on `row` at column 0 (the cursor row and below are
+// blank). The text comes from `seed`; a few lines hold a wide or an ambiguous
+// glyph.
+void PreZet(Mirror& t, std::uint16_t row, std::uint32_t seed) {
+    static constexpr const char* PIECES[] = {
+        "ls", "$ ", "file", " ", "x", "\xe4\xb8\xad", "\xc2\xb1", "Z"};
+    for (std::uint16_t r = 0; r < row; ++r) {
+        std::uint16_t used = 0;
+        for (int k = 0; k < 24; ++k) {
+            seed = seed * 1664525U + 1013904223U;
+            const char* piece = PIECES[(seed >> 16) % 8];
+            std::size_t len = 0;
+            while (piece[len] != 0) ++len;
+            if (used + len + 3 >= t.G->Cols()) break;
+            t.Feed(reinterpret_cast<const std::uint8_t*>(piece), len);
+            used = static_cast<std::uint16_t>(used + len);
+        }
+        static constexpr std::uint8_t CRLF[] = {'\r', '\n'};
+        t.Feed(CRLF, 2);
+    }
 }
 
 bool Has(ByteSpan b, std::initializer_list<unsigned char> seq) {
@@ -213,8 +236,15 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data,
 
     auto mirror = std::make_unique<Mirror>(cols, rows);
     if (!mirror->G) return 0;
-    auto term = std::make_unique<Mirror>(cols, rows);
+    auto term = std::make_unique<Mirror>(cols, rows);  // Real
     if (!term->G) return 0;
+    auto ref = std::make_unique<Mirror>(cols, rows);
+    if (!ref->G) return 0;
+    {
+        const auto preRow = static_cast<std::uint16_t>((data[1] / 10) % rows);
+        PreZet(*term, preRow, data[2] / 6U);
+        PreZet(*ref, preRow, data[2] / 6U);
+    }
     auto overlay = Overlay::Create();
     if (!overlay) return 0;
 
@@ -233,7 +263,7 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data,
               !Has(b, {0x1B, '[', 's'}) && !Has(b, {0x1B, '[', 'u'}));
         term->P.Feed(b.data(), b.size(), *term->G);
         overlay->Commit(engine);
-        Check(SameScreen(*term->G, *mirror->G));
+        Check(SameScreen(*term->G, *ref->G));
     };
     const auto draw = [&] {
         const ByteSpan b = overlay->BuildUpdate(engine, mirror->View());
@@ -248,6 +278,7 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data,
     const auto feed = [&](const std::uint8_t* d, std::size_t n) {
         mirror->Feed(d, n);
         term->Feed(d, n);
+        ref->Feed(d, n);
     };
 
     std::size_t i = 3;
@@ -267,7 +298,7 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data,
         for (std::size_t k = 0; k < n; ++k) {
             shown[k] = NoLowercase(p[k]);
             typed[k] = TypedKey(p[k]);
-            plain[k] = NoRep(p[k]);
+            plain[k] = p[k];
         }
 
         switch (op) {
@@ -322,6 +353,7 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data,
                 undo();
                 if (mirror->G->Resize(c, r).has_value()) {
                     if (!term->G->Resize(c, r).has_value()) return 0;
+                    if (!ref->G->Resize(c, r).has_value()) return 0;
                     engine.OnResize(now, mirror->View());
                 }
                 break;
@@ -334,13 +366,24 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data,
                 auto fresh2 = std::make_unique<Mirror>(fresh->G->Cols(),
                                                        fresh->G->Rows());
                 if (!fresh2->G) break;
+                auto fresh3 = std::make_unique<Mirror>(fresh->G->Cols(),
+                                                       fresh->G->Rows());
+                if (!fresh3->G) break;
                 undo();
+                // The snapshot's preamble: leave the alternate screen, clear,
+                // home. The terminal gets it with the rest.
+                static constexpr std::uint8_t PREAMBLE[] = {
+                    0x1B, '[', '?', '1', '0',  '4', '9', 'l',
+                    0x1B, '[', '2', 'J', 0x1B, '[', 'H'};
                 const std::uint8_t* body =
                     (echoOff ? shown.data() : plain.data()) + (n > 2 ? 2 : n);
-                fresh->Feed(body, n > 2 ? n - 2 : 0);
-                fresh2->Feed(body, n > 2 ? n - 2 : 0);
+                for (Mirror* m : {fresh.get(), fresh2.get(), fresh3.get()}) {
+                    m->Feed(PREAMBLE, sizeof(PREAMBLE));
+                    m->Feed(body, n > 2 ? n - 2 : 0);
+                }
                 mirror = std::move(fresh);
                 term = std::move(fresh2);
+                ref = std::move(fresh3);
                 ++gen;
                 out = 0;
                 engine.OnSnapshot(gen, now, mirror->View());
