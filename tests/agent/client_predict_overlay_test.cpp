@@ -21,7 +21,10 @@ TEST_CASE_FIXTURE(SodiumFixture,
     REQUIRE(rig.WaitFor([&] { return !rig.Inserts().empty(); }));
     REQUIRE(rig.Inserts().size() == 1);
     const std::string drawn = rig.InsertBytes(rig.Inserts()[0]);
-    CHECK(drawn == "\x1b[?2026h\x1b[?25l\x1b[5Gc\x1b[6G\x1b[?25h\x1b[?2026l");
+    // The glyph, then the program's last glyph B again at its own cell, so
+    // that a REP from the shell repeats B and not c.
+    CHECK(drawn ==
+          "\x1b[?2026h\x1b[?25l\x1b[5Gc\x1b[4GB\x1b[6G\x1b[?25h\x1b[?2026l");
     // It is on the terminal before the shell has printed anything for c.
     CHECK(rig.AgentStream() == "\r$ aB");
 
