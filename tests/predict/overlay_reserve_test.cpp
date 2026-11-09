@@ -14,15 +14,15 @@ using namespace zet::predict;
 using namespace zet::predict::test;
 
 TEST_CASE("the worst undo fits in OVERLAY_UNDO_BYTES_MAX") {
-    constexpr int COLS = PREDICTIONS_MAX + 8;
-    Rig r(COLS, 3, EDisplayMode::Always);
+    constexpr int cols = PREDICTIONS_MAX + 8;
+    Rig r(cols, 3, EDisplayMode::Always);
     auto overlay = Overlay::Create();
     REQUIRE(overlay != nullptr);
 
     // A row of blanks, each in other colours, with every attribute: what a
     // restore of an empty cell has to say again for every one of them.
     std::string row = "\r";
-    for (int c = 0; c < COLS; ++c) {
+    for (int c = 0; c < cols; ++c) {
         const std::string n = std::to_string(c % 200 + 30);
         row += "\x1b[0;1;2;3;4;5;7;9;38;2;" + n + ";" + n + ";250;48;2;" + n +
                ";9;" + n + ";58;2;" + n + ";" + n + ";1m ";
