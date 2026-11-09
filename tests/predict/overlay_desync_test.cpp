@@ -50,6 +50,20 @@ TEST_CASE("desync: typing under a shell's lines is drawn and restored") {
     c.Agent("");
 }
 
+TEST_CASE("desync: a row count change loses the rows") {
+    Client c(30, 6, EDisplayMode::Always);
+    FillToBottom(c, 6);  // the terminal's cursor is on row 5, the mirror's on 0
+    c.Start();
+    c.Agent("zzz\x1b[4G");  // text to the right of the cursor, in both
+    // Fewer rows: a terminal keeps the lines around its cursor, the mirror
+    // keeps its bottom ones, and its blank row is not the terminal's row.
+    c.Resize(30, 1);
+    CHECK_FALSE(c.R.G->RowsTrusted());
+    c.Start();
+    c.Key("c");  // would be drawn over the terminal's 'z', which restore erases
+    c.Agent("");
+}
+
 TEST_CASE("desync: cursor-up past the first row loses the rows") {
     Client c(30, 6, EDisplayMode::Always);
     c.Before(SHELL);

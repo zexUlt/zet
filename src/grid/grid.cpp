@@ -1337,6 +1337,10 @@ GridResult<void> Grid::Resize(std::uint16_t newCols,
 
     if (newCols == Cols_ && newRows == Rows_) return {};
 
+    // Which rows survive a change of the row count depends on where the cursor
+    // is, and an observer's cursor row is not the terminal's (RowsTrusted).
+    if (newRows != Rows_) NoteDrift();
+
     const std::uint16_t oldRows = Rows_;
     const std::uint16_t clampCols = newCols < Cols_ ? newCols : Cols_;
 

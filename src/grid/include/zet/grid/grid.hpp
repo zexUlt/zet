@@ -173,10 +173,12 @@ public:
     /// row 0, CUD/CNL/VPR at any row, RI on row 0, SU/SD/IL/DL, DECSTBM, DECOM,
     /// a DECRC that restores nothing the grid saw) loses the rows, and so does
     /// an absolute row over content, which moves it against the terminal's.
-    /// RIS and a snapshot (ED 2, CUP) reach a state both sides share. False
-    /// from the first loss until then. Not part of the grid's state: snapshots
-    /// and the differential tests do not see it. Alt screen entered with
-    /// ?1049 keeps the state of the main screen, which ?1049l restores.
+    /// A change of the row count loses them too: the rows kept depend on the
+    /// cursor row. RIS and a snapshot (ED 2, CUP) reach a state both sides
+    /// share. False from the first loss until then. Not part of the grid's
+    /// state: snapshots and the differential tests do not see it. Alt screen
+    /// entered with ?1049 keeps the state of the main screen, which ?1049l
+    /// restores.
     [[nodiscard]] bool RowsTrusted() const noexcept {
         return Sync_.Abs ? Sync_.Eq : !Sync_.Drift;
     }
