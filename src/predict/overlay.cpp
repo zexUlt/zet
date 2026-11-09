@@ -80,6 +80,27 @@ void End(grid::EscWriter& w, grid::Pen& pen, const grid::Grid& g,
     if (!g.ModeSet(grid::EMode::SyncOutput)) w.WriteLiteral("\x1b[?2026l");
 }
 
+/// The column Restore writes from: the half of a wide glyph is put back by
+/// writing the glyph whole, from its head, because the terminal has the glyph
+/// broken, or something in its place.
+std::uint16_t RestoredCol(const grid::Grid& g, std::uint16_t row,
+                          std::uint16_t col) noexcept {
+    if (g.CellAt(row, col).Width == 0 && col > 0 &&
+        g.CellAt(row, static_cast<std::uint16_t>(col - 1)).Width == 2) {
+        return static_cast<std::uint16_t>(col - 1);
+    }
+    return col;
+}
+
+/// The glyph Restore would print for the cell, 0 when it prints none (an empty
+/// cell goes through ECH).
+char32_t RestoreGlyph(const grid::Grid& g, std::uint16_t row,
+                      std::uint16_t col) noexcept {
+    const grid::Cell& cell = g.CellAt(row, RestoredCol(g, row, col));
+    if (cell.Width == 0 || cell.Codepoint == 0) return 0;
+    return Printable(cell.Codepoint);
+}
+
 /// A cell as the mirror has it, a wide glyph whole. An empty cell goes through
 /// ECH with the background of the cell, not a space: a space would change what
 /// a selection copies.
@@ -87,12 +108,7 @@ void End(grid::EscWriter& w, grid::Pen& pen, const grid::Grid& g,
 /// the terminal repeats next.
 char32_t Restore(grid::EscWriter& w, grid::Pen& pen, const grid::Grid& g,
                  std::uint16_t row, std::uint16_t col) noexcept {
-    // The half of a wide glyph is put back by writing the glyph whole, from
-    // its head: the terminal has the glyph broken, or something in its place.
-    if (g.CellAt(row, col).Width == 0 && col > 0 &&
-        g.CellAt(row, static_cast<std::uint16_t>(col - 1)).Width == 2) {
-        --col;
-    }
+    col = RestoredCol(g, row, col);
     const grid::Cell& cell = g.CellAt(row, col);
     if (cell.Width == 0) return 0;  // nothing the mirror can say about it
     Column(w, col);
@@ -304,6 +320,21 @@ ByteSpan Overlay::BuildUpdate(const PredictionEngine& engine,
             }
         }
         Reprint(w, pen, g);
+    }
+    // What takes the overlay off prints the mirror's glyphs back, and a REP on
+    // the terminal would then repeat the last of them. A drawing that prints
+    // nothing itself (a prediction erasing a cell) still leaves that behind,
+    // so it needs the same way to print the program's glyph again.
+    char32_t restored = 0;
+    for (std::size_t i = 0; i < Next_.Count; ++i) {
+        if (const char32_t cp =
+                RestoreGlyph(g, Next_.Cells[i].Row, Next_.Cells[i].Col)) {
+            restored = cp;
+        }
+    }
+    if (restored != 0 && restored != g.LastPrinted().Codepoint &&
+        !CanReprint(g)) {
+        return {};
     }
     End(w, pen, g, Next_.Cursor.value_or(g.CursorCol()));
     if (w.Overflow) return {};

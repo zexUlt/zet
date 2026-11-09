@@ -340,6 +340,20 @@ TEST_CASE("rep: after the overlay is taken off") {
     c.Agent("");
 }
 
+TEST_CASE("rep: taking off an erasure needs the program's glyph back") {
+    Client c(30, 5, EDisplayMode::Always);
+    c.Start();
+    c.Key("\x7f");  // erases the 'B': nothing printed to draw it
+    REQUIRE(c.Draws > 0);
+    // The program prints a glyph and a mark after it, so that its glyph cannot
+    // be printed again, and returns to the column. Taking the erasure off
+    // prints the 'B', which REP would then repeat: the erasure is not drawn.
+    // (Found by predict_fuzz as a trap that left no input behind.)
+    c.Agent("\xef\xbf\xbd\b\xcd\x9d");
+    c.Agent("\x1b[2b");
+    c.Agent("");
+}
+
 TEST_CASE("rep: after a cursor move on the row") {
     Client c(30, 5, EDisplayMode::Always);
     c.Start();

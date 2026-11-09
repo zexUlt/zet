@@ -47,6 +47,8 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
+#include <cstdlib>
 #include <memory>
 
 #include "zet/core/time.hpp"
@@ -91,7 +93,10 @@ std::uint8_t NoLowercase(std::uint8_t b) {
                                   : b;
 }
 
-[[noreturn]] void Fail() { __builtin_trap(); }
+[[noreturn]] void Fail(int line) {
+    std::fprintf(stderr, "predict_fuzz: invariant failed at line %d\n", line);
+    std::abort();
+}
 
 bool Blank(const grid::Cell& c) {
     return c.Codepoint == 0 || c.Codepoint == U' ';
@@ -164,8 +169,8 @@ bool Has(ByteSpan b, std::initializer_list<unsigned char> seq) {
     return false;
 }
 
-void Check(bool ok) {
-    if (!ok) Fail();
+void Check(bool ok, int line = __builtin_LINE()) {
+    if (!ok) Fail(line);
 }
 
 struct Seen {
