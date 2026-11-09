@@ -16,4 +16,14 @@ namespace zet::grid {
 /// these widths; cursor drift is documented in design.md §9.
 [[nodiscard]] int Wcwidth(char32_t cp) noexcept;
 
+/// East Asian Ambiguous (EAW A): one column here, two on a terminal set to
+/// wide ambiguous, so the column of whatever follows is not certain. Includes
+/// Cyrillic, box drawing, Greek and private use.
+[[nodiscard]] bool IsAmbiguousWidth(char32_t cp) noexcept;
+
+/// A codepoint that glues to the glyph before it into a cluster some terminals
+/// draw in a different width than a per-codepoint wcwidth gives: ZWJ, the
+/// variation selectors VS15 and VS16 and the emoji skin tone modifiers.
+[[nodiscard]] bool IsClusterJoiner(char32_t cp) noexcept;
+
 }  // namespace zet::grid
