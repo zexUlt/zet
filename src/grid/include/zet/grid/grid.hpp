@@ -55,6 +55,11 @@ enum class EMode : std::uint32_t {
 /// Allocated in a fixed arena; never grows after construction.
 struct Line {
     Cell* Cells{nullptr};  ///< [0 .. grid.Cols())
+    /// Column + 1 of the leftmost glyph in the row whose width terminals may
+    /// disagree on (East Asian ambiguous, or followed by a ZWJ or a variation
+    /// selector, which the grid drops); 0 for none. Not part of the content:
+    /// snapshots do not carry it.
+    std::uint16_t WidthDoubt{0};
 };
 
 /// Saved cursor state (DECSC/DECRC and alt-screen switch).
@@ -153,6 +158,55 @@ public:
     /// screens (a switch alone changes no cell).
     [[nodiscard]] std::uint64_t CellChangeCount() const noexcept {
         return CellChangeCount_;
+    }
+
+    /// Whether the rows of this grid are the rows of the terminal it models,
+    /// as far as an observer that starts in the middle of a screen can tell.
+    /// An observer's grid starts at row 0 while the terminal's cursor is on
+    /// some row N, with the shell's lines above it; their rows differ by an
+    /// unknown N. Until an absolute row (CUP, HVP, VPA) meets a screen that is
+    /// blank on both sides (ED 2, or ED 0 from the home position), only
+    /// moves that keep the difference are safe: text, CR, LF and IND (when the
+    /// terminal is at its bottom both scroll, otherwise the difference
+    /// shrinks), CUU not past the first row, RI not on the first row.
+    /// A move that clamps or scrolls somewhere the terminal may not (CUU past
+    /// row 0, CUD/CNL/VPR at any row, RI on row 0, SU/SD/IL/DL, DECSTBM, DECOM,
+    /// a DECRC that restores nothing the grid saw) loses the rows, and so does
+    /// an absolute row over content, which moves it against the terminal's.
+    /// A change of the row count loses them too: the rows kept depend on the
+    /// cursor row. RIS and a snapshot (ED 2, CUP) reach a state both sides
+    /// share. False from the first loss until then. Not part of the grid's
+    /// state: snapshots and the differential tests do not see it. Alt screen
+    /// entered with ?1049 keeps the state of the main screen, which ?1049l
+    /// restores.
+    [[nodiscard]] bool RowsTrusted() const noexcept {
+        return Sync_.Abs ? Sync_.Eq : !Sync_.Drift;
+    }
+
+    /// Whether a glyph left of `col` in `row` has a width terminals may
+    /// disagree on, so that where `col` is on the terminal is not certain:
+    /// East Asian ambiguous, or followed by ZWJ, VS15, VS16 or a skin tone
+    /// modifier. Stays set until the row is erased whole or scrolled away.
+    [[nodiscard]] bool WidthDoubtBefore(std::uint16_t row,
+                                        std::uint16_t col) const noexcept {
+        const std::uint16_t d = ActiveLine(row).WidthDoubt;
+        return d != 0 && d - 1U < col;
+    }
+
+    /// The last graphic character printed, what REP repeats: its codepoint (0
+    /// before the first), width, the cell it went to and whether a zero-width
+    /// mark was dropped after it (the cell on a terminal holds more than the
+    /// grid does).
+    struct LastGlyph {
+        char32_t Codepoint{0};
+        std::uint8_t Width{1};
+        std::uint16_t Row{0};
+        std::uint16_t Col{0};
+        bool Marked{false};
+    };
+    [[nodiscard]] LastGlyph LastPrinted() const noexcept {
+        return {LastPrintedChar_, static_cast<std::uint8_t>(LastPrintedWidth_),
+                LastPrintedRow_, LastPrintedCol_, LastPrintedMarked_};
     }
 
     [[nodiscard]] std::uint16_t ScrollTop() const noexcept {
@@ -299,8 +353,9 @@ public:
     void ScrollDown(std::uint16_t n) noexcept;
     void ScrollUp(std::uint16_t n) noexcept;
 
-    /// REP — repeat last printed character.
-    void RepeatChar(std::uint16_t n) noexcept;
+    /// REP — repeat last printed character. False when none was printed: the
+    /// terminal repeats a character the grid has not seen.
+    bool RepeatChar(std::uint16_t n) noexcept;
 
     /// DECSTBM — set scroll region (1-based from caller).
     void SetScrollRegion(std::uint16_t top1, std::uint16_t bot1) noexcept;
@@ -370,6 +425,29 @@ private:
     void ClearAltScreen() noexcept;
     void RepairWideOrphans(Line& line, std::uint16_t first,
                            std::uint16_t last) noexcept;
+    void MarkWidthDoubt(std::uint16_t row, std::uint16_t col) noexcept;
+
+    // RowsTrusted() bookkeeping.
+    struct RowSync {
+        bool Abs{false};    ///< an absolute row was set: rows are the same
+        bool Eq{false};     ///< with Abs: the contents are the same too
+        bool Blank{false};  ///< no cell written since a whole-screen clear
+        bool Drift{false};  ///< a move that may differ from the terminal's
+    };
+    void NoteDrift() noexcept {
+        if (!Sync_.Abs) Sync_.Drift = true;
+    }
+    void NoteAbsoluteRow() noexcept {
+        if (!Sync_.Abs) {
+            Sync_.Abs = true;
+            Sync_.Eq = Sync_.Blank;
+        }
+    }
+    void NoteWholeClear() noexcept {
+        if (IsAltScreen()) return;
+        Sync_.Blank = true;
+        if (Sync_.Abs) Sync_.Eq = true;
+    }
 
     // Clamp col/row to [0, Cols_-1] / [0, Rows_-1].
     [[nodiscard]] std::uint16_t ClampCol(std::uint16_t c) const noexcept {
@@ -443,9 +521,16 @@ private:
     static constexpr std::size_t TAB_WORDS = MAX_COLS / 64;
     std::uint64_t TabStops_[TAB_WORDS]{};
 
-    // Last printed character (for REP).
+    // Last printed character (for REP) and where it went.
     char32_t LastPrintedChar_{0};
     int LastPrintedWidth_{1};
+    std::uint16_t LastPrintedRow_{0};
+    std::uint16_t LastPrintedCol_{0};
+    bool LastPrintedMarked_{false};
+
+    RowSync Sync_{};
+    RowSync SyncMain_{};  ///< Sync_ as ?1049h found it, for ?1049l
+    bool SyncSaved_{false};
 
     bool PossiblyDiverged_{false};
 

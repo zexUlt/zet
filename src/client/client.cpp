@@ -41,6 +41,8 @@
 #include "zet/io/self_path.hpp"
 #include "zet/io/tcp.hpp"
 #include "zet/io/terminal.hpp"
+#include "zet/predict/engine.hpp"
+#include "zet/predict/overlay.hpp"
 #include "zet/session/bootstrap.hpp"
 #include "zet/session/client_session.hpp"
 #include "zet/session/connection.hpp"
@@ -83,6 +85,12 @@ constexpr Duration FLUSH_TIMEOUT = 10s;
 /// Output the terminal has not taken yet. A socket is read only while this has
 /// room for all that one read could deliver.
 constexpr std::size_t STDOUT_QUEUE_MAX = 1024 * 1024;
+
+/// With the overlay on, the client reads the socket only while the stdout
+/// queue has room for the output of the read and for taking the overlay off
+/// ahead of it, which cannot be left out; an overlay is drawn only if that
+/// room stays (design.md §9).
+static_assert(STDOUT_QUEUE_MAX >= 4 * predict::OVERLAY_BYTES_MAX);
 
 // The socket is read only while this has room for a whole live frame; less,
 // and the gate would never open.
@@ -142,12 +150,20 @@ constexpr std::string_view SNAPSHOT_RESTORE_NOTICE =
 constexpr std::string_view SNAPSHOT_DIVERGED_NOTICE =
     "zet: warning: the restored screen may differ from the remote one\r\n";
 constexpr std::uint8_t GRID_FLAG_POSSIBLY_DIVERGED = 0x01;
+/// Printed with --predict=always when the agent answers without ever sending
+/// an EchoAck: an old agent, or a protocol ceiling of 1 (§9). Prediction is
+/// then off for the session, as with --predict=never.
+constexpr std::string_view NO_ECHO_ACK_NOTICE =
+    "zet: predictive echo is off: the agent does not support it\r\n";
 
 constexpr std::string_view USAGE =
     "usage: zet [--agent PATH] [--ssh-arg ARG]... HOST\n"
     "  --agent PATH    use PATH as zet-agent on the remote host (disables "
     "delivery)\n"
     "  --ssh-arg ARG   passed to ssh as it is; repeat for several\n"
+    "  --predict MODE  predictive echo: adaptive (the default), always or "
+    "never;\n"
+    "                  --predict=MODE works too\n"
     "  --version       print the release version and exit\n";
 
 void Say(std::string_view text) noexcept {
@@ -193,6 +209,12 @@ struct Options {
     /// its snapshot to this path on exit. Empty means no mirror: nothing else
     /// asks for one yet, and without it the client does no extra work.
     std::string MirrorDump;
+    /// Predictive echo (--predict, §9). Never offers no ECHO_ACK and keeps no
+    /// mirror: the stream reaches the terminal as it always did.
+    predict::EDisplayMode Predict{predict::EDisplayMode::Adaptive};
+    /// Test hook ZET_TEST_OVERLAY_LOG: one line "offset length" for every
+    /// piece of overlay put into stdout, offsets counted in stdout bytes.
+    std::string OverlayLog;
     /// Test seam (SessionTestConfig::SizeSource): stands in for the tty when
     /// SIGWINCH asks for the terminal's size. Empty in production.
     std::function<std::optional<wire::ResizeMessage>()> SizeSource;
@@ -217,6 +239,14 @@ wire::BootstrapEnvironment ForwardedEnvironment() noexcept {
     return environment;
 }
 
+std::optional<predict::EDisplayMode> ParsePredict(
+    std::string_view value) noexcept {
+    if (value == "adaptive") return predict::EDisplayMode::Adaptive;
+    if (value == "always") return predict::EDisplayMode::Always;
+    if (value == "never") return predict::EDisplayMode::Never;
+    return std::nullopt;
+}
+
 std::optional<Options> ReadOptions(std::span<char*> args) {
     Options options;
     for (std::size_t i = 1; i < args.size(); ++i) {
@@ -226,6 +256,22 @@ std::optional<Options> ReadOptions(std::span<char*> args) {
             options.AgentExplicit = true;
         } else if (arg == "--ssh-arg" && i + 1 < args.size()) {
             options.SshArgs.emplace_back(args[++i]);
+        } else if (arg.starts_with("--predict=") ||
+                   (arg == "--predict" && i + 1 < args.size())) {
+            const std::string_view value =
+                arg == "--predict"
+                    ? std::string_view{args[++i]}
+                    : arg.substr(std::string_view{"--predict="}.size());
+            const auto mode = ParsePredict(value);
+            if (!mode) {
+                SayError("--predict", "unknown mode '" + SanitizeAscii(value) +
+                                          "' (adaptive, always or never)");
+                return std::nullopt;
+            }
+            options.Predict = *mode;
+        } else if (arg == "--predict") {
+            SayError("--predict", "needs a mode (adaptive, always or never)");
+            return std::nullopt;
         } else if (arg == "--version") {
             options.PrintVersion = true;
             return options;
@@ -266,6 +312,10 @@ std::optional<Options> ReadOptions(std::span<char*> args) {
     if (const char* dump = ::getenv("ZET_TEST_MIRROR_DUMP");
         dump != nullptr && dump[0] != '\0') {
         options.MirrorDump = dump;
+    }
+    if (const char* log = ::getenv("ZET_TEST_OVERLAY_LOG");
+        log != nullptr && log[0] != '\0') {
+        options.OverlayLog = log;
     }
     return options;
 }
@@ -975,6 +1025,25 @@ private:
     void Resize() noexcept;
     void Notice(std::string_view text) noexcept;
     void StartMirror() noexcept;
+    void StartPredict(std::uint32_t streamGen, Timestamp now) noexcept;
+    void OnEchoAcked(const wire::EchoAckMessage& ack, Timestamp now) noexcept;
+    void Tick() noexcept;
+    void PumpEvents(Timestamp now) noexcept;
+    /// Takes the overlay off the terminal: queues the restore. False when it
+    /// did not fit (the caller drops the connection).
+    [[nodiscard]] bool TakeOffOverlay(
+        std::size_t ceiling = STDOUT_QUEUE_MAX) noexcept;
+    /// Puts the engine's visible predictions on the terminal, if the queue
+    /// has room.
+    void RefreshOverlay() noexcept;
+    void LogOverlay(std::size_t length) noexcept;
+    void LoseMirror() noexcept;
+    [[nodiscard]] std::size_t StdoutReserve() const noexcept {
+        return Overlay_ ? predict::OVERLAY_UNDO_BYTES_MAX : 0;
+    }
+    [[nodiscard]] predict::MirrorView View() const noexcept {
+        return predict::MirrorView{Mirror_->Screen(), Mirror_->Parser()};
+    }
     void WriteMirrorDump() noexcept;
     [[nodiscard]] Duration Backoff() noexcept;
     [[nodiscard]] int Finish(int status) noexcept;
@@ -986,7 +1055,6 @@ private:
     std::vector<std::byte> Storage_;
     session::ClientSession Session_;
 
-    ELink Link_{ELink::Waiting};
     Deadline LinkDeadline_{Timestamp{}};
     std::size_t AddressIndex_{0};
     unsigned Attempts_{0};
@@ -1006,7 +1074,6 @@ private:
     std::array<std::byte, 2 * STDIN_CHUNK + 1> In_{};
     std::size_t InFrom_{0};
     std::size_t InTo_{0};
-    bool InEnded_{false};
     app::ByteQueue Stdout_;
     app::Registration StdinWatch_;
     /// Where typed input is read from; tests point it at a pipe.
@@ -1025,10 +1092,35 @@ private:
     uint16_t Ceiling_{wire::PROTOCOL_VERSION_MAX};
     /// Whether Hello carries GRID_CAPABLE.
     bool GridCapable_{true};
+    ELink Link_{ELink::Waiting};
+    bool InEnded_{false};
+    /// The first EchoAck of a connection only sets the baseline.
+    bool EchoBaseline_{false};
+    /// An EchoAck has come in this session, or Data has come first: the
+    /// agent's answer to ECHO_ACK is known either way (§9).
+    bool EchoDecided_{false};
+    /// The mirror was started by a snapshot, before the first EchoAck: it
+    /// shows the terminal exactly, the column included.
+    bool SeededFromSnapshot_{false};
+    bool Escaped_{false};
+    /// The link went down after it had been live, and the user was told.
+    bool Announced_{false};
+    /// GridBegin flags of PendingSnapshot_.
+    std::uint8_t PendingSnapshotFlags_{0};
 
     /// What the local terminal has been sent, as a grid; null when nothing
     /// wants it or it could not be kept in step (§9, M7).
     std::unique_ptr<Mirror> Mirror_;
+    /// Predictive echo (§9): created with the first EchoAck of the session,
+    /// never with --predict=never, an old agent or ver=1.
+    std::unique_ptr<predict::PredictionEngine> Predict_;
+    std::unique_ptr<predict::Overlay> Overlay_;
+    /// Input bytes the session has taken: the input offset the agent counts.
+    std::uint64_t InputWritten_{0};
+    /// The last SRTT given to the engine.
+    Duration LastSrtt_{Duration::min()};  // min: none yet
+    /// Bytes ever queued for stdout, for ZET_TEST_OVERLAY_LOG offsets.
+    std::uint64_t StdoutQueued_{0};
 
     struct PendingSnapshotInfo {
         std::uint32_t StreamGen{0};
@@ -1039,11 +1131,6 @@ private:
 
     std::optional<wire::SessionEndMessage> Ended_;
     std::optional<int> Signaled_;
-    bool Escaped_{false};
-    /// The link went down after it had been live, and the user was told.
-    bool Announced_{false};
-    /// GridBegin flags of PendingSnapshot_.
-    std::uint8_t PendingSnapshotFlags_{0};
     /// When the last live connection was lost; the give-up clock runs from it.
     std::optional<Timestamp> LostSince_;
     /// What the current connection started from, to tell whether it got
@@ -1087,6 +1174,7 @@ int Client::Run() noexcept {
                 }
             }
         }
+        Tick();
         if (Ended_) {
             int status;
             if (Ended_->Kind == wire::ESessionEndKind::Exited) {
@@ -1149,7 +1237,13 @@ void Client::FeedStdin() noexcept {
         if (!taken || *taken == 0) {
             break;
         }
+        const ByteSpan sent = ByteSpan{In_}.subspan(InFrom_, *taken);
         InFrom_ += *taken;
+        InputWritten_ += *taken;
+        if (Predict_ && Mirror_) {
+            Predict_->OnInput(sent, InputWritten_, io::MonotonicNow(), View());
+            RefreshOverlay();
+        }
     }
     if (InFrom_ == InTo_) {
         InFrom_ = 0;
@@ -1158,6 +1252,13 @@ void Client::FeedStdin() noexcept {
 }
 
 void Client::Pump(Timestamp now) noexcept {
+    PumpEvents(now);
+    // One draw for everything the pass delivered: the overlay was taken off
+    // before the first byte and goes back on after the last.
+    RefreshOverlay();
+}
+
+void Client::PumpEvents(Timestamp now) noexcept {
     while (Connection_) {
         // An input replay can be larger than the queue (up to DisconnectMax
         // against ResendMax plus the slack): frames go in only while a whole
@@ -1187,12 +1288,32 @@ void Client::Pump(Timestamp now) noexcept {
             }
         } else if (const auto* deliver =
                        std::get_if<session::Deliver>(&event)) {
-            if (!Stdout_.Append(deliver->Bytes)) {
+            if (!EchoDecided_) {
+                // The agent sends its first EchoAck before any Data; Data
+                // first means it does not (a 0.3 agent, or ver=1), and the
+                // session goes on as with never.
+                EchoDecided_ = true;
+                if (!Predict_ && Options_.MirrorDump.empty()) {
+                    Mirror_
+                        .reset();  // started for an EchoAck that did not come
+                    SeededFromSnapshot_ = false;
+                }
+                if (Options_.Predict == predict::EDisplayMode::Always) {
+                    static_cast<void>(::write(StderrFd_,
+                                              NO_ECHO_ACK_NOTICE.data(),
+                                              NO_ECHO_ACK_NOTICE.size()));
+                }
+            }
+            if (!TakeOffOverlay() || !Stdout_.Append(deliver->Bytes)) {
                 Drop(now);
                 return;
             }
+            StdoutQueued_ += deliver->Bytes.size();
             if (Mirror_) {
                 Mirror_->Feed(deliver->Bytes);
+                if (Predict_) {
+                    Predict_->OnOutput(Session_.ReceiveOffset(), now, View());
+                }
             }
         } else if (const auto* ended = std::get_if<session::Ended>(&event)) {
             Ended_ = ended->End;
@@ -1202,19 +1323,38 @@ void Client::Pump(Timestamp now) noexcept {
             // Path B (ver=2, §9): queue the snapshot behind the output already
             // waiting and confirm it once its last byte is written, so stdin,
             // signals and keepalives are served while the terminal drains.
-            if (!Stdout_.Append(snap->Bytes, STDOUT_SNAPSHOT_CEILING)) {
+            if (!TakeOffOverlay(STDOUT_SNAPSHOT_CEILING) ||
+                !Stdout_.Append(snap->Bytes, STDOUT_SNAPSHOT_CEILING)) {
                 // Unreachable while the read gate and the wire limit hold.
                 // Without GridApplied the agent offers it again on reconnect.
                 Connection_->DenyApply(snap->StreamGen);
                 Drop(now);
                 return;
             }
-            if (Mirror_ && !Mirror_->ResetFromSnapshot(snap->Bytes)) {
-                Mirror_.reset();
+            StdoutQueued_ += snap->Bytes.size();
+            if (!Mirror_ && !EchoDecided_ &&
+                Options_.Predict != predict::EDisplayMode::Never) {
+                // The first connection of the session went by path B, and the
+                // first EchoAck, which starts the mirror, comes after the
+                // snapshot: a mirror started then would not know what the
+                // snapshot drew. Start it here, from the snapshot.
+                StartMirror();
+                SeededFromSnapshot_ = Mirror_ != nullptr;
+            }
+            if (Mirror_) {
+                if (!Mirror_->ResetFromSnapshot(snap->Bytes)) {
+                    LoseMirror();
+                } else if (Predict_) {
+                    // The mirror is a new grid; the engine rebases on it.
+                    Predict_->OnSnapshot(snap->StreamGen, now, View());
+                }
             }
             PendingSnapshot_ =
                 PendingSnapshotInfo{.StreamGen = snap->StreamGen};
             PendingSnapshotFlags_ = snap->Flags;
+        } else if (const auto* acked =
+                       std::get_if<session::EchoAcked>(&event)) {
+            OnEchoAcked(acked->Ack, now);
         } else if (std::holds_alternative<session::SessionOverflowed>(event)) {
             // Agent killed the session because the ring overflowed and this
             // client does not have GRID_CAPABLE (ver=2 only, §7). Record it
@@ -1290,7 +1430,9 @@ void Client::FinishConnecting(Timestamp now) noexcept {
     }
     Connection_.emplace(Session_, RandomNonce<wire::HandshakeNonce>(),
                         MutableByteSpan{Frames_}, now, GridCapable_, Ceiling_,
-                        MutableByteSpan{SnapshotBuf_});
+                        MutableByteSpan{SnapshotBuf_},
+                        Options_.Predict != predict::EDisplayMode::Never);
+    EchoBaseline_ = false;
     if (Size_) {
         Connection_->QueueResize(*Size_);
     }
@@ -1363,8 +1505,9 @@ bool Client::UpdateInterest() noexcept {
             // the silence timer waits until reading resumes (§9).
             // Handshake frames are tiny and need no room on the terminal;
             // holding them back would only time the handshake out.
-            const bool stalled = Connection_->IsLive() &&
-                                 Stdout_.Room() < Connection_->ReadCapacity();
+            const bool stalled =
+                Connection_->IsLive() &&
+                Stdout_.Room() < Connection_->ReadCapacity() + StdoutReserve();
             Connection_->SetReadGate(!stalled, io::MonotonicNow());
             read = Connection_->ReadRoom() > 0 && !stalled;
             write = !SocketOut_.Empty();
@@ -1383,6 +1526,11 @@ Deadline Client::NextDeadline() const noexcept {
     if (GiveUpAfter_ && LostSince_) {
         next =
             Earliest(next, Deadline{*LostSince_ + *GiveUpAfter_ + Duration{1}});
+    }
+    if (Predict_) {
+        if (const auto glitch = Predict_->NextDeadline()) {
+            next = Earliest(next, Deadline{*glitch});
+        }
     }
     return next;
 }
@@ -1471,8 +1619,9 @@ void Client::WriteStdout() noexcept {
 void Client::ReadSocket(Timestamp now) noexcept {
     std::array<std::byte, SOCKET_READ_CHUNK> chunk{};
     const std::size_t room = std::min(Connection_->ReadRoom(), chunk.size());
-    if (room == 0 || (Connection_->IsLive() &&
-                      Stdout_.Room() < Connection_->ReadCapacity())) {
+    if (room == 0 ||
+        (Connection_->IsLive() &&
+         Stdout_.Room() < Connection_->ReadCapacity() + StdoutReserve())) {
         return;
     }
     const auto n =
@@ -1506,11 +1655,151 @@ void Client::Notice(std::string_view text) noexcept {
                          text.size()};
     if (!NoticesInline_) {
         static_cast<void>(::write(StderrFd_, text.data(), text.size()));
-    } else if (!Stdout_.Append(bytes)) {
+    } else if (!TakeOffOverlay() || !Stdout_.Append(bytes)) {
         // The terminal is far behind; the notice is not worth stalling for.
-    } else if (Mirror_) {
-        Mirror_->Feed(bytes);
+    } else {
+        StdoutQueued_ += bytes.size();
+        if (Mirror_) {
+            Mirror_->Feed(bytes);
+            if (Predict_) {
+                // Output nobody predicted, at the offset the stream is at.
+                Predict_->OnOutput(Session_.ReceiveOffset(), io::MonotonicNow(),
+                                   View());
+            }
+        }
+        RefreshOverlay();
     }
+}
+
+void Client::StartPredict(std::uint32_t streamGen, Timestamp now) noexcept {
+    if (!Mirror_) {
+        // The output before this point is not in it: the column is unknown
+        // until the stream sets it, and no prediction is made before (§9).
+        StartMirror();
+    }
+    if (!Mirror_) {
+        return;
+    }
+    auto overlay = predict::Overlay::Create();
+    if (!overlay) {
+        return;
+    }
+    Overlay_ = std::move(overlay);
+    Predict_ = std::make_unique<predict::PredictionEngine>(
+        View(), Options_.Predict, streamGen);
+    if (std::exchange(SeededFromSnapshot_, false)) {
+        // The mirror was filled from a snapshot and fed everything since: the
+        // cursor is known as it is after a snapshot.
+        Predict_->OnSnapshot(streamGen, now, View());
+    }
+    Predict_->OnOutput(Session_.ReceiveOffset(), now, View());
+}
+
+void Client::OnEchoAcked(const wire::EchoAckMessage& ack,
+                         Timestamp now) noexcept {
+    // The first EchoAck of a connection is a baseline: it says what the agent
+    // had read when it began, not what the user has typed since.
+    if (!EchoBaseline_) {
+        EchoBaseline_ = true;
+        if (!EchoDecided_) {
+            EchoDecided_ = true;
+            StartPredict(ack.StreamGen, now);
+        } else if (Predict_ && Mirror_) {
+            // A new connection: what was predicted for input the agent had
+            // before it began will get no EchoAck of its own.
+            Predict_->OnBaseline(
+                predict::EchoAck{.StreamGen = ack.StreamGen,
+                                 .OutputOffset = ack.OutputOffset,
+                                 .InputOffset = ack.InputOffset},
+                now, View());
+        }
+        return;
+    }
+    if (Predict_ && Mirror_) {
+        Predict_->OnEchoAck(predict::EchoAck{.StreamGen = ack.StreamGen,
+                                             .OutputOffset = ack.OutputOffset,
+                                             .InputOffset = ack.InputOffset},
+                            now, View());
+    }
+}
+
+void Client::Tick() noexcept {
+    if (!Predict_ || !Mirror_) {
+        return;
+    }
+    const Timestamp now = io::MonotonicNow();
+    if (Connection_) {
+        const auto srtt = Connection_->Srtt();
+        if (srtt && *srtt != LastSrtt_) {
+            LastSrtt_ = *srtt;
+            Predict_->OnSrtt(*srtt, now);
+        }
+    }
+    Predict_->OnTick(now);
+    RefreshOverlay();
+}
+
+bool Client::TakeOffOverlay(std::size_t ceiling) noexcept {
+    if (!Overlay_ || !Overlay_->Drawn() || !Mirror_ || !Predict_) {
+        return true;
+    }
+    const ByteSpan bytes = Overlay_->BuildUndo(View());
+    if (bytes.empty()) {
+        return true;
+    }
+    if (!Stdout_.Append(bytes, ceiling)) {
+        return false;
+    }
+    LogOverlay(bytes.size());
+    StdoutQueued_ += bytes.size();
+    Overlay_->Commit(*Predict_);
+    return true;
+}
+
+void Client::RefreshOverlay() noexcept {
+    if (!Overlay_ || !Predict_ || !Mirror_) {
+        return;
+    }
+    const ByteSpan bytes = Overlay_->BuildUpdate(*Predict_, View());
+    if (bytes.empty()) {
+        return;
+    }
+    const std::size_t readRoom =
+        Connection_ ? Connection_->ReadCapacity() : std::size_t{0};
+    if (Stdout_.Room() < bytes.size() + readRoom + StdoutReserve() ||
+        !Stdout_.Append(bytes)) {
+        // No room: the predictions live on, undrawn.
+        return;
+    }
+    LogOverlay(bytes.size());
+    StdoutQueued_ += bytes.size();
+    Overlay_->Commit(*Predict_);
+}
+
+void Client::LogOverlay(std::size_t length) noexcept {
+    if (Options_.OverlayLog.empty()) {
+        return;
+    }
+    const int fd = ::open(Options_.OverlayLog.c_str(),
+                          O_WRONLY | O_CREAT | O_APPEND, 0600);
+    if (fd < 0) {
+        return;
+    }
+    const std::string line =
+        std::to_string(StdoutQueued_) + " " + std::to_string(length) + "\n";
+    static_cast<void>(::write(fd, line.data(), line.size()));
+    ::close(fd);
+}
+
+void Client::LoseMirror() noexcept {
+    // Without the mirror nothing can be taken off; what is drawn stays.
+    if (Overlay_) {
+        Overlay_->Forget();
+    }
+    Predict_.reset();
+    Overlay_.reset();
+    Mirror_.reset();
+    SeededFromSnapshot_ = false;
 }
 
 void Client::StartMirror() noexcept {
@@ -1551,12 +1840,43 @@ void Client::Resize() noexcept {
     if (Size_ && Connection_) {
         Connection_->QueueResize(*Size_);
     }
-    if (Size_ && Mirror_ && !Mirror_->Resize(Size_->Cols, Size_->Rows)) {
-        Mirror_.reset();
+    if (Size_ && Mirror_) {
+        // Taken off by the grid the overlay was drawn on, before the resize,
+        // and only where the terminal's reflow cannot have moved what is
+        // restored: otherwise the glyphs stay, as the program's redraw (it
+        // gets the same SIGWINCH) will repaint them, and no byte is written.
+        if (Overlay_ && Predict_ && Overlay_->Drawn() &&
+            !Overlay_->UndoSurvivesResize(View(), Size_->Cols)) {
+            Overlay_->Forget();
+            Predict_->ClearDrawn();
+        } else if (!TakeOffOverlay()) {
+            LoseMirror();
+            return;
+        }
+        if (!Mirror_->Resize(Size_->Cols, Size_->Rows)) {
+            LoseMirror();
+        } else if (Predict_) {
+            Predict_->OnResize(io::MonotonicNow(), View());
+        }
     }
 }
 
 int Client::Finish(int status) noexcept {
+    const bool wasDrawn = Overlay_ && Overlay_->Drawn();
+    const bool undone = TakeOffOverlay(STDOUT_SNAPSHOT_CEILING) && wasDrawn;
+    if (Fatal_ && undone) {
+        // The loop below leaves the queue alone after a failure, but the
+        // predicted glyphs must not be left on the user's screen: one try,
+        // without waiting. Only when there is an undo to get out: with no
+        // overlay a failure leaves the queue as it always did.
+        while (!Stdout_.Empty()) {
+            const auto n = io::WriteSome(StdoutFd_, Stdout_.Front());
+            if (!n) {
+                break;
+            }
+            Stdout_.Consume(*n);
+        }
+    }
     // What the agent wrote last reaches the terminal before zet lets go of it.
     const Timestamp until = io::MonotonicNow() + FLUSH_TIMEOUT;
     while (!Stdout_.Empty() && !Fatal_) {
@@ -1595,6 +1915,8 @@ SessionTestResult RunSessionForTestImpl(SessionTestConfig config) noexcept {
     opts.Limits = config.Limits;
     opts.BackoffMax = config.BackoffMax;
     opts.MirrorDump = config.MirrorDump;
+    opts.Predict = config.Predict;
+    opts.OverlayLog = config.OverlayLog;
     opts.SizeSource = std::move(config.SizeSource);
 
     session::BootstrapResult br;

@@ -11,6 +11,7 @@
 
 #include "zet/core/time.hpp"
 #include "zet/io/tcp.hpp"
+#include "zet/predict/engine.hpp"
 #include "zet/session/limits.hpp"
 #include "zet/wire/key_schedule.hpp"
 #include "zet/wire/limits.hpp"
@@ -40,6 +41,11 @@ struct SessionTestConfig {
     /// Keep the mirror grid and write its snapshot here on exit (the
     /// ZET_TEST_MIRROR_DUMP hook); empty means no mirror.
     std::string MirrorDump{};
+    /// --predict. Never by default, so tests of the stream see it as it is.
+    predict::EDisplayMode Predict{predict::EDisplayMode::Never};
+    /// The ZET_TEST_OVERLAY_LOG hook: "offset length" lines for the overlay's
+    /// insertions into stdout.
+    std::string OverlayLog{};
     /// The terminal size the client starts with, as if SIGWINCH had never
     /// come; the tests have no terminal to ask.
     std::optional<wire::ResizeMessage> InitialSize{};

@@ -26,9 +26,9 @@ TEST_CASE("a multibyte character split between calls is one prediction") {
     r.Prompt();
     r.Type("\xc3");
     CHECK(r.Count() == 0);
-    r.Type("\xa9");
+    r.Type("\xb1");  // ñ; é is ambiguous in width and not predicted
     REQUIRE(r.Count() == 1);
-    CHECK(r.E.Predictions()[0].Codepoint == U'é');
+    CHECK(r.E.Predictions()[0].Codepoint == U'ñ');
     CHECK(r.E.Predictions()[0].InputEnd == 2);
 }
 

@@ -132,6 +132,11 @@ def main() -> None:
     # Wide: W or F (Fullwidth)
     wide = parse_ranges(eaw_lines, lambda f: f.split()[0] in ("W", "F"))
 
+    # Ambiguous: EAW A. Terminals disagree on their width (1 in most locales,
+    # 2 in CJK ones), so the predictive-echo overlay keeps off rows holding
+    # one (design.md section 9).
+    ambiguous = parse_ranges(eaw_lines, lambda f: f.split()[0] == "A")
+
     # Zero-width: Default_Ignorable_Code_Point + combining marks (Mn, Me).
     # Subtract EAW Wide characters so that Hangul Fillers (U+115F, U+1160)
     # and other W-class Mn/Me characters are classified as Wide (width 2),
@@ -163,6 +168,10 @@ def main() -> None:
         "// Source: EastAsianWidth.txt, Unicode 16.0.0.",
         *emit_table("WIDE", wide),
         "",
+        "// East Asian Width A (Ambiguous): width 1 here, 2 on terminals set to",
+        "// wide ambiguous. Source: EastAsianWidth.txt, Unicode 16.0.0.",
+        *emit_table("AMBIGUOUS", ambiguous),
+        "",
         "// Zero-width: combining marks (Mn, Me), Default_Ignorable, etc.",
         "// EAW Wide characters are excluded so Hangul Fillers stay width 2.",
         "// Source: DerivedCoreProperties.txt + DerivedGeneralCategory.txt.",
@@ -179,6 +188,17 @@ def main() -> None:
         "        else return true;",
         "    }",
         "    return false;",
+        "}",
+        "",
+        "bool IsAmbiguousWidth(char32_t cp) noexcept {",
+        "    if (cp < 0xA1) return false;",
+        "    return InRanges(AMBIGUOUS, sizeof(AMBIGUOUS) / sizeof(*AMBIGUOUS),",
+        "                    cp);",
+        "}",
+        "",
+        "bool IsClusterJoiner(char32_t cp) noexcept {",
+        "    return cp == 0x200D || cp == 0xFE0E || cp == 0xFE0F ||",
+        "           (cp >= 0x1F3FB && cp <= 0x1F3FF);",
         "}",
         "",
         "int Wcwidth(char32_t cp) noexcept {",

@@ -3,6 +3,8 @@
 #include <algorithm>
 #include <cstring>
 
+#include "zet/grid/unicode.hpp"
+
 namespace zet::grid {
 
 namespace {
@@ -157,8 +159,18 @@ bool SameContent(const Cell& a, const Cell& b) noexcept {
 }  // namespace
 
 void Grid::StoreCell(Cell& dst, const Cell& value) noexcept {
-    if (!SameContent(dst, value)) ++CellChangeCount_;
+    if (!SameContent(dst, value)) {
+        ++CellChangeCount_;
+        Sync_.Blank = false;
+    }
     dst = value;
+}
+
+void Grid::MarkWidthDoubt(std::uint16_t row, std::uint16_t col) noexcept {
+    if (row >= Rows_) return;
+    Line& line = ActiveLine(row);
+    const auto mark = static_cast<std::uint16_t>(col + 1);
+    if (line.WidthDoubt == 0 || mark < line.WidthDoubt) line.WidthDoubt = mark;
 }
 
 void Grid::BlankCell(Cell& cell) noexcept {
@@ -187,6 +199,7 @@ void Grid::PenToCell(Cell& cell) noexcept {
 
 void Grid::ClearLine(Line& line) noexcept {
     for (std::uint16_t c = 0; c < Cols_; ++c) BlankCell(line.Cells[c]);
+    line.WidthDoubt = 0;
 }
 
 void Grid::ClearCells(Cell* cells, std::uint16_t count) noexcept {
@@ -271,6 +284,7 @@ void Grid::ScrollRegionDown(std::uint16_t n) noexcept {
         Line& dst = ActiveLine(r);
         const Line& src = ActiveLine(static_cast<std::uint16_t>(r - n));
         CopyCells(dst.Cells, src.Cells, Cols_);
+        dst.WidthDoubt = src.WidthDoubt;
     }
     for (std::uint16_t r = ScrollTop_; r < ScrollTop_ + n; ++r)
         ClearLine(ActiveLine(r));
@@ -297,8 +311,20 @@ void Grid::PutChar(char32_t cp, int width) noexcept {
     }
 
     // Zero-width combining mark: GRAPHEME_MAX_CODEPOINTS=1 — keep base, drop
-    // mark.
-    if (width == 0) return;
+    // mark. A terminal may draw the cluster in another width than the sum of
+    // its parts (VS16 makes a text glyph wide, ZWJ glues), and the cell
+    // before this one then holds more than the grid knows.
+    if (width == 0) {
+        LastPrintedMarked_ = true;
+        if (IsClusterJoiner(cp)) {
+            const std::uint16_t prev =
+                (PendingWrap_ || CursorCol_ == 0)
+                    ? CursorCol_
+                    : static_cast<std::uint16_t>(CursorCol_ - 1);
+            MarkWidthDoubt(CursorRow_, prev);
+        }
+        return;
+    }
 
     if (PendingWrap_ && ModeSet(EMode::Awm)) {
         CursorCol_ = 0;
@@ -371,8 +397,14 @@ void Grid::PutChar(char32_t cp, int width) noexcept {
         StoreCell(cont, tail);
     }
 
+    if (IsAmbiguousWidth(cp) || IsClusterJoiner(cp)) {
+        MarkWidthDoubt(CursorRow_, CursorCol_);
+    }
     LastPrintedChar_ = cp;
     LastPrintedWidth_ = width;
+    LastPrintedRow_ = CursorRow_;
+    LastPrintedCol_ = CursorCol_;
+    LastPrintedMarked_ = false;
 
     const std::uint16_t advance = static_cast<std::uint16_t>(width);
     if (CursorCol_ + advance >= Cols_) {
@@ -413,6 +445,9 @@ void Grid::Index() noexcept {
 
 void Grid::ReverseIndex() noexcept {
     PendingWrap_ = false;
+    // On the first row (or the top margin) the terminal may be further down
+    // and move up instead of scrolling.
+    if (CursorRow_ == ScrollTop_ || CursorRow_ == 0) NoteDrift();
     if (CursorRow_ == ScrollTop_) {
         ScrollRegionDown(1);
     } else if (CursorRow_ > 0) {
@@ -480,13 +515,17 @@ void Grid::MoveCursorUp(std::uint16_t n) noexcept {
     } else {
         limit = ModeSet(EMode::Decom) ? ScrollTop_ : 0;
     }
-    if (n > CursorRow_ - limit)
+    if (n > CursorRow_ - limit) {
         n = static_cast<std::uint16_t>(CursorRow_ - limit);
+        NoteDrift();  // the terminal may be further down and go on up
+    }
     CursorRow_ = static_cast<std::uint16_t>(CursorRow_ - n);
 }
 
 void Grid::MoveCursorDown(std::uint16_t n) noexcept {
     PendingWrap_ = false;
+    // The terminal may be at its bottom, where it stays and we move on.
+    NoteDrift();
     // When cursor is inside the scroll region, always stop at ScrollBot_
     // regardless of DECOM (CUD must not cross the scroll margin).
     const std::uint16_t limit =
@@ -515,6 +554,7 @@ void Grid::MoveCursorLeft(std::uint16_t n) noexcept {
 
 void Grid::MoveCursorTo(std::uint16_t row1, std::uint16_t col1) noexcept {
     ++ColumnSetCount_;
+    NoteAbsoluteRow();
     PendingWrap_ = false;
     const std::uint16_t rowOff = ModeSet(EMode::Decom) ? ScrollTop_ : 0;
     const std::uint16_t maxRow = ModeSet(EMode::Decom)
@@ -538,6 +578,7 @@ void Grid::MoveCursorToCol(std::uint16_t col1) noexcept {
 }
 
 void Grid::MoveCursorToRow(std::uint16_t row1) noexcept {
+    NoteAbsoluteRow();
     PendingWrap_ = false;
     const std::uint16_t rowOff = ModeSet(EMode::Decom) ? ScrollTop_ : 0;
     const std::uint16_t maxRow = ModeSet(EMode::Decom)
@@ -589,6 +630,9 @@ void Grid::SaveCursor() noexcept {
 }
 
 void Grid::RestoreCursor() noexcept {
+    // The terminal's saved row is its own: the same as ours only if nothing
+    // moved either of them since (a scroll on one side), which is not known.
+    NoteDrift();
     const SavedCursor& sc = IsAltScreen() ? SavedCursorAlt_ : SavedCursorMain_;
     CursorRow_ = ClampRow(sc.Row);
     CursorCol_ = ClampCol(sc.Col);
@@ -626,12 +670,17 @@ void Grid::RestoreCursor() noexcept {
 void Grid::EraseInDisplay(std::uint8_t param) noexcept {
     PendingWrap_ = false;
     switch (param) {
-        case 0:
+        case 0: {
+            const bool home = CursorRow_ == 0 && CursorCol_ == 0;
             EraseInLine(0);
             for (std::uint16_t r = static_cast<std::uint16_t>(CursorRow_ + 1);
                  r < Rows_; ++r)
                 ClearLine(ActiveLine(r));
+            // From the home position it is the whole screen, but only when
+            // the home position is the terminal's too.
+            if (home && Sync_.Abs) NoteWholeClear();
             break;
+        }
         case 1:
             for (std::uint16_t r = 0; r < CursorRow_; ++r)
                 ClearLine(ActiveLine(r));
@@ -644,6 +693,8 @@ void Grid::EraseInDisplay(std::uint8_t param) noexcept {
                 HistoryStart_ = 0;
                 HistorySize_ = 0;
             }
+            // ED 3 clears the scrollback on a terminal, not the screen.
+            if (param == 2) NoteWholeClear();
             break;
         default:
             break;
@@ -698,6 +749,9 @@ void Grid::DeleteChars(std::uint16_t n) noexcept {
         BlankCell(line.Cells[CursorCol_ - 1]);
         BlankCell(line.Cells[CursorCol_]);
     }
+    // Doubtful glyphs may have shifted left past the old mark.
+    if (line.WidthDoubt != 0 && line.WidthDoubt - 1 >= CursorCol_)
+        line.WidthDoubt = static_cast<std::uint16_t>(CursorCol_ + 1);
     MoveCells(line.Cells + CursorCol_, line.Cells + CursorCol_ + n,
               static_cast<std::uint16_t>(avail - n));
     ClearCells(line.Cells + Cols_ - n, n);
@@ -733,6 +787,7 @@ void Grid::InsertChars(std::uint16_t n) noexcept {
 }
 
 void Grid::InsertLines(std::uint16_t n) noexcept {
+    NoteDrift();
     // IL is only valid when the cursor is within the scroll region,
     // regardless of DECOM mode.
     if (CursorRow_ < ScrollTop_ || CursorRow_ > ScrollBot_) return;
@@ -745,6 +800,7 @@ void Grid::InsertLines(std::uint16_t n) noexcept {
 }
 
 void Grid::DeleteLines(std::uint16_t n) noexcept {
+    NoteDrift();
     // DL is only valid when the cursor is within the scroll region,
     // regardless of DECOM mode.
     if (CursorRow_ < ScrollTop_ || CursorRow_ > ScrollBot_) return;
@@ -757,14 +813,22 @@ void Grid::DeleteLines(std::uint16_t n) noexcept {
     CursorCol_ = 0;
 }
 
-void Grid::ScrollDown(std::uint16_t n) noexcept { ScrollRegionDown(n); }
+void Grid::ScrollDown(std::uint16_t n) noexcept {
+    NoteDrift();
+    ScrollRegionDown(n);
+}
 
-void Grid::ScrollUp(std::uint16_t n) noexcept { ScrollRegionUp(n); }
+void Grid::ScrollUp(std::uint16_t n) noexcept {
+    NoteDrift();
+    ScrollRegionUp(n);
+}
 
-void Grid::RepeatChar(std::uint16_t n) noexcept {
-    if (LastPrintedChar_ == 0 || n == 0) return;
+bool Grid::RepeatChar(std::uint16_t n) noexcept {
+    if (LastPrintedChar_ == 0) return false;
+    if (n == 0) return true;
     for (std::uint16_t i = 0; i < n; ++i)
         PutChar(LastPrintedChar_, LastPrintedWidth_);
+    return true;
 }
 
 // ---------------------------------------------------------------------------
@@ -778,6 +842,7 @@ void Grid::SetScrollRegion(std::uint16_t top1, std::uint16_t bot1) noexcept {
     if (t >= Rows_) t = 0;
     if (b >= Rows_) b = static_cast<std::uint16_t>(Rows_ - 1);
     if (t >= b) return;
+    NoteDrift();  // homes the cursor, on terminals that agree
     ScrollTop_ = t;
     ScrollBot_ = b;
     CursorRow_ = ModeSet(EMode::Decom) ? ScrollTop_ : 0;
@@ -805,6 +870,7 @@ void Grid::SetMode(std::uint16_t param, bool value) noexcept {
             break;
         case 6:
             apply(EMode::Decom);
+            NoteDrift();
             CursorRow_ = value ? ScrollTop_ : 0;
             CursorCol_ = 0;
             PendingWrap_ = false;
@@ -861,12 +927,20 @@ void Grid::SetMode(std::uint16_t param, bool value) noexcept {
             // and restore the cursor (even when already on main). The cursor
             // does not move on entry.
             if (value) {
+                if (!IsAltScreen()) {
+                    SyncMain_ = Sync_;
+                    SyncSaved_ = true;
+                }
                 SaveCursor();
                 SwitchAltScreen(true);
                 ClearAltScreen();
             } else {
+                const bool fromAlt = IsAltScreen() && SyncSaved_;
                 SwitchAltScreen(false);
                 RestoreCursor();
+                // The main screen was not touched meanwhile and the cursor
+                // is where ?1049h found it, on the terminal too.
+                if (fromAlt) Sync_ = SyncMain_;
             }
             break;
         case 2004:
@@ -1193,6 +1267,8 @@ void Grid::Reset(bool hard) noexcept {
         SavedCursorMain_ = {};
         SavedCursorAlt_ = {};
         CursorStyle_ = 0;
+        Sync_ = RowSync{.Abs = true, .Eq = true, .Blank = true, .Drift = false};
+        SyncSaved_ = false;
     } else {
         // DECSTR (soft reset): keep cursor position, alt-screen flag, and
         // tab stops.  Only reset DECOM, IRM, LNM, bracketed-paste, and
@@ -1260,6 +1336,10 @@ GridResult<void> Grid::Resize(std::uint16_t newCols,
     newRows = size.Rows;
 
     if (newCols == Cols_ && newRows == Rows_) return {};
+
+    // Which rows survive a change of the row count depends on where the cursor
+    // is, and an observer's cursor row is not the terminal's (RowsTrusted).
+    if (newRows != Rows_) NoteDrift();
 
     const std::uint16_t oldRows = Rows_;
     const std::uint16_t clampCols = newCols < Cols_ ? newCols : Cols_;
@@ -1350,6 +1430,8 @@ GridResult<void> Grid::Resize(std::uint16_t newCols,
         const std::uint16_t src = static_cast<std::uint16_t>(srcStart + r);
         CopyCells(newMainLines[r].Cells, MainLines_[src].Cells, clampCols);
         CopyCells(newAltLines[r].Cells, AltLines_[src].Cells, clampCols);
+        newMainLines[r].WidthDoubt = MainLines_[src].WidthDoubt;
+        newAltLines[r].WidthDoubt = AltLines_[src].WidthDoubt;
     }
 
     // Swap screen buffers.

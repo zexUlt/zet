@@ -111,7 +111,7 @@ def _delivery_argv(client: Path, agent_dir: Path, host: SshHost,
         all_env.update(ssh_env)
     settings = " ".join(f"{name}={value}" for name, value in all_env.items())
     return [
-        str(client),
+        str(client), "--predict=never",
         "--ssh-arg", "-F", "--ssh-arg", str(host.config),
         "--ssh-arg", f"-oSetEnv={settings}",
         host.alias,
@@ -791,7 +791,7 @@ def test_agent_flag_disables_delivery(
 
     # Build the argv with --agent pointing to the already-installed agent.
     argv = [
-        str(binaries.client),
+        str(binaries.client), "--predict=never",
         "--agent", str(installed),
         "--ssh-arg", "-F", "--ssh-arg", str(ssh_host.config),
         ssh_host.alias,

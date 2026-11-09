@@ -95,6 +95,7 @@ void VtParser::FeedByte(std::byte b, Grid& grid) noexcept {
             // Signal that the parser lost sync: the output of the pty
             // may have diverged from what we tracked.
             grid.SetPossiblyDiverged(true);
+            ++BypassLimitCount_;
             return;
         }
         EmitBypassByte(b);
@@ -730,7 +731,8 @@ void VtParser::DispatchCsi(char32_t final, Grid& grid) noexcept {
 
         // Repeat char.
         case 'b':  // REP – repeat preceding character
-            grid.RepeatChar(p(0, 1));
+            if (!grid.RepeatChar(p(0, 1)))
+                ++UnknownSeqCount_;  // nothing to repeat
             break;
 
         // Window ops / device attributes – ignore silently (not tracked).

@@ -91,7 +91,7 @@ class MacZet:
             "ASAN_OPTIONS": "detect_leaks=0",
             **agent_env,
         }.items())
-        return [str(self.client),
+        return [str(self.client), "--predict=never",
                 "--ssh-arg", "-F", "--ssh-arg", str(self.host.config),
                 "--ssh-arg", f"-oSetEnv={settings}", self.host.alias]
 

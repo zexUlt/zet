@@ -11,7 +11,7 @@ set_property(GLOBAL PROPERTY ZET_FUZZ_MANIFEST "")
 
 # zet_add_fuzzer(<name> <libraries...>) — builds <name> from <name>.cpp.
 function(zet_add_fuzzer name)
-    add_executable(${name} ${name}.cpp)
+    add_executable(${name} ${name}.cpp ${CMAKE_CURRENT_SOURCE_DIR}/trap_to_abort.cpp)
     target_link_libraries(${name} PRIVATE ${ARGN} zet::compile_options)
 
     # The preset compiles everything with -fsanitize=fuzzer-no-link so that the

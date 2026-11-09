@@ -45,7 +45,7 @@ def _delivery_argv(client: Path, host: RemoteHost) -> list[str]:
         "ZET_ORPHAN_TIMEOUT": DEFAULT_ORPHAN_TIMEOUT_S,
         "ASAN_OPTIONS": "detect_leaks=0",
     }.items())
-    return [str(client),
+    return [str(client), "--predict=never",
             "--ssh-arg", "-F", "--ssh-arg", str(host.config),
             "--ssh-arg", f"-oSetEnv={settings}", host.alias]
 

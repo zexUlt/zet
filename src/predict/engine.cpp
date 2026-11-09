@@ -133,7 +133,10 @@ void PredictionEngine::StepInput(std::byte b, std::uint64_t end, Timestamp now,
                                                          : 0x10000;
                 const bool valid = cp >= minimum && cp <= 0x10FFFF &&
                                    !(cp >= 0xD800 && cp <= 0xDFFF);
-                if (valid && grid::Wcwidth(cp) == 1) {
+                // A glyph terminals disagree on the width of is not predicted:
+                // the column after it would be a guess.
+                if (valid && grid::Wcwidth(cp) == 1 &&
+                    !grid::IsAmbiguousWidth(cp) && !grid::IsClusterJoiner(cp)) {
                     PredictChar(cp, end, now, mirror);
                 } else {
                     BecomeTentative();
@@ -200,8 +203,9 @@ void PredictionEngine::StepCsi(std::uint8_t b) noexcept {
 
 bool PredictionEngine::Predictable(const MirrorView& mirror) const noexcept {
     const grid::Grid& g = mirror.Screen;
-    return Trusted_ && !g.IsAltScreen() && !g.ModeSet(grid::EMode::Irm) &&
-           g.CharsetG0() == 0 && g.CharsetActive() == 0 && !g.PendingWrap() &&
+    return Trusted_ && g.RowsTrusted() && !g.IsAltScreen() &&
+           !g.ModeSet(grid::EMode::Irm) && g.CharsetG0() == 0 &&
+           g.CharsetActive() == 0 && !g.PendingWrap() &&
            g.CursorRow() < g.Rows() && g.CursorCol() < g.Cols();
 }
 
@@ -264,6 +268,7 @@ void PredictionEngine::PredictChar(char32_t cp, std::uint64_t end,
     const Position at = BaseCursor(mirror);
     const grid::Grid& g = mirror.Screen;
     if (at.Row >= g.Rows() || at.Col + 1 >= g.Cols() ||
+        g.WidthDoubtBefore(at.Row, at.Col) ||
         !TailEmpty(mirror, at.Row, at.Col) || !HasRoomFor(at.Row, at.Col)) {
         // Last column, text to the right, or the list is full.
         BecomeTentative();
@@ -296,7 +301,8 @@ void PredictionEngine::PredictBackspace(std::uint64_t end, Timestamp now,
     const grid::Grid& g = mirror.Screen;
     // At or before the start of input the cell to the left is not ours.
     if (!InputStartCol_ || at.Col == 0 || at.Col <= *InputStartCol_ ||
-        at.Row >= g.Rows() || at.Col >= g.Cols()) {
+        at.Row >= g.Rows() || at.Col >= g.Cols() ||
+        g.WidthDoubtBefore(at.Row, at.Col)) {
         BecomeTentative();
         return;
     }
@@ -338,6 +344,7 @@ void PredictionEngine::Rebase(const MirrorView& mirror) noexcept {
     LastColumnSet_ = g.ColumnSetCount();
     LastUnknown_ = mirror.Parser.UnknownSeqCount();
     LastDcsApc_ = mirror.Parser.DcsApcCount();
+    LastBypassLimit_ = mirror.Parser.BypassLimitCount();
 }
 
 bool PredictionEngine::OutputIsPredictedEcho(
@@ -376,6 +383,8 @@ void PredictionEngine::Observe(const MirrorView& mirror) noexcept {
         untrust = true;
     }
     if (g.IsAltScreen() != LastAlt_) reset = true;
+    // The rows are not the terminal's: nothing predicted is where it seems.
+    if (!g.RowsTrusted()) reset = true;
     if (g.CursorRow() != LastRow_) reset = true;
     if (g.ScrollCount() != LastScroll_) reset = true;
     if (mirror.Parser.UnknownSeqCount() != LastUnknown_) {
@@ -383,6 +392,12 @@ void PredictionEngine::Observe(const MirrorView& mirror) noexcept {
         untrust = true;
     }
     if (mirror.Parser.DcsApcCount() != LastDcsApc_) {
+        reset = true;
+        untrust = true;
+    }
+    // The parser gave up on a string at its limit: the terminal is still
+    // inside it, which is as unknown as a DCS.
+    if (mirror.Parser.BypassLimitCount() != LastBypassLimit_) {
         reset = true;
         untrust = true;
     }
@@ -428,6 +443,20 @@ void PredictionEngine::OnSnapshot(std::uint32_t streamGen, Timestamp now,
     ResetAll();
     Trusted_ = true;
     Drain(now, mirror);
+}
+
+void PredictionEngine::OnBaseline(const EchoAck& ack, Timestamp now,
+                                  const MirrorView& /*mirror*/) noexcept {
+    if (Mode_ == EDisplayMode::Never) return;
+    // Before Cull: the age of a prediction that is dropped here must not count
+    // as a glitch.
+    std::size_t kept = 0;
+    for (std::size_t i = 0; i < Count_; ++i) {
+        if (Preds_[i].InputEnd > ack.InputOffset) Preds_[kept++] = Preds_[i];
+    }
+    Count_ = kept;
+    if (Cursor_ && Cursor_->InputEnd <= ack.InputOffset) Cursor_.reset();
+    Cull(now);
 }
 
 void PredictionEngine::OnResize(Timestamp now,
@@ -552,6 +581,21 @@ void PredictionEngine::OnSrtt(Duration srtt, Timestamp now) noexcept {
 void PredictionEngine::OnTick(Timestamp now) noexcept {
     if (Mode_ == EDisplayMode::Never) return;
     Cull(now);
+}
+
+std::optional<Timestamp> PredictionEngine::NextDeadline() const noexcept {
+    if (Mode_ == EDisplayMode::Never || Count_ == 0) return std::nullopt;
+    // Cull measures from the oldest prediction, the first of the list.
+    const Timestamp created = Preds_[0].Created;
+    std::optional<Timestamp> next;
+    const auto consider = [&](Duration threshold) {
+        const Timestamp at = created + threshold;
+        if (!next || at < *next) next = at;
+    };
+    // The stages Cull has not reached: each moves Glitch_ up, and only then.
+    if (Glitch_ < GLITCH_REPAIR_COUNT) consider(GLITCH_THRESHOLD);
+    if (Glitch_ < 2 * GLITCH_REPAIR_COUNT) consider(GLITCH_FLAG_THRESHOLD);
+    return next;
 }
 
 bool PredictionEngine::AnyDrawn() const noexcept {

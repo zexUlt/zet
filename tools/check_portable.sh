@@ -22,6 +22,7 @@ readonly PORTABLE=(
     src/client
     src/app
     src/grid
+    src/predict
     src/io/clock.cpp
     src/io/errno.cpp
     src/io/fd.cpp

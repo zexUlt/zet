@@ -43,7 +43,13 @@ readonly INPUT_TIMEOUT_SECONDS=25
 # between inputs, ASAN_OPTIONS the one ASan runs at exit, and it was the latter
 # that failed the run.
 readonly DETECT_LEAKS=0
-export ASAN_OPTIONS="detect_leaks=$DETECT_LEAKS"
+
+# Traps leave an artifact because fuzz/trap_to_abort.cpp turns SIGTRAP into
+# SIGABRT in every fuzzer: libFuzzer has no handler for SIGTRAP (there is no
+# handle_trap flag), and __builtin_trap is SIGTRAP on aarch64. The sanitizers
+# print a stack and halt.
+export ASAN_OPTIONS="detect_leaks=$DETECT_LEAKS:print_stacktrace=1"
+export UBSAN_OPTIONS="print_stacktrace=1:halt_on_error=1"
 
 root=$(cd "$(dirname "$0")/.." && pwd)
 cd "$root" || exit 2
@@ -64,8 +70,9 @@ if [ ! -s "$manifest" ]; then
     exit 2
 fi
 
+# Findings of earlier runs are kept: a run that starts over must not delete the
+# only reproducer of the previous one.
 findings=$build/findings
-rm -rf "$findings"
 mkdir -p "$findings"
 
 status=0
