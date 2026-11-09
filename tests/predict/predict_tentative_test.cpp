@@ -121,9 +121,9 @@ TEST_CASE(
 TEST_CASE("a width-1 non-ASCII character is predicted") {
     Ready t;
     const auto before = t.R.Count();
-    t.R.Type("\xc3\xa9");  // é
+    t.R.Type("\xc3\xb1");  // ñ (é is ambiguous in width)
     CHECK(t.R.Count() == before + 1);
-    CHECK(t.R.E.Predictions()[before].Codepoint == U'é');
+    CHECK(t.R.E.Predictions()[before].Codepoint == U'ñ');
 }
 
 TEST_CASE("the last column raises the epoch") {

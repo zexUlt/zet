@@ -83,8 +83,10 @@ void End(grid::EscWriter& w, grid::Pen& pen, const grid::Grid& g,
 /// A cell as the mirror has it, a wide glyph whole. An empty cell goes through
 /// ECH with the background of the cell, not a space: a space would change what
 /// a selection copies.
-void Restore(grid::EscWriter& w, grid::Pen& pen, const grid::Grid& g,
-             std::uint16_t row, std::uint16_t col) noexcept {
+/// Returns the glyph it printed, 0 for none: a printed glyph is what a REP on
+/// the terminal repeats next.
+char32_t Restore(grid::EscWriter& w, grid::Pen& pen, const grid::Grid& g,
+                 std::uint16_t row, std::uint16_t col) noexcept {
     // The half of a wide glyph is put back by writing the glyph whole, from
     // its head: the terminal has the glyph broken, or something in its place.
     if (g.CellAt(row, col).Width == 0 && col > 0 &&
@@ -92,14 +94,39 @@ void Restore(grid::EscWriter& w, grid::Pen& pen, const grid::Grid& g,
         --col;
     }
     const grid::Cell& cell = g.CellAt(row, col);
-    if (cell.Width == 0) return;  // nothing the mirror can say about it
+    if (cell.Width == 0) return 0;  // nothing the mirror can say about it
     Column(w, col);
     grid::EmitSgr(w, pen, cell);
     if (cell.Codepoint == 0) {
         w.WriteLiteral("\x1b[X");
-    } else {
-        w.WriteUtf8(Printable(cell.Codepoint));
+        return 0;
     }
+    w.WriteUtf8(Printable(cell.Codepoint));
+    return Printable(cell.Codepoint);
+}
+
+/// Whether the glyph the program printed last can be printed again, which is
+/// the only way to put what REP repeats back after the overlay printed
+/// something else: it must be in the cursor row, where CHA reaches it, still
+/// be there (a mirror that has printed nothing has no glyph), and be one the
+/// terminal holds as the grid does (no mark dropped after it).
+bool CanReprint(const grid::Grid& g) noexcept {
+    const grid::Grid::LastGlyph l = g.LastPrinted();
+    if (l.Marked || l.Row != g.CursorRow() || l.Col >= g.Cols()) {
+        return false;
+    }
+    const grid::Cell& c = g.CellAt(l.Row, l.Col);
+    const char32_t held = c.Codepoint == 0 ? U' ' : c.Codepoint;
+    return held == l.Codepoint;
+}
+
+/// Prints the program's last glyph again where it is.
+void Reprint(grid::EscWriter& w, grid::Pen& pen, const grid::Grid& g) noexcept {
+    const grid::Grid::LastGlyph l = g.LastPrinted();
+    const grid::Cell& c = g.CellAt(l.Row, l.Col);
+    Column(w, l.Col);
+    grid::EmitSgr(w, pen, c);
+    w.WriteUtf8(Printable(l.Codepoint));
 }
 
 }  // namespace
@@ -124,11 +151,20 @@ ByteSpan Overlay::BuildUndo(const MirrorView& mirror) noexcept {
     grid::EscWriter w{Buf_.data(), Buf_.size()};
     Begin(w, g);
     grid::Pen pen = PenOf(PenCell(g));
+    char32_t printed = 0;
     for (std::size_t i = 0; i < Drawn_.Count; ++i) {
         const Placed& p = Drawn_.Cells[i];
         if (p.Row < g.Rows() && p.Col < g.Cols()) {
-            Restore(w, pen, g, p.Row, p.Col);
+            if (const char32_t cp = Restore(w, pen, g, p.Row, p.Col)) {
+                printed = cp;
+            }
         }
+    }
+    // REP on the terminal repeats what was printed last: the program's glyph
+    // again, if it can be. When it cannot the overlay was not drawn in this
+    // state (BuildUpdate), so nothing here has put anything else.
+    if (printed != 0 && printed != g.LastPrinted().Codepoint && CanReprint(g)) {
+        Reprint(w, pen, g);
     }
     End(w, pen, g, g.CursorCol());
     if (w.Overflow) return {};
@@ -174,7 +210,9 @@ ByteSpan Overlay::BuildUpdate(const PredictionEngine& engine,
                          !g.IsAltScreen() && !g.PendingWrap() &&
                          !g.ModeSet(grid::EMode::Irm) && g.CharsetG0() == 0 &&
                          g.CharsetActive() == 0 && engine.ColumnTrusted() &&
-                         g.CursorRow() < g.Rows() && g.CursorCol() < g.Cols();
+                         g.CursorRow() < g.Rows() && g.CursorCol() < g.Cols() &&
+                         g.RowsTrusted() &&
+                         !g.WidthDoubtBefore(g.CursorRow(), g.CursorCol());
     // What is drawn is taken off only at a point where bytes may go in; the
     // overlay is only ever drawn at one, and the next piece of bytes comes
     // after a restore, so a point that is not one has nothing to take off.
@@ -197,6 +235,7 @@ ByteSpan Overlay::BuildUpdate(const PredictionEngine& engine,
             // one would break. A head the grid has broken (a narrow cell that
             // holds a wide codepoint, its tail overwritten) is one too: put
             // back, the terminal would print it two columns wide.
+            if (g.WidthDoubtBefore(p.Row, p.Col)) continue;
             if (cell.Width != 1 ||
                 (cell.Codepoint != 0 && grid::Wcwidth(cell.Codepoint) == 2) ||
                 (p.Col > 0 &&
@@ -231,10 +270,13 @@ ByteSpan Overlay::BuildUpdate(const PredictionEngine& engine,
     Begin(w, g);
     const grid::Cell base = PenCell(g);
     grid::Pen pen = PenOf(base);
+    char32_t printed = 0;
     for (std::size_t i = 0; i < Drawn_.Count; ++i) {
         const Placed& p = Drawn_.Cells[i];
         if (p.Row < g.Rows() && p.Col < g.Cols()) {
-            Restore(w, pen, g, p.Row, p.Col);
+            if (const char32_t cp = Restore(w, pen, g, p.Row, p.Col)) {
+                printed = cp;
+            }
         }
     }
     for (std::size_t i = 0; i < Next_.Count; ++i) {
@@ -247,7 +289,21 @@ ByteSpan Overlay::BuildUpdate(const PredictionEngine& engine,
             w.WriteLiteral("\x1b[X");
         } else {
             w.WriteUtf8(Printable(p.Codepoint));
+            printed = Printable(p.Codepoint);
         }
+    }
+    if (printed != 0 && printed != g.LastPrinted().Codepoint) {
+        // The terminal's REP would repeat the overlay's glyph. Without a way
+        // to print the program's again, nothing is drawn.
+        if (!CanReprint(g)) return {};
+        const grid::Grid::LastGlyph l = g.LastPrinted();
+        // Drawn over, it would show the overlay's cell, not the glyph.
+        for (std::size_t i = 0; i < Next_.Count; ++i) {
+            if (Next_.Cells[i].Row == l.Row && Next_.Cells[i].Col == l.Col) {
+                return {};
+            }
+        }
+        Reprint(w, pen, g);
     }
     End(w, pen, g, Next_.Cursor.value_or(g.CursorCol()));
     if (w.Overflow) return {};

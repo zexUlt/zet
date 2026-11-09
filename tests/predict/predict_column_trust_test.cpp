@@ -36,15 +36,26 @@ TEST_CASE("nothing is predicted before the column is known") {
 
 TEST_CASE("CR sets the column") { CHECK(PredictsAfter("$ \r$ ")); }
 
-TEST_CASE("CUP sets the column") { CHECK(PredictsAfter("\x1b[3;4H")); }
+// An absolute row alone does not make the mirror's rows the terminal's (the
+// shell's lines may be above the first one, design.md §9): it is trusted
+// after the screen is cleared, as the snapshot does it.
+TEST_CASE("CUP sets the column") {
+    CHECK(PredictsAfter("\x1b[2J\x1b[3;4H"));
+    CHECK_FALSE(PredictsAfter("\x1b[3;4H"));
+}
 
-TEST_CASE("HVP sets the column") { CHECK(PredictsAfter("\x1b[3;4f")); }
+TEST_CASE("HVP sets the column") {
+    CHECK(PredictsAfter("\x1b[2J\x1b[3;4f"));
+    CHECK_FALSE(PredictsAfter("\x1b[3;4f"));
+}
 
 TEST_CASE("CHA sets the column") { CHECK(PredictsAfter("\x1b[4G")); }
 
 TEST_CASE("CNL and CPL set the column") {
-    CHECK(PredictsAfter("\x1b[1E"));
-    CHECK(PredictsAfter("\x1b[1F"));
+    CHECK(PredictsAfter("\x1b[2J\x1b[H\x1b[1E"));
+    CHECK(PredictsAfter("\x1b[2J\x1b[H\x1b[1F"));
+    CHECK_FALSE(PredictsAfter("\x1b[1E"));  // the terminal may be at its bottom
+    CHECK_FALSE(PredictsAfter("\x1b[1F"));
 }
 
 TEST_CASE("RIS sets the column") {

@@ -9,118 +9,13 @@
 #include <string>
 #include <string_view>
 
+#include "overlay_rig.hpp"
 #include "predict_rig.hpp"
 #include "zet/grid/limits.hpp"
 #include "zet/predict/overlay.hpp"
 
 using namespace zet::predict;
 using namespace zet::predict::test;
-
-namespace {
-
-struct Term {
-    std::unique_ptr<zet::grid::Grid> G;
-    zet::grid::VtParser P;
-    Term(int cols, int rows) : G(MakeGrid(cols, rows)) {}
-    void Feed(zet::ByteSpan b) { P.Feed(b.data(), b.size(), *G); }
-    void Feed(std::string_view s) { Feed(Bytes(s)); }
-};
-
-bool Blank(const zet::grid::Cell& c) {
-    return c.Codepoint == 0 || c.Codepoint == U' ';
-}
-
-/// Cell text and cursor of two grids, compared.
-bool SameText(const zet::grid::Grid& a, const zet::grid::Grid& b) {
-    if (a.Rows() != b.Rows() || a.Cols() != b.Cols()) return false;
-    if (a.CursorRow() != b.CursorRow() || a.CursorCol() != b.CursorCol()) {
-        return false;
-    }
-    for (std::uint16_t r = 0; r < a.Rows(); ++r) {
-        for (std::uint16_t c = 0; c < a.Cols(); ++c) {
-            const auto& x = a.CellAt(r, c);
-            const auto& y = b.CellAt(r, c);
-            if (Blank(x) != Blank(y)) return false;
-            if (!Blank(x) && (x.Codepoint != y.Codepoint || x.Width != y.Width))
-                return false;
-        }
-    }
-    return true;
-}
-
-/// The client's order: undo, agent bytes, mirror, redraw. `Real` gets the
-/// overlay and the agent's bytes, `Ref` only the agent's bytes.
-struct Client {
-    Rig R;
-    Term Real;
-    Term Ref;
-    std::unique_ptr<Overlay> O = Overlay::Create();
-    std::size_t Draws = 0;
-    /// Bytes the overlay has put on the real terminal.
-    std::size_t Written = 0;
-
-    Client(int cols, int rows, EDisplayMode mode)
-        : R(cols, rows, mode), Real(cols, rows), Ref(cols, rows) {}
-
-    /// Bytes on the local terminal before zet started: not in the mirror.
-    void Before(std::string_view s) {
-        Real.Feed(s);
-        Ref.Feed(s);
-    }
-    void Undo() {
-        const auto b = O->BuildUndo(R.View());
-        Written += b.size();
-        Real.Feed(b);
-        O->Commit(R.E);
-    }
-    /// The terminal and the mirror change size. The overlay is taken off only
-    /// if the restore is still right afterwards, as Client::Resize does it;
-    /// otherwise it is forgotten without a byte. The terminal here does not
-    /// reflow: a test that wants it says what it would have done.
-    void Resize(std::uint16_t cols, std::uint16_t rows) {
-        if (O->UndoSurvivesResize(R.View(), cols)) {
-            Undo();
-        } else {
-            O->Forget();
-            R.E.ClearDrawn();
-        }
-        REQUIRE(Real.G->Resize(cols, rows).has_value());
-        REQUIRE(Ref.G->Resize(cols, rows).has_value());
-        REQUIRE(R.G->Resize(cols, rows).has_value());
-        R.E.OnResize(R.Now, R.View());
-    }
-    void Agent(std::string_view bytes) {
-        Undo();
-        Real.Feed(bytes);
-        Ref.Feed(bytes);
-        R.Output(bytes);
-        Refresh();
-    }
-    void Refresh() {
-        const auto b = O->BuildUpdate(R.E, R.View());
-        if (!b.empty()) ++Draws;
-        Written += b.size();
-        Real.Feed(b);
-        O->Commit(R.E);
-    }
-    void Key(std::string_view k) {
-        R.Type(k);
-        Refresh();
-    }
-    /// Prompt and two echoed keys: a confirmed epoch, cursor at column 4.
-    void Start() {
-        Agent("\r$ ");
-        Key("a");
-        Agent("a");
-        R.Ack();
-        Key("B");
-        Agent("B");
-        R.Ack();
-        Refresh();
-    }
-};
-
-}  // namespace
 
 TEST_CASE(
     "review: a prediction under a wide glyph that arrived later is taken off") {
@@ -137,7 +32,7 @@ TEST_CASE(
     // The overlay draws 'c' on the right half of the wide glyph; the next
     // restore skips cells whose width is not 1 and leaves 'c' there.
     c.Agent("");
-    CHECK(SameText(*c.Real.G, *c.Ref.G));
+    CHECK(SameScreen(*c.Real.G, *c.Ref.G));
 }
 
 TEST_CASE(
@@ -167,11 +62,9 @@ TEST_CASE(
     CHECK(c.O->BuildUpdate(c.R.E, c.R.View()).empty());
 }
 
-// Round B (row sync before absolute positioning): not fixed by this round.
 TEST_CASE(
     "review: a cursor-up above the mirror's first row puts the overlay on a "
-    "row of the terminal the mirror never saw" *
-    doctest::skip()) {
+    "row of the terminal the mirror never saw") {
     Client c(30, 6, EDisplayMode::Always);
     // zet starts on row 3 of a terminal that already shows the local shell.
     c.Before("local$ ls\r\nfile1 file2 file3\r\nlocal$ zet host\r\n");
@@ -180,11 +73,13 @@ TEST_CASE(
     // two-line prompt redrawn, a progress line). The terminal goes to row 2,
     // the mirror stays on row 0: no reset, the column stays trusted.
     c.Agent("\x1b[A\x1b[5G");
+    const std::size_t before = c.Draws;
     c.Key("x");
-    REQUIRE(c.Draws > 0);
+    // The rows are lost: nothing is drawn, so nothing is restored over the
+    // terminal's row 2 with the mirror's row 0.
+    CHECK(c.Draws == before);
     c.Agent("");
-    // The restore wrote the mirror's row 0 over the terminal's row 2.
-    CHECK(SameText(*c.Real.G, *c.Ref.G));
+    CHECK(SameScreen(*c.Real.G, *c.Ref.G));
 }
 
 TEST_CASE(
@@ -207,7 +102,7 @@ TEST_CASE(
     c.Resize(10, 5);
     CHECK(c.Written == before);
     CHECK_FALSE(c.O->Drawn());
-    CHECK(SameText(*c.Real.G, *c.Ref.G));
+    CHECK(SameScreen(*c.Real.G, *c.Ref.G));
 }
 
 TEST_CASE("review: a narrowing resize that keeps every column is undone") {
@@ -219,7 +114,7 @@ TEST_CASE("review: a narrowing resize that keeps every column is undone") {
     c.Resize(10, 5);
     CHECK(c.Written > before);
     CHECK_FALSE(c.O->Drawn());
-    CHECK(SameText(*c.Real.G, *c.Ref.G));
+    CHECK(SameScreen(*c.Real.G, *c.Ref.G));
 }
 
 TEST_CASE(
@@ -269,7 +164,7 @@ TEST_CASE("review: a widening resize on a plain row is undone") {
     const std::size_t before = c.Written;
     c.Resize(20, 5);
     CHECK(c.Written > before);
-    CHECK(SameText(*c.Real.G, *c.Ref.G));
+    CHECK(SameScreen(*c.Real.G, *c.Ref.G));
 }
 
 TEST_CASE(
@@ -355,6 +250,6 @@ TEST_CASE(
     REQUIRE(c.R.G->CellAt(0, 4).Width == 1);
     REQUIRE(c.R.G->CellAt(0, 4).Codepoint == 0x4E2D);
     c.Undo();
-    CHECK(SameText(*c.Real.G, *c.Ref.G));
+    CHECK(SameScreen(*c.Real.G, *c.Ref.G));
     CHECK(c.Real.G->CellAt(0, 5).Codepoint == U'x');
 }

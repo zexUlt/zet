@@ -17,8 +17,10 @@ namespace zet::predict {
 /// a glyph of four bytes.
 inline constexpr std::size_t OVERLAY_CELL_BYTES_MAX = 80;
 /// The fixed part of one overlay: sync and cursor visibility, the pen back,
-/// the cursor column back.
-inline constexpr std::size_t OVERLAY_FRAME_BYTES_MAX = 256;
+/// the cursor column back, and the program's last glyph printed again (what
+/// REP reads, design.md §9).
+inline constexpr std::size_t OVERLAY_FRAME_BYTES_MAX =
+    256 + OVERLAY_CELL_BYTES_MAX;
 /// The most bytes taking the overlay off the terminal can be. The client keeps
 /// this much room in its stdout queue ahead of every read, because the
 /// restore before the agent's bytes cannot be left out (design.md §9).

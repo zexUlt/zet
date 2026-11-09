@@ -133,7 +133,10 @@ void PredictionEngine::StepInput(std::byte b, std::uint64_t end, Timestamp now,
                                                          : 0x10000;
                 const bool valid = cp >= minimum && cp <= 0x10FFFF &&
                                    !(cp >= 0xD800 && cp <= 0xDFFF);
-                if (valid && grid::Wcwidth(cp) == 1) {
+                // A glyph terminals disagree on the width of is not predicted:
+                // the column after it would be a guess.
+                if (valid && grid::Wcwidth(cp) == 1 &&
+                    !grid::IsAmbiguousWidth(cp) && !grid::IsClusterJoiner(cp)) {
                     PredictChar(cp, end, now, mirror);
                 } else {
                     BecomeTentative();
@@ -200,8 +203,9 @@ void PredictionEngine::StepCsi(std::uint8_t b) noexcept {
 
 bool PredictionEngine::Predictable(const MirrorView& mirror) const noexcept {
     const grid::Grid& g = mirror.Screen;
-    return Trusted_ && !g.IsAltScreen() && !g.ModeSet(grid::EMode::Irm) &&
-           g.CharsetG0() == 0 && g.CharsetActive() == 0 && !g.PendingWrap() &&
+    return Trusted_ && g.RowsTrusted() && !g.IsAltScreen() &&
+           !g.ModeSet(grid::EMode::Irm) && g.CharsetG0() == 0 &&
+           g.CharsetActive() == 0 && !g.PendingWrap() &&
            g.CursorRow() < g.Rows() && g.CursorCol() < g.Cols();
 }
 
@@ -264,6 +268,7 @@ void PredictionEngine::PredictChar(char32_t cp, std::uint64_t end,
     const Position at = BaseCursor(mirror);
     const grid::Grid& g = mirror.Screen;
     if (at.Row >= g.Rows() || at.Col + 1 >= g.Cols() ||
+        g.WidthDoubtBefore(at.Row, at.Col) ||
         !TailEmpty(mirror, at.Row, at.Col) || !HasRoomFor(at.Row, at.Col)) {
         // Last column, text to the right, or the list is full.
         BecomeTentative();
@@ -296,7 +301,8 @@ void PredictionEngine::PredictBackspace(std::uint64_t end, Timestamp now,
     const grid::Grid& g = mirror.Screen;
     // At or before the start of input the cell to the left is not ours.
     if (!InputStartCol_ || at.Col == 0 || at.Col <= *InputStartCol_ ||
-        at.Row >= g.Rows() || at.Col >= g.Cols()) {
+        at.Row >= g.Rows() || at.Col >= g.Cols() ||
+        g.WidthDoubtBefore(at.Row, at.Col)) {
         BecomeTentative();
         return;
     }
@@ -377,6 +383,8 @@ void PredictionEngine::Observe(const MirrorView& mirror) noexcept {
         untrust = true;
     }
     if (g.IsAltScreen() != LastAlt_) reset = true;
+    // The rows are not the terminal's: nothing predicted is where it seems.
+    if (!g.RowsTrusted()) reset = true;
     if (g.CursorRow() != LastRow_) reset = true;
     if (g.ScrollCount() != LastScroll_) reset = true;
     if (mirror.Parser.UnknownSeqCount() != LastUnknown_) {

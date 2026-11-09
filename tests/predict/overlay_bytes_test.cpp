@@ -55,7 +55,9 @@ TEST_CASE(
     r.Start();
     r.Type("b");
     CHECK(r.Update() ==
-          std::string(BEGIN) + "\x1b[5Gb\x1b[6G" + std::string(END));
+          // The 'A' is the program's last glyph printed again: REP on the
+          // terminal repeats it, not the overlay's 'b'.
+          std::string(BEGIN) + "\x1b[5Gb\x1b[4GA\x1b[6G" + std::string(END));
 }
 
 TEST_CASE("the overlay says what was drawn to the engine") {
@@ -180,7 +182,8 @@ TEST_CASE(
     r.Start();
     r.Type("b");
     REQUIRE(r.E.UnderlinePredictions());
-    CHECK(r.Update() == std::string(BEGIN) + "\x1b[5G\x1b[0;4mb\x1b[0m\x1b[6G" +
+    CHECK(r.Update() == std::string(BEGIN) +
+                            "\x1b[5G\x1b[0;4mb\x1b[4G\x1b[0mA\x1b[6G" +
                             std::string(END));
 }
 
