@@ -29,6 +29,7 @@ add_executable(zet_tests
     predict/overlay_terminal_test.cpp
     predict/overlay_review_test.cpp
     predict/overlay_desync_test.cpp
+    predict/overlay_cpr_test.cpp
     predict/overlay_reserve_test.cpp
     predict/predict_baseline_drop_test.cpp
     predict/predict_ack_test.cpp

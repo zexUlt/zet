@@ -1,4 +1,5 @@
 add_library(zet_predict STATIC
+    calibration.cpp
     cpr_demux.cpp
     engine.cpp
     overlay.cpp

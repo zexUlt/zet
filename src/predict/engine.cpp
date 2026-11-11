@@ -203,7 +203,7 @@ void PredictionEngine::StepCsi(std::uint8_t b) noexcept {
 
 bool PredictionEngine::Predictable(const MirrorView& mirror) const noexcept {
     const grid::Grid& g = mirror.Screen;
-    return Trusted_ && g.RowsTrusted() && !g.IsAltScreen() &&
+    return Trusted_ && !Lagging_ && g.RowsTrusted() && !g.IsAltScreen() &&
            !g.ModeSet(grid::EMode::Irm) && g.CharsetG0() == 0 &&
            g.CharsetActive() == 0 && !g.PendingWrap() &&
            g.CursorRow() < g.Rows() && g.CursorCol() < g.Cols();
@@ -219,6 +219,9 @@ bool PredictionEngine::TailEmpty(const MirrorView& mirror, std::uint16_t row,
                                  std::uint16_t col) const noexcept {
     const grid::Grid& g = mirror.Screen;
     if (row >= g.Rows()) return false;
+    // Cells left of KnownFrom are the terminal's, not the mirror's: what the
+    // mirror holds there says nothing, and neither does their being blank.
+    if (col < g.KnownFrom(row)) return false;
     for (std::uint16_t c = col; c < g.Cols(); ++c) {
         if (Held(g.CellAt(row, c)) == 0) continue;
         // A cell the mirror still shows may already be predicted away.
@@ -308,7 +311,7 @@ void PredictionEngine::PredictBackspace(std::uint64_t end, Timestamp now,
     }
     const auto left = static_cast<std::uint16_t>(at.Col - 1);
     // Only at the end of the line: in the middle the program shifts the tail.
-    if (!TailEmpty(mirror, at.Row, at.Col) ||
+    if (!TailEmpty(mirror, at.Row, at.Col) || left < g.KnownFrom(at.Row) ||
         g.CellAt(at.Row, left).Width != 1 || !HasRoomFor(at.Row, left)) {
         BecomeTentative();
         return;
@@ -457,6 +460,15 @@ void PredictionEngine::OnBaseline(const EchoAck& ack, Timestamp now,
     Count_ = kept;
     if (Cursor_ && Cursor_->InputEnd <= ack.InputOffset) Cursor_.reset();
     Cull(now);
+}
+
+void PredictionEngine::OnCalibrated(bool resynced, Timestamp now,
+                                    const MirrorView& mirror) noexcept {
+    if (Mode_ == EDisplayMode::Never) return;
+    Cull(now);
+    Rebase(mirror);
+    if (resynced) ResetAll();
+    Trusted_ = true;
 }
 
 void PredictionEngine::OnResize(Timestamp now,
