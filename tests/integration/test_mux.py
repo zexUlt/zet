@@ -116,6 +116,10 @@ def two_hosts(tmp_path_factory, muxd) -> tuple[SshHost, SshHost]:
     work = tmp_path_factory.mktemp("sshd-m5")
     first = ensure_user(TEST_USER)
     second = ensure_user(SECOND_USER)
+    # make_keys replaces the first user's authorized_keys, which the session
+    # sshd of the other modules relies on; put the file back afterwards.
+    authorized = Path(first.pw_dir) / ".ssh" / "authorized_keys"
+    original = authorized.read_bytes() if authorized.exists() else None
     keys = make_keys(work, first)
     authorize(second, (work / "client_key.pub").read_text())
     ensure_user(INTRUDER_USER)
@@ -137,6 +141,10 @@ def two_hosts(tmp_path_factory, muxd) -> tuple[SshHost, SshHost]:
         yield hosts[0], hosts[1]
     finally:
         stop_sshd(sshd)
+        if original is None:
+            authorized.unlink(missing_ok=True)
+        else:
+            authorized.write_bytes(original)
 
 
 @pytest.fixture

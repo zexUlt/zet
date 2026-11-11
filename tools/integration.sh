@@ -29,6 +29,10 @@ target=${ZET_PYTEST_TARGET:-tests/integration}
 
 export ZET_EXTRA_PACKAGES=tools/integration-packages.txt
 export ZET_DOCKER_ARGS="--cap-add=NET_ADMIN"
+# CI makes a missing netem qdisc a failure rather than a skip (M7 tests).
+if [ -n "${CI:-}" ]; then
+    ZET_DOCKER_ARGS="$ZET_DOCKER_ARGS -e CI"
+fi
 for name in $(compgen -e | grep '^ZET_SOAK_' || true); do
     ZET_DOCKER_ARGS="$ZET_DOCKER_ARGS -e $name"
 done

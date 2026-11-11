@@ -7,6 +7,7 @@ the agent must work without root and is tested as the user it will run as.
 
 from __future__ import annotations
 
+import contextlib
 import os
 import pwd as _pwd
 import shutil
@@ -243,3 +244,40 @@ def iptables() -> str:
     if probe.returncode != 0:
         pytest.skip(f"iptables unusable here: {probe.stderr.decode(errors='replace').strip()}")
     return tool
+
+
+def _netem_unavailable(reason: str) -> None:
+    """In CI the M7 criterion would go unchecked, so a missing qdisc fails
+    there (design.md §16, M7 test criteria); on a developer's machine the
+    tests skip."""
+    if os.environ.get("CI") or os.environ.get("GITHUB_ACTIONS"):
+        pytest.fail(reason)
+    pytest.skip(reason)
+
+
+@pytest.fixture(scope="session")
+def netem():
+    """A context manager that puts `netem <spec>` on lo for the duration of a
+    with-block. A packet passes lo's egress once in each direction, so
+    `delay D` makes the round trip 2 D."""
+    tc = shutil.which("tc")
+    if tc is None:
+        _netem_unavailable("tc (iproute2) is not installed")
+    probe = subprocess.run([tc, "qdisc", "add", "dev", "lo", "root", "netem", "delay", "1ms"],
+                           capture_output=True, timeout=STEP_TIMEOUT_SECONDS)
+    if probe.returncode != 0:
+        _netem_unavailable(f"netem unusable here: {probe.stderr.decode(errors='replace').strip()}")
+    subprocess.run([tc, "qdisc", "del", "dev", "lo", "root"], check=False,
+                   capture_output=True, timeout=STEP_TIMEOUT_SECONDS)
+
+    @contextlib.contextmanager
+    def apply(spec: str):
+        subprocess.run([tc, "qdisc", "replace", "dev", "lo", "root", "netem", *spec.split()],
+                       check=True, timeout=STEP_TIMEOUT_SECONDS)
+        try:
+            yield
+        finally:
+            subprocess.run([tc, "qdisc", "del", "dev", "lo", "root"], check=False,
+                           capture_output=True, timeout=STEP_TIMEOUT_SECONDS)
+
+    return apply
