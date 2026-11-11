@@ -67,9 +67,13 @@
 //
 // Widths (round C4). With the calibration on, the model terminal (Real and
 // Ref, in every snapshot too) draws with a fixed width policy that the last
-// input byte picks: A and P one or two cells wide, VS16 widening or not. The
-// mirror starts from the default and learns it by the replies. Asserted after
-// every step:
+// input byte picks (bit 3 clear: the default table): A and P one or two cells
+// wide, VS16 widening or not. The mirror starts from the default and learns it
+// by the replies. A snapshot body holds only ASCII then: the mirror's cells
+// of a real snapshot are the agent's, not laid out again. Invariant a. is owed
+// only when the model has the default table: the overlay may draw over a glyph
+// that the mirror has narrower than the terminal does, which the verdicts are
+// there to end. Asserted after every step:
 //  14. no verdict contradicts the model: Narrow means the model draws the
 //      class one cell wide, Wide means two (E: VS16 widens); the mirror's
 //      policy is the one the verdicts give
@@ -306,16 +310,32 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data,
         PreZet(*term, preRow, data[2] / 6U);
         PreZet(*ref, preRow, data[2] / 6U);
     }
+    // REP repeats the last printed character: the mirror, which starts blank,
+    // and the terminal, which has had a shell before, must agree on it, or a
+    // REP before the first character makes them differ for a reason that is
+    // no width at all. One character is printed and taken back on all three.
+    if (calibrated) {
+        static constexpr std::uint8_t SAME_LAST[] = {'x', 0x08, 0x1B, '[', 'K'};
+        for (Mirror* m : {mirror.get(), term.get(), ref.get()}) {
+            m->Feed(SAME_LAST, sizeof(SAME_LAST));
+        }
+    }
     // The model terminal's widths, from the last byte of the input.
     grid::WidthPolicy model;
     if (calibrated) {
         const std::uint8_t b = data[size - 1];
-        model.Ambiguous = static_cast<std::uint8_t>(1 + (b & 1));
-        model.PrivateUse = static_cast<std::uint8_t>(1 + ((b >> 1) & 1));
-        model.Vs16Widens = ((b >> 2) & 1) != 0;
+        if (((b >> 3) & 1) != 0) {
+            model.Ambiguous = static_cast<std::uint8_t>(1 + (b & 1));
+            model.PrivateUse = static_cast<std::uint8_t>(1 + ((b >> 1) & 1));
+            model.Vs16Widens = ((b >> 2) & 1) != 0;
+        }
         term->G->SetWidthPolicy(model);
         ref->G->SetWidthPolicy(model);
     }
+    // The overlay is built for a terminal that lays out as the mirror does;
+    // when it does not, a prediction can land on a glyph the mirror has
+    // narrower than the terminal, and invariant a. is not owed.
+    const bool sameWidths = model == grid::WidthPolicy{};
     auto overlay = Overlay::Create();
     if (!overlay) return 0;
 
@@ -369,7 +389,7 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data,
         term->P.Feed(b.data(), b.size(), *term->G);
         if (cal) cal->OnWritten(b, now);
         overlay->Commit(engine);
-        Check(SameScreen(*term->G, *ref->G));
+        Check(!sameWidths || SameScreen(*term->G, *ref->G));
     };
     const auto draw = [&] {
         if (cal && cal->Frozen()) return;
@@ -604,7 +624,12 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data,
                 break;
             }
             case 3: {  // the local terminal is resized
-                const auto c = static_cast<std::uint16_t>(arg(0) % 60 + 1);
+                // With the calibration a terminal one column wide is not
+                // modelled: whether its cursor stays pending a wrap after a
+                // resize is the terminal's own, and a width verdict would
+                // read the difference as a glyph's.
+                const auto c =
+                    static_cast<std::uint16_t>(arg(0) % 60 + (cal ? 2 : 1));
                 const auto r = static_cast<std::uint16_t>(arg(1) % 10 + 1);
                 undo();
                 if (cal) {
@@ -640,7 +665,8 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data,
                 // A real snapshot holds no query: the body is masked.
                 std::array<std::uint8_t, 24> clean = echoOff ? shown : plain;
                 for (std::size_t k = 0; k < n; ++k) {
-                    if (clean[k] == 'c' || clean[k] == 'n' || clean[k] == 'Z') {
+                    if (clean[k] == 'c' || clean[k] == 'n' || clean[k] == 'Z' ||
+                        (!sameWidths && clean[k] >= 0x80)) {
                         clean[k] = '.';
                     }
                 }
@@ -652,19 +678,6 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data,
                 for (Mirror* m : {fresh.get(), fresh2.get(), fresh3.get()}) {
                     m->Feed(PREAMBLE, sizeof(PREAMBLE));
                     m->Feed(body, n > 2 ? n - 2 : 0);
-                }
-                if (calibrated) {
-                    // A snapshot ends with the cursor placed absolutely: the
-                    // terminal's cursor is the mirror's, though rows with
-                    // doubtful glyphs may have been laid out differently.
-                    const std::string cup =
-                        "\x1b[" + std::to_string(fresh->G->CursorRow() + 1) +
-                        ";" + std::to_string(fresh->G->CursorCol() + 1) + "H";
-                    for (Mirror* m : {fresh2.get(), fresh3.get()}) {
-                        m->Feed(
-                            reinterpret_cast<const std::uint8_t*>(cup.data()),
-                            cup.size());
-                    }
                 }
                 mirror = std::move(fresh);
                 term = std::move(fresh2);

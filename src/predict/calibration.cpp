@@ -332,7 +332,11 @@ void Calibration::Apply(const CprEvent& event, Timestamp now,
         // Before the verdicts: a Wide one turns the cursor row foreign.
         const bool tailKnownBlank =
             !colMatch && TailKnownBlank(g, row, expected);
-        const bool pathOk = !g.PathBroken();
+        // The difference is read as widths only when widths are the only
+        // reason to ask: after a sequence the mirror does not know (or a
+        // program leaving the alternate screen) the cursor may have moved for
+        // a reason that is no glyph's.
+        const bool pathOk = QueryReasons_ == CalWidth && !g.PathBroken();
         if (pathOk) {
             SolveWidth(g, static_cast<std::int64_t>(col) -
                               static_cast<std::int64_t>(expected));
