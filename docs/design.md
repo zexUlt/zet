@@ -866,7 +866,7 @@ tab_stops        : bitset  // HTS/TBC; по умолчанию каждые 8 с
 | 3 | зеркало клиента | `zet_client_loop` линкует `zet_grid`; зеркало кормится всем, что идёт в терминал; сборка на macOS, `check_portable.sh`, замер размера и пропускной способности | stdout байт-идентичен; дамп зеркала совпадает с pyte и со снимком агента |
 | 4 | движок | `zet_predict`: эпохи, предсказания, сверка, сбои, пороги; sans-I/O | юнит-тесты и `predict_fuzz` |
 | 5 | оверлей, флаг, adaptive | построитель оверлея в `zet_predict` и подключение к клиенту; `--predict` | `predict_fuzz` с сеткой-терминалом |
-| 6 | интеграция | `tests/integration/test_predict.py` с netem | критерий M7 |
+| 6 | интеграция | `tests/integration/test_m7_predict.py` с netem | критерий M7 |
 
 ### Калибровка зеркала запросом позиции курсора (M7, раунд C)
 
@@ -1407,7 +1407,7 @@ Soak лежит в `tests/integration/soak_m6.py` (имя без `test_`, обы
 - предсказаний не больше `PREDICTIONS_MAX`, память ограничена;
 - в выводе оверлея нет `\e7`, `\e8`, `\e[s`, `\e[u`.
 
-**Интеграция** (`tests/integration/test_predict.py`):
+**Интеграция** (`tests/integration/test_m7_predict.py`):
 
 - `test_m7_password_never_shown` — `--predict=always`, netem `D = 50 мс`. Сначала `echo ok`, чтобы эпоха была подтверждена; затем `stty -echo; read -r x; stty echo` и набор `hunter2` с Enter. Между приглашением и следующим выводом агента клиент не пишет в свой pty ни одного байта сверх потока агента (по `ZET_TEST_OVERLAY_LOG`), в записи pty клиента нет ни одного символа пароля.
 - `test_m7_vim_mispredict_repaired` — vim на главном экране (`vim -u NONE -N --cmd 'set t_ti= t_te='` с `inoremap q <Esc>`), `--predict=always`, netem `D = 100 мс`. `i`, затем `abc` — эпоха подтверждается, предсказания видны; затем `q`. Предсказанное `q` появляется в pty клиента раньше ответа агента. Не позже чем через RTT + `ECHO_TIMEOUT` + `ECHO_ACK_INTERVAL_MIN` + 100 мс после нажатия pyte-экран записи pty в этой ячейке показывает то же, что сетка агента. Запас в 100 мс нужен, потому что раннер CI делит ядра.
