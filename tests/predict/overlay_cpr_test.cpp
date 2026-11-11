@@ -188,6 +188,34 @@ TEST_CASE("No overlay is drawn while the mirror waits") {
     CHECK(t.ToAgent.ends_with("de"));
 }
 
+TEST_CASE("A prediction pending when the query goes out is not redrawn") {
+    CalClient t(20, 6);
+    ShellOnRow3(t);
+    Warm(t);
+    t.Model.Delay = milliseconds(50);
+    // A reason that has to wait for room, and keys typed meanwhile.
+    t.QueueRoom = false;
+    t.Resize(20, 6);
+    REQUIRE(t.Queries() == 1);
+    t.Agent("\x1b[2K\r$ ");
+    t.Key("d");
+    t.Agent("d");
+    t.Ack();
+    t.Key("e");
+    t.Agent("e");
+    t.Ack();
+    t.Key("f");
+    REQUIRE(t.R().AnyVisible());
+    t.QueueRoom = true;
+    t.Settle();
+    REQUIRE(t.Frozen());
+    // The query is the last thing on the wire: the undo took the prediction
+    // off, and the mirror that waits shows nothing new.
+    CHECK(t.Inserts.back() == t.QueryInserts.back());
+    t.Tick(milliseconds(10));
+    CHECK(t.Inserts.back() == t.QueryInserts.back());
+}
+
 TEST_CASE("Keys during the wait reach the agent at once, in order") {
     CalClient t(20, 6);
     ShellOnRow3(t);
