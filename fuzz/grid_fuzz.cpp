@@ -18,10 +18,10 @@
 //      that mark differs) leaves cells and cursor identical to the default
 //      policy's, so the default is the grid as it was
 //  11. the path counters are exact whenever the path is not broken: against a
-//      twin that draws ambiguous glyphs wide, rows and pending wrap agree and
-//      the columns differ by exactly the ambiguous glyphs counted, so a path
-//      that may have hit the right margin must report itself broken; a
-//      sequence the parser does not know breaks the path
+//      twin that draws ambiguous glyphs wide, on the same row the pending wrap
+//      agrees and the columns differ by exactly the ambiguous glyphs counted,
+//      so a path that may have hit the right margin must report itself broken;
+//      a sequence the parser does not know breaks the path
 //
 // Resize count and targets are variable and driven by input bytes.
 
@@ -333,9 +333,12 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data,
                 for (std::uint8_t c = 0; c < WIDTH_CLASS_COUNT; ++c)
                     glyphs += gNarrow->PathGlyphs(static_cast<EWidthClass>(c));
                 if (glyphs == 0 && same) twinsArmed = true;
-                if (twinsArmed &&
-                    (gNarrow->CursorRow() != gWide->CursorRow() ||
-                     gNarrow->PendingWrap() != gWide->PendingWrap() ||
+                // A row that differs is how the client sees a wrap the
+                // terminal made alone (the row of the report), so only equal
+                // rows are compared. On the last row a wrap scrolls and the
+                // rows agree again: that is what the right-margin rule is for.
+                if (twinsArmed && gNarrow->CursorRow() == gWide->CursorRow() &&
+                    (gNarrow->PendingWrap() != gWide->PendingWrap() ||
                      gWide->CursorCol() !=
                          gNarrow->CursorCol() +
                              gNarrow->PathGlyphs(EWidthClass::Ambiguous)))
