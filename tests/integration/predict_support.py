@@ -19,6 +19,9 @@ from harness import PtyProcess, Timeout
 from m6_support import drain, render, require_pyte, rows_of, typed
 
 
+CPR_QUERY = b"\x1b[6n\x1b[c"
+
+
 class Predicted:
     """A zet session with predictive echo, its overlay log and a pump."""
 
@@ -45,6 +48,13 @@ class Predicted:
         except FileNotFoundError:
             return []
         return [(int(a), int(b)) for a, b in (line.split() for line in lines)]
+
+    def drawn(self) -> list[tuple[int, int]]:
+        """The overlay pieces that are predictions: entries() without the
+        client's own cursor position queries, which the log has too (round
+        C3; this pty does not answer them)."""
+        stream = self.stream()
+        return [(a, b) for a, b in self.entries() if stream[a:a + b] != CPR_QUERY]
 
     def stream(self) -> bytes:
         """Everything the terminal received. The notices zet prints stay in:
