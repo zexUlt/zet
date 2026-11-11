@@ -145,6 +145,13 @@ public:
         return Da1QueryCount_;
     }
 
+    /// Cursor position requests seen (`CSI 6 n`, the plain form), counted on
+    /// the final byte. For the fuzzers, which play the terminal. Monotonic,
+    /// survives Reset.
+    [[nodiscard]] std::uint64_t CprQueryCount() const noexcept {
+        return CprQueryCount_;
+    }
+
     /// Whether the UTF-8 decoder is in the middle of a character: bytes
     /// written to the terminal now would split it (the overlay, design.md §9).
     [[nodiscard]] bool Utf8Pending() const noexcept {
@@ -228,6 +235,7 @@ private:
     std::uint8_t DcsHead_{0};
     std::uint64_t BypassLimitCount_{0};
     std::uint64_t Da1QueryCount_{0};
+    std::uint64_t CprQueryCount_{0};
 };
 
 }  // namespace zet::grid

@@ -1473,6 +1473,7 @@ void Grid::Reset(bool hard) noexcept {
         CursorRow_ = 0;
         CursorCol_ = 0;
         PendingWrap_ = false;
+        if (IsAltScreen()) ++AltExitCount_;
         Modes_ = ModeFlag(EMode::Awm) | ModeFlag(EMode::Dectcem);
         for (std::uint16_t r = 0; r < Rows_; ++r) {
             ClearLine(MainLines_[r]);
@@ -1536,10 +1537,12 @@ void Grid::DesignateCharset(std::uint8_t g, std::uint8_t designator) noexcept {
 void Grid::SwitchAltScreen(bool enter) noexcept {
     if (enter == IsAltScreen()) return;
     BreakPath();
-    if (enter)
+    if (enter) {
         Modes_ |= ModeFlag(EMode::AltScreen);
-    else
+    } else {
         Modes_ &= ~ModeFlag(EMode::AltScreen);
+        ++AltExitCount_;
+    }
 }
 
 // xterm ClearScreen on the active buffer: erase with the pen background and

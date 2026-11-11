@@ -539,6 +539,9 @@ void VtParser::DispatchEsc(char32_t final, Grid& grid) noexcept {
             case 'c':  // RIS – hard reset
                 grid.Reset(/*hard=*/true);
                 return;
+            case '=':  // DECKPAM – application keypad: no effect on the screen
+            case '>':  // DECKPNM – numeric keypad: the same
+                return;
             case 'Z':  // DECID – xterm answers it as DA1; counted, not acted on
                 ++Da1QueryCount_;
                 // Still an unknown sequence for the mirror, as before the
@@ -773,7 +776,10 @@ void VtParser::DispatchCsi(char32_t final, Grid& grid) noexcept {
                 ++Da1QueryCount_;
             }
             break;
-        case 'n':  // DSR
+        case 'n':  // DSR; the terminal answers 6 with the cursor's position
+            if (IntermediateCount_ == 0 && nparams == 1 && params[0] == 6) {
+                ++CprQueryCount_;
+            }
             break;
 
         default:
