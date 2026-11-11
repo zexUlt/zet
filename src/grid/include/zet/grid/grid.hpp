@@ -277,6 +277,9 @@ public:
     /// A verdict "narrow" for a class: drops its marks from every row of both
     /// screens, they were laid out right.
     void ClearWidthClass(EWidthClass cls) noexcept;
+    /// The same for one row of the active screen: the mark of `cls` goes, the
+    /// row's contents and KnownFrom stay. Out of range rows are ignored.
+    void ClearWidthClass(std::uint16_t row, EWidthClass cls) noexcept;
     /// A verdict "wide" for a class: every row of both screens that holds a
     /// mark of it becomes foreign (KnownFrom = cols), what was laid out in it
     /// no longer matches the terminal, and loses the mark.
@@ -308,6 +311,13 @@ public:
     [[nodiscard]] std::uint16_t KnownFrom(std::uint16_t row) const noexcept {
         return ActiveLine(row).KnownFrom;
     }
+
+    /// Sets the first known column of `row` of the active screen outright, up
+    /// or down (`col` is clamped to cols). The rules of Line::KnownFrom only
+    /// ever lower it as the mirror writes; a caller that learned from the
+    /// terminal where the known part of a row begins says it here. Out of range
+    /// rows are ignored.
+    void SetKnownFrom(std::uint16_t row, std::uint16_t col) noexcept;
 
     /// Calibrates the grid by a cursor position the terminal reported
     /// (design.md §9, round C). The cursor goes to (`row`, `col`), 0-based and

@@ -65,6 +65,15 @@
 //  13. the hold buffer has the size the calibration was given: the fuzzer
 //      makes it small, and an overflow ends the wait with the output in
 //
+// Widths (round C4). With the calibration on, the model terminal (Real and
+// Ref, in every snapshot too) draws with a fixed width policy that the last
+// input byte picks: A and P one or two cells wide, VS16 widening or not. The
+// mirror starts from the default and learns it by the replies. Asserted after
+// every step:
+//  14. no verdict contradicts the model: Narrow means the model draws the
+//      class one cell wide, Wide means two (E: VS16 widens); the mirror's
+//      policy is the one the verdicts give
+//
 // Input: 3 header bytes (columns, rows, mode; what is left of them says the
 // pre-zet row N and the text above it), then operations: one byte selecting the
 // operation, one byte giving the operand length, the operand.
@@ -296,6 +305,16 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data,
         const auto preRow = static_cast<std::uint16_t>((data[1] / 10) % rows);
         PreZet(*term, preRow, data[2] / 6U);
         PreZet(*ref, preRow, data[2] / 6U);
+    }
+    // The model terminal's widths, from the last byte of the input.
+    grid::WidthPolicy model;
+    if (calibrated) {
+        const std::uint8_t b = data[size - 1];
+        model.Ambiguous = static_cast<std::uint8_t>(1 + (b & 1));
+        model.PrivateUse = static_cast<std::uint8_t>(1 + ((b >> 1) & 1));
+        model.Vs16Widens = ((b >> 2) & 1) != 0;
+        term->G->SetWidthPolicy(model);
+        ref->G->SetWidthPolicy(model);
     }
     auto overlay = Overlay::Create();
     if (!overlay) return 0;
@@ -626,9 +645,26 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data,
                     }
                 }
                 const std::uint8_t* body = clean.data() + (n > 2 ? 2 : n);
+                if (calibrated) {
+                    fresh2->G->SetWidthPolicy(model);
+                    fresh3->G->SetWidthPolicy(model);
+                }
                 for (Mirror* m : {fresh.get(), fresh2.get(), fresh3.get()}) {
                     m->Feed(PREAMBLE, sizeof(PREAMBLE));
                     m->Feed(body, n > 2 ? n - 2 : 0);
+                }
+                if (calibrated) {
+                    // A snapshot ends with the cursor placed absolutely: the
+                    // terminal's cursor is the mirror's, though rows with
+                    // doubtful glyphs may have been laid out differently.
+                    const std::string cup =
+                        "\x1b[" + std::to_string(fresh->G->CursorRow() + 1) +
+                        ";" + std::to_string(fresh->G->CursorCol() + 1) + "H";
+                    for (Mirror* m : {fresh2.get(), fresh3.get()}) {
+                        m->Feed(
+                            reinterpret_cast<const std::uint8_t*>(cup.data()),
+                            cup.size());
+                    }
                 }
                 mirror = std::move(fresh);
                 term = std::move(fresh2);
@@ -715,6 +751,17 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data,
             if (replyMode == 1 && !aged) {
                 Check(forwardedAll + heldStr == expectedAll);
             }
+            // No verdict contradicts the terminal.
+            const auto contradicts = [&](grid::EWidthClass cls, bool wide) {
+                const EWidthVerdict v = cal->Verdict(cls);
+                return (v == EWidthVerdict::Narrow && wide) ||
+                       (v == EWidthVerdict::Wide && !wide);
+            };
+            Check(!contradicts(grid::EWidthClass::Ambiguous,
+                               model.Ambiguous == 2));
+            Check(!contradicts(grid::EWidthClass::PrivateUse,
+                               model.PrivateUse == 2));
+            Check(!contradicts(grid::EWidthClass::Emoji, model.Vs16Widens));
             // Nothing is kept for a wait that is over.
             if (!cal->Frozen()) {
                 Check(!cal->HoldsLag() && !cal->HoldsDeferredAck());

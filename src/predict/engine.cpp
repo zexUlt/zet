@@ -134,9 +134,18 @@ void PredictionEngine::StepInput(std::byte b, std::uint64_t end, Timestamp now,
                 const bool valid = cp >= minimum && cp <= 0x10FFFF &&
                                    !(cp >= 0xD800 && cp <= 0xDFFF);
                 // A glyph terminals disagree on the width of is not predicted:
-                // the column after it would be a guess.
+                // the column after it would be a guess. Once the terminal has
+                // shown that it draws East Asian ambiguous glyphs in one cell
+                // (a Narrow verdict on class A), the guess is gone for them.
+                const grid::WidthPolicy& policy = mirror.Screen.Policy();
+                const bool ambiguousNarrow =
+                    policy.Ambiguous == 1 &&
+                    (policy.DoubtClasses &
+                     grid::WidthClassBit(grid::EWidthClass::Ambiguous)) == 0;
                 if (valid && grid::Wcwidth(cp) == 1 &&
-                    !grid::IsAmbiguousWidth(cp) && !grid::IsClusterJoiner(cp)) {
+                    (!grid::IsAmbiguousWidth(cp) ||
+                     (ambiguousNarrow && !grid::IsPrivateUse(cp))) &&
+                    !grid::IsClusterJoiner(cp)) {
                     PredictChar(cp, end, now, mirror);
                 } else {
                     BecomeTentative();

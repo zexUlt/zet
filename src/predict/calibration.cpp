@@ -13,6 +13,14 @@ constexpr std::array<std::byte, Calibration::QUERY_SIZE> QUERY_BYTES{
     std::byte{0x1b}, std::byte{'['}, std::byte{'6'}, std::byte{'n'},
     std::byte{0x1b}, std::byte{'['}, std::byte{'c'}};
 
+constexpr std::array<grid::EWidthClass, 3> VERDICT_CLASSES{
+    grid::EWidthClass::Ambiguous, grid::EWidthClass::PrivateUse,
+    grid::EWidthClass::Emoji};
+
+constexpr std::size_t VerdictIndex(grid::EWidthClass cls) noexcept {
+    return static_cast<std::size_t>(cls);
+}
+
 }  // namespace
 
 ByteSpan Calibration::Query() noexcept { return ByteSpan{QUERY_BYTES}; }
@@ -107,6 +115,9 @@ void Calibration::Evaluate(const CalibrationTarget& target,
         }
         if (dcs != SeenDcs_) {
             Reasons_ |= CalDcs;
+        }
+        if (WidthDue(g)) {
+            Reasons_ |= CalWidth;
         }
     }
     SeenUnknown_ = unknown;
@@ -203,6 +214,14 @@ bool Calibration::QueryDue(Timestamp now,
     }
     if (!MirrorReady(*target.Screen, *target.Parser)) {
         return false;
+    }
+    // The reason of a portion's end may be gone by now (a CR restarted the
+    // path): a width query that has nothing to learn is not sent.
+    if ((Reasons_ & CalWidth) != 0 && !WidthDue(*target.Screen)) {
+        Reasons_ = static_cast<std::uint8_t>(Reasons_ & ~CalWidth);
+        if (Reasons_ == 0) {
+            return false;
+        }
     }
     // A silent terminal is not asked again until a resize clears the mark.
     if (Demux_->Silent()) {
@@ -305,25 +324,194 @@ void Calibration::Apply(const CprEvent& event, Timestamp now,
         static_cast<std::uint16_t>(event.Row > 0 ? event.Row - 1 : 0);
     const auto col =
         static_cast<std::uint16_t>(event.Col > 0 ? event.Col - 1 : 0);
-    const bool match =
-        ExpectKnown_ && g.CursorRow() == row && g.CursorCol() == col;
-    bool resynced = false;
-    if (!match) {
-        // The start is the only reason that says the tail of the cursor's row
-        // is blank: the shell left the cursor on a fresh line.
-        resynced = g.Resync(row, col, QueryReasons_ == CalStart);
-    }
-    if (match || resynced) {
-        target.Engine->OnCalibrated(resynced, now, target.View());
-        if (resynced) {
-            ++Resynced_;
-        } else {
-            ++Matched_;
+    if (ExpectKnown_ && g.CursorRow() == row) {
+        // The rows agree: the answer is about the column. The mirror stood
+        // still since the query, so its cursor is the one that was expected.
+        const std::uint16_t expected = g.CursorCol();
+        const bool colMatch = expected == col;
+        // Before the verdicts: a Wide one turns the cursor row foreign.
+        const bool tailKnownBlank =
+            !colMatch && TailKnownBlank(g, row, expected);
+        const bool pathOk = !g.PathBroken();
+        if (pathOk) {
+            SolveWidth(g, static_cast<std::int64_t>(col) -
+                              static_cast<std::int64_t>(expected));
         }
+        if (colMatch) {
+            // A cluster mark left of the cursor is confirmed by the match.
+            if (pathOk && g.WidthDoubtBefore(row, col,
+                                             grid::WidthClassBit(
+                                                 grid::EWidthClass::Cluster))) {
+                g.ClearWidthClass(row, grid::EWidthClass::Cluster);
+            }
+            ++Matched_;
+        } else {
+            FixColumn(g, row, col, tailKnownBlank);
+            ++ColumnFixed_;
+        }
+        target.Engine->OnCalibrated(!colMatch, now, target.View());
+        Thaw(now, target);
+        return;
+    }
+    // The start is the only reason that says the tail of the cursor's row is
+    // blank: the shell left the cursor on a fresh line.
+    if (g.Resync(row, col, QueryReasons_ == CalStart)) {
+        target.Engine->OnCalibrated(true, now, target.View());
+        ++Resynced_;
     } else {
         ++Abandoned_;
     }
     Thaw(now, target);
+}
+
+// ---------------------------------------------------------------------------
+// Widths
+// ---------------------------------------------------------------------------
+
+EWidthVerdict Calibration::Verdict(grid::EWidthClass cls) const noexcept {
+    const std::size_t k = VerdictIndex(cls);
+    return k < Verdicts_.size() ? Verdicts_[k] : EWidthVerdict::Unknown;
+}
+
+grid::WidthPolicy Calibration::Policy() const noexcept {
+    grid::WidthPolicy policy;
+    for (const grid::EWidthClass cls : VERDICT_CLASSES) {
+        const EWidthVerdict v = Verdicts_[VerdictIndex(cls)];
+        const std::uint8_t width = v == EWidthVerdict::Wide ? 2 : 1;
+        if (v == EWidthVerdict::Narrow || v == EWidthVerdict::Wide) {
+            policy.DoubtClasses = static_cast<std::uint8_t>(
+                policy.DoubtClasses & ~grid::WidthClassBit(cls));
+        }
+        switch (cls) {
+            case grid::EWidthClass::Ambiguous:
+                policy.Ambiguous = width;
+                break;
+            case grid::EWidthClass::PrivateUse:
+                policy.PrivateUse = width;
+                break;
+            case grid::EWidthClass::Emoji:
+                policy.Vs16Widens = width == 2;
+                break;
+            case grid::EWidthClass::Cluster:
+                break;
+        }
+    }
+    return policy;
+}
+
+bool Calibration::WidthDue(const grid::Grid& g) const noexcept {
+    if (g.IsAltScreen() || g.PathBroken()) {
+        return false;
+    }
+    for (const grid::EWidthClass cls : VERDICT_CLASSES) {
+        if (Verdicts_[VerdictIndex(cls)] == EWidthVerdict::Unknown &&
+            g.PathGlyphs(cls) != 0) {
+            return true;
+        }
+    }
+    return g.CursorRow() < g.Rows() &&
+           g.WidthDoubtBefore(g.CursorRow(), g.CursorCol(),
+                              grid::WidthClassBit(grid::EWidthClass::Cluster));
+}
+
+void Calibration::ApplyVerdict(grid::Grid& g,
+                               grid::EWidthClass cls) const noexcept {
+    g.SetWidthPolicy(Policy());
+    switch (Verdicts_[VerdictIndex(cls)]) {
+        case EWidthVerdict::Narrow:
+            g.ClearWidthClass(cls);
+            break;
+        case EWidthVerdict::Wide:
+            g.ForgetWidthClass(cls);
+            break;
+        case EWidthVerdict::Unknown:
+        case EWidthVerdict::Unsolved:
+            break;
+    }
+}
+
+void Calibration::SolveWidth(grid::Grid& g, std::int64_t d) noexcept {
+    // Glyphs of the classes still open, and the glyphs whose width stays open
+    // whatever the answer: clusters, and classes given up on.
+    std::array<std::uint32_t, 3> open{};
+    std::uint64_t unresolved = g.PathGlyphs(grid::EWidthClass::Cluster);
+    std::size_t openClasses = 0;
+    std::size_t only = 0;
+    for (const grid::EWidthClass cls : VERDICT_CLASSES) {
+        const std::size_t k = VerdictIndex(cls);
+        const std::uint32_t n = g.PathGlyphs(cls);
+        if (n == 0) {
+            continue;
+        }
+        if (Verdicts_[k] == EWidthVerdict::Unknown) {
+            open[k] = n;
+            ++openClasses;
+            only = k;
+        } else if (Verdicts_[k] == EWidthVerdict::Unsolved) {
+            unresolved += n;
+        }
+    }
+    if (openClasses == 0) {
+        return;
+    }
+    // A glyph is as wide as the mirror drew it or one column wider, so the
+    // terminal's cursor is right of the mirror's by between none and one per
+    // glyph of open width.
+    if (d == 0) {
+        for (const grid::EWidthClass cls : VERDICT_CLASSES) {
+            const std::size_t k = VerdictIndex(cls);
+            if (open[k] != 0) {
+                Verdicts_[k] = EWidthVerdict::Narrow;
+                ApplyVerdict(g, cls);
+            }
+        }
+        return;
+    }
+    if (openClasses == 1 && unresolved == 0 &&
+        d == static_cast<std::int64_t>(open[only])) {
+        Verdicts_[only] = EWidthVerdict::Wide;
+        ApplyVerdict(g, VERDICT_CLASSES[only]);
+        return;
+    }
+    for (std::size_t k = 0; k < open.size(); ++k) {
+        if (open[k] != 0 && ++SolveFails_[k] >= CPR_SOLVE_FAILS_MAX) {
+            Verdicts_[k] = EWidthVerdict::Unsolved;
+        }
+    }
+}
+
+bool Calibration::TailKnownBlank(const grid::Grid& g, std::uint16_t row,
+                                 std::uint16_t col) noexcept {
+    if (row >= g.Rows() || g.KnownFrom(row) > col) {
+        return false;
+    }
+    for (std::uint16_t c = col; c < g.Cols(); ++c) {
+        const char32_t cp = g.CellAt(row, c).Codepoint;
+        if (cp != 0 && cp != U' ') {
+            return false;
+        }
+    }
+    return true;
+}
+
+void Calibration::FixColumn(grid::Grid& g, std::uint16_t row, std::uint16_t col,
+                            bool tailKnownBlank) noexcept {
+    // The terminal's cursor is where it says; the mirror follows it.
+    g.MoveCursorToCol(static_cast<std::uint16_t>(col + 1));
+    if (tailKnownBlank) {
+        // The tail from the answered column is blank there too. What the
+        // mirror drew left of it is the terminal's, in places it cannot name.
+        g.EraseInLine(0);
+        g.SetKnownFrom(row, col);
+    } else {
+        g.SetKnownFrom(row, g.Cols());
+    }
+    // Nothing the row's marks say can be checked any more.
+    for (const grid::EWidthClass cls :
+         {grid::EWidthClass::Ambiguous, grid::EWidthClass::PrivateUse,
+          grid::EWidthClass::Emoji, grid::EWidthClass::Cluster}) {
+        g.ClearWidthClass(row, cls);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -379,6 +567,11 @@ void Calibration::OnSnapshot(Timestamp now,
     Sticky_ = false;
     if (target.Valid()) {
         Rebase(target);
+        // The grid is a fresh one with the default policy and the snapshot's
+        // rows laid out by it: the verdicts are the session's, not the grid's.
+        for (const grid::EWidthClass cls : VERDICT_CLASSES) {
+            ApplyVerdict(*target.Screen, cls);
+        }
     }
 }
 

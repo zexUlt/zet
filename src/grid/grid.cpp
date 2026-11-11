@@ -235,6 +235,18 @@ void Grid::ClearWidthClass(EWidthClass cls) noexcept {
     }
 }
 
+void Grid::ClearWidthClass(std::uint16_t row, EWidthClass cls) noexcept {
+    if (row >= Rows_) return;
+    Line& line = ActiveLine(row);
+    line.ClassDoubt[static_cast<std::size_t>(cls)] = 0;
+    RecomputeWidthDoubt(line);
+}
+
+void Grid::SetKnownFrom(std::uint16_t row, std::uint16_t col) noexcept {
+    if (row >= Rows_) return;
+    ActiveLine(row).KnownFrom = col < Cols_ ? col : Cols_;
+}
+
 void Grid::ForgetWidthClass(EWidthClass cls) noexcept {
     const auto k = static_cast<std::size_t>(cls);
     for (std::uint16_t r = 0; r < Rows_; ++r) {

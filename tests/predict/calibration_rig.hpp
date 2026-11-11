@@ -29,14 +29,24 @@ enum class EReply : std::uint8_t {
     Da1Only,  ///< the device attributes without the position
 };
 
-/// How the terminal treats wide glyphs: the hook for round C4, not used yet.
-enum class EWidthMode : std::uint8_t { Narrow, Wide };
-
 struct TermModel {
     EReply Reply = EReply::Normal;
     std::chrono::milliseconds Delay{0};
-    EWidthMode Width = EWidthMode::Narrow;
 };
+
+/// How a terminal draws the three glyph classes of round C4: East Asian
+/// ambiguous (A) in one or two cells, private use (P) in one or two, and
+/// whether VS16 widens a text glyph that has an emoji variation sequence (E).
+/// The terminal is a grid with this width policy; the mirror starts with the
+/// default one and has to learn it.
+inline grid::WidthPolicy Terminal(int ambiguous, int privateUse,
+                                  bool vs16Widens) {
+    grid::WidthPolicy p;
+    p.Ambiguous = static_cast<std::uint8_t>(ambiguous);
+    p.PrivateUse = static_cast<std::uint8_t>(privateUse);
+    p.Vs16Widens = vs16Widens;
+    return p;
+}
 
 inline std::string Cpr(int row, int col) {
     return "\x1b[" + std::to_string(row) + ";" + std::to_string(col) + "R";
@@ -71,6 +81,16 @@ struct CalClient {
         : C(cols, rows, mode) {}
 
     Rig& R() { return C.R; }
+
+    /// The terminal draws as `policy` says, from now on: both screens that
+    /// stand for it (with and without the overlay) and every grid made for
+    /// them later. Call before the first bytes.
+    void SetTerminal(const grid::WidthPolicy& policy) {
+        TermPolicy = policy;
+        C.Real.G->SetWidthPolicy(policy);
+        C.Ref.G->SetWidthPolicy(policy);
+    }
+    grid::WidthPolicy TermPolicy{};
     CalibrationTarget T() {
         return CalibrationTarget{C.R.G.get(), &C.R.P, &C.R.E};
     }
@@ -158,6 +178,14 @@ struct CalClient {
                 break;
         }
         Replies.push_back({R().Now + Model.Delay, reply});
+    }
+
+    /// The terminal answers the pending query with this position (0-based)
+    /// instead of its own: for the answers a model terminal cannot give. Use
+    /// with `Model.Reply = EReply::Never`, after the query is written.
+    void Scripted(int row, int col) {
+        Replies.push_back({R().Now, Cpr(row + 1, col + 1) + DA1});
+        Settle();
     }
 
     void Unblock() {
@@ -316,8 +344,10 @@ struct CalClient {
         const int cols = R().G->Cols();
         const int rows = R().G->Rows();
         C.Real.G = MakeGrid(cols, rows);
+        C.Real.G->SetWidthPolicy(TermPolicy);
         C.Real.P.Reset();
         C.Ref.G = MakeGrid(cols, rows);
+        C.Ref.G->SetWidthPolicy(TermPolicy);
         C.Ref.P.Reset();
         Emit(EKind::Agent, bytes);
         R().G = MakeGrid(cols, rows);

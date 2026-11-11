@@ -270,6 +270,9 @@ public:
         std::size_t AnswerMax{~std::size_t{0}};
         /// The client cannot rebuild its mirror from this snapshot (from 1).
         unsigned LoseMirrorAtSnapshot{0};
+        /// How the test's terminal draws the glyphs of doubtful width (A, P,
+        /// E); it answers the query from its own cursor.
+        zet::grid::WidthPolicy TerminalPolicy{};
     };
 
     ClientRig(std::uint8_t seed, Options options)
@@ -654,6 +657,7 @@ private:
             auto made = zet::grid::Grid::Create(80, 24, 0);
             REQUIRE(made.has_value());
             Term_.reset(made.value());
+            Term_->SetWidthPolicy(Options_.TerminalPolicy);
         }
         for (;;) {
             const std::size_t at = Out_.find(QUERY, TermAt_);
