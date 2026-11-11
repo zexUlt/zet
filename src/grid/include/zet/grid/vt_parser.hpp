@@ -164,6 +164,7 @@ private:
     void TransitionTo(EParserState next, Grid& grid) noexcept;
     void ClearParams() noexcept;
     void AddParam(std::uint8_t ch) noexcept;
+    [[nodiscard]] bool HasMidParamMarker() const noexcept;
     void CollectIntermediate(std::uint8_t ch) noexcept;
     void EmitBypassByte(std::byte b) noexcept;
     void EmitBypassStart() noexcept;

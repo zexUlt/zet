@@ -100,3 +100,23 @@ TEST_CASE("the counts survive Reset") {
     f.P.Reset();
     CHECK(f.P.Da1QueryCount() == 1);
 }
+
+TEST_CASE("ESC Z still counts as an unknown sequence for the mirror") {
+    // PredictionEngine::Observe resets on UnknownSeqCount.
+    Fixture f;
+    const auto before = f.P.UnknownSeqCount();
+    f.Feed("\x1bZ");
+    CHECK(f.P.Da1QueryCount() == 1);
+    CHECK(f.P.UnknownSeqCount() == before + 1);
+}
+
+TEST_CASE("a private marker after a parameter makes CSI c no query") {
+    // xterm's parser ignores `CSI 0 ? c`: no reply, so nothing to count.
+    Fixture f;
+    f.Feed("\x1b[0?c");
+    f.Feed("\x1b[;>c");
+    f.Feed("\x1b[0=c");
+    CHECK(f.P.Da1QueryCount() == 0);
+    f.Feed("\x1b[0c");
+    CHECK(f.P.Da1QueryCount() == 1);
+}
