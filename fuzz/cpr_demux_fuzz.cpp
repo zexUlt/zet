@@ -93,35 +93,42 @@ bool IsReply(const std::string& s) {
     return da1() && i == s.size();
 }
 
-struct Harness {
+struct Harness : CprSink {
     std::unique_ptr<CprDemux> D = CprDemux::Create();
     Timestamp Now = Timestamp::FromNanos(1'000'000'000);
-    CprOutput Out;
     std::string Input;      // every stdin byte given
     std::string Accounted;  // forwarded + stripped, in order
+    std::string ForwardedNow;
+    std::size_t StripsNow = 0;
+    std::size_t EventsNow = 0;
     std::vector<std::size_t> StripStarts;
     std::size_t Queries = 0;
     std::size_t QueryEvents = 0;
     bool EverOff = false;
 
+    void Forward(ByteSpan bytes) noexcept override {
+        for (const std::byte b : bytes) {
+            Accounted.push_back(static_cast<char>(b));
+            ForwardedNow.push_back(static_cast<char>(b));
+        }
+    }
+    void Strip(ByteSpan bytes) noexcept override {
+        std::string text;
+        for (const std::byte b : bytes) {
+            text.push_back(static_cast<char>(b));
+        }
+        REQUIRE_INV(IsReply(text));  // 2.
+        StripStarts.push_back(Accounted.size());
+        Accounted += text;
+        ++StripsNow;
+    }
+    void Event(const CprEvent&) noexcept override {
+        ++EventsNow;
+        ++QueryEvents;
+    }
+
     void Settle(bool wasQuiet, const std::string& chunk) {
         // 1. accounting
-        std::size_t fwd = 0;
-        for (const auto& strip : Out.Strips) {
-            for (; fwd < strip.ForwardAt; ++fwd) {
-                Accounted.push_back(static_cast<char>(Out.Forward[fwd]));
-            }
-            StripStarts.push_back(Accounted.size());
-            std::string text;
-            for (std::size_t i = 0; i < strip.Length; ++i) {
-                text.push_back(static_cast<char>(strip.Bytes[i]));
-            }
-            REQUIRE_INV(IsReply(text));  // 2.
-            Accounted += text;
-        }
-        for (; fwd < Out.Forward.size(); ++fwd) {
-            Accounted.push_back(static_cast<char>(Out.Forward[fwd]));
-        }
         std::string whole = Accounted;
         for (const std::byte b : D->HeldBytes()) {
             whole.push_back(static_cast<char>(b));
@@ -129,21 +136,15 @@ struct Harness {
         REQUIRE_INV(whole == Input);
         // 3.
         if (wasQuiet) {
-            REQUIRE_INV(Out.Strips.empty());
-            REQUIRE_INV(Out.Events.empty());
-            std::string fwdText;
-            for (const std::byte b : Out.Forward) {
-                fwdText.push_back(static_cast<char>(b));
-            }
-            REQUIRE_INV(fwdText == chunk);
+            REQUIRE_INV(StripsNow == 0);
+            REQUIRE_INV(EventsNow == 0);
+            REQUIRE_INV(ForwardedNow == chunk);
         }
         // 6.
-        for (const auto& e : Out.Events) {
-            (void)e;
-            ++QueryEvents;
-        }
         REQUIRE_INV(QueryEvents <= Queries);
-        Out.Clear();
+        ForwardedNow.clear();
+        StripsNow = 0;
+        EventsNow = 0;
         // 4.
         REQUIRE_INV(D->QueueSize() <= CPR_QUEUE_MAX);
         REQUIRE_INV(D->HeldSize() <= CPR_HELD_MAX);
@@ -164,9 +165,7 @@ struct Harness {
         Input += chunk;
         D->OnInput(
             {reinterpret_cast<const std::byte*>(chunk.data()), chunk.size()},
-            Now, Out);
-        // A deadline the read passed settles first, so the quiet check
-        // applies only if nothing was outstanding at the new time either.
+            Now, *this);
         Settle(quiet && !D->Outstanding(), chunk);
     }
 };
@@ -221,15 +220,15 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data,
                 break;
             case 4:
                 h.Now += std::chrono::milliseconds(4 * (n > 0 ? p[0] : 1));
-                h.D->OnTick(h.Now, h.Out);
+                h.D->OnTick(h.Now, h);
                 h.Settle(false, "");
                 break;
             case 5:
-                h.D->OnResize(h.Now, h.Out);
+                h.D->OnResize(h.Now, h);
                 h.Settle(false, "");
                 break;
             case 6:
-                h.D->OnCancel(h.Now, h.Out);
+                h.D->OnCancel(h.Now, h);
                 h.Settle(false, "");
                 break;
             case 7: {
@@ -249,11 +248,11 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data,
     }
     // Time runs out: nothing stays held, nothing stays queued.
     h.Now += CPR_TIMEOUT;
-    h.D->OnTick(h.Now, h.Out);
+    h.D->OnTick(h.Now, h);
     h.Settle(false, "");
     REQUIRE_INV(h.D->HeldSize() == 0);
     h.Now += CPR_FORGET;
-    h.D->OnTick(h.Now, h.Out);
+    h.D->OnTick(h.Now, h);
     h.Settle(false, "");
     REQUIRE_INV(h.D->Off() || !h.D->Outstanding());
     REQUIRE_INV(h.D->HeldSize() == 0);

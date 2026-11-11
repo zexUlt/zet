@@ -18,57 +18,49 @@ using namespace std::chrono_literals;
 
 namespace {
 
-struct Rig {
+struct Rig : CprSink {
     std::unique_ptr<CprDemux> D = CprDemux::Create();
     Timestamp Now = Timestamp::FromNanos(1'000'000'000);
-    CprOutput Out;
-    /// Everything for the agent so far, and every event.
+    /// Everything for the agent so far, every event, and the bytes taken out.
     std::string Fwd;
     std::vector<CprEvent> Events;
-    /// Bytes taken out of the stream, in order.
     std::string Stripped;
 
     Rig() { REQUIRE(D != nullptr); }
 
-    static ByteSpan B(std::string_view s) {
-        return {reinterpret_cast<const std::byte*>(s.data()), s.size()};
-    }
-    void Take() {
-        for (const std::byte b : Out.Forward) {
+    void Forward(ByteSpan bytes) noexcept override {
+        for (const std::byte b : bytes) {
             Fwd.push_back(static_cast<char>(b));
         }
-        Events.insert(Events.end(), Out.Events.begin(), Out.Events.end());
-        for (const auto& strip : Out.Strips) {
-            for (std::size_t i = 0; i < strip.Length; ++i) {
-                Stripped.push_back(static_cast<char>(strip.Bytes[i]));
-            }
+    }
+    void Strip(ByteSpan bytes) noexcept override {
+        for (const std::byte b : bytes) {
+            Stripped.push_back(static_cast<char>(b));
         }
-        Out.Clear();
+    }
+    void Event(const CprEvent& event) noexcept override {
+        Events.push_back(event);
+    }
+
+    static ByteSpan B(std::string_view s) {
+        return {reinterpret_cast<const std::byte*>(s.data()), s.size()};
     }
     /// Bytes from stdin; returns what went to the agent in this call.
     std::string In(std::string_view s) {
         const auto before = Fwd.size();
-        D->OnInput(B(s), Now, Out);
-        Take();
+        D->OnInput(B(s), Now, *this);
         return Fwd.substr(before);
     }
     std::string Tick() {
         const auto before = Fwd.size();
-        D->OnTick(Now, Out);
-        Take();
+        D->OnTick(Now, *this);
         return Fwd.substr(before);
     }
     void Advance(Duration d) { Now += d; }
     void Output(std::string_view s) { D->OnOutput(B(s)); }
     bool Query() { return D->OnQuerySent(Now); }
-    void Resize() {
-        D->OnResize(Now, Out);
-        Take();
-    }
-    void Cancel() {
-        D->OnCancel(Now, Out);
-        Take();
-    }
+    void Resize() { D->OnResize(Now, *this); }
+    void Cancel() { D->OnCancel(Now, *this); }
     std::size_t Count(ECprEvent k) const {
         std::size_t n = 0;
         for (const auto& e : Events) {

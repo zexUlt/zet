@@ -35,7 +35,7 @@ std::unique_ptr<CprDemux> CprDemux::Create() noexcept {
         return nullptr;
     }
     return std::unique_ptr<CprDemux>(
-        new (std::nothrow) CprDemux(std::unique_ptr<grid::Grid>(grid.value())));
+        new (std::nothrow) CprDemux(std::unique_ptr<grid::Grid>(*grid)));
 }
 
 bool CprDemux::Pending() const noexcept {
@@ -111,13 +111,13 @@ std::optional<std::size_t> CprDemux::Target(bool position) const noexcept {
     return std::nullopt;
 }
 
-void CprDemux::Fail(CprOutput& out) noexcept {
-    out.Events.push_back(CprEvent{ECprEvent::Failed, 0, 0});
+void CprDemux::Fail(CprSink& out) noexcept {
+    out.Event(CprEvent{ECprEvent::Failed, 0, 0});
     Silent_ = true;
 }
 
 CprDemux::Entry CprDemux::PopThrough(std::size_t target,
-                                     CprOutput& out) noexcept {
+                                     CprSink& out) noexcept {
     // The entries in front of the one the answer belongs to were never
     // answered. A pending query of ours among them is unanswered, as by the
     // deadline.
@@ -143,12 +143,8 @@ CprDemux::Entry CprDemux::PopThrough(std::size_t target,
     return taken;
 }
 
-void CprDemux::Strip(std::size_t length, CprOutput& out) const noexcept {
-    CprStrip strip;
-    strip.ForwardAt = out.Forward.size();
-    strip.Length = length;
-    std::copy(Held_.begin(), Held_.begin() + length, strip.Bytes.begin());
-    out.Strips.push_back(strip);
+void CprDemux::StripHeld(std::size_t length, CprSink& out) const noexcept {
+    out.Strip({Held_.data(), length});
 }
 
 // ---------------------------------------------------------------------------
@@ -285,19 +281,16 @@ CprDemux::EDa1Look CprDemux::LookDa1(const std::byte* d, std::size_t n,
 // Walking stdin
 // ---------------------------------------------------------------------------
 
-void CprDemux::ForwardHeld(std::size_t count, CprOutput& out) noexcept {
+void CprDemux::ForwardHeld(std::size_t count, CprSink& out) noexcept {
     if (HeldForwarded_ < count) {
-        out.Forward.insert(out.Forward.end(), Held_.begin() + HeldForwarded_,
-                           Held_.begin() + count);
+        out.Forward({Held_.data() + HeldForwarded_, count - HeldForwarded_});
         HeldForwarded_ = count;
     }
 }
 
-void CprDemux::FlushHeld(CprOutput& out) noexcept {
-    ForwardHeld(HeldLen_, out);
-}
+void CprDemux::FlushHeld(CprSink& out) noexcept { ForwardHeld(HeldLen_, out); }
 
-void CprDemux::Reprocess(std::size_t from, CprOutput& out) noexcept {
+void CprDemux::Reprocess(std::size_t from, CprSink& out) noexcept {
     std::array<std::byte, CPR_HELD_MAX> rest{};
     const std::size_t n = HeldLen_ - from;
     std::copy(Held_.begin() + from, Held_.begin() + HeldLen_, rest.begin());
@@ -310,10 +303,10 @@ void CprDemux::Reprocess(std::size_t from, CprOutput& out) noexcept {
     }
 }
 
-void CprDemux::Step(std::byte b, bool forwarded, CprOutput& out) noexcept {
+void CprDemux::Step(std::byte b, bool forwarded, CprSink& out) noexcept {
     if (InPaste_) {
         if (!forwarded) {
-            out.Forward.push_back(b);
+            out.Forward({&b, 1});
         }
         if (b == ESC) {
             PasteEndMatched_ = 1;
@@ -331,7 +324,7 @@ void CprDemux::Step(std::byte b, bool forwarded, CprOutput& out) noexcept {
     if (HeldLen_ == 0) {
         if (b != ESC) {
             if (!forwarded) {
-                out.Forward.push_back(b);
+                out.Forward({&b, 1});
             }
             return;
         }
@@ -348,7 +341,7 @@ void CprDemux::Step(std::byte b, bool forwarded, CprOutput& out) noexcept {
     Resolve(out);
 }
 
-void CprDemux::Resolve(CprOutput& out) noexcept {
+void CprDemux::Resolve(CprSink& out) noexcept {
     const TryResult r = Scan(Held_.data(), HeldLen_);
     switch (r.Status) {
         case ETry::NeedMore:
@@ -383,7 +376,7 @@ void CprDemux::Resolve(CprOutput& out) noexcept {
                 return;
             }
             // Our end marker without our position: unanswered.
-            Strip(r.Length, out);
+            StripHeld(r.Length, out);
             const Entry own = PopThrough(*target, out);
             if (own.Live) {
                 Fail(out);
@@ -421,11 +414,10 @@ void CprDemux::Resolve(CprOutput& out) noexcept {
                     Reprocess(r.Length, out);
                     return;
                 case EDa1Look::Full: {
-                    Strip(r.Length + markerLen, out);
+                    StripHeld(r.Length + markerLen, out);
                     const Entry own = PopThrough(*target, out);
                     if (own.Live) {
-                        out.Events.push_back(
-                            CprEvent{ECprEvent::Answered, r.Row, r.Col});
+                        out.Event(CprEvent{ECprEvent::Answered, r.Row, r.Col});
                     }
                     Reprocess(r.Length + markerLen, out);
                     return;
@@ -436,15 +428,28 @@ void CprDemux::Resolve(CprOutput& out) noexcept {
     }
 }
 
-void CprDemux::OnInput(ByteSpan bytes, Timestamp now, CprOutput& out) noexcept {
+void CprDemux::OnInput(ByteSpan bytes, Timestamp now, CprSink& out) noexcept {
     Settle(now, out);
     Now_ = now;
     if (Off_) {
-        out.Forward.insert(out.Forward.end(), bytes.begin(), bytes.end());
+        out.Forward(bytes);
         return;
     }
-    for (const std::byte b : bytes) {
-        Step(b, false, out);
+    std::size_t i = 0;
+    while (i < bytes.size()) {
+        if (HeldLen_ == 0 && !InPaste_) {
+            // Nothing is under way: a run without ESC goes in one piece.
+            std::size_t j = i;
+            while (j < bytes.size() && bytes[j] != ESC) {
+                ++j;
+            }
+            if (j > i) {
+                out.Forward(bytes.subspan(i, j - i));
+                i = j;
+                continue;
+            }
+        }
+        Step(bytes[i++], false, out);
     }
     if (HeldLen_ > HeldForwarded_) {
         const bool hold =
@@ -459,14 +464,14 @@ void CprDemux::OnInput(ByteSpan bytes, Timestamp now, CprOutput& out) noexcept {
 // Time and events
 // ---------------------------------------------------------------------------
 
-void CprDemux::AbandonLive(CprOutput& out) noexcept {
+void CprDemux::AbandonLive(CprSink& out) noexcept {
     for (std::size_t i = 0; i < QueueLen_; ++i) {
         Queue_[i].Live = false;
     }
     FlushHeld(out);
 }
 
-void CprDemux::Settle(Timestamp now, CprOutput& out) noexcept {
+void CprDemux::Settle(Timestamp now, CprSink& out) noexcept {
     Now_ = now;
     if (Off_) {
         return;
@@ -476,7 +481,7 @@ void CprDemux::Settle(Timestamp now, CprOutput& out) noexcept {
     }
     if (Pending() && now >= TimeoutAt_) {
         AbandonLive(out);
-        out.Events.push_back(CprEvent{ECprEvent::TimedOut, 0, 0});
+        out.Event(CprEvent{ECprEvent::TimedOut, 0, 0});
         Silent_ = true;
     }
     if (Outstanding() && now >= ForgetAt_) {
@@ -490,16 +495,16 @@ void CprDemux::Settle(Timestamp now, CprOutput& out) noexcept {
     }
 }
 
-void CprDemux::OnTick(Timestamp now, CprOutput& out) noexcept {
+void CprDemux::OnTick(Timestamp now, CprSink& out) noexcept {
     Settle(now, out);
 }
 
-void CprDemux::OnCancel(Timestamp now, CprOutput& out) noexcept {
+void CprDemux::OnCancel(Timestamp now, CprSink& out) noexcept {
     Settle(now, out);
     AbandonLive(out);
 }
 
-void CprDemux::OnResize(Timestamp now, CprOutput& out) noexcept {
+void CprDemux::OnResize(Timestamp now, CprSink& out) noexcept {
     OnCancel(now, out);
     Silent_ = false;
 }

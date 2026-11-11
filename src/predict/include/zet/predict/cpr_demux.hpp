@@ -5,7 +5,6 @@
 #include <cstdint>
 #include <memory>
 #include <optional>
-#include <vector>
 
 #include "zet/core/bytes.hpp"
 #include "zet/core/time.hpp"
@@ -32,27 +31,17 @@ struct CprEvent {
     std::uint16_t Col{0};
 };
 
-/// A reply of ours that was taken out of the stream, for tests and the fuzzer:
-/// `ForwardAt` is how many bytes of CprOutput::Forward precede it.
-struct CprStrip {
-    std::size_t ForwardAt{0};
-    std::size_t Length{0};
-    std::array<std::byte, CPR_HELD_MAX> Bytes{};
-};
-
-/// What a call produced. The demultiplexer only appends; the caller clears.
-struct CprOutput {
-    /// Bytes for the agent, in stream order.
-    std::vector<std::byte> Forward;
-    std::vector<CprEvent> Events;
-    /// Every reply taken out, in order: Forward plus Strips is the input.
-    std::vector<CprStrip> Strips;
-
-    void Clear() noexcept {
-        Forward.clear();
-        Events.clear();
-        Strips.clear();
-    }
+/// Where a call puts what it produced. The core allocates nothing, so the
+/// caller owns the buffers; the calls come in stream order, so the forwarded
+/// runs and the strips interleave as the bytes were read.
+class CprSink {
+public:
+    virtual ~CprSink() = default;
+    /// Bytes for the agent.
+    virtual void Forward(ByteSpan bytes) noexcept = 0;
+    /// A reply of ours, taken out of the stream (not for the agent).
+    virtual void Strip(ByteSpan bytes) noexcept = 0;
+    virtual void Event(const CprEvent& event) noexcept = 0;
 };
 
 /// Strips the terminal's answers to the client's own `CSI 6 n CSI c` out of
@@ -87,23 +76,23 @@ public:
     /// after the queue was forgotten switches the demultiplexer on again.
     bool OnQuerySent(Timestamp now) noexcept;
 
-    /// Bytes read from stdin. Appends the bytes for the agent and the events
+    /// Bytes read from stdin. Reports the bytes for the agent and the events
     /// to `out`. A possible beginning of the client's own answer at the end
     /// of `bytes` is held while the query is pending, for CPR_HOLD at most.
-    void OnInput(ByteSpan bytes, Timestamp now, CprOutput& out) noexcept;
+    void OnInput(ByteSpan bytes, Timestamp now, CprSink& out) noexcept;
 
     /// Time passed: releases what is held, expires the pending query, forgets
     /// the queue. Also done at the start of every OnInput.
-    void OnTick(Timestamp now, CprOutput& out) noexcept;
+    void OnTick(Timestamp now, CprSink& out) noexcept;
 
     /// The pending query is abandoned (a snapshot): its answer, when it comes,
     /// is stripped and thrown away, and no event is raised for it.
-    void OnCancel(Timestamp now, CprOutput& out) noexcept;
+    void OnCancel(Timestamp now, CprSink& out) noexcept;
 
     /// The local terminal changed size: the pending query is abandoned as in
     /// OnCancel, and the silent mark is cleared so that the client may ask
     /// again.
-    void OnResize(Timestamp now, CprOutput& out) noexcept;
+    void OnResize(Timestamp now, CprSink& out) noexcept;
 
     /// The earliest moment OnTick changes something: end of the hold, of the
     /// pending query, or of the wait for a late answer. Unset when there is
@@ -165,9 +154,9 @@ private:
         bool position) const noexcept;
     /// Removes entries up to and including `target`'s one answer; own live
     /// entries passed over raise Failed.
-    Entry PopThrough(std::size_t target, CprOutput& out) noexcept;
-    void Fail(CprOutput& out) noexcept;
-    void Strip(std::size_t length, CprOutput& out) const noexcept;
+    Entry PopThrough(std::size_t target, CprSink& out) noexcept;
+    void Fail(CprSink& out) noexcept;
+    void StripHeld(std::size_t length, CprSink& out) const noexcept;
 
     [[nodiscard]] static TryResult Scan(const std::byte* data,
                                         std::size_t size) noexcept;
@@ -175,13 +164,13 @@ private:
                                           std::size_t size,
                                           std::size_t& length) noexcept;
 
-    void Step(std::byte b, bool forwarded, CprOutput& out) noexcept;
-    void Resolve(CprOutput& out) noexcept;
-    void FlushHeld(CprOutput& out) noexcept;
-    void Reprocess(std::size_t from, CprOutput& out) noexcept;
-    void ForwardHeld(std::size_t count, CprOutput& out) noexcept;
-    void Settle(Timestamp now, CprOutput& out) noexcept;
-    void AbandonLive(CprOutput& out) noexcept;
+    void Step(std::byte b, bool forwarded, CprSink& out) noexcept;
+    void Resolve(CprSink& out) noexcept;
+    void FlushHeld(CprSink& out) noexcept;
+    void Reprocess(std::size_t from, CprSink& out) noexcept;
+    void ForwardHeld(std::size_t count, CprSink& out) noexcept;
+    void Settle(Timestamp now, CprSink& out) noexcept;
+    void AbandonLive(CprSink& out) noexcept;
 
     std::unique_ptr<grid::Grid> Grid_;
     grid::VtParser Parser_;
