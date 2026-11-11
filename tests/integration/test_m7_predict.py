@@ -196,6 +196,31 @@ def test_m7_underline_above_threshold(zet: Zet, clean_bashrc, netem, tmp_path):
         p.kill()
 
 
+def test_m7_no_underline_below_threshold(zet: Zet, clean_bashrc, netem, tmp_path):
+    """RTT 100 ms (SRTT / 2 = 50, over the show threshold, under the underline
+    one): predictions are drawn and none of them is underlined."""
+    p = Predicted(zet, "adaptive", tmp_path)
+    try:
+        p.prime()
+        with netem("delay 50ms"):
+            drawn = 0
+            for _ in range(6):
+                type_keys(p, LETTERS, 0.3)
+                p.pump(0.5)
+                stream = p.stream()
+                for offset, length in p.entries():
+                    piece = stream[offset:offset + length]
+                    assert not UNDERLINE.search(piece), piece
+                drawn = len(p.entries())
+                p.terminal.send(b"\x15")
+                p.pump(0.5)
+            assert drawn > 0, "nothing was predicted at D=50 ms, the control is vacuous"
+            p.settle()
+        assert_no_stray_overlay(p)
+    finally:
+        p.kill()
+
+
 def test_m7_password_never_shown(zet: Zet, clean_bashrc, netem, tmp_path):
     """The program turns the echo off and reads a password. The client is
     asked for predictions always, and the epoch of the typed line is not
