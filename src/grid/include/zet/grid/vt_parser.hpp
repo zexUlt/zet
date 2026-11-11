@@ -124,6 +124,17 @@ public:
         return BypassLimitCount_;
     }
 
+    /// Number of primary device attributes queries dispatched since
+    /// construction: `CSI c`, `CSI 0 c`, `CSI 0 ; ... c` (xterm looks only at
+    /// the first parameter) and `ESC Z` (DECID, which xterm answers with the
+    /// same reply). A terminal will send a reply back to each. Counted on the
+    /// final byte, so a query split across feeds counts once, and never inside
+    /// an OSC, DCS, APC, PM or SOS string. DA2 (`CSI > c`), DA3 (`CSI = c`) and
+    /// queries with intermediates are not counted. Monotonic, survives Reset.
+    [[nodiscard]] std::uint64_t Da1QueryCount() const noexcept {
+        return Da1QueryCount_;
+    }
+
     /// Whether the UTF-8 decoder is in the middle of a character: bytes
     /// written to the terminal now would split it (the overlay, design.md §9).
     [[nodiscard]] bool Utf8Pending() const noexcept {
@@ -153,6 +164,7 @@ private:
     void TransitionTo(EParserState next, Grid& grid) noexcept;
     void ClearParams() noexcept;
     void AddParam(std::uint8_t ch) noexcept;
+    [[nodiscard]] bool HasMidParamMarker() const noexcept;
     void CollectIntermediate(std::uint8_t ch) noexcept;
     void EmitBypassByte(std::byte b) noexcept;
     void EmitBypassStart() noexcept;
@@ -201,6 +213,7 @@ private:
     std::uint64_t UnknownSeqCount_{0};
     std::uint64_t DcsApcCount_{0};
     std::uint64_t BypassLimitCount_{0};
+    std::uint64_t Da1QueryCount_{0};
 };
 
 }  // namespace zet::grid

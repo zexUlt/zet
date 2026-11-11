@@ -370,6 +370,18 @@ void VtParser::AddParam(std::uint8_t ch) noexcept {
     // Else: silently overflow (seq goes to ignore on dispatch if needed).
 }
 
+bool VtParser::HasMidParamMarker() const noexcept {
+    // xterm's parser takes 0x3C-0x3F after a parameter byte as an error and
+    // ignores the sequence (`CSI 0 ? c` gets no reply).
+    for (std::size_t i = 1; i < ParamLen_; ++i) {
+        const auto ch = static_cast<std::uint8_t>(ParamBuf_[i]);
+        if (ch >= 0x3C && ch <= 0x3F) {
+            return true;
+        }
+    }
+    return false;
+}
+
 void VtParser::CollectIntermediate(std::uint8_t ch) noexcept {
     if (IntermediateCount_ < MAX_INTERMEDIATES)
         Intermediates_[IntermediateCount_++] = ch;
@@ -517,6 +529,12 @@ void VtParser::DispatchEsc(char32_t final, Grid& grid) noexcept {
                 return;
             case 'c':  // RIS – hard reset
                 grid.Reset(/*hard=*/true);
+                return;
+            case 'Z':  // DECID – xterm answers it as DA1; counted, not acted on
+                ++Da1QueryCount_;
+                // Still an unknown sequence for the mirror, as before the
+                // DA1 count existed.
+                ++UnknownSeqCount_;
                 return;
             case '\\':  // ST – string terminator (ends bypass)
                 // If we arrived here from Bypass (via the ESC 0x5C path),
@@ -736,7 +754,16 @@ void VtParser::DispatchCsi(char32_t final, Grid& grid) noexcept {
             break;
 
         // Window ops / device attributes – ignore silently (not tracked).
-        case 'c':  // DA1/DA2
+        // They are not answered here, but DA1 is counted: the sender of the
+        // bytes (the client's query demultiplexer) needs to know a terminal
+        // will reply. Only the plain forms count: DA2 (CSI > c) and DA3
+        // (CSI = c) never reach this switch, they carry a private marker.
+        case 'c':  // DA1; xterm looks only at the first parameter
+            if (IntermediateCount_ == 0 && (nparams == 0 || params[0] == 0) &&
+                !HasMidParamMarker()) {
+                ++Da1QueryCount_;
+            }
+            break;
         case 'n':  // DSR
             break;
 

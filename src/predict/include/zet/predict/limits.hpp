@@ -40,4 +40,36 @@ inline constexpr std::uint32_t GLITCH_REPAIR_COUNT = 10;
 inline constexpr Duration GLITCH_REPAIR_MININTERVAL =
     std::chrono::milliseconds(150);
 
+// Cursor position calibration (design.md §9, "Калибровка зеркала запросом
+// позиции курсора", "Пределы").
+
+/// How long the client waits for the answer to its own `CSI 6n CSI c` before
+/// the terminal is declared silent.
+inline constexpr Duration CPR_TIMEOUT = std::chrono::seconds(1);
+/// How long a possible beginning of the client's own answer is held back from
+/// the agent while the query is pending. A terminal writes the position and
+/// the DA1 reply in one piece or in two writes close together, so a held
+/// beginning is rare. A complete position is held longer, to the live
+/// entry's CPR_TIMEOUT, for a DA1 reply that comes late.
+inline constexpr Duration CPR_HOLD = std::chrono::milliseconds(50);
+/// After CPR_TIMEOUT the client's own entry is kept this long, so that a late
+/// answer is still stripped; then it is dropped and stdin passes through
+/// untouched. The same span bounds how long a count of the program's DA1
+/// queries is believed (one query is dropped per span for which the count has
+/// not been zero), so that a reply lost on the way cannot block the alignment
+/// for good.
+inline constexpr Duration CPR_FORGET = std::chrono::seconds(10);
+
+/// Longest answer the demultiplexer recognises: `CSI r ; c R` with five-digit
+/// numbers is 14 bytes. A device attributes answer is `CSI ? Pm c`: xterm's
+/// default vt420 reply is 38 bytes and Windows Terminal's is 39, so the limit
+/// is 128, more than three times the longest seen, for terminals that report
+/// more features. Beyond it the bytes are not an answer. Position and the
+/// answer after it can be held together; the buffer is a fixed array, never
+/// allocated.
+inline constexpr std::size_t CPR_POSITION_REPLY_MAX = 14;
+inline constexpr std::size_t CPR_DA1_REPLY_MAX = 128;
+inline constexpr std::size_t CPR_HELD_MAX =
+    CPR_POSITION_REPLY_MAX + CPR_DA1_REPLY_MAX;
+
 }  // namespace zet::predict
