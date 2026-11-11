@@ -229,6 +229,10 @@ struct Options {
     /// Test seam (SessionTestConfig::SizeSource): stands in for the tty when
     /// SIGWINCH asks for the terminal's size. Empty in production.
     std::function<std::optional<wire::ResizeMessage>()> SizeSource;
+    /// Test seam (SessionTestConfig::LoseMirrorAtSnapshot): the mirror cannot
+    /// be rebuilt from this snapshot (counting from 1), as when its allocation
+    /// fails. 0 in production.
+    unsigned LoseMirrorAtSnapshot{0};
 };
 
 /// What of the local environment goes to the shell on the far side: the
@@ -1168,6 +1172,8 @@ private:
     /// Options::Calibrate is on, never with --predict=never, an old agent or
     /// ver=1.
     std::unique_ptr<predict::Calibration> Cal_;
+    /// Snapshots applied to the mirror (for Options::LoseMirrorAtSnapshot).
+    unsigned SnapshotsApplied_{0};
 
     struct PendingSnapshotInfo {
         std::uint32_t StreamGen{0};
@@ -1409,7 +1415,8 @@ void Client::PumpEvents(Timestamp now) noexcept {
                 SeededFromSnapshot_ = Mirror_ != nullptr;
             }
             if (Mirror_) {
-                if (!Mirror_->ResetFromSnapshot(snap->Bytes)) {
+                if (++SnapshotsApplied_ == Options_.LoseMirrorAtSnapshot ||
+                    !Mirror_->ResetFromSnapshot(snap->Bytes)) {
                     LoseMirror();
                 } else if (Predict_) {
                     // C4: ResetFromSnapshot built a fresh Grid, so the width
@@ -1839,6 +1846,7 @@ void Client::StartPredict(std::uint32_t streamGen, Timestamp now) noexcept {
         Predict_->OnSnapshot(streamGen, now, View());
     }
     Predict_->OnOutput(Session_.ReceiveOffset(), now, View());
+    MaybeQuery(now);
 }
 
 void Client::OnEchoAcked(const wire::EchoAckMessage& ack,
@@ -2156,6 +2164,7 @@ SessionTestResult RunSessionForTestImpl(SessionTestConfig config) noexcept {
     opts.OverlayLog = config.OverlayLog;
     opts.Calibrate = config.Calibrate;
     opts.SizeSource = std::move(config.SizeSource);
+    opts.LoseMirrorAtSnapshot = config.LoseMirrorAtSnapshot;
 
     session::BootstrapResult br;
     br.Secrets = std::move(config.Secrets);

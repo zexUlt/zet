@@ -35,8 +35,9 @@ void Calibration::Sink::Event(const CprEvent& event) noexcept {
 }
 
 Calibration::Calibration(std::unique_ptr<CprDemux> demux, bool seeded,
-                         const CalibrationTarget& target) noexcept
-    : Demux_(std::move(demux)) {
+                         const CalibrationTarget& target,
+                         std::size_t lagMax) noexcept
+    : Demux_(std::move(demux)), LagMax_(lagMax) {
     if (!seeded) {
         Reasons_ = CalStart;
     }
@@ -46,13 +47,13 @@ Calibration::Calibration(std::unique_ptr<CprDemux> demux, bool seeded,
 }
 
 std::unique_ptr<Calibration> Calibration::Create(
-    bool seeded, const CalibrationTarget& target) noexcept {
+    bool seeded, const CalibrationTarget& target, std::size_t lagMax) noexcept {
     auto demux = CprDemux::Create();
     if (!demux) {
         return nullptr;
     }
-    return std::unique_ptr<Calibration>(
-        new (std::nothrow) Calibration(std::move(demux), seeded, target));
+    return std::unique_ptr<Calibration>(new (std::nothrow) Calibration(
+        std::move(demux), seeded, target, lagMax));
 }
 
 // ---------------------------------------------------------------------------
@@ -72,7 +73,7 @@ void Calibration::Rebase(const CalibrationTarget& target) noexcept {
     SeenUnknown_ = p.UnknownSeqCount();
     SeenDcs_ = p.DcsApcCount() - p.DcsQueryCount();
     SeenBypass_ = p.BypassLimitCount();
-    PrevAlt_ = target.Screen->IsAltScreen();
+    SeenAltExit_ = target.Screen->AltExitCount();
 }
 
 void Calibration::Evaluate(const CalibrationTarget& target,
@@ -84,10 +85,14 @@ void Calibration::Evaluate(const CalibrationTarget& target,
         SeenBypass_ = p.BypassLimitCount();
         Sticky_ = true;
     }
-    if (PrevAlt_ && !alt && !quiet) {
-        Reasons_ |= CalAltExit;
+    // Counted, not compared at the call boundaries: an enter and an exit
+    // inside one portion, or inside the wait, are seen too.
+    if (g.AltExitCount() != SeenAltExit_) {
+        SeenAltExit_ = g.AltExitCount();
+        if (!quiet) {
+            Reasons_ |= CalAltExit;
+        }
     }
-    PrevAlt_ = alt;
     // A string or a character in progress is judged when it is over.
     if (p.State() != grid::EParserState::Ground || p.Utf8Pending()) {
         return;
@@ -120,7 +125,7 @@ void Calibration::OnTerminalBytes(ByteSpan bytes, std::uint64_t outputEnd,
         return;
     }
     if (Frozen_) {
-        if (bytes.size() <= CPR_LAG_BYTES_MAX - LagLen_) {
+        if (bytes.size() <= LagMax_ - LagLen_) {
             if (!bytes.empty()) {
                 std::memcpy(Lag_.get() + LagLen_, bytes.data(), bytes.size());
             }
@@ -213,7 +218,7 @@ bool Calibration::BeginQuery(Timestamp /*now*/,
     if (!target.Valid()) {
         return false;
     }
-    Lag_.reset(new (std::nothrow) std::byte[CPR_LAG_BYTES_MAX]);
+    Lag_.reset(new (std::nothrow) std::byte[LagMax_]);
     if (!Lag_) {
         Disabled_ = true;
         return false;

@@ -56,6 +56,9 @@ struct SessionTestConfig {
     /// the tests do not have; empty means the real one. Called on the
     /// client's thread.
     std::function<std::optional<wire::ResizeMessage>()> SizeSource{};
+    /// The mirror cannot be rebuilt from this snapshot (counting from 1, as
+    /// when its allocation fails): the client drops it. 0: never.
+    unsigned LoseMirrorAtSnapshot{0};
 };
 
 struct SessionTestResult {

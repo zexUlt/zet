@@ -81,8 +81,11 @@ public:
     /// query. `target` is the mirror as it is now: what its parser has counted
     /// so far gives no reason. Null when the demultiplexer cannot be
     /// allocated.
+    /// `lagMax`: how much output the wait holds before it is given up; the
+    /// constant outside tests.
     [[nodiscard]] static std::unique_ptr<Calibration> Create(
-        bool seeded, const CalibrationTarget& target) noexcept;
+        bool seeded, const CalibrationTarget& target,
+        std::size_t lagMax = CPR_LAG_BYTES_MAX) noexcept;
 
     // --- The terminal side -------------------------------------------------
 
@@ -169,6 +172,14 @@ public:
         return QueryUnwritten_;
     }
     [[nodiscard]] std::uint8_t Reasons() const noexcept { return Reasons_; }
+    /// Output held for the wait / the EchoAck held for it: neither outlives
+    /// the wait (for the fuzzers).
+    [[nodiscard]] bool HoldsLag() const noexcept {
+        return Lag_ != nullptr || LagLen_ != 0 || LagHasEnd_;
+    }
+    [[nodiscard]] bool HoldsDeferredAck() const noexcept {
+        return DeferredAck_.has_value();
+    }
     [[nodiscard]] const CprDemux& Demux() const noexcept { return *Demux_; }
     /// Queries answered by a resync / by a match / given up (timeout, failure,
     /// overflow, resize, snapshot).
@@ -196,7 +207,7 @@ private:
     };
 
     Calibration(std::unique_ptr<CprDemux> demux, bool seeded,
-                const CalibrationTarget& target) noexcept;
+                const CalibrationTarget& target, std::size_t lagMax) noexcept;
 
     /// Raises the reasons the parser's counters show since the last look.
     /// `quiet`: advance without raising (a notice).
@@ -237,6 +248,7 @@ private:
 
     // The wait: output after the query's point, and the latest EchoAck.
     std::unique_ptr<std::byte[]> Lag_;
+    std::size_t LagMax_{CPR_LAG_BYTES_MAX};
     std::size_t LagLen_{0};
     std::uint64_t LagEnd_{0};
     bool LagHasEnd_{false};
@@ -246,7 +258,7 @@ private:
     std::uint64_t SeenUnknown_{0};
     std::uint64_t SeenDcs_{0};
     std::uint64_t SeenBypass_{0};
-    bool PrevAlt_{false};
+    std::uint64_t SeenAltExit_{0};
 
     std::uint32_t Resynced_{0};
     std::uint32_t Matched_{0};
