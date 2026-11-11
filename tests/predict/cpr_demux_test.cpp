@@ -1148,7 +1148,7 @@ TEST_CASE("a half end marker in a paste does not end it later") {
 }
 
 // Kills: an ESC in the middle of a half end marker is not a new beginning.
-TEST_CASE("ESC ESC [201~ in a paste ends it") {
+TEST_CASE("ESC ESC and the end marker in a paste end it") {
     Rig r;
     REQUIRE(r.Query());
     const std::string paste = "\x1b[200~a\x1b\x1b[201~";

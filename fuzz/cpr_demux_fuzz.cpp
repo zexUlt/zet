@@ -553,8 +553,18 @@ struct Harness : CprSink {
     }
 
     void FlushDeferred() {
-        if (HasDeferred) {
-            HasDeferred = false;
+        if (!HasDeferred) {
+            return;
+        }
+        HasDeferred = false;
+        if (EndsInPaste(Stream)) {
+            // A paste began between the two writes: the DA1 reply is in it.
+            const auto index = static_cast<std::size_t>(DeferredTag);
+            Units[index].Lost = true;
+            Clean = false;
+            LostFirst = std::min(LostFirst, index);
+            Push(Deferred, TAG_PASTE);
+        } else {
             Push(Deferred, DeferredTag);
         }
     }
