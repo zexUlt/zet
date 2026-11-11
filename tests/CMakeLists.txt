@@ -150,6 +150,7 @@ if(ZET_HAVE_AGENT)
         agent/client_input_replay_pacing_test.cpp
         agent/client_predict_baseline_test.cpp
         agent/client_predict_off_test.cpp
+        agent/client_predict_cpr_test.cpp
         agent/client_predict_overlay_test.cpp
         agent/client_predict_password_test.cpp
         agent/client_predict_wiring_test.cpp

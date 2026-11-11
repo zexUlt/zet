@@ -261,6 +261,10 @@ public:
         /// client fails ("the terminal went away") as soon as it has bytes
         /// queued for it, and its queue is then as Finish finds it.
         bool StdoutIsFile{false};
+        /// The client asks the terminal where its cursor is (round C).
+        bool Calibrate{false};
+        /// The test's terminal answers the query: `CSI r;c R CSI ? 6 2 c`.
+        bool Answer{true};
     };
 
     ClientRig(std::uint8_t seed, Options options)
@@ -352,6 +356,7 @@ public:
                 .GiveUpAfter = Options_.GiveUp,
                 .Predict = Options_.Mode,
                 .OverlayLog = LogPath_,
+                .Calibrate = Options_.Calibrate,
                 .SizeSource = Options_.SizeSource,
             });
         });
@@ -507,6 +512,17 @@ public:
     /// How the client session ended; valid after Finish.
     [[nodiscard]] int ClientStatus() const { return Status_; }
 
+    /// Whether the client built the stdin demultiplexer; valid after Finish.
+    [[nodiscard]] bool CalibrationCreated() const {
+        return CalibrationCreated_;
+    }
+    /// Queries the client wrote to its terminal; valid after Finish.
+    [[nodiscard]] std::uint32_t QueriesWritten() const {
+        return QueriesWritten_;
+    }
+    /// Queries seen in the client's stdout so far.
+    [[nodiscard]] std::size_t QueriesSeen() const { return QueriesSeen_; }
+
     /// What the client wrote to its stderr.
     [[nodiscard]] std::string ErrText() const {
         std::string text(4096, '\0');
@@ -553,7 +569,10 @@ public:
                     std::quick_exit(1);
                 }
             }
-            Status_ = Client_.get().Status;
+            const auto result = Client_.get();
+            Status_ = result.Status;
+            CalibrationCreated_ = result.CalibrationCreated;
+            QueriesWritten_ = result.QueriesWritten;
         }
         Drain();
     }
@@ -567,6 +586,7 @@ private:
             if (!n || *n == 0) break;
             Out_.append(reinterpret_cast<const char*>(buf.data()), *n);
         }
+        AnswerQueries();
         for (;;) {
             const auto n = io::ReadSome(Slave_.Get(), MutableByteSpan{buf});
             if (!n || *n == 0) break;
@@ -574,8 +594,49 @@ private:
         }
     }
 
+    /// The terminal: follows what the client wrote, answers a query from its
+    /// cursor when the query has gone by.
+    void AnswerQueries() {
+        static constexpr std::string_view QUERY = "\x1b[6n\x1b[c";
+        if (!Term_) {
+            auto made = zet::grid::Grid::Create(80, 24, 0);
+            REQUIRE(made.has_value());
+            Term_.reset(made.value());
+        }
+        for (;;) {
+            const std::size_t at = Out_.find(QUERY, TermAt_);
+            const std::size_t upTo = at == std::string::npos ? Out_.size() : at;
+            // A partial query at the end waits for the rest.
+            const std::size_t safe =
+                at == std::string::npos && Out_.size() >= TermAt_
+                    ? (Out_.size() > QUERY.size() ? Out_.size() - QUERY.size()
+                                                  : 0)
+                    : upTo;
+            const std::size_t feedTo = std::max(safe, TermAt_);
+            TermParser_.Feed(
+                reinterpret_cast<const std::byte*>(Out_.data()) + TermAt_,
+                feedTo - TermAt_, *Term_);
+            TermAt_ = feedTo;
+            if (at == std::string::npos) return;
+            TermAt_ = at + QUERY.size();
+            ++QueriesSeen_;
+            if (Options_.Answer) {
+                const std::string reply =
+                    "\x1b[" + std::to_string(Term_->CursorRow() + 1) + ";" +
+                    std::to_string(Term_->CursorCol() + 1) + "R\x1b[?62;c";
+                Keys(reply);
+            }
+        }
+    }
+
     std::uint8_t Seed_;
     Options Options_;
+    std::unique_ptr<zet::grid::Grid> Term_;
+    zet::grid::VtParser TermParser_;
+    std::size_t TermAt_{0};
+    std::size_t QueriesSeen_{0};
+    bool CalibrationCreated_{false};
+    std::uint32_t QueriesWritten_{0};
     session::SessionLimits Limits_;
     io::UniqueFd Slave_;
     io::UniqueFd Master_;
