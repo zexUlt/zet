@@ -21,6 +21,18 @@ namespace zet::grid {
 /// Cyrillic, box drawing, Greek and private use.
 [[nodiscard]] bool IsAmbiguousWidth(char32_t cp) noexcept;
 
+/// Private use: U+E000-F8FF and planes 15-16. Ambiguous in the width table;
+/// terminals draw powerline and Nerd Fonts glyphs here in one or two columns.
+[[nodiscard]] constexpr bool IsPrivateUse(char32_t cp) noexcept {
+    return (cp >= 0xE000 && cp <= 0xF8FF) || (cp >= 0xF0000 && cp <= 0xFFFFD) ||
+           (cp >= 0x100000 && cp <= 0x10FFFD);
+}
+
+/// A codepoint with an emoji variation sequence (emoji-variation-sequences.txt:
+/// base + VS16 is drawn as an emoji), among them text glyphs of width 1 such as
+/// U+2601 and U+2764 that some terminals then draw two columns wide.
+[[nodiscard]] bool HasEmojiVariation(char32_t cp) noexcept;
+
 /// A codepoint that glues to the glyph before it into a cluster some terminals
 /// draw in a different width than a per-codepoint wcwidth gives: ZWJ, the
 /// variation selectors VS15 and VS16 and the emoji skin tone modifiers.

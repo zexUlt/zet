@@ -10,7 +10,18 @@
 //      a width==0 cell is preceded by width==2; width==2 NOT in last column
 //   7. pending-wrap relation: PendingWrap only when col == cols–1
 //   8. byte-at-a-time (with scrollback) produces identical screen to bulk:
-//      all cell fields (codepoint, width, attrs, colours) and cursor state
+//      all cell fields (codepoint, width, attrs, colours), cursor state and
+//      KnownFrom, under a random WidthPolicy
+//   9. KnownFrom <= cols on every row; the row's aggregate width mark agrees
+//      with its per-class marks
+//  10. a policy that keeps every width of the table (only the set of classes
+//      that mark differs) leaves cells and cursor identical to the default
+//      policy's, so the default is the grid as it was
+//  11. the path counters are exact whenever the path is not broken: against a
+//      twin that draws ambiguous glyphs wide, on the same row the pending wrap
+//      agrees and the columns differ by exactly the ambiguous glyphs counted,
+//      so a path that may have hit the right margin must report itself broken;
+//      a sequence the parser does not know breaks the path
 //
 // Resize count and targets are variable and driven by input bytes.
 
@@ -23,6 +34,50 @@
 #include "zet/grid/vt_parser.hpp"
 
 using namespace zet::grid;
+
+// A WidthPolicy from four input bits (the whole space is reachable).
+static WidthPolicy PolicyFrom(std::uint8_t a, std::uint8_t b) noexcept {
+    WidthPolicy w;
+    w.Ambiguous = (a & 1) != 0 ? 2 : 1;
+    w.PrivateUse = (a & 2) != 0 ? 2 : 1;
+    w.Vs16Widens = (a & 4) != 0;
+    switch (b & 3) {
+        case 0:
+            w.DoubtClasses = WIDTH_CLASSES_ALL;
+            break;
+        case 1:
+            w.DoubtClasses = static_cast<std::uint8_t>(
+                WIDTH_CLASSES_ALL & ~WidthClassBit(EWidthClass::Ambiguous));
+            break;
+        case 2:
+            w.DoubtClasses = 0;
+            break;
+        default:
+            w.DoubtClasses = WidthClassBit(EWidthClass::PrivateUse);
+            break;
+    }
+    return w;
+}
+
+// The calls a client makes between feeds, driven by one input byte.
+static void ClientCall(Grid& g, std::uint8_t b) noexcept {
+    const auto cls = static_cast<EWidthClass>(b & 3);
+    switch ((b >> 2) & 3) {
+        case 0:
+            g.Resync(static_cast<std::uint16_t>((b >> 4) % g.Rows()),
+                     static_cast<std::uint16_t>((b >> 1) % g.Cols()),
+                     (b & 0x80) != 0);
+            break;
+        case 1:
+            g.ClearWidthClass(cls);
+            break;
+        case 2:
+            g.ForgetWidthClass(cls);
+            break;
+        default:
+            break;
+    }
+}
 
 static void CheckInvariants(const Grid& g, const VtParser& p) noexcept {
     const std::uint16_t cols = g.Cols();
@@ -60,6 +115,17 @@ static void CheckInvariants(const Grid& g, const VtParser& p) noexcept {
     // 5. Scrollback within limit; scrollback-0 never has entries.
     if (g.ScrollbackSize() > g.ScrollbackLimit()) __builtin_trap();
     if (g.ScrollbackLimit() == 0 && g.ScrollbackSize() != 0) __builtin_trap();
+
+    // 9. KnownFrom within the row; aggregate mark agrees with the classes.
+    for (std::uint16_t r = 0; r < rows; ++r) {
+        if (g.KnownFrom(r) > cols) __builtin_trap();
+        for (std::uint16_t c = 0; c <= cols;
+             c = static_cast<std::uint16_t>(c + 1 + cols / 4)) {
+            if (g.WidthDoubtBefore(r, c) !=
+                g.WidthDoubtBefore(r, c, WIDTH_CLASSES_ALL))
+                __builtin_trap();
+        }
+    }
 
     // 6. Wide-char pairing invariant.
     //    Lead (width==2) must NOT be in the last column.
@@ -116,6 +182,9 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data,
             Grid* gByte = rByte.value();
             Grid* gBulk = rBulk.value();
             VtParser pByte, pBulk;
+            const WidthPolicy pol = PolicyFrom(data[0] >> 5, data[1] >> 6);
+            gByte->SetWidthPolicy(pol);
+            gBulk->SetWidthPolicy(pol);
 
             for (std::size_t i = 0; i < len; ++i)
                 pByte.Feed(bytes + i, 1, *gByte);
@@ -145,6 +214,9 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data,
             if (gByte->CursorRow() != gBulk->CursorRow()) __builtin_trap();
             if (gByte->CursorCol() != gBulk->CursorCol()) __builtin_trap();
             if (gByte->PendingWrap() != gBulk->PendingWrap()) __builtin_trap();
+            for (std::uint16_t r = 0; r < rows0; ++r)
+                if (gByte->KnownFrom(r) != gBulk->KnownFrom(r))
+                    __builtin_trap();
 
             delete gByte;
             delete gBulk;
@@ -164,6 +236,43 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data,
 
     VtParser p;
     p.SetBypassCallback([](EBypassEvent, std::byte, void*) {}, nullptr);
+    g->SetWidthPolicy(PolicyFrom(data[0] >> 5, data[1] >> 6));
+
+    // 10. Two grids that differ only in which classes mark.
+    Grid* gDef = nullptr;
+    Grid* gMark = nullptr;
+    VtParser pDef, pMark;
+    {
+        auto a = Grid::Create(cols0, rows0, 0);
+        auto b = Grid::Create(cols0, rows0, 0);
+        if (a.has_value()) gDef = a.value();
+        if (b.has_value()) gMark = b.value();
+        if (gDef && gMark) {
+            WidthPolicy narrow = PolicyFrom(0, data[3] >> 6);
+            gMark->SetWidthPolicy(narrow);
+        }
+    }
+
+    // 11. Twins of the path: all classes in doubt, ambiguous narrow against
+    // wide. Not resized, so the same size.
+    Grid* gNarrow = nullptr;
+    Grid* gWide = nullptr;
+    VtParser pNarrow, pWide, pUnknown;
+    {
+        auto a = Grid::Create(cols0, rows0, 0);
+        auto b = Grid::Create(cols0, rows0, 0);
+        if (a.has_value()) gNarrow = a.value();
+        if (b.has_value()) gWide = b.value();
+        if (gNarrow && gWide) {
+            WidthPolicy w;
+            gNarrow->SetWidthPolicy(w);
+            w.Ambiguous = 2;
+            gWide->SetWidthPolicy(w);
+        }
+    }
+    // Whether the twins' cursors are known to agree at the start of the
+    // current path; they do on fresh grids.
+    bool twinsArmed = true;
 
     // Decide the resize schedule: each resize is triggered when the byte
     // index is a multiple of (resize_period+1), where resize_period is
@@ -188,6 +297,55 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data,
         p.Feed(bytes + i, 1, *g);
         CheckInvariants(*g, p);
 
+        if (gDef && gMark) {
+            pDef.Feed(bytes + i, 1, *gDef);
+            pMark.Feed(bytes + i, 1, *gMark);
+            if (i % 7 == 6) {  // the same client call on both
+                ClientCall(*gDef, static_cast<std::uint8_t>(bytes[i]));
+                ClientCall(*gMark, static_cast<std::uint8_t>(bytes[i]));
+            }
+        }
+        if (i % 11 == 10) ClientCall(*g, static_cast<std::uint8_t>(bytes[i]));
+        CheckInvariants(*g, p);
+
+        if (gNarrow && gWide) {
+            pNarrow.Feed(bytes + i, 1, *gNarrow);
+            pWide.Feed(bytes + i, 1, *gWide);
+            if (i % 7 == 6) {
+                ClientCall(*gNarrow, static_cast<std::uint8_t>(bytes[i]));
+                ClientCall(*gWide, static_cast<std::uint8_t>(bytes[i]));
+            }
+            if (i % 13 == 12) {
+                // HPA: the grid does not parse it, a terminal does. Only the
+                // narrow twin sees it, as the cursor of both stays put.
+                const std::byte hpa[] = {std::byte{0x1b}, std::byte{'['},
+                                         std::byte{'2'}, std::byte{'`'}};
+                pUnknown.Feed(hpa, sizeof hpa, *gNarrow);
+                if (!gNarrow->PathBroken()) __builtin_trap();
+            }
+            const bool same = gNarrow->CursorRow() == gWide->CursorRow() &&
+                              gNarrow->CursorCol() == gWide->CursorCol() &&
+                              gNarrow->PendingWrap() == gWide->PendingWrap();
+            if (gNarrow->PathBroken()) {
+                twinsArmed = false;
+            } else {
+                std::uint32_t glyphs = 0;
+                for (std::uint8_t c = 0; c < WIDTH_CLASS_COUNT; ++c)
+                    glyphs += gNarrow->PathGlyphs(static_cast<EWidthClass>(c));
+                if (glyphs == 0 && same) twinsArmed = true;
+                // A row that differs is how the client sees a wrap the
+                // terminal made alone (the row of the report), so only equal
+                // rows are compared. On the last row a wrap scrolls and the
+                // rows agree again: that is what the right-margin rule is for.
+                if (twinsArmed && gNarrow->CursorRow() == gWide->CursorRow() &&
+                    (gNarrow->PendingWrap() != gWide->PendingWrap() ||
+                     gWide->CursorCol() !=
+                         gNarrow->CursorCol() +
+                             gNarrow->PathGlyphs(EWidthClass::Ambiguous)))
+                    __builtin_trap();
+            }
+        }
+
         if (g1x1) {
             p1x1.Feed(bytes + i, 1, *g1x1);
             // 1×1 grid has fixed size: just check it doesn't crash.
@@ -205,6 +363,25 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data,
             rrows = tmp;
         }
     }
+
+    if (gDef && gMark) {
+        for (std::uint16_t r = 0; r < rows0; ++r) {
+            for (std::uint16_t c = 0; c < cols0; ++c) {
+                const Cell& a = gDef->CellAt(r, c);
+                const Cell& b = gMark->CellAt(r, c);
+                if (a.Codepoint != b.Codepoint || a.Width != b.Width)
+                    __builtin_trap();
+            }
+        }
+        if (gDef->CursorRow() != gMark->CursorRow() ||
+            gDef->CursorCol() != gMark->CursorCol() ||
+            gDef->PendingWrap() != gMark->PendingWrap())
+            __builtin_trap();
+    }
+    delete gDef;
+    delete gMark;
+    delete gNarrow;
+    delete gWide;
 
     // One final explicit 1×1 resize to exercise the extreme shrink path.
     (void)g->Resize(1, 1);
