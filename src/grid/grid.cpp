@@ -197,6 +197,28 @@ void Grid::NoteColumnSet() noexcept {
     RestartPath();
 }
 
+bool Grid::PathBroken() const noexcept {
+    if (Path_.Broken) return true;
+    // The terminal's cursor stands at most one column right of the mirror's
+    // per glyph of a class that may be wider there (a class still in doubt,
+    // and Cluster, which never has a verdict). Once the mirror's column plus
+    // those glyphs reaches Cols, the terminal may have gone past its last
+    // column: it clamps there or wraps, and its reported column then no longer
+    // counts glyphs. One short of that (== Cols - 1) the terminal is at most
+    // in the last column without a pending wrap, and the difference still is
+    // exact. Needs no state of its own: the column only grows on a path,
+    // everything that moves it left or sets it breaks or restarts the path.
+    std::uint64_t doubtful =
+        Path_.Glyphs[static_cast<std::size_t>(EWidthClass::Cluster)];
+    for (std::size_t i = 0; i < WIDTH_CLASS_COUNT; ++i) {
+        const auto cls = static_cast<EWidthClass>(i);
+        if (cls != EWidthClass::Cluster &&
+            (Policy_.DoubtClasses & WidthClassBit(cls)) != 0)
+            doubtful += Path_.Glyphs[i];
+    }
+    return doubtful != 0 && CursorCol_ + doubtful >= Cols_;
+}
+
 void Grid::SetWidthPolicy(const WidthPolicy& policy) noexcept {
     Policy_ = policy;
     Policy_.Ambiguous = policy.Ambiguous == 2 ? 2 : 1;
@@ -375,6 +397,9 @@ bool Grid::WidenForVs16(std::uint16_t prev) noexcept {
     // on wrapping; the caller marks that.)
     if (PendingWrap_ || CursorCol_ != prev + 1U) return false;
     Line& line = ActiveLine(CursorRow_);
+    // Insert mode makes room for the second column first, the way it does
+    // for a glyph that is wide to begin with.
+    if (ModeSet(EMode::Irm)) InsertChars(1);
     Cell head = line.Cells[prev];
     head.Width = 2;
     StoreCell(line.Cells[prev], head);
@@ -445,6 +470,13 @@ void Grid::PutChar(char32_t cp, int width) noexcept {
                 if (!WidenForVs16(prev)) {
                     MarkWidthDoubt(CursorRow_, prev, EWidthClass::Cluster);
                     BreakPath();
+                } else if (IsAmbiguousWidth(LastPrintedChar_) &&
+                           !IsPrivateUse(LastPrintedChar_)) {
+                    // Two columns whatever the base is: it is the emoji's
+                    // width the path now depends on, not the base's class.
+                    std::uint32_t& a = Path_.Glyphs[static_cast<std::size_t>(
+                        EWidthClass::Ambiguous)];
+                    if (a != 0 && a != UINT32_MAX) --a;
                 }
             } else {
                 NoteClassGlyph(CursorRow_, prev, cls);
@@ -457,12 +489,9 @@ void Grid::PutChar(char32_t cp, int width) noexcept {
     if (PendingWrap_ && ModeSet(EMode::Awm)) {
         CursorCol_ = 0;
         LineFeed();
+        BreakPath();  // under LNM the LineFeed restarted it
     }
     PendingWrap_ = false;
-
-    if (ModeSet(EMode::Irm)) {
-        InsertChars(static_cast<std::uint16_t>(width));
-    }
 
     // Terminals set to wide ambiguous or to wide private use draw those in two
     // columns; the policy says which this one is (design.md §9, round C). Not
@@ -476,6 +505,11 @@ void Grid::PutChar(char32_t cp, int width) noexcept {
                                    ? Policy_.PrivateUse
                                    : Policy_.Ambiguous;
         if (w == 2) width = 2;
+    }
+
+    // Insert mode makes room for the glyph as it will be, after the policy.
+    if (ModeSet(EMode::Irm)) {
+        InsertChars(static_cast<std::uint16_t>(width));
     }
 
     // D4: in a 1-column grid a wide char can never fit regardless of AWM.
@@ -543,7 +577,12 @@ void Grid::PutChar(char32_t cp, int width) noexcept {
         StoreCell(cont, tail);
     }
 
-    if (IsAmbiguousWidth(cp)) {
+    if (mapped && classed) {
+        // The policy never sizes Special Graphics (terminals draw it
+        // themselves), so no verdict on A applies to it: like a cluster, it
+        // keeps its mark and counts as a glyph of open width.
+        NoteClassGlyph(CursorRow_, CursorCol_, EWidthClass::Cluster);
+    } else if (IsAmbiguousWidth(cp)) {
         NoteClassGlyph(CursorRow_, CursorCol_, cls);
     } else if (IsClusterJoiner(cp)) {
         NoteClassGlyph(CursorRow_, CursorCol_, EWidthClass::Cluster);
@@ -843,7 +882,14 @@ void Grid::EraseInDisplay(std::uint8_t param) noexcept {
             break;
         case 2:
         case 3:
-            for (std::uint16_t r = 0; r < Rows_; ++r) ClearLine(ActiveLine(r));
+            for (std::uint16_t r = 0; r < Rows_; ++r) {
+                Line& line = ActiveLine(r);
+                // ED 3 leaves the screen on a terminal, so what the mirror
+                // knew of it stays as it was.
+                const std::uint16_t known = line.KnownFrom;
+                ClearLine(line);
+                if (param == 3) line.KnownFrom = known;
+            }
             if (param == 3 && !IsAltScreen()) {
                 HistoryStart_ = 0;
                 HistorySize_ = 0;

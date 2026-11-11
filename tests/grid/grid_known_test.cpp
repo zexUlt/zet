@@ -241,13 +241,11 @@ TEST_CASE("ED 1 makes the rows above and the head of the cursor row known") {
     CHECK(r.Known(3) == 10);
 }
 
-TEST_CASE("ED 2 and ED 3 make everything known") {
-    for (const char* seq : {"\x1b[2J", "\x1b[3J"}) {
-        Rig r;
-        r.G->Resync(3, 0, false);
-        r.Feed(seq);
-        for (int row = 0; row < 4; ++row) CHECK(r.Known(row) == 0);
-    }
+TEST_CASE("ED 2 makes everything known") {
+    Rig r;
+    r.G->Resync(3, 0, false);
+    r.Feed("\x1b[2J");
+    for (int row = 0; row < 4; ++row) CHECK(r.Known(row) == 0);
 }
 
 TEST_CASE(
@@ -438,4 +436,22 @@ TEST_CASE("KnownFrom is not part of a snapshot") {
     const auto bb = ob->Bytes();
     REQUIRE(ba.size() == bb.size());
     CHECK(std::equal(ba.begin(), ba.end(), bb.begin()));
+}
+
+// R7: ED 3 erases the scrollback on a terminal, not the screen (the grid's
+// own comment); a foreign row stays foreign.
+TEST_CASE("R7 ED 3 does not make foreign rows known") {
+    Rig r(10, 4);
+    r.Feed("one\r\ntwo\r\nthree");
+    REQUIRE(r.G->Resync(2, 5, true));
+    r.Feed("\x1b[3J");
+    CHECK(r.G->KnownFrom(0) == 10);
+}
+
+TEST_CASE("R10 resync blanks the rows below with the default background") {
+    Rig r(10, 3);
+    r.Feed("\x1b[41m");
+    REQUIRE(r.G->Resync(0, 0, true));
+    CHECK(r.G->CellAt(1, 0).BgKind == EColorKind::Default);
+    CHECK(r.G->CellAt(0, 5).BgKind == EColorKind::Default);
 }

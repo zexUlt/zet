@@ -17,6 +17,11 @@
 //  10. a policy that keeps every width of the table (only the set of classes
 //      that mark differs) leaves cells and cursor identical to the default
 //      policy's, so the default is the grid as it was
+//  11. the path counters are exact whenever the path is not broken: against a
+//      twin that draws ambiguous glyphs wide, rows and pending wrap agree and
+//      the columns differ by exactly the ambiguous glyphs counted, so a path
+//      that may have hit the right margin must report itself broken; a
+//      sequence the parser does not know breaks the path
 //
 // Resize count and targets are variable and driven by input bytes.
 
@@ -248,6 +253,27 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data,
         }
     }
 
+    // 11. Twins of the path: all classes in doubt, ambiguous narrow against
+    // wide. Not resized, so the same size.
+    Grid* gNarrow = nullptr;
+    Grid* gWide = nullptr;
+    VtParser pNarrow, pWide, pUnknown;
+    {
+        auto a = Grid::Create(cols0, rows0, 0);
+        auto b = Grid::Create(cols0, rows0, 0);
+        if (a.has_value()) gNarrow = a.value();
+        if (b.has_value()) gWide = b.value();
+        if (gNarrow && gWide) {
+            WidthPolicy w;
+            gNarrow->SetWidthPolicy(w);
+            w.Ambiguous = 2;
+            gWide->SetWidthPolicy(w);
+        }
+    }
+    // Whether the twins' cursors are known to agree at the start of the
+    // current path; they do on fresh grids.
+    bool twinsArmed = true;
+
     // Decide the resize schedule: each resize is triggered when the byte
     // index is a multiple of (resize_period+1), where resize_period is
     // encoded in data[2] bits 7 (gives 1..128 period).  Resize dimensions
@@ -281,6 +307,41 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data,
         }
         if (i % 11 == 10) ClientCall(*g, static_cast<std::uint8_t>(bytes[i]));
         CheckInvariants(*g, p);
+
+        if (gNarrow && gWide) {
+            pNarrow.Feed(bytes + i, 1, *gNarrow);
+            pWide.Feed(bytes + i, 1, *gWide);
+            if (i % 7 == 6) {
+                ClientCall(*gNarrow, static_cast<std::uint8_t>(bytes[i]));
+                ClientCall(*gWide, static_cast<std::uint8_t>(bytes[i]));
+            }
+            if (i % 13 == 12) {
+                // HPA: the grid does not parse it, a terminal does. Only the
+                // narrow twin sees it, as the cursor of both stays put.
+                const std::byte hpa[] = {std::byte{0x1b}, std::byte{'['},
+                                         std::byte{'2'}, std::byte{'`'}};
+                pUnknown.Feed(hpa, sizeof hpa, *gNarrow);
+                if (!gNarrow->PathBroken()) __builtin_trap();
+            }
+            const bool same = gNarrow->CursorRow() == gWide->CursorRow() &&
+                              gNarrow->CursorCol() == gWide->CursorCol() &&
+                              gNarrow->PendingWrap() == gWide->PendingWrap();
+            if (gNarrow->PathBroken()) {
+                twinsArmed = false;
+            } else {
+                std::uint32_t glyphs = 0;
+                for (std::uint8_t c = 0; c < WIDTH_CLASS_COUNT; ++c)
+                    glyphs += gNarrow->PathGlyphs(static_cast<EWidthClass>(c));
+                if (glyphs == 0 && same) twinsArmed = true;
+                if (twinsArmed &&
+                    (gNarrow->CursorRow() != gWide->CursorRow() ||
+                     gNarrow->PendingWrap() != gWide->PendingWrap() ||
+                     gWide->CursorCol() !=
+                         gNarrow->CursorCol() +
+                             gNarrow->PathGlyphs(EWidthClass::Ambiguous)))
+                    __builtin_trap();
+            }
+        }
 
         if (g1x1) {
             p1x1.Feed(bytes + i, 1, *g1x1);
@@ -316,6 +377,8 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data,
     }
     delete gDef;
     delete gMark;
+    delete gNarrow;
+    delete gWide;
 
     // One final explicit 1×1 resize to exercise the extreme shrink path.
     (void)g->Resize(1, 1);

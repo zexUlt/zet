@@ -49,6 +49,8 @@ constexpr char32_t WOMAN = 0x1F469;
 constexpr char32_t TONE = 0x1F3FD;
 constexpr char32_t THUMB = 0x1F44D;
 constexpr char32_t KEYCAP = 0x20E3;
+constexpr char32_t HEART = 0x2665;  // ambiguous, with an emoji form
+constexpr char32_t CJK = 0x4E2D;
 
 struct Rig {
     std::unique_ptr<Grid> G;
@@ -608,7 +610,7 @@ TEST_CASE("ED and EL 2 clear the marks of the rows they erase") {
 // ---------------------------------------------------------------------------
 
 TEST_CASE("the path counts each class") {
-    Rig r;
+    Rig r(40, 3);
     r.Put({ZHE, ZHE, BOX, PUA, 'a', CLOUD, VS16, MAN, ZWJ});
     CHECK(r.G->PathGlyphs(EWidthClass::Ambiguous) == 3);
     CHECK(r.G->PathGlyphs(EWidthClass::PrivateUse) == 1);
@@ -679,6 +681,11 @@ TEST_CASE("erasing and inserting keep the path") {
 
 TEST_CASE("a wrap breaks the path") {
     Rig r(4, 3);
+    // No class in doubt: the right-margin rule has nothing to count, the wrap
+    // alone breaks the path.
+    WidthPolicy w;
+    w.DoubtClasses = 0;
+    r.G->SetWidthPolicy(w);
     r.Put({ZHE, ZHE, ZHE, ZHE});
     CHECK_FALSE(r.G->PathBroken());  // pending, not yet wrapped
     r.Put({ZHE});
@@ -739,4 +746,195 @@ TEST_CASE("the existing counters do not move with the new bookkeeping") {
     CHECK(r.G->ScrollCount() == 0);
     r.Feed("\r");
     CHECK(r.G->ColumnSetCount() == 1);
+}
+
+// R1: a wide-A terminal reaches the pending wrap (reports the last column)
+// while the mirror is one column short: d = 0 though A is wide.
+TEST_CASE(
+    "R1 a path that may have hit the right edge on the terminal is not "
+    "solvable") {
+    Rig r(10, 3);
+    r.Feed("\r");
+    r.Put({ZHE});
+    r.Feed("12345678");
+    REQUIRE(r.G->CursorCol() == 9);
+    REQUIRE_FALSE(r.G->PendingWrap());
+    REQUIRE(r.G->PathGlyphs(EWidthClass::Ambiguous) == 1);
+    CHECK(r.G->PathBroken());
+}
+
+// R2: an unparsed sequence may move the terminal's cursor (HPA here).
+TEST_CASE("R2 an unknown sequence breaks the path") {
+    Rig r(10, 3);
+    r.Feed("\r");
+    r.Put({ZHE});
+    r.Feed("\x1b[2`x");
+    CHECK(r.G->PathBroken());
+}
+
+// R3: under LNM the autowrap goes through LineFeed, whose NoteColumnSet
+// restarts the path after the wrap broke it.
+TEST_CASE("R3 a wrap breaks the path under LNM too") {
+    Rig r(10, 3);
+    r.Feed("\x1b[20h\r");
+    r.Put({ZHE});
+    r.Feed("123456789x");
+    CHECK(r.G->PathBroken());
+}
+
+// R4: with VS16 known wide, an ambiguous base + VS16 is two columns whatever
+// A is, so it must not count as an A glyph of open width.
+TEST_CASE("R4 a widened VS16 emoji does not count its ambiguous base") {
+    Rig r;
+    WidthPolicy w;
+    w.Vs16Widens = true;
+    w.DoubtClasses = A | P;
+    r.G->SetWidthPolicy(w);
+    r.Feed("\r");
+    r.Put({HEART, VS16});
+    REQUIRE(r.At(0, 0).Width == 2);
+    CHECK(r.G->PathGlyphs(EWidthClass::Ambiguous) == 0);
+}
+
+// R5: Special Graphics glyphs are not sized by the A policy, so they cannot
+// count as A on the path.
+TEST_CASE("R5 Special Graphics line drawing is not an A glyph on the path") {
+    Rig r;
+    r.Feed("\r\x1b(0q\x1b(B");
+    CHECK(r.G->PathGlyphs(EWidthClass::Ambiguous) == 0);
+    CHECK(r.G->WidthDoubtBefore(0, 1));  // still doubtful: aggregate unchanged
+}
+
+// R6: IRM must insert as many cells as the glyph takes under the policy.
+TEST_CASE("R6 insert mode makes room for a glyph the policy widens") {
+    Rig r;
+    WidthPolicy w;
+    w.Ambiguous = 2;
+    r.G->SetWidthPolicy(w);
+    r.Feed("abc\r\x1b[4h");
+    r.Put({ZHE});
+    CHECK(r.At(0, 0).Codepoint == ZHE);
+    CHECK(r.At(0, 0).Width == 2);
+    CHECK(r.At(0, 2).Codepoint == U'a');
+    CHECK(r.At(0, 3).Codepoint == U'b');
+    CHECK(r.At(0, 4).Codepoint == U'c');
+}
+
+// Mutant killers (survivors of the grid suite).
+TEST_CASE("R8 resync drops the width marks of the alt screen too") {
+    Rig r(10, 3);
+    r.Feed("\x1b[?47h");
+    r.Put({ZHE});
+    r.Feed("\x1b[?47l");
+    REQUIRE(r.G->Resync(0, 0, true));
+    r.Feed("\x1b[?47h");
+    REQUIRE(r.At(0, 0).Codepoint == ZHE);
+    CHECK_FALSE(r.G->WidthDoubtBefore(0, 1));
+}
+
+TEST_CASE(
+    "R9 resync does not leave the head of a wide glyph cut by the blank tail") {
+    Rig r(10, 3);
+    r.Feed("abc");
+    r.Put({CJK});
+    REQUIRE(r.At(0, 3).Width == 2);
+    REQUIRE(r.G->Resync(0, 4, true));
+    CHECK(r.At(0, 3).Width == 1);
+    CHECK(r.At(0, 3).Codepoint == 0);
+}
+
+TEST_CASE("R11 a glyph VS16 widens next to the known tail joins it") {
+    Rig r(10, 3);
+    WidthPolicy w;
+    w.Vs16Widens = true;
+    r.G->SetWidthPolicy(w);
+    REQUIRE(r.G->Resync(0, 5, true));
+    r.Feed("\x1b[4G");
+    r.Put({HEART});
+    REQUIRE(r.G->KnownFrom(0) == 5);
+    r.Put({VS16});
+    REQUIRE(r.At(0, 3).Width == 2);
+    CHECK(r.G->KnownFrom(0) == 3);
+}
+
+TEST_CASE("R12 a class mark keeps the leftmost glyph of the class") {
+    Rig r;
+    r.Put({ZHE});
+    r.Feed("abcd");
+    r.Put({ZHE});
+    CHECK(r.G->WidthDoubtBefore(0, 2, A));
+}
+
+TEST_CASE("R13 clearing a class keeps the leftmost mark of the others") {
+    Rig r;
+    r.Put({PUA});
+    r.Feed("abcd");
+    r.Put({ZHE});
+    r.G->ClearWidthClass(EWidthClass::Cluster);
+    CHECK(r.G->WidthDoubtBefore(0, 2));
+}
+
+TEST_CASE("R14 resize keeps the class marks") {
+    Rig r;
+    r.Put({ZHE});
+    REQUIRE(r.G->Resize(12, 3).has_value());
+    CHECK(r.G->WidthDoubtBefore(0, 1, A));
+}
+
+TEST_CASE("R15 a class verdict reaches the alt screen") {
+    Rig r;
+    r.Feed("\x1b[?47h");
+    r.Put({ZHE});
+    r.G->ClearWidthClass(EWidthClass::Ambiguous);
+    CHECK_FALSE(r.G->WidthDoubtBefore(0, 1));
+    r.Feed("\r\n");
+    r.Put({ZHE});
+    r.G->ForgetWidthClass(EWidthClass::Ambiguous);
+    CHECK_FALSE(r.G->WidthDoubtBefore(1, 1));
+    CHECK(r.G->KnownFrom(1) == 10);
+}
+
+TEST_CASE("R1 the margin rule is exact: one short of the edge the path holds") {
+    Rig r(10, 3);
+    r.Feed("\r");
+    r.Put({ZHE});
+    r.Feed("1234567");  // column 8, one glyph: the terminal is at 9 at most
+    REQUIRE(r.G->CursorCol() == 8);
+    CHECK_FALSE(r.G->PathBroken());
+    r.Feed("8");  // column 9: the terminal may have reached the margin
+    CHECK(r.G->PathBroken());
+}
+
+TEST_CASE("R1 a class with a verdict does not count at the margin") {
+    Rig r(10, 3);
+    WidthPolicy w;
+    w.DoubtClasses = P;  // A is known narrow
+    r.G->SetWidthPolicy(w);
+    r.Feed("\r");
+    r.Put({ZHE});
+    r.Feed("12345678");
+    CHECK_FALSE(r.G->PathBroken());
+}
+
+TEST_CASE("R2 the unknown sequence changes nothing else") {
+    Rig r(10, 3);
+    r.Put({ZHE});
+    const auto col = r.G->CursorCol();
+    r.Feed("\x1b[2`");
+    CHECK(r.P.UnknownSeqCount() == 1);
+    CHECK(r.G->CursorCol() == col);
+}
+
+TEST_CASE("R6 insert mode makes room for a VS16 that widens") {
+    Rig r;
+    WidthPolicy w;
+    w.Vs16Widens = true;
+    r.G->SetWidthPolicy(w);
+    r.Feed("abc\r\x1b[4h");
+    r.Put({CLOUD, VS16});
+    CHECK(r.At(0, 0).Codepoint == CLOUD);
+    CHECK(r.At(0, 0).Width == 2);
+    CHECK(r.At(0, 2).Codepoint == U'a');
+    CHECK(r.At(0, 3).Codepoint == U'b');
+    CHECK(r.At(0, 4).Codepoint == U'c');
 }

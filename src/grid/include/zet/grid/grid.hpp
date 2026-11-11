@@ -286,8 +286,16 @@ public:
     }
     /// Whether the path can no longer tell where the terminal's cursor is from
     /// its glyphs alone: the line wrapped on it, or the cursor moved left, by
-    /// a tab, against an edge, by DECRC or across a screen switch or resize.
-    [[nodiscard]] bool PathBroken() const noexcept { return Path_.Broken; }
+    /// a tab, against an edge, by DECRC or across a screen switch or resize,
+    /// or a sequence the parser does not know went by (NoteUnknownSequence),
+    /// or the terminal's cursor may have reached the right edge, where it
+    /// stops or wraps and the difference to the mirror's no longer counts
+    /// glyphs (see the definition).
+    [[nodiscard]] bool PathBroken() const noexcept;
+    /// A sequence the parser does not recognise went by. Terminals may know
+    /// it (HPA, say) and have moved the cursor: the path is broken. Nothing
+    /// else changes.
+    void NoteUnknownSequence() noexcept { BreakPath(); }
 
     /// The first known column of `row` (Line::KnownFrom). Mirror cells right
     /// of it are known to match the terminal's, those left of it are not.
