@@ -60,6 +60,13 @@ inline constexpr Duration CPR_HOLD = std::chrono::milliseconds(50);
 /// for good.
 inline constexpr Duration CPR_FORGET = std::chrono::seconds(10);
 
+/// Output held back while the mirror waits at the point of the client's own
+/// query (design.md §9, "Заморозка"). Past it there is no calibration: the
+/// wait ends, the held output goes into the mirror, and the query's answer is
+/// stripped and thrown away. The buffer is allocated when the wait begins and
+/// freed when it ends.
+inline constexpr std::size_t CPR_LAG_BYTES_MAX = 1024 * 1024;
+
 /// Longest answer the demultiplexer recognises: `CSI r ; c R` with five-digit
 /// numbers is 14 bytes. A device attributes answer is `CSI ? Pm c`: xterm's
 /// default vt420 reply is 38 bytes and Windows Terminal's is 39, so the limit

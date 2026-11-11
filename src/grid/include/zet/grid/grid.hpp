@@ -188,6 +188,12 @@ public:
     [[nodiscard]] std::uint64_t ColumnSetCount() const noexcept {
         return ColumnSetCount_;
     }
+    /// AltExitCount: every time the alternate screen was left (?47, ?1047,
+    /// ?1049 reset, and RIS while on it). A caller that looks only now and
+    /// then sees an enter and an exit inside one portion through this.
+    [[nodiscard]] std::uint64_t AltExitCount() const noexcept {
+        return AltExitCount_;
+    }
 
     /// CellChangeCount: every time a cell of either screen buffer was stored
     /// with content that differs from what it held: glyph (an empty cell and a
@@ -689,6 +695,7 @@ private:
 
     std::uint64_t ScrollCount_{0};
     std::uint64_t ColumnSetCount_{0};
+    std::uint64_t AltExitCount_{0};
     std::uint64_t CellChangeCount_{0};
 };
 

@@ -26,6 +26,8 @@
 //   18 time runs to NextDeadline(), a tick follows: it must make progress
 //   19 time runs to NextDeadline() - 1ns, a tick follows: it changes nothing
 //   20 the terminal writes a DA1 reply nobody asked for
+//   21 the program writes the operand bytes as they are (only the check that
+//      the Ground fast path of OnOutput counts what a plain parser counts)
 // Replies come in several shapes: DA1 of 127 and 128 bytes, over the cap, and
 // positions with leading zeros or five digits. The terminal answers every
 // query in order; the pipe is cut at any byte by the reads.
@@ -239,6 +241,11 @@ struct Unit {
 
 struct Harness : CprSink {
     std::unique_ptr<CprDemux> D = CprDemux::Create();
+    std::unique_ptr<grid::Grid> PlainGrid{grid::Grid::Create(1, 1, 0).value()};
+    grid::VtParser Plain;
+    std::unique_ptr<CprDemux> Raw = CprDemux::Create();
+    std::unique_ptr<grid::Grid> RawGrid{grid::Grid::Create(1, 1, 0).value()};
+    grid::VtParser RawPlain;
     Timestamp Now = Timestamp::FromNanos(1'000'000'000);
 
     // The model.
@@ -596,9 +603,28 @@ struct Harness : CprSink {
         }
     }
 
+    /// The output goes to the demultiplexer, whose Ground fast path skips
+    /// bytes, and byte by byte to a plain parser: both must count the same
+    /// DA1 queries.
     void Output(const std::string& s) {
-        D->OnOutput({reinterpret_cast<const std::byte*>(s.data()), s.size()},
-                    Now);
+        const ByteSpan bytes{reinterpret_cast<const std::byte*>(s.data()),
+                             s.size()};
+        D->OnOutput(bytes, Now);
+        for (const std::byte b : bytes) {
+            Plain.FeedByte(b, *PlainGrid);
+        }
+        REQUIRE_INV(Plain.Da1QueryCount() == D->Da1Seen());
+    }
+
+    /// Arbitrary bytes as program output to a second demultiplexer, for the
+    /// same check; the model above knows nothing of them.
+    void RawOutput(const std::uint8_t* p, std::size_t n) {
+        const ByteSpan bytes{reinterpret_cast<const std::byte*>(p), n};
+        Raw->OnOutput(bytes, Now);
+        for (const std::byte b : bytes) {
+            RawPlain.FeedByte(b, *RawGrid);
+        }
+        REQUIRE_INV(RawPlain.Da1QueryCount() == Raw->Da1Seen());
     }
 
     void AddProgram(const std::string& query, const std::string& reply,
@@ -693,14 +719,14 @@ struct Harness : CprSink {
 extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data,
                                       std::size_t size) {
     Harness h;
-    if (!h.D || size < 1) {
+    if (!h.D || !h.Raw || size < 1) {
         return 0;
     }
     h.Lossy = (data[0] & 1) != 0;
     std::size_t at = 1;
     int ops = 0;
     while (at + 2 <= size && ops++ < 400) {
-        const std::uint8_t op = data[at] % 21;
+        const std::uint8_t op = data[at] % 22;
         const std::size_t len = std::min<std::size_t>(data[at + 1], 64);
         at += 2;
         const std::size_t n = std::min(len, size - at);
@@ -859,6 +885,9 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data,
                 break;
             case 20:
                 h.Unasked(Da1Reply(n > 0 ? p[0] : 0, n > 1 ? p[1] : 0));
+                break;
+            case 21:
+                h.RawOutput(p, n);
                 break;
         }
     }

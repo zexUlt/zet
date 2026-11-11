@@ -1056,6 +1056,26 @@ TEST_CASE("CSI with unknown final increments UnknownSeqCount") {
     delete g;
 }
 
+TEST_CASE("DECKPAM and DECKPNM are known and touch neither screen nor cursor") {
+    Grid* g = MakeGrid(80, 5);
+    VtParser p;
+    Feed(p, *g, "ab\x1b[2;3H");
+    const auto row = g->CursorRow();
+    const auto col = g->CursorCol();
+    const auto cells = g->CellChangeCount();
+    const auto before = p.UnknownSeqCount();
+    Feed(p, *g, "\x1b=\x1b>");
+    CHECK(p.UnknownSeqCount() == before);
+    CHECK(p.State() == EParserState::Ground);
+    CHECK(g->CursorRow() == row);
+    CHECK(g->CursorCol() == col);
+    CHECK(g->CellChangeCount() == cells);
+    // An intermediate byte before them still makes a different sequence.
+    Feed(p, *g, "\x1b !=");
+    CHECK(p.UnknownSeqCount() == before + 1);
+    delete g;
+}
+
 TEST_CASE("CAN/SUB abort current escape sequence") {
     Grid* g = MakeGrid(80, 5);
     VtParser p;
@@ -3091,5 +3111,21 @@ TEST_CASE(
 TEST_CASE("Resize no-op returns success when dimensions are unchanged") {
     Grid* g = MakeGrid(80, 24, 0);
     CHECK(g->Resize(80, 24).has_value());
+    delete g;
+}
+
+TEST_CASE("CSI 6 n is counted as a position request, other DSRs are not") {
+    Grid* g = MakeGrid(10, 3);
+    VtParser p;
+    Feed(p, *g, "\x1b[6n");
+    CHECK(p.CprQueryCount() == 1);
+    Feed(p, *g, "\x1b[5n\x1b[?6n\x1b[6;1n\x1b[16n");
+    CHECK(p.CprQueryCount() == 1);
+    // Split over feeds, it counts once, on the final byte.
+    Feed(p, *g, "\x1b[");
+    Feed(p, *g, "6");
+    CHECK(p.CprQueryCount() == 1);
+    Feed(p, *g, "n");
+    CHECK(p.CprQueryCount() == 2);
     delete g;
 }

@@ -41,6 +41,7 @@
 #include "zet/io/self_path.hpp"
 #include "zet/io/tcp.hpp"
 #include "zet/io/terminal.hpp"
+#include "zet/predict/calibration.hpp"
 #include "zet/predict/engine.hpp"
 #include "zet/predict/overlay.hpp"
 #include "zet/session/bootstrap.hpp"
@@ -106,6 +107,11 @@ constexpr std::size_t STDOUT_SNAPSHOT_CEILING =
 constexpr std::size_t SOCKET_OUTPUT_SLACK = 1024 * 1024;
 
 constexpr std::size_t STDIN_CHUNK = 4096;
+static_assert(STDIN_CHUNK <= predict::Calibration::INPUT_MAX);
+/// Room for what the stdin demultiplexer lets through: a read, and the bytes
+/// it held back, twice (design.md §9, "Разбор stdin").
+constexpr std::size_t RELEASED_MAX =
+    predict::Calibration::INPUT_MAX + 2 * predict::CPR_HELD_MAX;
 constexpr std::size_t SOCKET_READ_CHUNK = 64 * 1024;
 constexpr std::size_t SSH_OUTPUT_MAX = 256 * 1024;
 constexpr std::size_t EVENTS_PER_WAIT = 16;
@@ -192,32 +198,41 @@ void SayError(std::string_view what, std::string_view why) noexcept {
 }
 
 struct Options {
-    bool PrintVersion{false};
     std::string Agent{DEFAULT_AGENT};
-    /// True when --agent was given: skip delivery and run the agent directly.
-    bool AgentExplicit{false};
     std::vector<std::string> SshArgs;
     std::string Host;
     session::SessionLimits Limits;
     Duration BackoffMax{BACKOFF_MAX};
-    /// Test hooks (ZET_TEST_VERSION_CEILING, ZET_TEST_NO_GRID_CAPABLE): the
-    /// protocol ceiling offered in Hello, and whether GRID_CAPABLE goes with
-    /// it. Production offers the default ceiling and always the TLV.
-    std::uint16_t Ceiling{wire::PROTOCOL_VERSION_MAX};
-    bool GridCapable{true};
     /// Test hook ZET_TEST_MIRROR_DUMP: keep the mirror grid (§9, M7) and write
     /// its snapshot to this path on exit. Empty means no mirror: nothing else
     /// asks for one yet, and without it the client does no extra work.
     std::string MirrorDump;
-    /// Predictive echo (--predict, §9). Never offers no ECHO_ACK and keeps no
-    /// mirror: the stream reaches the terminal as it always did.
-    predict::EDisplayMode Predict{predict::EDisplayMode::Adaptive};
     /// Test hook ZET_TEST_OVERLAY_LOG: one line "offset length" for every
     /// piece of overlay put into stdout, offsets counted in stdout bytes.
     std::string OverlayLog;
     /// Test seam (SessionTestConfig::SizeSource): stands in for the tty when
     /// SIGWINCH asks for the terminal's size. Empty in production.
     std::function<std::optional<wire::ResizeMessage>()> SizeSource;
+    /// Test seam (SessionTestConfig::LoseMirrorAtSnapshot): the mirror cannot
+    /// be rebuilt from this snapshot (counting from 1), as when its allocation
+    /// fails. 0 in production.
+    unsigned LoseMirrorAtSnapshot{0};
+    /// Test hooks (ZET_TEST_VERSION_CEILING, ZET_TEST_NO_GRID_CAPABLE): the
+    /// protocol ceiling offered in Hello, and whether GRID_CAPABLE goes with
+    /// it. Production offers the default ceiling and always the TLV.
+    std::uint16_t Ceiling{wire::PROTOCOL_VERSION_MAX};
+    /// Predictive echo (--predict, §9). Never offers no ECHO_ACK and keeps no
+    /// mirror: the stream reaches the terminal as it always did.
+    predict::EDisplayMode Predict{predict::EDisplayMode::Adaptive};
+    bool PrintVersion{false};
+    /// True when --agent was given: skip delivery and run the agent directly.
+    bool AgentExplicit{false};
+    bool GridCapable{true};
+    /// Ask the terminal where its cursor is (design.md §9, round C). On when
+    /// stdin and stdout are a terminal: a pipe cannot answer, and the query
+    /// would be written into a file. Off for the tests that read the client's
+    /// stdout from a pipe.
+    bool Calibrate{false};
 };
 
 /// What of the local environment goes to the shell on the far side: the
@@ -1045,6 +1060,26 @@ private:
         return predict::MirrorView{Mirror_->Screen(), Mirror_->Parser()};
     }
     void WriteMirrorDump() noexcept;
+    /// The mirror, the engine and the grid they watch as the calibration
+    /// takes them; empty when there is no mirror.
+    [[nodiscard]] predict::CalibrationTarget CalTarget() noexcept {
+        if (!Mirror_ || !Predict_) {
+            return {};
+        }
+        return predict::CalibrationTarget{&Mirror_->MutableScreen(),
+                                          &Mirror_->MutableParser(),
+                                          Predict_.get()};
+    }
+    /// Asks the terminal for the cursor position if a reason is pending and
+    /// the queue has room (design.md §9, round C).
+    void MaybeQuery(Timestamp now) noexcept;
+    /// Bytes the stdout queue wrote just now: the demultiplexer counts them,
+    /// and the query's last byte starts the answer's clock.
+    void NoteWritten(ByteSpan written) noexcept;
+    /// What the stdin demultiplexer let through goes to Released_, and from
+    /// there to the escape scanner when In_ has room.
+    void StageForwarded() noexcept;
+    void MoveReleased() noexcept;
     [[nodiscard]] Duration Backoff() noexcept;
     [[nodiscard]] int Finish(int status) noexcept;
 
@@ -1074,6 +1109,10 @@ private:
     std::array<std::byte, 2 * STDIN_CHUNK + 1> In_{};
     std::size_t InFrom_{0};
     std::size_t InTo_{0};
+    /// Typed bytes the demultiplexer has let through, waiting for In_. Empty
+    /// without calibration.
+    std::array<std::byte, RELEASED_MAX> Released_{};
+    std::size_t ReleasedLen_{0};
     app::ByteQueue Stdout_;
     app::Registration StdinWatch_;
     /// Where typed input is read from; tests point it at a pipe.
@@ -1105,6 +1144,10 @@ private:
     bool Escaped_{false};
     /// The link went down after it had been live, and the user was told.
     bool Announced_{false};
+    /// The loop must not wait: input was moved to In_ outside a read.
+    bool Wake_{false};
+    bool CalibrationCreated_{false};
+    std::uint32_t QueriesWritten_{0};
     /// GridBegin flags of PendingSnapshot_.
     std::uint8_t PendingSnapshotFlags_{0};
 
@@ -1121,6 +1164,16 @@ private:
     Duration LastSrtt_{Duration::min()};  // min: none yet
     /// Bytes ever queued for stdout, for ZET_TEST_OVERLAY_LOG offsets.
     std::uint64_t StdoutQueued_{0};
+    /// Bytes written to the terminal, on the same scale.
+    std::uint64_t StdoutWritten_{0};
+    /// Where the cursor position query stands in the same offsets.
+    std::uint64_t QueryAt_{0};
+    /// Cursor position calibration: created with the predictive echo when
+    /// Options::Calibrate is on, never with --predict=never, an old agent or
+    /// ver=1.
+    std::unique_ptr<predict::Calibration> Cal_;
+    /// Snapshots applied to the mirror (for Options::LoseMirrorAtSnapshot).
+    unsigned SnapshotsApplied_{0};
 
     struct PendingSnapshotInfo {
         std::uint32_t StreamGen{0};
@@ -1158,6 +1211,7 @@ int Client::Run() noexcept {
     for (;;) {
         const Timestamp now = io::MonotonicNow();
         FeedStdin();
+        Wake_ = false;
         if (Link_ == ELink::Up) {
             Pump(now);
             // An Ack taken by Pump may have freed ring room that the input
@@ -1231,28 +1285,40 @@ int Client::Run() noexcept {
 }
 
 void Client::FeedStdin() noexcept {
-    while (InFrom_ < InTo_ && Session_.AcceptsWrites()) {
-        const auto taken =
-            Session_.Write(ByteSpan{In_}.subspan(InFrom_, InTo_ - InFrom_));
-        if (!taken || *taken == 0) {
-            break;
+    for (;;) {
+        while (InFrom_ < InTo_ && Session_.AcceptsWrites()) {
+            const auto taken =
+                Session_.Write(ByteSpan{In_}.subspan(InFrom_, InTo_ - InFrom_));
+            if (!taken || *taken == 0) {
+                break;
+            }
+            const ByteSpan sent = ByteSpan{In_}.subspan(InFrom_, *taken);
+            InFrom_ += *taken;
+            InputWritten_ += *taken;
+            if (Predict_ && Mirror_) {
+                Predict_->OnInput(sent, InputWritten_, io::MonotonicNow(),
+                                  View());
+                RefreshOverlay();
+            }
         }
-        const ByteSpan sent = ByteSpan{In_}.subspan(InFrom_, *taken);
-        InFrom_ += *taken;
-        InputWritten_ += *taken;
-        if (Predict_ && Mirror_) {
-            Predict_->OnInput(sent, InputWritten_, io::MonotonicNow(), View());
-            RefreshOverlay();
+        if (InFrom_ != InTo_) {
+            return;
         }
-    }
-    if (InFrom_ == InTo_) {
         InFrom_ = 0;
         InTo_ = 0;
+        // What the demultiplexer let through while In_ was full.
+        MoveReleased();
+        if (InTo_ == 0) {
+            return;
+        }
     }
 }
 
 void Client::Pump(Timestamp now) noexcept {
     PumpEvents(now);
+    // The query goes out before the draw, so that the overlay is not drawn to
+    // be taken off at once.
+    MaybeQuery(now);
     // One draw for everything the pass delivered: the overlay was taken off
     // before the first byte and goes back on after the last.
     RefreshOverlay();
@@ -1310,9 +1376,16 @@ void Client::PumpEvents(Timestamp now) noexcept {
             }
             StdoutQueued_ += deliver->Bytes.size();
             if (Mirror_) {
-                Mirror_->Feed(deliver->Bytes);
-                if (Predict_) {
-                    Predict_->OnOutput(Session_.ReceiveOffset(), now, View());
+                if (Cal_ && Predict_) {
+                    Cal_->OnTerminalBytes(deliver->Bytes,
+                                          Session_.ReceiveOffset(), now,
+                                          CalTarget());
+                } else {
+                    Mirror_->Feed(deliver->Bytes);
+                    if (Predict_) {
+                        Predict_->OnOutput(Session_.ReceiveOffset(), now,
+                                           View());
+                    }
                 }
             }
         } else if (const auto* ended = std::get_if<session::Ended>(&event)) {
@@ -1342,9 +1415,18 @@ void Client::PumpEvents(Timestamp now) noexcept {
                 SeededFromSnapshot_ = Mirror_ != nullptr;
             }
             if (Mirror_) {
-                if (!Mirror_->ResetFromSnapshot(snap->Bytes)) {
+                if (++SnapshotsApplied_ == Options_.LoseMirrorAtSnapshot ||
+                    !Mirror_->ResetFromSnapshot(snap->Bytes)) {
                     LoseMirror();
                 } else if (Predict_) {
+                    // C4: ResetFromSnapshot built a fresh Grid, so the width
+                    // policy the solver settled on is gone with the old one;
+                    // C4 must apply it to the new grid here.
+                    // The held output and the query's answer go with the old
+                    // grid; no query is asked for the snapshot's sake.
+                    if (Cal_) {
+                        Cal_->OnSnapshot(now, CalTarget());
+                    }
                     // The mirror is a new grid; the engine rebases on it.
                     Predict_->OnSnapshot(snap->StreamGen, now, View());
                 }
@@ -1490,7 +1572,8 @@ void Client::Drop(Timestamp now) noexcept {
 }
 
 bool Client::UpdateInterest() noexcept {
-    const bool readStdin = !InEnded_ && InTo_ == 0 && Session_.AcceptsWrites();
+    const bool readStdin = !InEnded_ && InTo_ == 0 && ReleasedLen_ == 0 &&
+                           Session_.AcceptsWrites();
     if (!StdinWatch_.Want(Poller_, readStdin, false) ||
         !StdoutWatch_.Want(Poller_, false, !Stdout_.Empty())) {
         return false;
@@ -1532,6 +1615,14 @@ Deadline Client::NextDeadline() const noexcept {
             next = Earliest(next, Deadline{*glitch});
         }
     }
+    if (Cal_) {
+        if (const auto cpr = Cal_->NextDeadline()) {
+            next = Earliest(next, Deadline{*cpr});
+        }
+    }
+    if (Wake_) {
+        next = Earliest(next, Deadline{Timestamp{}});
+    }
     return next;
 }
 
@@ -1572,7 +1663,7 @@ void Client::Handle(const io::PollEvent& event, Timestamp now) noexcept {
 }
 
 void Client::ReadStdin() noexcept {
-    if (InTo_ != 0 || InEnded_) {
+    if (InTo_ != 0 || ReleasedLen_ != 0 || InEnded_) {
         return;
     }
     std::array<std::byte, STDIN_CHUNK> typed{};
@@ -1587,20 +1678,67 @@ void Client::ReadStdin() noexcept {
         InEnded_ = true;
         return;
     }
+    if (Cal_) {
+        // stdin, the demultiplexer, the `~.` scanner, the agent (design.md §9).
+        Cal_->OnInput(ByteSpan{typed}.first(*n), io::MonotonicNow(),
+                      CalTarget());
+        StageForwarded();
+        MoveReleased();
+        return;
+    }
     const auto scanned =
         Escape_.Feed(ByteSpan{typed}.first(*n), MutableByteSpan{In_});
     InTo_ = scanned.Written;
     Escaped_ = scanned.Quit;
 }
 
+void Client::StageForwarded() noexcept {
+    if (!Cal_) {
+        return;
+    }
+    const ByteSpan forwarded = Cal_->Forwarded();
+    // Bounded by the contract: a read is released with at most the bytes held
+    // back, and nothing is read while Released_ holds anything.
+    const std::size_t n =
+        std::min(forwarded.size(), Released_.size() - ReleasedLen_);
+    if (n != 0) {
+        std::memcpy(Released_.data() + ReleasedLen_, forwarded.data(), n);
+        ReleasedLen_ += n;
+    }
+    Cal_->ClearForwarded();
+}
+
+void Client::MoveReleased() noexcept {
+    while (ReleasedLen_ != 0 && InTo_ == 0) {
+        const std::size_t n = std::min(ReleasedLen_, STDIN_CHUNK);
+        const auto scanned =
+            Escape_.Feed(ByteSpan{Released_}.first(n), MutableByteSpan{In_});
+        InTo_ = scanned.Written;
+        if (scanned.Quit) {
+            Escaped_ = true;
+        }
+        std::memmove(Released_.data(), Released_.data() + n, ReleasedLen_ - n);
+        ReleasedLen_ -= n;
+        if (InTo_ != 0) {
+            Wake_ = true;
+        }
+    }
+}
+
 void Client::WriteStdout() noexcept {
     while (!Stdout_.Empty()) {
-        const auto n = io::WriteSome(StdoutFd_, Stdout_.Front());
+        const ByteSpan front = Stdout_.Front();
+        const auto n = io::WriteSome(StdoutFd_, front);
         if (!n) {
             if (!n.error().WouldBlock()) {
                 Fatal_ = "the terminal went away";
             }
             return;
+        }
+        if (Cal_) {
+            NoteWritten(front.first(*n));
+        } else {
+            StdoutWritten_ += *n;
         }
         Stdout_.Consume(*n);
     }
@@ -1660,11 +1798,17 @@ void Client::Notice(std::string_view text) noexcept {
     } else {
         StdoutQueued_ += bytes.size();
         if (Mirror_) {
-            Mirror_->Feed(bytes);
-            if (Predict_) {
-                // Output nobody predicted, at the offset the stream is at.
-                Predict_->OnOutput(Session_.ReceiveOffset(), io::MonotonicNow(),
-                                   View());
+            if (Cal_ && Predict_) {
+                // A notice gives no reason to ask.
+                Cal_->OnTerminalBytes(bytes, Session_.ReceiveOffset(),
+                                      io::MonotonicNow(), CalTarget(), true);
+            } else {
+                Mirror_->Feed(bytes);
+                if (Predict_) {
+                    // Output nobody predicted, at the offset the stream is at.
+                    Predict_->OnOutput(Session_.ReceiveOffset(),
+                                       io::MonotonicNow(), View());
+                }
             }
         }
         RefreshOverlay();
@@ -1687,12 +1831,22 @@ void Client::StartPredict(std::uint32_t streamGen, Timestamp now) noexcept {
     Overlay_ = std::move(overlay);
     Predict_ = std::make_unique<predict::PredictionEngine>(
         View(), Options_.Predict, streamGen);
-    if (std::exchange(SeededFromSnapshot_, false)) {
+    const bool seeded = std::exchange(SeededFromSnapshot_, false);
+    if (Options_.Calibrate &&
+        Options_.Predict != predict::EDisplayMode::Never) {
+        // The first EchoAck is the start of the session: the mirror begins
+        // empty on a terminal that shows the local shell, unless a snapshot
+        // seeded it. A failed allocation leaves the session as with never.
+        Cal_ = predict::Calibration::Create(seeded, CalTarget());
+        CalibrationCreated_ = Cal_ != nullptr;
+    }
+    if (seeded) {
         // The mirror was filled from a snapshot and fed everything since: the
         // cursor is known as it is after a snapshot.
         Predict_->OnSnapshot(streamGen, now, View());
     }
     Predict_->OnOutput(Session_.ReceiveOffset(), now, View());
+    MaybeQuery(now);
 }
 
 void Client::OnEchoAcked(const wire::EchoAckMessage& ack,
@@ -1716,18 +1870,27 @@ void Client::OnEchoAcked(const wire::EchoAckMessage& ack,
         return;
     }
     if (Predict_ && Mirror_) {
-        Predict_->OnEchoAck(predict::EchoAck{.StreamGen = ack.StreamGen,
-                                             .OutputOffset = ack.OutputOffset,
-                                             .InputOffset = ack.InputOffset},
-                            now, View());
+        const predict::EchoAck echo{.StreamGen = ack.StreamGen,
+                                    .OutputOffset = ack.OutputOffset,
+                                    .InputOffset = ack.InputOffset};
+        if (Cal_) {
+            Cal_->OnEchoAck(echo, now, CalTarget());
+        } else {
+            Predict_->OnEchoAck(echo, now, View());
+        }
     }
 }
 
 void Client::Tick() noexcept {
+    const Timestamp now = io::MonotonicNow();
+    if (Cal_) {
+        Cal_->OnTick(now, CalTarget());
+        StageForwarded();
+        MoveReleased();
+    }
     if (!Predict_ || !Mirror_) {
         return;
     }
-    const Timestamp now = io::MonotonicNow();
     if (Connection_) {
         const auto srtt = Connection_->Srtt();
         if (srtt && *srtt != LastSrtt_) {
@@ -1736,7 +1899,70 @@ void Client::Tick() noexcept {
         }
     }
     Predict_->OnTick(now);
+    MaybeQuery(now);
     RefreshOverlay();
+}
+
+void Client::MaybeQuery(Timestamp now) noexcept {
+    if (!Cal_ || !Predict_ || !Mirror_) {
+        return;
+    }
+    const predict::CalibrationTarget target = CalTarget();
+    const bool due = Cal_->QueryDue(now, target);
+    // Settling may have let held bytes go.
+    StageForwarded();
+    MoveReleased();
+    if (!due) {
+        return;
+    }
+    // The overlay's undo, the query, and what the read gate keeps free.
+    const std::size_t readRoom =
+        Connection_ ? Connection_->ReadCapacity() : std::size_t{0};
+    if (Stdout_.Room() <
+        predict::Calibration::QUERY_SIZE + readRoom + 2 * StdoutReserve()) {
+        return;
+    }
+    if (!Cal_->BeginQuery(now, target)) {
+        return;
+    }
+    const ByteSpan query = predict::Calibration::Query();
+    if (!TakeOffOverlay() || !Stdout_.Append(query)) {
+        Cal_->AbortQuery(now, target);
+        return;
+    }
+    LogOverlay(query.size());
+    QueryAt_ = StdoutQueued_;
+    StdoutQueued_ += query.size();
+}
+
+void Client::NoteWritten(ByteSpan written) noexcept {
+    const Timestamp now = io::MonotonicNow();
+    const std::uint64_t from = StdoutWritten_;
+    const std::uint64_t to = from + written.size();
+    StdoutWritten_ = to;
+    if (!Cal_->QueryUnwritten()) {
+        Cal_->OnWritten(written, now);
+        return;
+    }
+    // The demultiplexer counts the agent's bytes, in stdout order; the query
+    // itself is not one of them.
+    const std::uint64_t queryEnd = QueryAt_ + predict::Calibration::QUERY_SIZE;
+    if (from < QueryAt_) {
+        Cal_->OnWritten(written.first(static_cast<std::size_t>(
+                            std::min(to, QueryAt_) - from)),
+                        now);
+    }
+    if (to >= queryEnd) {
+        ++QueriesWritten_;
+        Cal_->OnQueryWritten(now, CalTarget());
+        StageForwarded();
+        MoveReleased();
+        if (to > queryEnd) {
+            Cal_->OnWritten(
+                written.subspan(static_cast<std::size_t>(queryEnd - from)),
+                now);
+        }
+    }
 }
 
 bool Client::TakeOffOverlay(std::size_t ceiling) noexcept {
@@ -1758,6 +1984,11 @@ bool Client::TakeOffOverlay(std::size_t ceiling) noexcept {
 
 void Client::RefreshOverlay() noexcept {
     if (!Overlay_ || !Predict_ || !Mirror_) {
+        return;
+    }
+    // The mirror waits at the query's point: it is not the terminal's screen,
+    // and nothing is drawn on it.
+    if (Cal_ && Cal_->Frozen()) {
         return;
     }
     const ByteSpan bytes = Overlay_->BuildUpdate(*Predict_, View());
@@ -1795,6 +2026,10 @@ void Client::LoseMirror() noexcept {
     // Without the mirror nothing can be taken off; what is drawn stays.
     if (Overlay_) {
         Overlay_->Forget();
+    }
+    if (Cal_) {
+        // The late answer is still stripped from stdin.
+        Cal_->Detach(io::MonotonicNow());
     }
     Predict_.reset();
     Overlay_.reset();
@@ -1853,6 +2088,13 @@ void Client::Resize() noexcept {
             LoseMirror();
             return;
         }
+        // The wait ends before the grid changes size: the held output goes in
+        // at the old size.
+        if (Cal_ && Predict_) {
+            Cal_->OnResize(io::MonotonicNow(), CalTarget());
+            StageForwarded();
+            MoveReleased();
+        }
         if (!Mirror_->Resize(Size_->Cols, Size_->Rows)) {
             LoseMirror();
         } else if (Predict_) {
@@ -1908,7 +2150,10 @@ int Client::Finish(int status) noexcept {
 SessionTestResult RunSessionForTestImpl(SessionTestConfig config) noexcept {
     auto maybePoller = io::Poller::Create();
     if (!maybePoller) {
-        return {.Status = FAILURE_STATUS, .SnapshotBufferBytes = 0};
+        return {.Status = FAILURE_STATUS,
+                .SnapshotBufferBytes = 0,
+                .CalibrationCreated = false,
+                .QueriesWritten = 0};
     }
 
     Options opts;
@@ -1917,7 +2162,9 @@ SessionTestResult RunSessionForTestImpl(SessionTestConfig config) noexcept {
     opts.MirrorDump = config.MirrorDump;
     opts.Predict = config.Predict;
     opts.OverlayLog = config.OverlayLog;
+    opts.Calibrate = config.Calibrate;
     opts.SizeSource = std::move(config.SizeSource);
+    opts.LoseMirrorAtSnapshot = config.LoseMirrorAtSnapshot;
 
     session::BootstrapResult br;
     br.Secrets = std::move(config.Secrets);
@@ -1953,7 +2200,9 @@ SessionTestResult RunSessionForTestImpl(SessionTestConfig config) noexcept {
 
     const int status = clientObj->Run();
     return {.Status = status,
-            .SnapshotBufferBytes = clientObj->SnapshotBuf_.size()};
+            .SnapshotBufferBytes = clientObj->SnapshotBuf_.size(),
+            .CalibrationCreated = clientObj->CalibrationCreated_,
+            .QueriesWritten = clientObj->QueriesWritten_};
 }
 
 }  // namespace
@@ -2085,6 +2334,8 @@ int Main(std::span<char*> args) noexcept {
             ? std::nullopt
             : std::optional<Duration>{
                   std::chrono::seconds{bootstrapped->OrphanTimeoutSeconds}};
+    options->Calibrate =
+        io::IsTerminal(STDIN_FILENO) && io::IsTerminal(STDOUT_FILENO);
     auto client =
         std::make_unique<Client>(*options, std::move(*bootstrapped), *addresses,
                                  std::move(*poller), giveUpAfter);

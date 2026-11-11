@@ -122,6 +122,20 @@ public:
     void OnSnapshot(std::uint32_t streamGen, Timestamp now,
                     const MirrorView& mirror) noexcept;
 
+    /// The mirror is held at the point of the client's own cursor position
+    /// query, waiting for the answer (design.md §9, round C). While it is,
+    /// nothing is predicted: a key raises the epoch like any input the engine
+    /// does not model. The client turns it off when the wait ends.
+    void SetLagging(bool lagging) noexcept { Lagging_ = lagging; }
+    [[nodiscard]] bool Lagging() const noexcept { return Lagging_; }
+
+    /// The mirror was calibrated by the terminal's answer (Grid::Resync, or a
+    /// position that agreed with the mirror's). The cursor column is known
+    /// now. After a resync the rows are not what the predictions were made on:
+    /// they are dropped, and the engine rebases on the mirror.
+    void OnCalibrated(bool resynced, Timestamp now,
+                      const MirrorView& mirror) noexcept;
+
     /// The local terminal changed size (the mirror was resized).
     void OnResize(Timestamp now, const MirrorView& mirror) noexcept;
 
@@ -242,6 +256,8 @@ private:
     /// Column where input started in the cursor row; backspace stops there.
     std::optional<std::uint16_t> InputStartCol_;
     bool Trusted_{false};
+    /// The mirror waits for the terminal's answer to the client's query.
+    bool Lagging_{false};
 
     // Input parser state, across calls.
     EInputState In_{EInputState::Ground};

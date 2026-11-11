@@ -46,6 +46,9 @@ struct SessionTestConfig {
     /// The ZET_TEST_OVERLAY_LOG hook: "offset length" lines for the overlay's
     /// insertions into stdout.
     std::string OverlayLog{};
+    /// Ask the terminal where its cursor is (round C). Off by default: the
+    /// tests' stdout is a pipe that does not answer.
+    bool Calibrate{false};
     /// The terminal size the client starts with, as if SIGWINCH had never
     /// come; the tests have no terminal to ask.
     std::optional<wire::ResizeMessage> InitialSize{};
@@ -53,12 +56,20 @@ struct SessionTestConfig {
     /// the tests do not have; empty means the real one. Called on the
     /// client's thread.
     std::function<std::optional<wire::ResizeMessage>()> SizeSource{};
+    /// The mirror cannot be rebuilt from this snapshot (counting from 1, as
+    /// when its allocation fails): the client drops it. 0: never.
+    unsigned LoseMirrorAtSnapshot{0};
 };
 
 struct SessionTestResult {
     int Status;
     /// What the client held for snapshot reassembly when it exited.
     std::size_t SnapshotBufferBytes;
+    /// Whether the client built the stdin demultiplexer (never, an old agent
+    /// and ver=1 must not).
+    bool CalibrationCreated;
+    /// Cursor position queries written to the terminal.
+    std::uint32_t QueriesWritten;
 };
 
 [[nodiscard]] SessionTestResult RunSessionForTest(

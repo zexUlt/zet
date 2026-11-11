@@ -39,6 +39,32 @@
 //      Some output is wrapped as a prompt on another row (DECSC / row 9 /
 //      DECRC, or CNL-style down and CUU+CHA back)
 //
+// Calibration (round C3). When data[0] / 60 is 1..4 and the mode is not
+// `never`, the client's Calibration runs as in the client, and the terminal
+// ("Real") answers its query `CSI 6 n CSI c`: data[0] / 60 says how (1 both
+// replies, 2 silence, 3 position only, 4 device attributes only), data[1] / 100
+// after how long (0, 300 ms or 1500 ms of time the target steps through in
+// pieces, as the client's timer does). The terminal answers the program's own
+// queries (CSI c, CSI 0 c, ESC Z, CSI 6 n) the same way: a position for
+// CSI 6 n in modes 1 and 3, device attributes for the others in modes 1 and 4.
+// Replies come in with the keystrokes, in one piece or two. Keystrokes hold no
+// ESC, so what the demux let through to the agent can be compared with what the
+// user typed and the program was answered:
+//   9. the typed bytes are an in-order subsequence of what reached the agent
+//      (and the bytes the demux still holds), in every reply mode; after all
+//      deadlines have passed, of what reached the agent
+//  10. when the terminal answers both replies, the bytes forwarded to the
+//      agent plus the held ones are exactly the typed bytes and the replies to
+//      the program's queries, in the order they came in (no reply of the
+//      client's own leaks, none of the program's is taken); not asserted
+//      while a program DA1 has been waiting for ten seconds or more, which
+//      the demux forgets
+//  11. nothing stays held while the calibration is not frozen: the output and
+//      the EchoAck held for the wait go with it (a snapshot ends the wait)
+//  12. a resize leaves the calibration with a reason to ask again
+//  13. the hold buffer has the size the calibration was given: the fuzzer
+//      makes it small, and an overflow ends the wait with the output in
+//
 // Input: 3 header bytes (columns, rows, mode; what is left of them says the
 // pre-zet row N and the text above it), then operations: one byte selecting the
 // operation, one byte giving the operand length, the operand.
@@ -50,11 +76,17 @@
 #include <cstdio>
 #include <cstdlib>
 #include <memory>
+#include <optional>
+#include <string>
+#include <string_view>
+#include <vector>
 
 #include "zet/core/time.hpp"
 #include "zet/grid/grid.hpp"
 #include "zet/grid/vt_parser.hpp"
+#include "zet/predict/calibration.hpp"
 #include "zet/predict/engine.hpp"
+#include "zet/predict/limits.hpp"
 #include "zet/predict/overlay.hpp"
 
 using namespace zet;
@@ -212,6 +244,15 @@ void CheckInvariants(const PredictionEngine& e, const grid::Grid& g,
     }
 }
 
+// `need` is a subsequence of `hay`: greedy matching is as good as any.
+bool IsSubsequence(std::string_view need, std::string_view hay) {
+    std::size_t k = 0;
+    for (const char c : hay) {
+        if (k < need.size() && need[k] == c) ++k;
+    }
+    return k == need.size();
+}
+
 std::uint64_t Hash(const grid::Grid& g) {
     std::uint64_t h = 1469598103934665603ULL;
     auto mix = [&h](std::uint64_t v) { h = (h ^ v) * 1099511628211ULL; };
@@ -238,6 +279,12 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data,
     const auto rows = static_cast<std::uint16_t>(data[1] % 10 + 1);
     const auto mode = static_cast<EDisplayMode>(data[2] % 3);
     const bool echoOff = (data[2] / 3) % 2 == 1;
+    const int replyMode = mode == EDisplayMode::Never ? 0 : data[0] / 60 % 5;
+    const bool calibrated = replyMode != 0;
+    static constexpr std::chrono::milliseconds DELAYS[] = {
+        std::chrono::milliseconds(0), std::chrono::milliseconds(300),
+        std::chrono::milliseconds(1500)};
+    const auto replyDelay = DELAYS[data[1] / 100 % 3];
 
     auto mirror = std::make_unique<Mirror>(cols, rows);
     if (!mirror->G) return 0;
@@ -260,6 +307,40 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data,
     std::uint32_t gen = 0;
     Seen seen;
 
+    std::unique_ptr<Calibration> cal;
+    std::string typedAll;      // what the user typed
+    std::string forwardedAll;  // what reached the agent
+    std::string expectedAll;   // typed + the replies to the program
+    std::optional<Timestamp> waitingSince;
+    struct Reply {
+        Timestamp At;
+        std::string Bytes;
+        bool Own;  // the answer to the client's query, not the program's
+    };
+    std::vector<Reply> replies;
+    const auto target = [&] {
+        return CalibrationTarget{mirror->G.get(), &mirror->P, &engine};
+    };
+    // A small hold buffer now and then, so that the overflow is reached.
+    const std::size_t lagMax = data[1] % 4 == 0
+                                   ? 16 + static_cast<std::size_t>(data[0]) % 48
+                                   : CPR_LAG_BYTES_MAX;
+    if (calibrated) {
+        cal = Calibration::Create(false, target(), lagMax);
+        if (!cal) return 0;
+    }
+    // Stdin bytes the demux let through go to the engine, as the client's
+    // FeedStdin does after the session write.
+    const auto forward = [&] {
+        if (!cal) return;
+        const ByteSpan f = cal->Forwarded();
+        if (f.empty()) return;
+        forwardedAll.append(reinterpret_cast<const char*>(f.data()), f.size());
+        in += f.size();
+        engine.OnInput(f, in, now, mirror->View());
+        cal->ClearForwarded();
+    };
+
     // The client's order around every piece of bytes.
     const auto undo = [&] {
         const ByteSpan b = overlay->BuildUndo(mirror->View());
@@ -267,10 +348,12 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data,
         Check(!Has(b, {0x1B, '7'}) && !Has(b, {0x1B, '8'}) &&
               !Has(b, {0x1B, '[', 's'}) && !Has(b, {0x1B, '[', 'u'}));
         term->P.Feed(b.data(), b.size(), *term->G);
+        if (cal) cal->OnWritten(b, now);
         overlay->Commit(engine);
         Check(SameScreen(*term->G, *ref->G));
     };
     const auto draw = [&] {
+        if (cal && cal->Frozen()) return;
         const ByteSpan b = overlay->BuildUpdate(engine, mirror->View());
         if (b.empty()) return;
         Check(term->P.State() == grid::EParserState::Ground &&
@@ -278,17 +361,150 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data,
         Check(!Has(b, {0x1B, '7'}) && !Has(b, {0x1B, '8'}) &&
               !Has(b, {0x1B, '[', 's'}) && !Has(b, {0x1B, '[', 'u'}));
         term->P.Feed(b.data(), b.size(), *term->G);
+        if (cal) cal->OnWritten(b, now);
         overlay->Commit(engine);
     };
+    // Bytes of the agent: the terminals get them at once, the mirror gets them
+    // together at the end of the piece, through the calibration (which may hold
+    // them back) or straight in.
+    std::array<std::uint8_t, 64> piece{};
+    std::size_t pieceLen = 0;
+    std::uint64_t refDa1 = 0;  // the queries of the program already answered
+    std::uint64_t refCpr = 0;
     const auto feed = [&](const std::uint8_t* d, std::size_t n) {
-        mirror->Feed(d, n);
         term->Feed(d, n);
         ref->Feed(d, n);
+        if (cal) {
+            // The terminal answers the program's queries, whole, one reply
+            // each, in the order they came.
+            while (refDa1 < ref->P.Da1QueryCount() ||
+                   refCpr < ref->P.CprQueryCount()) {
+                const bool cpr = refCpr < ref->P.CprQueryCount();
+                // Which came first is not known; position replies first.
+                if (cpr) {
+                    ++refCpr;
+                    if (replyMode == 1 || replyMode == 3) {
+                        replies.push_back(
+                            {now + replyDelay,
+                             "\x1b[" +
+                                 std::to_string(term->G->CursorRow() + 1) +
+                                 ";" +
+                                 std::to_string(term->G->CursorCol() + 1) + "R",
+                             false});
+                    }
+                } else {
+                    ++refDa1;
+                    if (replyMode == 1 || replyMode == 4) {
+                        replies.push_back(
+                            {now + replyDelay, "\x1b[?62;c", false});
+                    }
+                }
+            }
+        }
+        for (std::size_t k = 0; k < n && pieceLen < piece.size(); ++k) {
+            piece[pieceLen++] = d[k];
+        }
+    };
+    // `agentBytes`: how much of the agent's stream the piece counts for.
+    const auto deliver = [&](std::size_t agentBytes) {
+        const std::byte* d = reinterpret_cast<const std::byte*>(piece.data());
+        if (cal) {
+            cal->OnTerminalBytes({d, pieceLen}, out + agentBytes, now,
+                                 target());
+            cal->OnWritten({d, pieceLen}, now);
+        } else {
+            mirror->Feed(piece.data(), pieceLen);
+        }
+        pieceLen = 0;
+        out += agentBytes;
+        if (!cal) engine.OnOutput(out, now, mirror->View());
+    };
+
+    // The query is written (the overlay off first, as the client does) and the
+    // terminal answers from its cursor. The replies that are due go to stdin.
+    const auto maybeQuery = [&] {
+        if (!cal) return;
+        const bool due = cal->QueryDue(now, target());
+        forward();
+        if (!due || !cal->BeginQuery(now, target())) return;
+        undo();
+        term->P.Feed(Calibration::Query().data(), Calibration::QUERY_SIZE,
+                     *term->G);
+        const std::string pos = "\x1b[" +
+                                std::to_string(term->G->CursorRow() + 1) + ";" +
+                                std::to_string(term->G->CursorCol() + 1) + "R";
+        const std::string da1 = "\x1b[?62;c";
+        std::string reply;
+        switch (replyMode) {
+            case 1:
+                reply = pos + da1;
+                break;
+            case 3:
+                reply = pos;
+                break;
+            case 4:
+                reply = da1;
+                break;
+            default:
+                break;
+        }
+        if (!reply.empty()) replies.push_back({now + replyDelay, reply, true});
+        cal->OnQueryWritten(now, target());
+    };
+    const auto stdinBytes = [&](std::string_view bytes, bool own = false) {
+        if (bytes.empty()) return;
+        if (!own) expectedAll.append(bytes);
+        cal->OnInput(
+            {reinterpret_cast<const std::byte*>(bytes.data()), bytes.size()},
+            now, target());
+        forward();
+    };
+    // Answers that are due arrive, whole or in two reads; queries that are due
+    // are asked. Repeats until nothing moves.
+    const auto settle = [&] {
+        if (!cal) return;
+        for (int guard = 0; guard < 16; ++guard) {
+            bool did = false;
+            for (std::size_t k = 0; k < replies.size();) {
+                if (replies[k].At <= now) {
+                    const std::string r = replies[k].Bytes;
+                    const bool own = replies[k].Own;
+                    replies.erase(replies.begin() +
+                                  static_cast<std::ptrdiff_t>(k));
+                    const std::size_t cut = r.size() > 3 ? r.size() / 2 : 0;
+                    stdinBytes(std::string_view(r).substr(0, cut), own);
+                    stdinBytes(std::string_view(r).substr(cut), own);
+                    did = true;
+                } else {
+                    ++k;
+                }
+            }
+            const std::size_t before = replies.size();
+            maybeQuery();
+            if (!did && replies.size() == before) break;
+        }
+    };
+    // Time passes in steps no longer than the client's timer would let it go
+    // without a tick.
+    const auto advance = [&](std::chrono::milliseconds span) {
+        while (span.count() > 0) {
+            const auto step = span < std::chrono::milliseconds(250)
+                                  ? span
+                                  : std::chrono::milliseconds(250);
+            span -= step;
+            now += step;
+            if (cal) {
+                cal->OnTick(now, target());
+                forward();
+            }
+            engine.OnTick(now);
+            settle();
+        }
     };
 
     std::size_t i = 3;
     while (i + 1 < size) {
-        const std::uint8_t op = data[i] % 9;
+        const std::uint8_t op = data[i] % 10;
         const std::size_t want = data[i + 1] % 24;
         i += 2;
         const std::size_t n = want < size - i ? want : size - i;
@@ -328,16 +544,28 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data,
                     undo();
                     feed(echoOff ? shown.data() : plain.data(), n);
                 }
-                out += n;
-                engine.OnOutput(out, now, mirror->View());
+                deliver(n);
                 break;
-            case 1:  // keystrokes
-                in += n;
-                engine.OnInput({reinterpret_cast<const std::byte*>(
-                                    echoOff ? typed.data() : plain.data()),
-                                n},
-                               in, now, mirror->View());
+            case 1: {  // keystrokes
+                std::array<std::uint8_t, 24> keys = echoOff ? typed : plain;
+                if (cal) {
+                    // No ESC among them: what the demux let through must be
+                    // exactly what was typed.
+                    for (std::size_t k = 0; k < n; ++k) {
+                        if (keys[k] == 0x1B) keys[k] = 'e';
+                    }
+                    typedAll.append(reinterpret_cast<const char*>(keys.data()),
+                                    n);
+                    stdinBytes(std::string_view(
+                        reinterpret_cast<const char*>(keys.data()), n));
+                } else {
+                    in += n;
+                    engine.OnInput(
+                        {reinterpret_cast<const std::byte*>(keys.data()), n},
+                        in, now, mirror->View());
+                }
                 break;
+            }
             case 2: {  // EchoAck: current, early, short on input, other gen
                 const std::uint64_t dO = arg(0) % 8;
                 const std::uint64_t dI = arg(1) % 8;
@@ -349,13 +577,23 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data,
                                        ? out + dO
                                        : (out >= dO ? out - dO : 0);
                 ack.InputOffset = in >= dI ? in - dI : 0;
-                engine.OnEchoAck(ack, now, mirror->View());
+                if (cal) {
+                    cal->OnEchoAck(ack, now, target());
+                } else {
+                    engine.OnEchoAck(ack, now, mirror->View());
+                }
                 break;
             }
             case 3: {  // the local terminal is resized
                 const auto c = static_cast<std::uint16_t>(arg(0) % 60 + 1);
                 const auto r = static_cast<std::uint16_t>(arg(1) % 10 + 1);
                 undo();
+                if (cal) {
+                    cal->OnResize(now, target());
+                    // A resize always leaves a reason to ask again.
+                    Check((cal->Reasons() & CalResize) != 0);
+                    forward();
+                }
                 if (mirror->G->Resize(c, r).has_value()) {
                     if (!term->G->Resize(c, r).has_value()) return 0;
                     if (!ref->G->Resize(c, r).has_value()) return 0;
@@ -380,8 +618,14 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data,
                 static constexpr std::uint8_t PREAMBLE[] = {
                     0x1B, '[', '?', '1', '0',  '4', '9', 'l',
                     0x1B, '[', '2', 'J', 0x1B, '[', 'H'};
-                const std::uint8_t* body =
-                    (echoOff ? shown.data() : plain.data()) + (n > 2 ? 2 : n);
+                // A real snapshot holds no query: the body is masked.
+                std::array<std::uint8_t, 24> clean = echoOff ? shown : plain;
+                for (std::size_t k = 0; k < n; ++k) {
+                    if (clean[k] == 'c' || clean[k] == 'n' || clean[k] == 'Z') {
+                        clean[k] = '.';
+                    }
+                }
+                const std::uint8_t* body = clean.data() + (n > 2 ? 2 : n);
                 for (Mirror* m : {fresh.get(), fresh2.get(), fresh3.get()}) {
                     m->Feed(PREAMBLE, sizeof(PREAMBLE));
                     m->Feed(body, n > 2 ? n - 2 : 0);
@@ -391,12 +635,31 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data,
                 ref = std::move(fresh3);
                 ++gen;
                 out = 0;
+                refDa1 = 0;
+                refCpr = 0;
+                if (cal) {
+                    cal->OnSnapshot(now, target());
+                    // The terminal gets the snapshot's bytes too, and the
+                    // demultiplexer sees them (the client's NoteWritten).
+                    cal->OnWritten(
+                        {reinterpret_cast<const std::byte*>(PREAMBLE),
+                         sizeof(PREAMBLE)},
+                        now);
+                    cal->OnWritten({reinterpret_cast<const std::byte*>(body),
+                                    n > 2 ? n - 2 : 0},
+                                   now);
+                }
                 engine.OnSnapshot(gen, now, mirror->View());
                 break;
             }
             case 5:  // time passes
-                now += std::chrono::milliseconds(arg(0) * 8 + arg(1) * 100);
-                engine.OnTick(now);
+                if (cal) {
+                    advance(
+                        std::chrono::milliseconds(arg(0) * 8 + arg(1) * 100));
+                } else {
+                    now += std::chrono::milliseconds(arg(0) * 8 + arg(1) * 100);
+                    engine.OnTick(now);
+                }
                 break;
             case 6:  // an RTT sample
                 engine.OnSrtt(std::chrono::milliseconds(arg(0) * 2), now);
@@ -412,18 +675,65 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data,
                 }
                 break;
             }
+            case 9: {  // the program asks the terminal something
+                static constexpr const char* QUERIES[] = {
+                    "\x1b[c", "\x1b[0c", "\x1bZ", "\x1b[6n", "\x1b[5n"};
+                const char* q = QUERIES[arg(0) % 5];
+                undo();
+                feed(reinterpret_cast<const std::uint8_t*>(q),
+                     std::char_traits<char>::length(q));
+                const std::size_t extra = arg(1) % 4;
+                if (extra != 0) {
+                    feed(shown.data(), extra < n ? extra : n);
+                    deliver(std::char_traits<char>::length(q) +
+                            (extra < n ? extra : n));
+                } else {
+                    deliver(std::char_traits<char>::length(q));
+                }
+                break;
+            }
             default:  // another look at the clock
                 engine.OnTick(now);
                 break;
         }
+        settle();
         draw();
         CheckInvariants(engine, *mirror->G, seen);
+        if (cal) {
+            const ByteSpan held = cal->Demux().HeldBytes();
+            const std::string heldStr(
+                reinterpret_cast<const char*>(held.data()), held.size());
+            Check(IsSubsequence(typedAll, forwardedAll + heldStr));
+            // Waiting for a program DA1 reply for ten seconds is forgotten.
+            if (cal->Demux().Ahead() + cal->Demux().Behind() == 0) {
+                waitingSince.reset();
+            } else if (!waitingSince) {
+                waitingSince = now;
+            }
+            const bool aged =
+                waitingSince && now - *waitingSince >= std::chrono::seconds(10);
+            if (replyMode == 1 && !aged) {
+                Check(forwardedAll + heldStr == expectedAll);
+            }
+            // Nothing is kept for a wait that is over.
+            if (!cal->Frozen()) {
+                Check(!cal->HoldsLag() && !cal->HoldsDeferredAck());
+            }
+        }
         if (echoOff) {
             Check(engine.ConfirmedEpoch() == 0);
             for (const Prediction& pr : engine.Predictions()) {
                 Check(!engine.IsVisible(pr));
             }
         }
+    }
+
+    // Every deadline passes: whatever the demux held is out, and the typed
+    // bytes are all among what reached the agent.
+    if (cal) {
+        advance(std::chrono::seconds(30));
+        settle();
+        Check(IsSubsequence(typedAll, forwardedAll));
     }
 
     // The engine reads the mirror and never writes it: a call that only reads

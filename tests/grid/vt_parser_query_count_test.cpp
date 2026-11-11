@@ -120,3 +120,34 @@ TEST_CASE("a private marker after a parameter makes CSI c no query") {
     f.Feed("\x1b[0c");
     CHECK(f.P.Da1QueryCount() == 1);
 }
+
+TEST_CASE(
+    "DECRQSS and XTGETTCAP count as DCS queries, other DCS strings do not") {
+    Fixture f;
+    f.Feed("\x1bP$qm\x1b\\");
+    CHECK(f.P.DcsApcCount() == 1);
+    CHECK(f.P.DcsQueryCount() == 1);
+    f.Feed("\x1bP+q544e\x1b\\");
+    CHECK(f.P.DcsApcCount() == 2);
+    CHECK(f.P.DcsQueryCount() == 2);
+    f.Feed("\x1bP1$rabc\x1b\\");
+    CHECK(f.P.DcsApcCount() == 3);
+    CHECK(f.P.DcsQueryCount() == 2);
+    f.Feed("\x1bP$tabc\x1b\\");
+    CHECK(f.P.DcsQueryCount() == 2);
+    // An APC or OSC that happens to start the same way is not a query.
+    f.Feed("\x1b_$q\x1b\\");
+    f.Feed("\x1b]$q\x07");
+    CHECK(f.P.DcsQueryCount() == 2);
+    CHECK(f.P.State() == EParserState::Ground);
+}
+
+TEST_CASE("A DCS query split across feeds is counted once") {
+    Fixture f;
+    f.Feed("\x1bP$");
+    CHECK(f.P.DcsQueryCount() == 0);
+    f.Feed("q");
+    CHECK(f.P.DcsQueryCount() == 1);
+    f.Feed("m\x1b\\");
+    CHECK(f.P.DcsQueryCount() == 1);
+}

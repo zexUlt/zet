@@ -68,11 +68,11 @@ def converge(p: Predicted, lines: int = 6) -> None:
     piece: the SRTT is then past the threshold. Each keystroke a second or
     more after the last probes the round trip."""
     for _ in range(lines):
-        before = len(p.entries())
+        before = len(p.drawn())
         type_keys(p, LETTERS, 0.3)
         p.terminal.send(b"\x15")
         p.pump(0.5)
-        if len(p.entries()) > before:
+        if len(p.drawn()) > before:
             return
     raise AssertionError(f"no overlay piece in {lines} lines of typing")
 
@@ -83,7 +83,7 @@ def test_m7_adaptive_low_rtt_draws_nothing(zet: Zet, clean_bashrc, tmp_path):
         p.prime()
         type_keys(p, LETTERS, 0.1)
         p.settle()
-        assert p.entries() == []
+        assert p.drawn() == []
     finally:
         p.kill()
 
@@ -96,7 +96,7 @@ def test_m7_adaptive_on_off(zet: Zet, clean_bashrc, netem, tmp_path):
         type_keys(p, LETTERS, 0.1)
         p.terminal.send(b"\x15")
         p.settle()
-        assert p.entries() == []
+        assert p.drawn() == []
 
         with netem("delay 50ms"):
             # Each keystroke after the first second probes the round trip;
@@ -115,18 +115,18 @@ def test_m7_adaptive_on_off(zet: Zet, clean_bashrc, netem, tmp_path):
         # and the pieces stop.
         quiet_lines = 0
         for _ in range(12):
-            before = len(p.entries())
+            before = len(p.drawn())
             type_keys(p, LETTERS, 0.3)
             p.terminal.send(b"\x15")
             p.pump(0.5)
-            quiet_lines = quiet_lines + 1 if len(p.entries()) == before else 0
+            quiet_lines = quiet_lines + 1 if len(p.drawn()) == before else 0
             if quiet_lines >= 2:
                 break
         assert quiet_lines >= 2, "pieces never stopped after the delay was lifted"
-        count = len(p.entries())
+        count = len(p.drawn())
         type_keys(p, LETTERS, 0.15)
         p.settle()
-        assert len(p.entries()) == count
+        assert len(p.drawn()) == count
     finally:
         p.kill()
 
@@ -211,7 +211,7 @@ def test_m7_no_underline_below_threshold(zet: Zet, clean_bashrc, netem, tmp_path
                 for offset, length in p.entries():
                     piece = stream[offset:offset + length]
                     assert not UNDERLINE.search(piece), piece
-                drawn = len(p.entries())
+                drawn = len(p.drawn())
                 p.terminal.send(b"\x15")
                 p.pump(0.5)
             assert drawn > 0, "nothing was predicted at D=50 ms, the control is vacuous"
@@ -241,7 +241,7 @@ def test_m7_password_never_shown(zet: Zet, clean_bashrc, netem, tmp_path):
             t.send(b"\r")
             t.expect(b"Password: ")
             p.pump(0.5)
-            pieces = len(p.entries())
+            pieces = len(p.drawn())
             assert pieces > 0, "ordinary typing was not predicted: the test would prove nothing"
             mark = len(t.buffer)
 
@@ -252,7 +252,7 @@ def test_m7_password_never_shown(zet: Zet, clean_bashrc, netem, tmp_path):
             t.expect(b"len=7\r\n")
             t.expect(PROMPT)
             p.settle()
-        assert len(p.entries()) == pieces, p.entries()[pieces:]
+        assert len(p.drawn()) == pieces, p.drawn()[pieces:]
         assert b"hunter2" not in t.buffer
         # Nothing of the typed bytes reached the terminal but the shell's own
         # words: "len=7" and the next prompt.
@@ -284,7 +284,7 @@ def test_m7_never_byte_identical(zet: Zet, clean_bashrc, netem, tmp_path):
         assert got == want
         t.send(typed("exit 0"))
         assert t.finish() == 0
-        assert p.entries() == []
+        assert p.drawn() == []
     finally:
         p.kill()
 
@@ -303,7 +303,7 @@ def test_m7_loss_and_cut_leave_no_stray_overlay(zet: Zet, clean_bashrc, netem, i
             # Up to the pieces being drawn: a confirmed epoch.
             first = LETTERS[:10]
             type_keys(p, first, 0.25)
-            pieces = len(p.entries())
+            pieces = len(p.drawn())
             assert pieces > 0, "nothing was predicted before the cut"
 
             second = LETTERS[10:20]
@@ -477,7 +477,7 @@ def test_m7_compat_old_peer(zet: Zet, clean_bashrc, netem, tmp_path):
                 + b"\x1b[?2004h" + TEST_USER.encode() + b"@zet-prompt$ ")
         assert got == want
         assert t.buffer.count(NO_ECHO_ACK_NOTICE) == 1, t.buffer[:300]
-        assert p.entries() == []
+        assert p.drawn() == []
     finally:
         p.kill()
 

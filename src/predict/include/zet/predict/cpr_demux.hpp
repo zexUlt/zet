@@ -159,6 +159,10 @@ public:
     /// answered.
     [[nodiscard]] std::uint32_t Ahead() const noexcept { return Ahead_; }
     [[nodiscard]] std::uint32_t Behind() const noexcept { return Behind_; }
+    /// DA1 queries of the program seen in the output so far, answered or not
+    /// and never aged out: a plain parser fed the same output byte by byte
+    /// counts as many (the Ground fast path of OnOutput skips bytes).
+    [[nodiscard]] std::uint64_t Da1Seen() const noexcept { return SeenDa1_; }
     /// Bytes read from stdin and not yet passed on.
     [[nodiscard]] std::size_t HeldSize() const noexcept;
     [[nodiscard]] ByteSpan HeldBytes() const noexcept {

@@ -116,6 +116,16 @@ public:
         return DcsApcCount_;
     }
 
+    /// Number of DCS strings among those counted by DcsApcCount that only ask
+    /// the terminal something and change nothing on the screen: DECRQSS
+    /// (`DCS $ q`) and XTGETTCAP (`DCS + q`). Counted when the `q` arrives, so
+    /// DcsApcCount() - DcsQueryCount() is settled once the string has ended
+    /// (design.md §9, the client's reasons to ask for the cursor position).
+    /// Monotonic, survives Reset.
+    [[nodiscard]] std::uint64_t DcsQueryCount() const noexcept {
+        return DcsQueryCount_;
+    }
+
     /// Number of times the parser gave up on a DCS/OSC/APC/PM/SOS string at
     /// BYPASS_LIMIT_BYTES and went to Ground. The real terminal is still
     /// inside the string, and what it is given next is read as the string's
@@ -133,6 +143,13 @@ public:
     /// queries with intermediates are not counted. Monotonic, survives Reset.
     [[nodiscard]] std::uint64_t Da1QueryCount() const noexcept {
         return Da1QueryCount_;
+    }
+
+    /// Cursor position requests seen (`CSI 6 n`, the plain form), counted on
+    /// the final byte. For the fuzzers, which play the terminal. Monotonic,
+    /// survives Reset.
+    [[nodiscard]] std::uint64_t CprQueryCount() const noexcept {
+        return CprQueryCount_;
     }
 
     /// Whether the UTF-8 decoder is in the middle of a character: bytes
@@ -212,8 +229,13 @@ private:
     // Statistics
     std::uint64_t UnknownSeqCount_{0};
     std::uint64_t DcsApcCount_{0};
+    std::uint64_t DcsQueryCount_{0};
+    /// The first byte of the DCS string being passed through, 0 for any other
+    /// bypass string.
+    std::uint8_t DcsHead_{0};
     std::uint64_t BypassLimitCount_{0};
     std::uint64_t Da1QueryCount_{0};
+    std::uint64_t CprQueryCount_{0};
 };
 
 }  // namespace zet::grid

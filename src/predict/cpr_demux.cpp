@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <cstring>
 #include <new>
 #include <utility>
 
@@ -492,8 +493,19 @@ bool CprDemux::OnQuerySent(Timestamp now, CprSink& out) noexcept {
 
 void CprDemux::OnOutput(ByteSpan bytes, Timestamp now) noexcept {
     ExpireCounts(now);
-    for (const std::byte b : bytes) {
-        Parser_.FeedByte(b, *Grid_);
+    for (std::size_t i = 0; i < bytes.size(); ++i) {
+        // In Ground only ESC can start a sequence the parser counts; the
+        // rest would only move the demux's private grid.
+        if (Parser_.State() == grid::EParserState::Ground) {
+            const void* esc =
+                std::memchr(bytes.data() + i, 0x1B, bytes.size() - i);
+            if (esc == nullptr) {
+                break;
+            }
+            i = static_cast<std::size_t>(static_cast<const std::byte*>(esc) -
+                                         bytes.data());
+        }
+        Parser_.FeedByte(bytes[i], *Grid_);
         const std::uint64_t da1 = Parser_.Da1QueryCount();
         if (da1 != SeenDa1_) {
             SeenDa1_ = da1;
