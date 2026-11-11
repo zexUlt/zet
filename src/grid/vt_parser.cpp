@@ -98,6 +98,11 @@ void VtParser::FeedByte(std::byte b, Grid& grid) noexcept {
             ++BypassLimitCount_;
             return;
         }
+        // DECRQSS and XTGETTCAP: `$ q` or `+ q` opens the string.
+        if (BypassBytes_ == 1 && !InOsc_ && raw == 'q' &&
+            (DcsHead_ == '$' || DcsHead_ == '+')) {
+            ++DcsQueryCount_;
+        }
         EmitBypassByte(b);
         return;
     }
@@ -227,12 +232,14 @@ void VtParser::FeedByte(std::byte b, Grid& grid) noexcept {
             } else if (raw == 0x5D) {  // ']' → OSC
                 InOsc_ = true;
                 BypassBytes_ = 0;
+                DcsHead_ = 0;
                 State_ = EParserState::Bypass;
                 EmitBypassStart();
             } else if (raw == 0x58 || raw == 0x5E || raw == 0x5F) {
                 // SOS (0x58), PM (0x5E), APC (0x5F) → bypass
                 InOsc_ = false;
                 BypassBytes_ = 0;
+                DcsHead_ = 0;
                 State_ = EParserState::Bypass;
                 EmitBypassStart();
             } else if (raw >= 0x51 && raw <= 0x57) {
@@ -323,6 +330,7 @@ void VtParser::FeedByte(std::byte b, Grid& grid) noexcept {
             // DCS → immediately bypass without accumulating params.
             InOsc_ = false;
             BypassBytes_ = 0;
+            DcsHead_ = raw;
             State_ = EParserState::Bypass;
             EmitBypassStart();
             // Re-process this byte as a bypass payload.
@@ -339,6 +347,7 @@ void VtParser::FeedByte(std::byte b, Grid& grid) noexcept {
             // Shouldn't normally land here.  Route everything to bypass.
             InOsc_ = false;
             BypassBytes_ = 0;
+            DcsHead_ = 0;
             State_ = EParserState::Bypass;
             EmitBypassStart();
             EmitBypassByte(b);
