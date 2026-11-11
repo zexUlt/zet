@@ -47,14 +47,17 @@ inline constexpr Duration GLITCH_REPAIR_MININTERVAL =
 /// the terminal is declared silent.
 inline constexpr Duration CPR_TIMEOUT = std::chrono::seconds(1);
 /// How long a possible beginning of the client's own answer is held back from
-/// the agent while the query is pending. A terminal writes an answer in one
-/// piece, so a held beginning is rare.
+/// the agent while the query is pending. A terminal writes the position and
+/// the DA1 reply in one piece or in two writes close together, so a held
+/// beginning is rare. A complete position is held longer, to the live
+/// entry's CPR_TIMEOUT, for a DA1 reply that comes late.
 inline constexpr Duration CPR_HOLD = std::chrono::milliseconds(50);
 /// After CPR_TIMEOUT the client's own entry is kept this long, so that a late
 /// answer is still stripped; then it is dropped and stdin passes through
 /// untouched. The same span bounds how long a count of the program's DA1
-/// queries is believed (from its newest query), so that a reply lost on the
-/// way cannot block the alignment for good.
+/// queries is believed (one query is dropped per span for which the count has
+/// not been zero), so that a reply lost on the way cannot block the alignment
+/// for good.
 inline constexpr Duration CPR_FORGET = std::chrono::seconds(10);
 
 /// Longest answer the demultiplexer recognises: `CSI r ; c R` with five-digit

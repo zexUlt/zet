@@ -25,6 +25,8 @@ struct Rig : CprSink {
     /// Everything for the agent so far, every event, and the bytes taken out.
     std::string Fwd;
     std::vector<CprEvent> Events;
+    /// What Silent() said inside each Event callback.
+    std::vector<bool> SilentInEvent;
     std::string Stripped;
 
     Rig() { REQUIRE(D != nullptr); }
@@ -41,6 +43,7 @@ struct Rig : CprSink {
     }
     void Event(const CprEvent& event) noexcept override {
         Events.push_back(event);
+        SilentInEvent.push_back(D->Silent());
     }
 
     static ByteSpan B(std::string_view s) {
@@ -59,7 +62,8 @@ struct Rig : CprSink {
     }
     void Advance(Duration d) { Now += d; }
     void Output(std::string_view s) { D->OnOutput(B(s), Now); }
-    bool Query() { return D->OnQuerySent(Now); }
+    bool Query() { return D->OnQuerySent(Now, *this); }
+    bool Can() { return D->CanQuery(Now, *this); }
     void Resize() { D->OnResize(Now, *this); }
     void Cancel() { D->OnCancel(Now, *this); }
     std::size_t Count(ECprEvent k) const {
@@ -75,6 +79,9 @@ std::string Pos(int r, int c) {
     return "\x1b[" + std::to_string(r) + ";" + std::to_string(c) + "R";
 }
 const std::string DA1 = "\x1b[?62;22c";
+std::string LongDa1(std::size_t size) {
+    return "\x1b[?" + std::string(size - 4, '1') + "c";
+}
 
 }  // namespace
 
@@ -185,9 +192,19 @@ TEST_CASE("a position at the end of the read waits for the marker, then goes") {
     REQUIRE(r.Query());
     CHECK(r.In("\x1b[1;2R").empty());
     CHECK(r.D->HeldSize() == 6);
+    // CPR_HOLD does not release a complete position while the entry is live.
     r.Advance(CPR_HOLD);
+    CHECK(r.Tick().empty());
+    CHECK(r.D->HeldSize() == 6);
+    // At the deadline the entry dies; CPR_HOLD counts from there.
+    r.Advance(CPR_TIMEOUT - CPR_HOLD);
+    CHECK(r.Tick().empty());
+    CHECK(r.Count(ECprEvent::TimedOut) == 1);
+    r.Advance(CPR_HOLD - 1ms);
+    CHECK(r.Tick().empty());
+    r.Advance(1ms);
     CHECK(r.Tick() == "\x1b[1;2R");
-    CHECK(r.D->Pending());
+    CHECK(r.D->HeldSize() == 0);
 }
 
 TEST_CASE("the program's CPR in front of ours is not tracked and passes") {
@@ -671,18 +688,66 @@ TEST_CASE("a count of the program's queries expires after TIMEOUT + FORGET") {
     CHECK(r.Count(ECprEvent::Answered) == 1);
 }
 
-TEST_CASE("the age of a count is that of its newest query") {
+TEST_CASE("a count ages by its oldest query, one dropped per span") {
     const Duration span = CPR_TIMEOUT + CPR_FORGET;
     Rig r;
     r.Output("\x1b[c");
     r.Advance(span - 1ms);
-    r.Output("\x1b[c");
-    r.Advance(span - 1ms);
-    r.Tick();
+    r.Output("\x1b[c");  // a young query does not keep the old one alive
     CHECK(r.D->Ahead() == 2);
     r.Advance(1ms);
     r.Tick();
+    CHECK(r.D->Ahead() == 1);
+    // The other one is a span old a span after it was written.
+    r.Advance(span - 2ms);
+    r.Tick();
+    CHECK(r.D->Ahead() == 1);
+    r.Advance(1ms);
+    r.Tick();
     CHECK(r.D->Ahead() == 0);
+}
+
+TEST_CASE("a reply that is answered does not reset the clock of the count") {
+    // fish asks at every prompt: the count is never zero. One lost reply must
+    // not live as long as the user is active.
+    Rig r;
+    r.Output("\x1bZ");  // never answered
+    for (int i = 1; i <= 6; ++i) {
+        r.Advance(5s);
+        r.Output("\x1b[6n\x1b[c");
+        const std::string fish = Pos(i, 3) + DA1;
+        CHECK(r.In(fish) == fish);
+    }
+    CHECK(r.D->Ahead() == 0);
+    r.Advance(100ms);
+    REQUIRE(r.Query());
+    CHECK(r.In(Pos(9, 1) + DA1).empty());
+    CHECK(r.Count(ECprEvent::Answered) == 1);
+}
+
+TEST_CASE("the paste residual does not misalign the next own query") {
+    // Our reply is lost inside a paste and fish's takes its place: Behind of
+    // that moment becomes Ahead, and fish keeps it fresh. It still ages out.
+    Rig r;
+    REQUIRE(r.Query());
+    r.Output("\x1b[6n\x1b[c");
+    const std::string paste = "\x1b[200~x" + Pos(2, 2) + DA1 + "\x1b[201~";
+    CHECK(r.In(paste) == paste);
+    r.In(Pos(3, 1) + DA1);
+    for (int i = 0; i < 6; ++i) {
+        r.Advance(5s);
+        r.Output("\x1b[6n\x1b[c");
+        const std::string fish = Pos(4, 1) + DA1;
+        CHECK(r.In(fish) == fish);
+    }
+    r.Advance(1s);
+    r.Resize();
+    REQUIRE(r.Query());
+    r.Output("\x1b[6n\x1b[c");
+    const std::string fish = Pos(5, 1) + DA1;
+    CHECK(r.In(Pos(9, 1) + DA1 + fish) == fish);
+    REQUIRE_FALSE(r.Events.empty());
+    CHECK(r.Events.back().Row == 9);
 }
 
 TEST_CASE("a lost reply expires the count while our query waits") {
@@ -701,9 +766,10 @@ TEST_CASE(
     "the queries written after the forgotten entry are ahead of a new one") {
     Rig r;
     REQUIRE(r.Query());
+    r.Advance(10ms);
     r.Output("\x1b[c");
     CHECK(r.D->Behind() == 1);
-    r.Advance(CPR_TIMEOUT);
+    r.Advance(CPR_TIMEOUT - 10ms);
     r.Tick();
     r.Advance(CPR_FORGET - 1ms);
     r.Output("\x1b[c");  // keeps the count young
@@ -910,13 +976,13 @@ TEST_CASE("F3 with modifiers is a key in every state") {
             REQUIRE(r.Query());
             CHECK(r.In(f3 + "x") == f3 + "x");
             CHECK(r.D->Pending());
-            // At the end of a read it waits for a DA1, then goes.
+            // At the end of a read it waits for a DA1.
             CHECK(r.In(f3).empty());
             r.Advance(CPR_HOLD);
-            CHECK(r.Tick() == f3);
-            CHECK(r.D->Pending());
-            // Our reply is still ours.
-            CHECK(r.In(Pos(7, 8) + DA1).empty());
+            CHECK(r.Tick().empty());
+            // The next bytes are not a DA1 reply: it is a key, and goes now.
+            // Our reply behind it is still ours.
+            CHECK(r.In(Pos(7, 8) + DA1) == f3);
             CHECK(r.Count(ECprEvent::Answered) == 1);
         }
         {  // dead
@@ -960,10 +1026,10 @@ TEST_CASE("a terminal that answers the position but not DA1") {
     Rig r;
     REQUIRE(r.Query());
     CHECK(r.In(Pos(2, 2)).empty());
-    r.Advance(CPR_HOLD);
-    CHECK(r.Tick() == Pos(2, 2));  // it looked like a key
     r.Advance(CPR_TIMEOUT);
     r.Tick();
+    r.Advance(CPR_HOLD);
+    CHECK(r.Tick() == Pos(2, 2));  // it looked like a key
     CHECK(r.Count(ECprEvent::TimedOut) == 1);
     CHECK(r.Count(ECprEvent::Answered) == 0);
     CHECK(r.D->Silent());
@@ -1007,4 +1073,381 @@ TEST_CASE("our reply is claimed only by the DA1 that follows the program's") {
     CHECK(r.Events.back().Row == 2);
     CHECK(r.D->Ahead() == 0);
     CHECK(r.D->Behind() == 0);
+}
+
+// Cases that kill the mutants found in review.
+
+// Kills: Consume does not promote Behind_ to Ahead_.
+TEST_CASE("after our reply the queries written behind it are first in line") {
+    Rig r;
+    REQUIRE(r.Query());
+    r.Output("\x1b[c");  // behind
+    CHECK(r.In(Pos(2, 2) + DA1).empty());
+    CHECK(r.D->Ahead() == 1);
+    // A new query of ours before the program's reply arrives: the next DA1 is
+    // the program's, not ours.
+    REQUIRE(r.Query());
+    CHECK(r.In(DA1) == DA1);
+    CHECK(r.D->Pending());
+    CHECK(r.In(Pos(3, 3) + DA1).empty());
+    CHECK(r.Count(ECprEvent::Answered) == 2);
+}
+
+// Kills: promotion at forget keeps AheadAt_ instead of taking BehindAt_.
+TEST_CASE("a count promoted by forgetting ages from its newest query") {
+    const Duration span = CPR_TIMEOUT + CPR_FORGET;
+    Rig r;
+    REQUIRE(r.Query());
+    r.Advance(CPR_TIMEOUT);
+    r.Tick();
+    r.Advance(CPR_FORGET - 5s);
+    r.Output("\x1b[c");  // behind, written 5 s before the entry is forgotten
+    r.Advance(5s);
+    r.Tick();
+    REQUIRE(r.D->Off());
+    REQUIRE(r.D->Ahead() == 1);
+    r.Advance(span - 5s - 1ms);
+    r.Tick();
+    CHECK(r.D->Ahead() == 1);
+    r.Advance(1ms);
+    r.Tick();
+    CHECK(r.D->Ahead() == 0);
+}
+
+// Kills: Behind_ expiry at > instead of >=.
+TEST_CASE(
+    "a count behind the entry written with it is gone when it is forgotten") {
+    const Duration span = CPR_TIMEOUT + CPR_FORGET;
+    Rig r;
+    REQUIRE(r.Query());
+    r.Output("\x1b[c");
+    r.Advance(span);
+    r.Tick();
+    CHECK(r.D->Off());
+    CHECK(r.D->Ahead() == 0);
+    CHECK(r.D->Behind() == 0);
+}
+
+// Kills: the hold runs out (>) instead of at (>=) CPR_HOLD, via NextDeadline.
+TEST_CASE("a tick exactly at CPR_HOLD releases, the deadline says so") {
+    Rig r;
+    REQUIRE(r.Query());
+    CHECK(r.In("\x1b[").empty());
+    r.Advance(CPR_HOLD);
+    CHECK(r.Tick() == "\x1b[");
+}
+
+// Kills: PasteEndMatched_ not reset on a mismatch.
+TEST_CASE("a half end marker in a paste does not end it later") {
+    Rig r;
+    REQUIRE(r.Query());
+    const std::string lookalike = Pos(1, 1) + DA1;
+    const std::string paste = "\x1b[200~\x1b[20X1~" + lookalike + "\x1b[201~";
+    CHECK(r.In(paste) == paste);
+    CHECK(r.D->Pending());
+}
+
+// Kills: an ESC in the middle of a half end marker is not a new beginning.
+TEST_CASE("ESC ESC [201~ in a paste ends it") {
+    Rig r;
+    REQUIRE(r.Query());
+    const std::string paste = "\x1b[200~a\x1b\x1b[201~";
+    CHECK(r.In(paste) == paste);
+    CHECK(r.In(Pos(7, 7) + DA1).empty());
+    CHECK(r.Count(ECprEvent::Answered) == 1);
+}
+
+// Kills: the Scan cap on a lone DA1 reply (no position in front).
+TEST_CASE("a lone DA1 reply up to the cap is ours, one more is not") {
+    Rig r;
+    REQUIRE(r.Query());
+    CHECK(r.In(LongDa1(CPR_DA1_REPLY_MAX)).empty());
+    CHECK(r.Count(ECprEvent::Failed) == 1);
+
+    Rig s;
+    REQUIRE(s.Query());
+    const std::string tooLong = LongDa1(CPR_DA1_REPLY_MAX + 1);
+    CHECK(s.In(tooLong) == tooLong);
+    CHECK(s.D->Pending());
+
+    Rig t;
+    REQUIRE(t.Query());
+    CHECK(t.In(LongDa1(38)).empty());  // a real vt420 reply, mutant cap 20
+    CHECK(t.Count(ECprEvent::Failed) == 1);
+}
+
+// Kills: the cap in the look-ahead after a position, at the exact size.
+TEST_CASE("a DA1 reply of exactly the cap after a position, split in two") {
+    Rig r;
+    REQUIRE(r.Query());
+    const std::string da = LongDa1(CPR_DA1_REPLY_MAX);
+    CHECK(r.In(Pos(3, 3) + da.substr(0, 127)).empty());
+    r.Advance(1ms);
+    CHECK(r.In(da.substr(127)).empty());
+    CHECK(r.Count(ECprEvent::Answered) == 1);
+}
+
+// Kills: an unterminated DA1 prefix of exactly the cap is still held.
+TEST_CASE("an unterminated DA1 prefix of CPR_DA1_REPLY_MAX bytes is not held") {
+    Rig r;
+    REQUIRE(r.Query());
+    const std::string prefix =
+        "\x1b[?" + std::string(CPR_DA1_REPLY_MAX - 3, '1');
+    REQUIRE(prefix.size() == CPR_DA1_REPLY_MAX);
+    CHECK(r.In(prefix) == prefix);
+    CHECK(r.D->HeldSize() == 0);
+    // And one byte short of it is still held.
+    Rig s;
+    REQUIRE(s.Query());
+    CHECK(s.In(prefix.substr(0, CPR_DA1_REPLY_MAX - 1)).empty());
+    CHECK(s.D->HeldSize() == CPR_DA1_REPLY_MAX - 1);
+}
+
+// Kills: OnOutput does not expire an old count before adding to it.
+TEST_CASE("a new query does not revive a count that has aged out") {
+    Rig r;
+    r.Output("\x1b[c");
+    r.Advance(CPR_TIMEOUT + CPR_FORGET);
+    r.Output("\x1b[c");  // no tick in between
+    CHECK(r.D->Ahead() == 1);
+}
+
+// Kills: forgetting the entry does not release a beginning held a moment ago.
+TEST_CASE(
+    "a beginning held just before CPR_FORGET is released with the entry") {
+    Rig r;
+    REQUIRE(r.Query());
+    r.Advance(CPR_TIMEOUT);
+    r.Tick();
+    r.Advance(CPR_FORGET - 10ms);
+    CHECK(r.In("\x1b[").empty());
+    r.Advance(10ms);
+    CHECK(r.Tick() == "\x1b[");
+    CHECK(r.D->Off());
+    CHECK(r.D->HeldSize() == 0);
+}
+
+// Kills: more than five digits accepted in a position.
+TEST_CASE("six digits with leading zeros are not a position") {
+    Rig r;
+    REQUIRE(r.Query());
+    const std::string text = "\x1b[000001;000001R" + DA1;
+    CHECK(r.In(text) == "\x1b[000001;000001R");
+    // The DA1 alone is ours, without a position: unanswered.
+    CHECK(r.Count(ECprEvent::Failed) == 1);
+}
+
+// Kills: CSI 0200~ taken for a paste start.
+TEST_CASE("CSI 0200~ is not a bracketed paste") {
+    Rig r;
+    REQUIRE(r.Query());
+    CHECK(r.In("\x1b[0200~").empty() == false);
+    CHECK(r.In(Pos(4, 4) + DA1).empty());
+    CHECK(r.Count(ECprEvent::Answered) == 1);
+}
+
+// Kills: the first number of a position taken with six digits.
+TEST_CASE("a six-digit first number is not a position either") {
+    Rig r;
+    REQUIRE(r.Query());
+    CHECK(r.In("\x1b[000001;1R" + DA1) == "\x1b[000001;1R");
+    CHECK(r.Count(ECprEvent::Failed) == 1);
+}
+
+// Kills: look-ahead holds a DA1 prefix that already reached the cap.
+TEST_CASE("a position followed by an unterminated DA1 prefix of the cap goes") {
+    Rig r;
+    REQUIRE(r.Query());
+    const std::string prefix =
+        "\x1b[?" + std::string(CPR_DA1_REPLY_MAX - 3, '1');
+    CHECK(r.In(Pos(3, 3) + prefix) == Pos(3, 3) + prefix);
+    CHECK(r.D->HeldSize() == 0);
+}
+
+// ---------------------------------------------------------------------------
+// A complete position is held for its DA1 reply while the entry is live
+// ---------------------------------------------------------------------------
+
+TEST_CASE("a position 300 ms before its DA1 reply is ours") {
+    Rig r;
+    REQUIRE(r.Query());
+    CHECK(r.In(Pos(5, 6)).empty());
+    r.Advance(300ms);
+    CHECK(r.Tick().empty());
+    CHECK(r.D->HeldSize() == Pos(5, 6).size());
+    CHECK(r.In(DA1).empty());
+    CHECK(r.Fwd.empty());
+    REQUIRE(r.Count(ECprEvent::Answered) == 1);
+    CHECK(r.Events.back().Row == 5);
+    CHECK(r.Events.back().Col == 6);
+    CHECK_FALSE(r.D->Outstanding());
+    CHECK(r.D->HeldSize() == 0);
+}
+
+TEST_CASE("a position followed by a part of the DA1 reply waits for the rest") {
+    Rig r;
+    REQUIRE(r.Query());
+    const std::string da = DA1;
+    CHECK(r.In(Pos(5, 6) + da.substr(0, 4)).empty());
+    r.Advance(300ms);
+    CHECK(r.Tick().empty());
+    CHECK(r.In(da.substr(4)).empty());
+    CHECK(r.Count(ECprEvent::Answered) == 1);
+    CHECK(r.Fwd.empty());
+}
+
+TEST_CASE("a position followed by a plain key is forwarded at once") {
+    Rig r;
+    REQUIRE(r.Query());
+    CHECK(r.In("\x1b[1;2R").empty());
+    r.Advance(1ms);
+    CHECK(r.In("a") == "\x1b[1;2Ra");
+    CHECK(r.D->HeldSize() == 0);
+    CHECK(r.D->Pending());
+}
+
+TEST_CASE("the hold of a complete position ends at the entry's deadline") {
+    Rig r;
+    REQUIRE(r.Query());
+    const Timestamp deadline = r.Now + CPR_TIMEOUT;
+    r.Advance(100ms);
+    CHECK(r.In("\x1b[1;2R").empty());
+    REQUIRE(r.D->NextDeadline().has_value());
+    CHECK(*r.D->NextDeadline() == deadline);
+    // The entry dies; CPR_HOLD counts from the deadline.
+    r.Now = deadline;
+    CHECK(r.Tick().empty());
+    CHECK(r.Count(ECprEvent::TimedOut) == 1);
+    REQUIRE(r.D->NextDeadline().has_value());
+    CHECK(*r.D->NextDeadline() == deadline + CPR_HOLD);
+    r.Now = deadline + CPR_HOLD - 1ms;
+    CHECK(r.Tick().empty());
+    r.Now = deadline + CPR_HOLD;
+    CHECK(r.Tick() == "\x1b[1;2R");
+}
+
+TEST_CASE("a DA1 reply inside the hold after the deadline is a late reply") {
+    Rig r;
+    REQUIRE(r.Query());
+    r.Advance(100ms);
+    CHECK(r.In(Pos(5, 6)).empty());
+    r.Advance(CPR_TIMEOUT - 100ms + CPR_HOLD - 1ms);
+    CHECK(r.In(DA1).empty());
+    CHECK(r.Count(ECprEvent::TimedOut) == 1);
+    CHECK(r.Count(ECprEvent::Answered) == 0);
+    CHECK(r.Fwd.empty());
+    CHECK_FALSE(r.D->Pending());
+}
+
+TEST_CASE("with a dead entry a complete position holds CPR_HOLD from arrival") {
+    Rig r;
+    REQUIRE(r.Query());
+    r.Advance(CPR_TIMEOUT);
+    r.Tick();
+    r.Advance(1s);
+    CHECK(r.In("\x1b[1;2R").empty());
+    REQUIRE(r.D->NextDeadline().has_value());
+    CHECK(*r.D->NextDeadline() == r.Now + CPR_HOLD);
+    r.Advance(CPR_HOLD);
+    CHECK(r.Tick() == "\x1b[1;2R");
+}
+
+TEST_CASE("partial beginnings keep CPR_HOLD while the entry is live") {
+    for (const char* text :
+         {"\x1b", "\x1b[", "\x1b[12;", "\x1b[12", "\x1b[?6"}) {
+        CAPTURE(text);
+        Rig r;
+        REQUIRE(r.Query());
+        CHECK(r.In(text).empty());
+        REQUIRE(r.D->NextDeadline().has_value());
+        CHECK(*r.D->NextDeadline() == r.Now + CPR_HOLD);
+        r.Advance(CPR_HOLD);
+        CHECK(r.Tick() == text);
+    }
+}
+
+TEST_CASE("a cancelled entry's held position has CPR_HOLD only") {
+    Rig r;
+    REQUIRE(r.Query());
+    CHECK(r.In("\x1b[1;2R").empty());
+    r.Advance(CPR_HOLD);
+    r.Cancel();
+    CHECK(r.Fwd == "\x1b[1;2R");
+}
+
+// ---------------------------------------------------------------------------
+// The API contract
+// ---------------------------------------------------------------------------
+
+TEST_CASE("CanQuery is false while the entry is live or dead, true once gone") {
+    Rig r;
+    CHECK(r.Can());
+    REQUIRE(r.Query());
+    CHECK_FALSE(r.Can());
+    r.Advance(CPR_TIMEOUT);
+    CHECK_FALSE(r.Can());  // dead
+    CHECK(r.Count(ECprEvent::TimedOut) == 1);
+    r.Advance(CPR_FORGET - 1ms);
+    CHECK_FALSE(r.Can());
+    r.Advance(1ms);
+    CHECK(r.Can());  // forgotten by the call itself, no tick before it
+    CHECK(r.D->Off());
+}
+
+TEST_CASE("CanQuery is true again after the late reply of a dead entry") {
+    Rig r;
+    REQUIRE(r.Query());
+    r.Advance(CPR_TIMEOUT);
+    r.Tick();
+    r.In(Pos(2, 2) + DA1);
+    CHECK(r.Can());
+}
+
+TEST_CASE("CanQuery releases what the forgetting releases") {
+    Rig r;
+    REQUIRE(r.Query());
+    r.Advance(CPR_TIMEOUT);
+    r.Tick();
+    r.Advance(CPR_FORGET - 10ms);
+    CHECK(r.In("\x1b[").empty());
+    r.Advance(10ms);
+    CHECK(r.Can());
+    CHECK(r.Fwd == "\x1b[");
+}
+
+TEST_CASE("OnQuerySent settles first: no tick is needed after CPR_FORGET") {
+    Rig r;
+    REQUIRE(r.Query());
+    r.Advance(CPR_TIMEOUT + CPR_FORGET);
+    CHECK(r.Query());
+    CHECK(r.Count(ECprEvent::TimedOut) == 1);
+    CHECK(r.D->Pending());
+}
+
+TEST_CASE("Silent is already set inside the event callback") {
+    {
+        Rig r;
+        REQUIRE(r.Query());
+        r.Advance(CPR_TIMEOUT);
+        r.Tick();
+        REQUIRE(r.Events.size() == 1);
+        CHECK(r.Events[0].Kind == ECprEvent::TimedOut);
+        CHECK(r.SilentInEvent[0]);
+    }
+    {
+        Rig r;
+        REQUIRE(r.Query());
+        r.In(DA1);
+        REQUIRE(r.Events.size() == 1);
+        CHECK(r.Events[0].Kind == ECprEvent::Failed);
+        CHECK(r.SilentInEvent[0]);
+    }
+    {
+        Rig r;
+        REQUIRE(r.Query());
+        r.In(Pos(2, 2) + DA1);
+        REQUIRE(r.Events.size() == 1);
+        CHECK(r.Events[0].Kind == ECprEvent::Answered);
+        CHECK_FALSE(r.SilentInEvent[0]);
+    }
 }

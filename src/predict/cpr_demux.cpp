@@ -57,8 +57,9 @@ void Bump(std::uint32_t& count) noexcept {
 }  // namespace
 
 void CprDemux::Fail(CprSink& out) noexcept {
-    out.Event(CprEvent{ECprEvent::Failed, 0, 0});
+    // Silent() is already true in the sink's callback.
     Silent_ = true;
+    out.Event(CprEvent{ECprEvent::Failed, 0, 0});
 }
 
 void CprDemux::Consume(const TryResult* position, CprSink& out) noexcept {
@@ -67,6 +68,7 @@ void CprDemux::Consume(const TryResult* position, CprSink& out) noexcept {
     // The program's queries written after ours are the first in line now.
     Ahead_ = Behind_;
     AheadAt_ = BehindAt_;
+    AheadSince_ = BehindSince_;
     Behind_ = 0;
     if (!live) {
         return;
@@ -86,6 +88,17 @@ void CprDemux::ExpireCounts(Timestamp now) noexcept {
     }
     if (Behind_ > 0 && now >= BehindAt_ + CPR_TIMEOUT + CPR_FORGET) {
         Behind_ = 0;
+    }
+    // Replies come in order: a count that has not been back to zero for the
+    // whole span holds a lost reply, however fresh its newest query is (fish
+    // asks at every prompt). One is dropped per span.
+    if (Ahead_ > 0 && now >= AheadSince_ + CPR_TIMEOUT + CPR_FORGET) {
+        --Ahead_;
+        AheadSince_ = now;
+    }
+    if (Behind_ > 0 && now >= BehindSince_ + CPR_TIMEOUT + CPR_FORGET) {
+        --Behind_;
+        BehindSince_ = now;
     }
 }
 
@@ -237,8 +250,9 @@ void CprDemux::ForwardHeld(std::size_t count, CprSink& out) noexcept {
 void CprDemux::FlushHeld(CprSink& out) noexcept { ForwardHeld(HeldLen_, out); }
 
 void CprDemux::Reprocess(std::size_t from, CprSink& out) noexcept {
-    std::array<std::byte, CPR_HELD_MAX> rest{};
-    std::array<Timestamp, CPR_HELD_MAX> restAt{};
+    // Not zero-initialised: a failed ESC sequence (each arrow key) comes here.
+    std::array<std::byte, CPR_HELD_MAX> rest;
+    std::array<Timestamp, CPR_HELD_MAX> restAt;
     const std::size_t n = HeldLen_ - from;
     std::copy(Held_.begin() + from, Held_.begin() + HeldLen_, rest.begin());
     std::copy(HeldAt_.begin() + from, HeldAt_.begin() + HeldLen_,
@@ -375,7 +389,7 @@ void CprDemux::OnInput(ByteSpan bytes, Timestamp now, CprSink& out) noexcept {
     }
     if (HeldLen_ > HeldForwarded_) {
         const bool hold =
-            HeldForwarded_ == 0 && Eligible() && now < HeldAt_[0] + CPR_HOLD;
+            HeldForwarded_ == 0 && Eligible() && now < HoldDeadline();
         if (!hold) {
             FlushHeld(out);
         }
@@ -393,29 +407,54 @@ void CprDemux::AbandonLive() noexcept {
 }
 
 void CprDemux::Settle(Timestamp now, CprSink& out) noexcept {
-    Now_ = now;
     ExpireCounts(now);
-    if (HeldLen_ > HeldForwarded_ &&
-        (now >= HeldAt_[HeldForwarded_] + CPR_HOLD || !Eligible())) {
-        FlushHeld(out);
-    }
     if (Own_ == EOwn::Live && now >= TimeoutAt_) {
+        // A complete position held for its DA1 is judged by CPR_HOLD from
+        // here on.
+        if (HeldLen_ > HeldForwarded_ && HoldsPosition() &&
+            HeldAt_[HeldForwarded_] < TimeoutAt_) {
+            HeldAt_[HeldForwarded_] = TimeoutAt_;
+        }
         Own_ = EOwn::Dead;
-        out.Event(CprEvent{ECprEvent::TimedOut, 0, 0});
         Silent_ = true;
+        out.Event(CprEvent{ECprEvent::TimedOut, 0, 0});
     }
+    FlushDue(now, out);
     if (Own_ != EOwn::None && now >= ForgetAt_) {
         FlushHeld(out);
         Own_ = EOwn::None;
         Off_ = true;
         // Queries written after the forgotten one are before any new one.
         if (Behind_ > 0) {
-            Ahead_ =
-                Ahead_ > UINT32_MAX - Behind_ ? UINT32_MAX : Ahead_ + Behind_;
+            if (Ahead_ == 0) {
+                AheadSince_ = BehindSince_;
+            }
+            Ahead_ += Behind_;
             AheadAt_ = BehindAt_;
             Behind_ = 0;
         }
     }
+}
+
+void CprDemux::FlushDue(Timestamp now, CprSink& out) noexcept {
+    if (HeldLen_ > HeldForwarded_ && now >= HoldDeadline()) {
+        FlushHeld(out);
+    }
+}
+
+bool CprDemux::HoldsPosition() const noexcept {
+    return HeldForwarded_ == 0 &&
+           Scan(Held_.data(), HeldLen_).Status == ETry::Position;
+}
+
+Timestamp CprDemux::HoldDeadline() const noexcept {
+    // A complete position reply that could be ours waits for its DA1 reply
+    // until the live entry runs out: a terminal writes the two separately,
+    // and on a lossy link the second can come late.
+    if (Own_ == EOwn::Live && Ahead_ == 0 && HoldsPosition()) {
+        return TimeoutAt_;
+    }
+    return HeldAt_[HeldForwarded_] + CPR_HOLD;
 }
 
 void CprDemux::OnTick(Timestamp now, CprSink& out) noexcept {
@@ -425,6 +464,8 @@ void CprDemux::OnTick(Timestamp now, CprSink& out) noexcept {
 void CprDemux::OnCancel(Timestamp now, CprSink& out) noexcept {
     Settle(now, out);
     AbandonLive();
+    // A position held for the live entry has only CPR_HOLD now.
+    FlushDue(now, out);
 }
 
 void CprDemux::OnResize(Timestamp now, CprSink& out) noexcept {
@@ -432,8 +473,13 @@ void CprDemux::OnResize(Timestamp now, CprSink& out) noexcept {
     Silent_ = false;
 }
 
-bool CprDemux::OnQuerySent(Timestamp now) noexcept {
-    ExpireCounts(now);
+bool CprDemux::CanQuery(Timestamp now, CprSink& out) noexcept {
+    Settle(now, out);
+    return Own_ == EOwn::None;
+}
+
+bool CprDemux::OnQuerySent(Timestamp now, CprSink& out) noexcept {
+    Settle(now, out);
     if (Own_ != EOwn::None) {
         return false;
     }
@@ -452,9 +498,15 @@ void CprDemux::OnOutput(ByteSpan bytes, Timestamp now) noexcept {
         if (da1 != SeenDa1_) {
             SeenDa1_ = da1;
             if (Own_ == EOwn::None) {
+                if (Ahead_ == 0) {
+                    AheadSince_ = now;
+                }
                 Bump(Ahead_);
                 AheadAt_ = now;
             } else {
+                if (Behind_ == 0) {
+                    BehindSince_ = now;
+                }
                 Bump(Behind_);
                 BehindAt_ = now;
             }
@@ -470,7 +522,7 @@ std::optional<Timestamp> CprDemux::NextDeadline() const noexcept {
         }
     };
     if (HeldLen_ > HeldForwarded_) {
-        consider(HeldAt_[HeldForwarded_] + CPR_HOLD);
+        consider(HoldDeadline());
     }
     if (Own_ == EOwn::Live) {
         consider(TimeoutAt_);
