@@ -518,6 +518,9 @@ void VtParser::DispatchEsc(char32_t final, Grid& grid) noexcept {
             case 'c':  // RIS – hard reset
                 grid.Reset(/*hard=*/true);
                 return;
+            case 'Z':  // DECID – xterm answers it as DA1; counted, not acted on
+                ++Da1QueryCount_;
+                return;
             case '\\':  // ST – string terminator (ends bypass)
                 // If we arrived here from Bypass (via the ESC 0x5C path),
                 // the bypass state has already exited before calling Escape.
@@ -736,20 +739,16 @@ void VtParser::DispatchCsi(char32_t final, Grid& grid) noexcept {
             break;
 
         // Window ops / device attributes – ignore silently (not tracked).
-        // They are not answered here, but counted: the sender of the bytes
-        // (the client's query demultiplexer) needs to know a terminal will
-        // reply. Only the plain forms count: DECXCPR (CSI ? 6 n) and DA2
-        // (CSI > c) never reach this switch, they carry a private marker.
-        case 'c':  // DA1
-            if (IntermediateCount_ == 0 &&
-                (nparams == 0 || (nparams == 1 && params[0] == 0))) {
+        // They are not answered here, but DA1 is counted: the sender of the
+        // bytes (the client's query demultiplexer) needs to know a terminal
+        // will reply. Only the plain forms count: DA2 (CSI > c) and DA3
+        // (CSI = c) never reach this switch, they carry a private marker.
+        case 'c':  // DA1; xterm looks only at the first parameter
+            if (IntermediateCount_ == 0 && (nparams == 0 || params[0] == 0)) {
                 ++Da1QueryCount_;
             }
             break;
         case 'n':  // DSR
-            if (IntermediateCount_ == 0 && nparams == 1 && params[0] == 6) {
-                ++Dsr6QueryCount_;
-            }
             break;
 
         default:

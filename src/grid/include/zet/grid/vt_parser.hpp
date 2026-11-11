@@ -124,15 +124,13 @@ public:
         return BypassLimitCount_;
     }
 
-    /// Number of cursor position queries (`CSI 6 n`) and primary device
-    /// attributes queries (`CSI c`, `CSI 0 c`) dispatched since construction:
-    /// the replies a terminal will send back. Counted on the final byte, so a
-    /// query split across feeds counts once, and never inside an OSC, DCS,
-    /// APC, PM or SOS string. DECXCPR (`CSI ? 6 n`), DA2 (`CSI > c`) and
-    /// queries with intermediates are not counted. Monotonic, survive Reset.
-    [[nodiscard]] std::uint64_t Dsr6QueryCount() const noexcept {
-        return Dsr6QueryCount_;
-    }
+    /// Number of primary device attributes queries dispatched since
+    /// construction: `CSI c`, `CSI 0 c`, `CSI 0 ; ... c` (xterm looks only at
+    /// the first parameter) and `ESC Z` (DECID, which xterm answers with the
+    /// same reply). A terminal will send a reply back to each. Counted on the
+    /// final byte, so a query split across feeds counts once, and never inside
+    /// an OSC, DCS, APC, PM or SOS string. DA2 (`CSI > c`), DA3 (`CSI = c`) and
+    /// queries with intermediates are not counted. Monotonic, survives Reset.
     [[nodiscard]] std::uint64_t Da1QueryCount() const noexcept {
         return Da1QueryCount_;
     }
@@ -214,7 +212,6 @@ private:
     std::uint64_t UnknownSeqCount_{0};
     std::uint64_t DcsApcCount_{0};
     std::uint64_t BypassLimitCount_{0};
-    std::uint64_t Dsr6QueryCount_{0};
     std::uint64_t Da1QueryCount_{0};
 };
 

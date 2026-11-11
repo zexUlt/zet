@@ -38,109 +38,55 @@ std::unique_ptr<CprDemux> CprDemux::Create() noexcept {
         new (std::nothrow) CprDemux(std::unique_ptr<grid::Grid>(*grid)));
 }
 
-bool CprDemux::Pending() const noexcept {
-    return std::any_of(
-        Queue_.begin(), Queue_.begin() + QueueLen_,
-        [](const Entry& e) { return e.Kind == EKind::Own && e.Live; });
-}
-
-bool CprDemux::Outstanding() const noexcept {
-    return std::any_of(Queue_.begin(), Queue_.begin() + QueueLen_,
-                       [](const Entry& e) { return e.Kind == EKind::Own; });
-}
-
 std::size_t CprDemux::HeldSize() const noexcept {
     return HeldLen_ - HeldForwarded_;
 }
 
 // ---------------------------------------------------------------------------
-// The queue
+// The own entry and the program's counts
 // ---------------------------------------------------------------------------
 
-void CprDemux::Erase(std::size_t index) noexcept {
-    for (std::size_t i = index + 1; i < QueueLen_; ++i) {
-        Queue_[i - 1] = Queue_[i];
+namespace {
+
+void Bump(std::uint32_t& count) noexcept {
+    if (count != UINT32_MAX) {
+        ++count;
     }
-    --QueueLen_;
 }
 
-void CprDemux::DropFor(std::size_t) noexcept {
-    // Program entries first, then own entries that are no longer wanted. The
-    // pending one is never the victim: there is at most one of it.
-    for (std::size_t i = 0; i < QueueLen_; ++i) {
-        if (Queue_[i].Kind != EKind::Own) {
-            Erase(i);
-            return;
-        }
-    }
-    for (std::size_t i = 0; i < QueueLen_; ++i) {
-        if (!Queue_[i].Live) {
-            Erase(i);
-            return;
-        }
-    }
-    Erase(0);
-}
-
-void CprDemux::Push(EKind kind) noexcept {
-    if (kind != EKind::Own && QueueLen_ > 0 &&
-        Queue_[QueueLen_ - 1].Kind == kind) {
-        auto& count = Queue_[QueueLen_ - 1].Count;
-        if (count != UINT32_MAX) {
-            ++count;
-        }
-        return;
-    }
-    if (QueueLen_ == Queue_.size()) {
-        DropFor(1);
-    }
-    Entry e;
-    e.Kind = kind;
-    e.Live = kind == EKind::Own;
-    e.Count = kind == EKind::Own ? 0 : 1;
-    Queue_[QueueLen_++] = e;
-}
-
-std::optional<std::size_t> CprDemux::Target(bool position) const noexcept {
-    const EKind want = position ? EKind::ProgramCpr : EKind::ProgramDa1;
-    for (std::size_t i = 0; i < QueueLen_; ++i) {
-        if (Queue_[i].Kind == EKind::Own || Queue_[i].Kind == want) {
-            return i;
-        }
-    }
-    return std::nullopt;
-}
+}  // namespace
 
 void CprDemux::Fail(CprSink& out) noexcept {
     out.Event(CprEvent{ECprEvent::Failed, 0, 0});
     Silent_ = true;
 }
 
-CprDemux::Entry CprDemux::PopThrough(std::size_t target,
-                                     CprSink& out) noexcept {
-    // The entries in front of the one the answer belongs to were never
-    // answered. A pending query of ours among them is unanswered, as by the
-    // deadline.
-    for (std::size_t i = 0; i < target; ++i) {
-        if (Queue_[i].Kind == EKind::Own && Queue_[i].Live) {
-            Fail(out);
-        }
+void CprDemux::Consume(const TryResult* position, CprSink& out) noexcept {
+    const bool live = Own_ == EOwn::Live;
+    Own_ = EOwn::None;
+    // The program's queries written after ours are the first in line now.
+    Ahead_ = Behind_;
+    AheadAt_ = BehindAt_;
+    Behind_ = 0;
+    if (!live) {
+        return;
     }
-    const Entry taken = Queue_[target];
-    std::size_t keepFrom = target;
-    if (taken.Kind != EKind::Own && taken.Count > 1) {
-        // One query of a run answered: the run stays, shorter.
-        Queue_[target].Count = taken.Count - 1;
+    if (position != nullptr) {
+        out.Event(CprEvent{ECprEvent::Answered, position->Row, position->Col});
     } else {
-        keepFrom = target + 1;
+        // Our end marker without our position: unanswered.
+        Fail(out);
     }
-    const std::size_t drop = keepFrom;
-    std::size_t w = 0;
-    for (std::size_t i = drop; i < QueueLen_; ++i) {
-        Queue_[w++] = Queue_[i];
+}
+
+void CprDemux::ExpireCounts(Timestamp now) noexcept {
+    // A reply lost on the way must not block the alignment for good.
+    if (Ahead_ > 0 && now >= AheadAt_ + CPR_TIMEOUT + CPR_FORGET) {
+        Ahead_ = 0;
     }
-    QueueLen_ = w;
-    return taken;
+    if (Behind_ > 0 && now >= BehindAt_ + CPR_TIMEOUT + CPR_FORGET) {
+        Behind_ = 0;
+    }
 }
 
 void CprDemux::StripHeld(std::size_t length, CprSink& out) const noexcept {
@@ -292,18 +238,22 @@ void CprDemux::FlushHeld(CprSink& out) noexcept { ForwardHeld(HeldLen_, out); }
 
 void CprDemux::Reprocess(std::size_t from, CprSink& out) noexcept {
     std::array<std::byte, CPR_HELD_MAX> rest{};
+    std::array<Timestamp, CPR_HELD_MAX> restAt{};
     const std::size_t n = HeldLen_ - from;
     std::copy(Held_.begin() + from, Held_.begin() + HeldLen_, rest.begin());
+    std::copy(HeldAt_.begin() + from, HeldAt_.begin() + HeldLen_,
+              restAt.begin());
     const std::size_t forwarded =
         HeldForwarded_ > from ? HeldForwarded_ - from : 0;
     HeldLen_ = 0;
     HeldForwarded_ = 0;
     for (std::size_t i = 0; i < n; ++i) {
-        Step(rest[i], i < forwarded, out);
+        Step(rest[i], i < forwarded, restAt[i], out);
     }
 }
 
-void CprDemux::Step(std::byte b, bool forwarded, CprSink& out) noexcept {
+void CprDemux::Step(std::byte b, bool forwarded, Timestamp at,
+                    CprSink& out) noexcept {
     if (InPaste_) {
         if (!forwarded) {
             out.Forward({&b, 1});
@@ -321,22 +271,17 @@ void CprDemux::Step(std::byte b, bool forwarded, CprSink& out) noexcept {
         }
         return;
     }
-    if (HeldLen_ == 0) {
-        if (b != ESC) {
-            if (!forwarded) {
-                out.Forward({&b, 1});
-            }
-            return;
+    if (HeldLen_ == 0 && b != ESC) {
+        if (!forwarded) {
+            out.Forward({&b, 1});
         }
-        Held_[0] = b;
-        HeldLen_ = 1;
-        HeldForwarded_ = forwarded ? 1 : 0;
-        HeldSince_ = Now_;
-    } else {
-        Held_[HeldLen_++] = b;
-        if (forwarded) {
-            HeldForwarded_ = HeldLen_;
-        }
+        return;
+    }
+    Held_[HeldLen_] = b;
+    HeldAt_[HeldLen_] = at;
+    ++HeldLen_;
+    if (forwarded) {
+        HeldForwarded_ = HeldLen_;
     }
     Resolve(out);
 }
@@ -357,52 +302,38 @@ void CprDemux::Resolve(CprSink& out) noexcept {
             PasteEndMatched_ = 0;
             return;
         case ETry::Da1: {
-            const auto target = Target(false);
-            if (!target) {
+            if (Ahead_ > 0) {
+                // The program's: it asked before us.
                 ForwardHeld(r.Length, out);
-                Reprocess(r.Length, out);
-                return;
-            }
-            if (Queue_[*target].Kind != EKind::Own) {
+                --Ahead_;
+            } else if (Own_ == EOwn::None) {
                 ForwardHeld(r.Length, out);
-                PopThrough(*target, out);
-                Reprocess(r.Length, out);
-                return;
-            }
-            if (HeldForwarded_ > 0) {
-                // The beginning already went to the agent: it is not ours.
-                ForwardHeld(r.Length, out);
-                Reprocess(r.Length, out);
-                return;
-            }
-            // Our end marker without our position: unanswered.
-            StripHeld(r.Length, out);
-            const Entry own = PopThrough(*target, out);
-            if (own.Live) {
-                Fail(out);
+            } else {
+                // Ours. Without a position in front of it (that one was
+                // forwarded, or never came) the query is unanswered. When the
+                // beginning of the reply already went to the agent (the hold
+                // ran out), the rest follows it, but the entry is still
+                // answered.
+                if (HeldForwarded_ > 0) {
+                    ForwardHeld(r.Length, out);
+                } else {
+                    StripHeld(r.Length, out);
+                }
+                Consume(nullptr, out);
             }
             Reprocess(r.Length, out);
             return;
         }
         case ETry::Position: {
-            const auto target = Target(true);
-            if (!target) {
+            if (!Eligible() || HeldForwarded_ > 0) {
+                // No DA1 reply of ours can follow, or the beginning is gone:
+                // a key, or the program's answer. A DA1 reply right after it
+                // is judged on its own.
                 ForwardHeld(r.Length, out);
                 Reprocess(r.Length, out);
                 return;
             }
-            if (Queue_[*target].Kind != EKind::Own) {
-                ForwardHeld(r.Length, out);
-                PopThrough(*target, out);
-                Reprocess(r.Length, out);
-                return;
-            }
-            if (HeldForwarded_ > 0) {
-                ForwardHeld(r.Length, out);
-                Reprocess(r.Length, out);
-                return;
-            }
-            // Ours only if the end marker follows at once: Shift-, Ctrl- and
+            // Ours only if our DA1 reply follows at once: Shift-, Ctrl- and
             // Alt-F3 are `CSI 1 ; Pm R`.
             std::size_t markerLen = 0;
             switch (LookDa1(Held_.data() + r.Length, HeldLen_ - r.Length,
@@ -413,15 +344,11 @@ void CprDemux::Resolve(CprSink& out) noexcept {
                     ForwardHeld(r.Length, out);
                     Reprocess(r.Length, out);
                     return;
-                case EDa1Look::Full: {
+                case EDa1Look::Full:
                     StripHeld(r.Length + markerLen, out);
-                    const Entry own = PopThrough(*target, out);
-                    if (own.Live) {
-                        out.Event(CprEvent{ECprEvent::Answered, r.Row, r.Col});
-                    }
+                    Consume(&r, out);
                     Reprocess(r.Length + markerLen, out);
                     return;
-                }
             }
             return;
         }
@@ -430,11 +357,6 @@ void CprDemux::Resolve(CprSink& out) noexcept {
 
 void CprDemux::OnInput(ByteSpan bytes, Timestamp now, CprSink& out) noexcept {
     Settle(now, out);
-    Now_ = now;
-    if (Off_) {
-        out.Forward(bytes);
-        return;
-    }
     std::size_t i = 0;
     while (i < bytes.size()) {
         if (HeldLen_ == 0 && !InPaste_) {
@@ -449,11 +371,11 @@ void CprDemux::OnInput(ByteSpan bytes, Timestamp now, CprSink& out) noexcept {
                 continue;
             }
         }
-        Step(bytes[i++], false, out);
+        Step(bytes[i++], false, now, out);
     }
     if (HeldLen_ > HeldForwarded_) {
         const bool hold =
-            HeldForwarded_ == 0 && Pending() && now < HeldSince_ + CPR_HOLD;
+            HeldForwarded_ == 0 && Eligible() && now < HeldAt_[0] + CPR_HOLD;
         if (!hold) {
             FlushHeld(out);
         }
@@ -464,34 +386,35 @@ void CprDemux::OnInput(ByteSpan bytes, Timestamp now, CprSink& out) noexcept {
 // Time and events
 // ---------------------------------------------------------------------------
 
-void CprDemux::AbandonLive(CprSink& out) noexcept {
-    for (std::size_t i = 0; i < QueueLen_; ++i) {
-        Queue_[i].Live = false;
+void CprDemux::AbandonLive() noexcept {
+    if (Own_ == EOwn::Live) {
+        Own_ = EOwn::Dead;
     }
-    FlushHeld(out);
 }
 
 void CprDemux::Settle(Timestamp now, CprSink& out) noexcept {
     Now_ = now;
-    if (Off_) {
-        return;
-    }
-    if (HeldLen_ > HeldForwarded_ && now >= HeldSince_ + CPR_HOLD) {
+    ExpireCounts(now);
+    if (HeldLen_ > HeldForwarded_ &&
+        (now >= HeldAt_[HeldForwarded_] + CPR_HOLD || !Eligible())) {
         FlushHeld(out);
     }
-    if (Pending() && now >= TimeoutAt_) {
-        AbandonLive(out);
+    if (Own_ == EOwn::Live && now >= TimeoutAt_) {
+        Own_ = EOwn::Dead;
         out.Event(CprEvent{ECprEvent::TimedOut, 0, 0});
         Silent_ = true;
     }
-    if (Outstanding() && now >= ForgetAt_) {
+    if (Own_ != EOwn::None && now >= ForgetAt_) {
         FlushHeld(out);
-        QueueLen_ = 0;
-        HeldLen_ = 0;
-        HeldForwarded_ = 0;
-        InPaste_ = false;
-        PasteEndMatched_ = 0;
+        Own_ = EOwn::None;
         Off_ = true;
+        // Queries written after the forgotten one are before any new one.
+        if (Behind_ > 0) {
+            Ahead_ =
+                Ahead_ > UINT32_MAX - Behind_ ? UINT32_MAX : Ahead_ + Behind_;
+            AheadAt_ = BehindAt_;
+            Behind_ = 0;
+        }
     }
 }
 
@@ -501,7 +424,7 @@ void CprDemux::OnTick(Timestamp now, CprSink& out) noexcept {
 
 void CprDemux::OnCancel(Timestamp now, CprSink& out) noexcept {
     Settle(now, out);
-    AbandonLive(out);
+    AbandonLive();
 }
 
 void CprDemux::OnResize(Timestamp now, CprSink& out) noexcept {
@@ -510,46 +433,36 @@ void CprDemux::OnResize(Timestamp now, CprSink& out) noexcept {
 }
 
 bool CprDemux::OnQuerySent(Timestamp now) noexcept {
-    if (Pending()) {
+    ExpireCounts(now);
+    if (Own_ != EOwn::None) {
         return false;
     }
-    if (Off_) {
-        Off_ = false;
-        InPaste_ = false;
-        PasteEndMatched_ = 0;
-        HeldLen_ = 0;
-        HeldForwarded_ = 0;
-    }
-    Push(EKind::Own);
+    Off_ = false;
+    Own_ = EOwn::Live;
     TimeoutAt_ = now + CPR_TIMEOUT;
     ForgetAt_ = now + CPR_TIMEOUT + CPR_FORGET;
     return true;
 }
 
-void CprDemux::OnOutput(ByteSpan bytes) noexcept {
+void CprDemux::OnOutput(ByteSpan bytes, Timestamp now) noexcept {
+    ExpireCounts(now);
     for (const std::byte b : bytes) {
         Parser_.FeedByte(b, *Grid_);
-        const std::uint64_t dsr = Parser_.Dsr6QueryCount();
         const std::uint64_t da1 = Parser_.Da1QueryCount();
-        if (dsr != SeenDsr6_) {
-            SeenDsr6_ = dsr;
-            if (!Off_) {
-                Push(EKind::ProgramCpr);
-            }
-        }
         if (da1 != SeenDa1_) {
             SeenDa1_ = da1;
-            if (!Off_) {
-                Push(EKind::ProgramDa1);
+            if (Own_ == EOwn::None) {
+                Bump(Ahead_);
+                AheadAt_ = now;
+            } else {
+                Bump(Behind_);
+                BehindAt_ = now;
             }
         }
     }
 }
 
 std::optional<Timestamp> CprDemux::NextDeadline() const noexcept {
-    if (Off_) {
-        return std::nullopt;
-    }
     std::optional<Timestamp> next;
     const auto consider = [&next](Timestamp t) {
         if (!next || t < *next) {
@@ -557,12 +470,12 @@ std::optional<Timestamp> CprDemux::NextDeadline() const noexcept {
         }
     };
     if (HeldLen_ > HeldForwarded_) {
-        consider(HeldSince_ + CPR_HOLD);
+        consider(HeldAt_[HeldForwarded_] + CPR_HOLD);
     }
-    if (Pending()) {
+    if (Own_ == EOwn::Live) {
         consider(TimeoutAt_);
     }
-    if (Outstanding()) {
+    if (Own_ != EOwn::None) {
         consider(ForgetAt_);
     }
     return next;

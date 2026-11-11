@@ -50,20 +50,22 @@ inline constexpr Duration CPR_TIMEOUT = std::chrono::seconds(1);
 /// the agent while the query is pending. A terminal writes an answer in one
 /// piece, so a held beginning is rare.
 inline constexpr Duration CPR_HOLD = std::chrono::milliseconds(50);
-/// After CPR_TIMEOUT the queue of expected answers is kept this long, so that
-/// a late answer is still stripped; then it is dropped and stdin passes
-/// through untouched.
+/// After CPR_TIMEOUT the client's own entry is kept this long, so that a late
+/// answer is still stripped; then it is dropped and stdin passes through
+/// untouched. The same span bounds how long a count of the program's DA1
+/// queries is believed (from its newest query), so that a reply lost on the
+/// way cannot block the alignment for good.
 inline constexpr Duration CPR_FORGET = std::chrono::seconds(10);
 
-/// Entries in the queue of expected answers. A program that asks for the
-/// cursor position and the device attributes in turn, to a terminal that
-/// never answers, would grow it without bound; the oldest is dropped.
-inline constexpr std::size_t CPR_QUEUE_MAX = 32;
 /// Longest answer the demultiplexer recognises: `CSI r ; c R` with five-digit
-/// numbers is 14 bytes, a device attributes answer is cut at 20. Position and
-/// the answer after it can be held together.
+/// numbers is 14 bytes. A device attributes answer is `CSI ? Pm c`: xterm's
+/// default vt420 reply is 38 bytes and Windows Terminal's is 39, so the limit
+/// is 128, more than three times the longest seen, for terminals that report
+/// more features. Beyond it the bytes are not an answer. Position and the
+/// answer after it can be held together; the buffer is a fixed array, never
+/// allocated.
 inline constexpr std::size_t CPR_POSITION_REPLY_MAX = 14;
-inline constexpr std::size_t CPR_DA1_REPLY_MAX = 20;
+inline constexpr std::size_t CPR_DA1_REPLY_MAX = 128;
 inline constexpr std::size_t CPR_HELD_MAX =
     CPR_POSITION_REPLY_MAX + CPR_DA1_REPLY_MAX;
 

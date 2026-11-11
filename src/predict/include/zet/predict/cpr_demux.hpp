@@ -49,10 +49,17 @@ public:
 /// OnX(now, ...) calls and NextDeadline, no clock, no system calls. The client
 /// builds one only when calibration is on; `never` does not construct it.
 ///
-/// The terminal answers in the order of the queries, so an answer belongs to
-/// the head of a queue of expected answers. The queue holds the client's own
-/// queries and the remote program's `CSI 6 n` and DA1, which the demultiplexer
-/// counts itself in the outgoing stream with a private VtParser.
+/// DA1 replies (`CSI ? Pm c`) are the anchor: no key sends one. The remote
+/// program's DA1 queries (`CSI c`, `CSI 0 c`, `ESC Z`), which a private
+/// VtParser counts in the outgoing stream, are kept as two counts: `ahead`,
+/// written before the client's own query and not yet answered, and `behind`,
+/// written after it. A DA1 reply with `ahead > 0` is the program's. With
+/// `ahead == 0` and an own entry it is ours, and so is the position reply
+/// right before it, if any; a position reply with no DA1 reply right after it
+/// (a key such as Shift-F3 `CSI 1;2R`, or a program's answer) is forwarded.
+/// The program's `CSI 6 n` is not tracked at all. There is at most one own
+/// entry, live (before CPR_TIMEOUT) or dead (timed out or cancelled, until
+/// CPR_FORGET), so the state does not grow with the number of queries.
 ///
 /// Call order, per event, by the client:
 ///   bytes written to the terminal         OnOutput
@@ -67,35 +74,39 @@ public:
     [[nodiscard]] static std::unique_ptr<CprDemux> Create() noexcept;
 
     /// Bytes the client writes to the terminal, excluding its own query. The
-    /// remote program's `CSI 6 n` and DA1 in them are put in the queue, each
-    /// on its last byte, never inside an OSC or DCS string.
-    void OnOutput(ByteSpan bytes) noexcept;
+    /// remote program's DA1 queries in them are counted, each on its last
+    /// byte, never inside an OSC or DCS string. Counted also while Off.
+    void OnOutput(ByteSpan bytes, Timestamp now) noexcept;
 
-    /// The client wrote its own query. False, and nothing happens, when one is
-    /// already pending (the client asks for at most one at a time). A query
-    /// after the queue was forgotten switches the demultiplexer on again.
+    /// The client wrote its own query. False, and nothing happens, while an
+    /// own entry exists, live or dead: the client asks for at most one at a
+    /// time, and after a timeout it waits for the late answer or CPR_FORGET.
     bool OnQuerySent(Timestamp now) noexcept;
 
     /// Bytes read from stdin. Reports the bytes for the agent and the events
     /// to `out`. A possible beginning of the client's own answer at the end
-    /// of `bytes` is held while the query is pending, for CPR_HOLD at most.
+    /// of `bytes` is held while an own entry exists and no DA1 reply of the
+    /// program is expected before it, for CPR_HOLD at most from its first
+    /// byte. While Off, program DA1 replies are still recognised, to keep
+    /// the count, and stdin is passed on unchanged.
     void OnInput(ByteSpan bytes, Timestamp now, CprSink& out) noexcept;
 
-    /// Time passed: releases what is held, expires the pending query, forgets
-    /// the queue. Also done at the start of every OnInput.
+    /// Time passed: releases what is held, expires the live entry, forgets
+    /// the dead one. Also done at the start of every call.
     void OnTick(Timestamp now, CprSink& out) noexcept;
 
-    /// The pending query is abandoned (a snapshot): its answer, when it comes,
-    /// is stripped and thrown away, and no event is raised for it.
+    /// The live entry is abandoned (a snapshot): its answer, when it comes, is
+    /// stripped and thrown away, and no event is raised for it. Held bytes
+    /// keep their CPR_HOLD.
     void OnCancel(Timestamp now, CprSink& out) noexcept;
 
-    /// The local terminal changed size: the pending query is abandoned as in
-    /// OnCancel, and the silent mark is cleared so that the client may ask
-    /// again.
+    /// The local terminal changed size: the live entry is abandoned as in
+    /// OnCancel, and the silent mark is cleared. The client may ask again
+    /// once the dead entry is gone (its late answer came, or CPR_FORGET).
     void OnResize(Timestamp now, CprSink& out) noexcept;
 
     /// The earliest moment OnTick changes something: end of the hold, of the
-    /// pending query, or of the wait for a late answer. Unset when there is
+    /// live entry, or of the wait for a late answer. Unset when there is
     /// none. The client adds it to its poll deadline.
     [[nodiscard]] std::optional<Timestamp> NextDeadline() const noexcept;
 
@@ -103,14 +114,20 @@ public:
     /// client has not been told to ask again by a resize.
     [[nodiscard]] bool Silent() const noexcept { return Silent_; }
     /// The client's own query is waiting for its answer.
-    [[nodiscard]] bool Pending() const noexcept;
-    /// Some entry of the client's own is in the queue, pending or not: while
-    /// there is none, stdin passes through unchanged.
-    [[nodiscard]] bool Outstanding() const noexcept;
-    /// The queue was forgotten and nothing is parsed.
+    [[nodiscard]] bool Pending() const noexcept { return Own_ == EOwn::Live; }
+    /// An own entry exists, live or dead: while there is none, stdin passes
+    /// through unchanged.
+    [[nodiscard]] bool Outstanding() const noexcept {
+        return Own_ != EOwn::None;
+    }
+    /// The dead entry was forgotten by CPR_FORGET. Stdin is not stripped;
+    /// the program's DA1 queries are still counted.
     [[nodiscard]] bool Off() const noexcept { return Off_; }
 
-    [[nodiscard]] std::size_t QueueSize() const noexcept { return QueueLen_; }
+    /// Program DA1 queries written before / after the own entry and not yet
+    /// answered.
+    [[nodiscard]] std::uint32_t Ahead() const noexcept { return Ahead_; }
+    [[nodiscard]] std::uint32_t Behind() const noexcept { return Behind_; }
     /// Bytes read from stdin and not yet passed on.
     [[nodiscard]] std::size_t HeldSize() const noexcept;
     [[nodiscard]] ByteSpan HeldBytes() const noexcept {
@@ -118,15 +135,7 @@ public:
     }
 
 private:
-    enum class EKind : std::uint8_t { ProgramCpr, ProgramDa1, Own };
-
-    struct Entry {
-        EKind Kind{EKind::Own};
-        /// Own only: the answer is wanted (false after a deadline or cancel).
-        bool Live{false};
-        /// Program only: queries in a row of this kind.
-        std::uint32_t Count{0};
-    };
+    enum class EOwn : std::uint8_t { None, Live, Dead };
 
     enum class ETry : std::uint8_t {
         NeedMore,
@@ -146,16 +155,16 @@ private:
     explicit CprDemux(std::unique_ptr<grid::Grid> grid) noexcept
         : Grid_(std::move(grid)) {}
 
-    void Push(EKind kind) noexcept;
-    void DropFor(std::size_t room) noexcept;
-    void Erase(std::size_t index) noexcept;
-    /// Index of the first entry that can take an answer of this kind.
-    [[nodiscard]] std::optional<std::size_t> Target(
-        bool position) const noexcept;
-    /// Removes entries up to and including `target`'s one answer; own live
-    /// entries passed over raise Failed.
-    Entry PopThrough(std::size_t target, CprSink& out) noexcept;
+    /// An own entry exists and the next DA1 reply would land on it.
+    [[nodiscard]] bool Eligible() const noexcept {
+        return Own_ != EOwn::None && Ahead_ == 0;
+    }
+    /// The own entry got its DA1 reply: gone; the queries written after it
+    /// are now the first in line. `position` is set when the position reply
+    /// came with it.
+    void Consume(const TryResult* position, CprSink& out) noexcept;
     void Fail(CprSink& out) noexcept;
+    void ExpireCounts(Timestamp now) noexcept;
     void StripHeld(std::size_t length, CprSink& out) const noexcept;
 
     [[nodiscard]] static TryResult Scan(const std::byte* data,
@@ -164,34 +173,39 @@ private:
                                           std::size_t size,
                                           std::size_t& length) noexcept;
 
-    void Step(std::byte b, bool forwarded, CprSink& out) noexcept;
+    void Step(std::byte b, bool forwarded, Timestamp at, CprSink& out) noexcept;
     void Resolve(CprSink& out) noexcept;
     void FlushHeld(CprSink& out) noexcept;
     void Reprocess(std::size_t from, CprSink& out) noexcept;
     void ForwardHeld(std::size_t count, CprSink& out) noexcept;
     void Settle(Timestamp now, CprSink& out) noexcept;
-    void AbandonLive(CprSink& out) noexcept;
+    void AbandonLive() noexcept;
 
     std::unique_ptr<grid::Grid> Grid_;
     grid::VtParser Parser_;
-    std::uint64_t SeenDsr6_{0};
     std::uint64_t SeenDa1_{0};
 
-    std::array<Entry, CPR_QUEUE_MAX> Queue_{};
-    std::size_t QueueLen_{0};
+    EOwn Own_{EOwn::None};
+    Timestamp TimeoutAt_;
+    Timestamp ForgetAt_;
+    /// Program DA1 queries written before / after the own entry, and when the
+    /// newest of each was written.
+    std::uint32_t Ahead_{0};
+    std::uint32_t Behind_{0};
+    Timestamp AheadAt_;
+    Timestamp BehindAt_;
 
     bool Silent_{false};
     bool Off_{false};
-    Timestamp TimeoutAt_;
-    Timestamp ForgetAt_;
 
-    // A possible beginning of an answer: the tail of the stream, in order.
-    // The first HeldForwarded_ bytes already went to the agent (the hold ran
-    // out): they stay only to recognise a bracketed paste that starts there.
+    // A possible beginning of an answer: the tail of the stream, in order,
+    // with the time each byte arrived. The first HeldForwarded_ bytes already
+    // went to the agent (the hold ran out, or nothing is to be held): they
+    // stay only to recognise a reply or a bracketed paste that starts there.
     std::array<std::byte, CPR_HELD_MAX> Held_{};
+    std::array<Timestamp, CPR_HELD_MAX> HeldAt_{};
     std::size_t HeldLen_{0};
     std::size_t HeldForwarded_{0};
-    Timestamp HeldSince_;
     Timestamp Now_;
 
     bool InPaste_{false};
