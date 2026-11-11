@@ -35,11 +35,11 @@ struct CalibrationTarget {
 
 /// Why the client wants to ask the terminal where its cursor is.
 enum ECalReason : std::uint8_t {
-    CAL_START = 1,     ///< the mirror begins empty, the shell's prompt unseen
-    CAL_RESIZE = 2,    ///< the terminal reflowed what it showed
-    CAL_DCS = 4,       ///< a DCS/SOS/PM/APC string passed through
-    CAL_ALT_EXIT = 8,  ///< the program left the alternate screen
-    CAL_UNKNOWN = 16,  ///< a sequence the mirror does not know
+    CalStart = 1,     ///< the mirror begins empty, the shell's prompt unseen
+    CalResize = 2,    ///< the terminal reflowed what it showed
+    CalDcs = 4,       ///< a DCS/SOS/PM/APC string passed through
+    CalAltExit = 8,   ///< the program left the alternate screen
+    CalUnknown = 16,  ///< a sequence the mirror does not know
 };
 
 /// Row synchronisation of the mirror by the terminal's cursor position report
@@ -195,8 +195,8 @@ private:
         std::size_t EventCount{0};
     };
 
-    explicit Calibration(std::unique_ptr<CprDemux> demux) noexcept
-        : Demux_(std::move(demux)) {}
+    Calibration(std::unique_ptr<CprDemux> demux, bool seeded,
+                const CalibrationTarget& target) noexcept;
 
     /// Raises the reasons the parser's counters show since the last look.
     /// `quiet`: advance without raising (a notice).

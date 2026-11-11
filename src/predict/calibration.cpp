@@ -34,24 +34,25 @@ void Calibration::Sink::Event(const CprEvent& event) noexcept {
     }
 }
 
+Calibration::Calibration(std::unique_ptr<CprDemux> demux, bool seeded,
+                         const CalibrationTarget& target) noexcept
+    : Demux_(std::move(demux)) {
+    if (!seeded) {
+        Reasons_ = CalStart;
+    }
+    if (target.Valid()) {
+        Rebase(target);
+    }
+}
+
 std::unique_ptr<Calibration> Calibration::Create(
     bool seeded, const CalibrationTarget& target) noexcept {
     auto demux = CprDemux::Create();
     if (!demux) {
         return nullptr;
     }
-    std::unique_ptr<Calibration> self(new (std::nothrow)
-                                          Calibration(std::move(demux)));
-    if (!self) {
-        return nullptr;
-    }
-    if (!seeded) {
-        self->Reasons_ = CAL_START;
-    }
-    if (target.Valid()) {
-        self->Rebase(target);
-    }
-    return self;
+    return std::unique_ptr<Calibration>(
+        new (std::nothrow) Calibration(std::move(demux), seeded, target));
 }
 
 // ---------------------------------------------------------------------------
@@ -84,7 +85,7 @@ void Calibration::Evaluate(const CalibrationTarget& target,
         Sticky_ = true;
     }
     if (PrevAlt_ && !alt && !quiet) {
-        Reasons_ |= CAL_ALT_EXIT;
+        Reasons_ |= CalAltExit;
     }
     PrevAlt_ = alt;
     // A string or a character in progress is judged when it is over.
@@ -97,10 +98,10 @@ void Calibration::Evaluate(const CalibrationTarget& target,
     const std::uint64_t unknown = p.UnknownSeqCount();
     if (!alt && !quiet) {
         if (unknown != SeenUnknown_) {
-            Reasons_ |= CAL_UNKNOWN;
+            Reasons_ |= CalUnknown;
         }
         if (dcs != SeenDcs_) {
-            Reasons_ |= CAL_DCS;
+            Reasons_ |= CalDcs;
         }
     }
     SeenUnknown_ = unknown;
@@ -228,7 +229,7 @@ bool Calibration::BeginQuery(Timestamp /*now*/,
     // Where the mirror says the cursor is, when that is worth comparing: the
     // reasons that cast the rows in doubt are not asking "is the mirror
     // right?" but "where are we?".
-    ExpectKnown_ = (QueryReasons_ & (CAL_START | CAL_RESIZE | CAL_DCS)) == 0 &&
+    ExpectKnown_ = (QueryReasons_ & (CalStart | CalResize | CalDcs)) == 0 &&
                    g.RowsTrusted();
     ExpectRow_ = g.CursorRow();
     ExpectCol_ = g.CursorCol();
@@ -305,7 +306,7 @@ void Calibration::Apply(const CprEvent& event, Timestamp now,
     if (!match) {
         // The start is the only reason that says the tail of the cursor's row
         // is blank: the shell left the cursor on a fresh line.
-        resynced = g.Resync(row, col, QueryReasons_ == CAL_START);
+        resynced = g.Resync(row, col, QueryReasons_ == CalStart);
     }
     if (match || resynced) {
         target.Engine->OnCalibrated(resynced, now, target.View());
@@ -389,7 +390,7 @@ void Calibration::OnResize(Timestamp now,
     }
     Demux_->OnResize(now, Sink_);
     Sink_.EventCount = 0;
-    Reasons_ |= CAL_RESIZE;
+    Reasons_ |= CalResize;
 }
 
 void Calibration::Detach(Timestamp now) noexcept {

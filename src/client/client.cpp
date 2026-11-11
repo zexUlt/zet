@@ -211,6 +211,11 @@ struct Options {
     /// it. Production offers the default ceiling and always the TLV.
     std::uint16_t Ceiling{wire::PROTOCOL_VERSION_MAX};
     bool GridCapable{true};
+    /// Ask the terminal where its cursor is (design.md §9, round C). On when
+    /// stdin and stdout are a terminal: a pipe cannot answer, and the query
+    /// would be written into a file. Off for the tests that read the client's
+    /// stdout from a pipe.
+    bool Calibrate{false};
     /// Test hook ZET_TEST_MIRROR_DUMP: keep the mirror grid (§9, M7) and write
     /// its snapshot to this path on exit. Empty means no mirror: nothing else
     /// asks for one yet, and without it the client does no extra work.
@@ -221,11 +226,6 @@ struct Options {
     /// Test hook ZET_TEST_OVERLAY_LOG: one line "offset length" for every
     /// piece of overlay put into stdout, offsets counted in stdout bytes.
     std::string OverlayLog;
-    /// Ask the terminal where its cursor is (design.md §9, round C). On when
-    /// stdin and stdout are a terminal: a pipe cannot answer, and the query
-    /// would be written into a file. Off for the tests that read the client's
-    /// stdout from a pipe.
-    bool Calibrate{false};
     /// Test seam (SessionTestConfig::SizeSource): stands in for the tty when
     /// SIGWINCH asks for the terminal's size. Empty in production.
     std::function<std::optional<wire::ResizeMessage>()> SizeSource;
@@ -1109,8 +1109,6 @@ private:
     /// without calibration.
     std::array<std::byte, RELEASED_MAX> Released_{};
     std::size_t ReleasedLen_{0};
-    /// The loop must not wait: input was moved to In_ outside a read.
-    bool Wake_{false};
     app::ByteQueue Stdout_;
     app::Registration StdinWatch_;
     /// Where typed input is read from; tests point it at a pipe.
@@ -1142,6 +1140,10 @@ private:
     bool Escaped_{false};
     /// The link went down after it had been live, and the user was told.
     bool Announced_{false};
+    /// The loop must not wait: input was moved to In_ outside a read.
+    bool Wake_{false};
+    bool CalibrationCreated_{false};
+    std::uint32_t QueriesWritten_{0};
     /// GridBegin flags of PendingSnapshot_.
     std::uint8_t PendingSnapshotFlags_{0};
 
@@ -1166,8 +1168,6 @@ private:
     /// Options::Calibrate is on, never with --predict=never, an old agent or
     /// ver=1.
     std::unique_ptr<predict::Calibration> Cal_;
-    bool CalibrationCreated_{false};
-    std::uint32_t QueriesWritten_{0};
 
     struct PendingSnapshotInfo {
         std::uint32_t StreamGen{0};
