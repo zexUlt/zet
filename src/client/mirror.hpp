@@ -38,6 +38,11 @@ public:
     [[nodiscard]] bool Resize(std::uint16_t cols, std::uint16_t rows) noexcept;
 
     [[nodiscard]] const grid::Grid& Screen() const noexcept { return *Grid_; }
+    /// For the calibration, which feeds the parser itself while the mirror
+    /// waits and sets the grid's cursor by the terminal's answer. The pointer
+    /// is not kept: a snapshot or a resize may replace the grid.
+    [[nodiscard]] grid::Grid& MutableScreen() noexcept { return *Grid_; }
+    [[nodiscard]] grid::VtParser& MutableParser() noexcept { return Parser_; }
     [[nodiscard]] const grid::VtParser& Parser() const noexcept {
         return Parser_;
     }
