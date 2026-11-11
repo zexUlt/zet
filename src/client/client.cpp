@@ -198,31 +198,15 @@ void SayError(std::string_view what, std::string_view why) noexcept {
 }
 
 struct Options {
-    bool PrintVersion{false};
     std::string Agent{DEFAULT_AGENT};
-    /// True when --agent was given: skip delivery and run the agent directly.
-    bool AgentExplicit{false};
     std::vector<std::string> SshArgs;
     std::string Host;
     session::SessionLimits Limits;
     Duration BackoffMax{BACKOFF_MAX};
-    /// Test hooks (ZET_TEST_VERSION_CEILING, ZET_TEST_NO_GRID_CAPABLE): the
-    /// protocol ceiling offered in Hello, and whether GRID_CAPABLE goes with
-    /// it. Production offers the default ceiling and always the TLV.
-    std::uint16_t Ceiling{wire::PROTOCOL_VERSION_MAX};
-    bool GridCapable{true};
-    /// Ask the terminal where its cursor is (design.md §9, round C). On when
-    /// stdin and stdout are a terminal: a pipe cannot answer, and the query
-    /// would be written into a file. Off for the tests that read the client's
-    /// stdout from a pipe.
-    bool Calibrate{false};
     /// Test hook ZET_TEST_MIRROR_DUMP: keep the mirror grid (§9, M7) and write
     /// its snapshot to this path on exit. Empty means no mirror: nothing else
     /// asks for one yet, and without it the client does no extra work.
     std::string MirrorDump;
-    /// Predictive echo (--predict, §9). Never offers no ECHO_ACK and keeps no
-    /// mirror: the stream reaches the terminal as it always did.
-    predict::EDisplayMode Predict{predict::EDisplayMode::Adaptive};
     /// Test hook ZET_TEST_OVERLAY_LOG: one line "offset length" for every
     /// piece of overlay put into stdout, offsets counted in stdout bytes.
     std::string OverlayLog;
@@ -233,6 +217,22 @@ struct Options {
     /// be rebuilt from this snapshot (counting from 1), as when its allocation
     /// fails. 0 in production.
     unsigned LoseMirrorAtSnapshot{0};
+    /// Test hooks (ZET_TEST_VERSION_CEILING, ZET_TEST_NO_GRID_CAPABLE): the
+    /// protocol ceiling offered in Hello, and whether GRID_CAPABLE goes with
+    /// it. Production offers the default ceiling and always the TLV.
+    std::uint16_t Ceiling{wire::PROTOCOL_VERSION_MAX};
+    /// Predictive echo (--predict, §9). Never offers no ECHO_ACK and keeps no
+    /// mirror: the stream reaches the terminal as it always did.
+    predict::EDisplayMode Predict{predict::EDisplayMode::Adaptive};
+    bool PrintVersion{false};
+    /// True when --agent was given: skip delivery and run the agent directly.
+    bool AgentExplicit{false};
+    bool GridCapable{true};
+    /// Ask the terminal where its cursor is (design.md §9, round C). On when
+    /// stdin and stdout are a terminal: a pipe cannot answer, and the query
+    /// would be written into a file. Off for the tests that read the client's
+    /// stdout from a pipe.
+    bool Calibrate{false};
 };
 
 /// What of the local environment goes to the shell on the far side: the
