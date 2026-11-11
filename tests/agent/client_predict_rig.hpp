@@ -265,6 +265,11 @@ public:
         bool Calibrate{false};
         /// The test's terminal answers the query: `CSI r;c R CSI ? 6 2 c`.
         bool Answer{true};
+        /// With Answer: only this many queries are answered, the rest meet a
+        /// silent terminal.
+        std::size_t AnswerMax{~std::size_t{0}};
+        /// The client cannot rebuild its mirror from this snapshot (from 1).
+        unsigned LoseMirrorAtSnapshot{0};
     };
 
     ClientRig(std::uint8_t seed, Options options)
@@ -358,6 +363,7 @@ public:
                 .OverlayLog = LogPath_,
                 .Calibrate = Options_.Calibrate,
                 .SizeSource = Options_.SizeSource,
+                .LoseMirrorAtSnapshot = Options_.LoseMirrorAtSnapshot,
             });
         });
     }
@@ -398,6 +404,50 @@ public:
             }
         }
         AgentStream_.append(text);
+    }
+
+    /// The shell prints from another thread, for output the pipeline cannot
+    /// take at once (the client's terminal is not read). Ends with Finish.
+    void PrintAsync(std::string text) {
+        PrinterTotal_ = text.size();
+        Printer_ = std::thread{[this, t = std::move(text)] {
+            std::size_t done = 0;
+            while (done < t.size() && !PrinterStop_) {
+                const auto n = io::WriteSome(
+                    Slave_.Get(),
+                    ByteSpan{
+                        reinterpret_cast<const std::byte*>(t.data()) + done,
+                        t.size() - done});
+                if (n) {
+                    done += *n;
+                    PrinterDone_ = done;
+                } else {
+                    std::this_thread::sleep_for(1ms);
+                }
+            }
+        }};
+    }
+
+    /// How much of PrintAsync's text has been taken by the pty, and its size.
+    [[nodiscard]] std::size_t PrinterDone() const { return PrinterDone_; }
+    [[nodiscard]] std::size_t PrinterTotal() const { return PrinterTotal_; }
+
+    /// The terminal takes at most `bytes` of what the client wrote, then the
+    /// test looks at the rest as Pump does. For a terminal that is slow.
+    void DrainSome(std::size_t bytes) {
+        std::array<std::byte, 4096> buf{};
+        const auto n = io::ReadSome(
+            StdoutRead_.Get(),
+            MutableByteSpan{buf}.first(std::min(bytes, buf.size())));
+        if (n && *n != 0) {
+            Out_.append(reinterpret_cast<const char*>(buf.data()), *n);
+        }
+        AnswerQueries();
+        for (;;) {
+            const auto m = io::ReadSome(Slave_.Get(), MutableByteSpan{buf});
+            if (!m || *m == 0) break;
+            ShellIn_.append(reinterpret_cast<const char*>(buf.data()), *m);
+        }
     }
 
     /// Lets time pass, reading what the client writes and what the shell is
@@ -553,6 +603,8 @@ public:
     /// the client give up), waits for the client, and takes what it wrote.
     void Finish() {
         if (std::exchange(Done_, true)) return;
+        PrinterStop_ = true;
+        if (Printer_.joinable()) Printer_.join();
         StopAgent_ = true;
         if (Agent_.joinable()) {
             auto waker = io::StartConnect(Wake_);
@@ -620,7 +672,7 @@ private:
             if (at == std::string::npos) return;
             TermAt_ = at + QUERY.size();
             ++QueriesSeen_;
-            if (Options_.Answer) {
+            if (Options_.Answer && QueriesSeen_ <= Options_.AnswerMax) {
                 const std::string reply =
                     "\x1b[" + std::to_string(Term_->CursorRow() + 1) + ";" +
                     std::to_string(Term_->CursorCol() + 1) + "R\x1b[?62;c";
@@ -654,6 +706,10 @@ private:
     std::unique_ptr<SpyProxy> Proxy_;
     std::atomic<bool> StopAgent_{false};
     std::thread Agent_;
+    std::thread Printer_;
+    std::atomic<bool> PrinterStop_{false};
+    std::atomic<std::size_t> PrinterDone_{0};
+    std::atomic<std::size_t> PrinterTotal_{0};
     std::future<client::SessionTestResult> Client_;
     bool Done_{false};
     int Status_{-1};

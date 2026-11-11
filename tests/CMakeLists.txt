@@ -30,6 +30,7 @@ add_executable(zet_tests
     predict/overlay_review_test.cpp
     predict/overlay_desync_test.cpp
     predict/overlay_cpr_test.cpp
+    predict/overlay_cpr_review_test.cpp
     predict/overlay_reserve_test.cpp
     predict/predict_baseline_drop_test.cpp
     predict/predict_ack_test.cpp
@@ -151,6 +152,7 @@ if(ZET_HAVE_AGENT)
         agent/client_predict_baseline_test.cpp
         agent/client_predict_off_test.cpp
         agent/client_predict_cpr_test.cpp
+        agent/client_predict_cpr_wiring_test.cpp
         agent/client_predict_overlay_test.cpp
         agent/client_predict_password_test.cpp
         agent/client_predict_wiring_test.cpp

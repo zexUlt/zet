@@ -119,3 +119,114 @@ TEST_CASE_FIXTURE(SodiumFixture,
     CHECK_FALSE(ShellSawEscape(rig));
     CHECK(rig.WithoutOverlay() == rig.AgentStream());
 }
+
+TEST_CASE_FIXTURE(SodiumFixture,
+                  "Client: a prediction pending when the query goes out is not "
+                  "redrawn while the mirror waits") {
+    // The start is answered; the second query meets silence, so the wait
+    // lasts CPR_TIMEOUT, long enough to look.
+    ClientRig rig{
+        226, {.Mode = EDisplayMode::Always, .Calibrate = true, .AnswerMax = 1}};
+    rig.Warm();
+    REQUIRE(rig.QueriesSeen() == 1);
+    // A reason (alt-screen exit) that has to wait: DECOM is on. The shell
+    // redraws its prompt and two keys are echoed; a third is predicted and
+    // drawn, and the shell does not answer it.
+    rig.Print("\x1b[?6h\x1b[?1049h");
+    rig.Pump(50ms);
+    rig.Print("\x1b[?1049l\x1b[2K\r$ ");
+    rig.Pump(100ms);
+    rig.TypeAndEcho('d');
+    rig.TypeAndEcho('e');
+    const std::size_t before = rig.Inserts().size();
+    rig.Keys("f");
+    REQUIRE(rig.WaitFor([&] { return rig.Inserts().size() == before + 1; }));
+    REQUIRE(rig.QueriesSeen() == 1);
+    // The gate opens: the overlay comes off, the query goes out.
+    rig.Print("\x1b[?6l");
+    REQUIRE(rig.WaitFor([&] { return rig.QueriesSeen() == 2; }));
+    rig.Pump(300ms);
+    const auto inserts = rig.Inserts();
+    // The overlay came off, then the query went out: the query is not
+    // written over the prediction.
+    REQUIRE(inserts.size() >= before + 3);
+    // The query is the last thing the client wrote: nothing put the
+    // prediction back during the wait.
+    CHECK(rig.InsertBytes(inserts.back()) == QUERY);
+    CHECK(rig.InsertBytes(inserts[inserts.size() - 2]).find("\x1b[X") !=
+          std::string::npos);
+    rig.Finish();
+}
+
+TEST_CASE_FIXTURE(SodiumFixture,
+                  "Client: a lone ESC typed while the answer is awaited is "
+                  "released by the timer, not by the next key") {
+    ClientRig rig{
+        227,
+        {.Mode = EDisplayMode::Always, .Calibrate = true, .Answer = false}};
+    rig.Keys("\n");
+    REQUIRE(rig.WaitFor(
+        [&] { return rig.ShellInput().find('\n') != std::string::npos; }));
+    rig.Print("\r$ ");
+    rig.Pump(100ms);
+    rig.TypeAndEcho('a');
+    REQUIRE(rig.WaitFor([&] { return rig.QueriesSeen() == 1; }));
+    // The demultiplexer holds the ESC for CPR_HOLD (50 ms) in case it starts
+    // the answer; nothing else wakes the client.
+    rig.Keys("\x1b");
+    CHECK(rig.WaitFor(
+        [&] { return rig.ShellInput().find('\x1b') != std::string::npos; },
+        400ms));
+    rig.Finish();
+}
+
+TEST_CASE_FIXTURE(SodiumFixture, "Client: a resize is a reason to ask again") {
+    const BlockWinch block;
+    std::atomic<bool> asked{false};
+    ClientRig rig{
+        228,
+        {.Mode = EDisplayMode::Always,
+         .SizeSource =
+             [&asked] {
+                 asked = true;
+                 return std::optional{wire::ResizeMessage{
+                     .Rows = 24, .Cols = 100, .XPixel = 0, .YPixel = 0}};
+             },
+         .Calibrate = true}};
+    rig.Warm();
+    REQUIRE(rig.QueriesSeen() == 1);
+    REQUIRE(::kill(::getpid(), SIGWINCH) == 0);
+    REQUIRE(rig.WaitFor([&] { return asked.load(); }));
+    CHECK(rig.WaitFor([&] { return rig.QueriesSeen() == 2; }));
+    rig.Finish();
+    CHECK(rig.QueriesWritten() == 2);
+}
+
+TEST_CASE_FIXTURE(
+    SodiumFixture,
+    "Client: the start query goes out before the prompt that came "
+    "with the first echo-ack") {
+    ClientRig rig{231, {.Mode = EDisplayMode::Always, .Calibrate = true}};
+    // The shell's prompt is already in the ring when the client connects, so
+    // it arrives in the pass of the first EchoAck. ESC = is zsh's smkx.
+    rig.Print("$ \x1b=");
+    REQUIRE(rig.WaitFor([&] { return rig.QueriesSeen() >= 1; }));
+    rig.Pump(100ms);
+    const auto q = rig.Out().find(QUERY);
+    const auto p = rig.Out().find("$ ");
+    REQUIRE(q != std::string::npos);
+    REQUIRE(p != std::string::npos);
+    CHECK(q < p);
+    // The first prompt line predicts at once, not only after Enter.
+    rig.TypeAndEcho('a');
+    rig.TypeAndEcho('B');
+    rig.Keys("c");
+    CHECK(rig.WaitFor([&] {
+        for (const OverlayInsert& i : rig.Inserts()) {
+            const std::string b = rig.InsertBytes(i);
+            if (b != QUERY && b.find('c') != std::string::npos) return true;
+        }
+        return false;
+    }));
+    rig.Finish();
+}

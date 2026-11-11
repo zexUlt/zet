@@ -47,6 +47,8 @@ struct CalClient {
     Client C;
     std::unique_ptr<Calibration> Cal;
     TermModel Model;
+    /// How much output the wait holds (the constant outside this rig).
+    std::size_t LagMax = CPR_LAG_BYTES_MAX;
 
     /// Every byte queued for the terminal, in queue order.
     std::string Wire;
@@ -78,7 +80,7 @@ struct CalClient {
 
     /// The client starts calibration (the first EchoAck of the session).
     void Begin(bool seeded = false, bool settle = true) {
-        Cal = Calibration::Create(seeded, T());
+        Cal = Calibration::Create(seeded, T(), LagMax);
         REQUIRE(Cal != nullptr);
         if (settle) Settle();
     }
