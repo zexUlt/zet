@@ -44,11 +44,26 @@
 // ("Real") answers its query `CSI 6 n CSI c`: data[0] / 60 says how (1 both
 // replies, 2 silence, 3 position only, 4 device attributes only), data[1] / 100
 // after how long (0, 300 ms or 1500 ms of time the target steps through in
-// pieces, as the client's timer does). Replies come in with the keystrokes, in
-// one piece or two. In this mode keystrokes hold no ESC, so what the demux
-// let through to the agent can be compared with what the user typed:
-//   9. when the terminal answers both replies, the bytes forwarded to the
-//      agent are exactly the bytes typed, always (no reply leaks)
+// pieces, as the client's timer does). The terminal answers the program's own
+// queries (CSI c, CSI 0 c, ESC Z, CSI 6 n) the same way: a position for
+// CSI 6 n in modes 1 and 3, device attributes for the others in modes 1 and 4.
+// Replies come in with the keystrokes, in one piece or two. Keystrokes hold no
+// ESC, so what the demux let through to the agent can be compared with what the
+// user typed and the program was answered:
+//   9. the typed bytes are an in-order subsequence of what reached the agent
+//      (and the bytes the demux still holds), in every reply mode; after all
+//      deadlines have passed, of what reached the agent
+//  10. when the terminal answers both replies, the bytes forwarded to the
+//      agent plus the held ones are exactly the typed bytes and the replies to
+//      the program's queries, in the order they came in (no reply of the
+//      client's own leaks, none of the program's is taken); not asserted
+//      while a program DA1 has been waiting for ten seconds or more, which
+//      the demux forgets
+//  11. nothing stays held while the calibration is not frozen: the output and
+//      the EchoAck held for the wait go with it (a snapshot ends the wait)
+//  12. a resize leaves the calibration with a reason to ask again
+//  13. the hold buffer has the size the calibration was given: the fuzzer
+//      makes it small, and an overflow ends the wait with the output in
 //
 // Input: 3 header bytes (columns, rows, mode; what is left of them says the
 // pre-zet row N and the text above it), then operations: one byte selecting the
@@ -61,6 +76,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <memory>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -228,6 +244,15 @@ void CheckInvariants(const PredictionEngine& e, const grid::Grid& g,
     }
 }
 
+// `need` is a subsequence of `hay`: greedy matching is as good as any.
+bool IsSubsequence(std::string_view need, std::string_view hay) {
+    std::size_t k = 0;
+    for (const char c : hay) {
+        if (k < need.size() && need[k] == c) ++k;
+    }
+    return k == need.size();
+}
+
 std::uint64_t Hash(const grid::Grid& g) {
     std::uint64_t h = 1469598103934665603ULL;
     auto mix = [&h](std::uint64_t v) { h = (h ^ v) * 1099511628211ULL; };
@@ -285,16 +310,23 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data,
     std::unique_ptr<Calibration> cal;
     std::string typedAll;      // what the user typed
     std::string forwardedAll;  // what reached the agent
+    std::string expectedAll;   // typed + the replies to the program
+    std::optional<Timestamp> waitingSince;
     struct Reply {
         Timestamp At;
         std::string Bytes;
+        bool Own;  // the answer to the client's query, not the program's
     };
     std::vector<Reply> replies;
     const auto target = [&] {
         return CalibrationTarget{mirror->G.get(), &mirror->P, &engine};
     };
+    // A small hold buffer now and then, so that the overflow is reached.
+    const std::size_t lagMax = data[1] % 4 == 0
+                                   ? 16 + static_cast<std::size_t>(data[0]) % 48
+                                   : CPR_LAG_BYTES_MAX;
     if (calibrated) {
-        cal = Calibration::Create(false, target());
+        cal = Calibration::Create(false, target(), lagMax);
         if (!cal) return 0;
     }
     // Stdin bytes the demux let through go to the engine, as the client's
@@ -337,9 +369,38 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data,
     // them back) or straight in.
     std::array<std::uint8_t, 64> piece{};
     std::size_t pieceLen = 0;
+    std::uint64_t refDa1 = 0;  // the queries of the program already answered
+    std::uint64_t refCpr = 0;
     const auto feed = [&](const std::uint8_t* d, std::size_t n) {
         term->Feed(d, n);
         ref->Feed(d, n);
+        if (cal) {
+            // The terminal answers the program's queries, whole, one reply
+            // each, in the order they came.
+            while (refDa1 < ref->P.Da1QueryCount() ||
+                   refCpr < ref->P.CprQueryCount()) {
+                const bool cpr = refCpr < ref->P.CprQueryCount();
+                // Which came first is not known; position replies first.
+                if (cpr) {
+                    ++refCpr;
+                    if (replyMode == 1 || replyMode == 3) {
+                        replies.push_back(
+                            {now + replyDelay,
+                             "\x1b[" +
+                                 std::to_string(term->G->CursorRow() + 1) +
+                                 ";" +
+                                 std::to_string(term->G->CursorCol() + 1) + "R",
+                             false});
+                    }
+                } else {
+                    ++refDa1;
+                    if (replyMode == 1 || replyMode == 4) {
+                        replies.push_back(
+                            {now + replyDelay, "\x1b[?62;c", false});
+                    }
+                }
+            }
+        }
         for (std::size_t k = 0; k < n && pieceLen < piece.size(); ++k) {
             piece[pieceLen++] = d[k];
         }
@@ -387,11 +448,12 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data,
             default:
                 break;
         }
-        if (!reply.empty()) replies.push_back({now + replyDelay, reply});
+        if (!reply.empty()) replies.push_back({now + replyDelay, reply, true});
         cal->OnQueryWritten(now, target());
     };
-    const auto stdinBytes = [&](std::string_view bytes) {
+    const auto stdinBytes = [&](std::string_view bytes, bool own = false) {
         if (bytes.empty()) return;
+        if (!own) expectedAll.append(bytes);
         cal->OnInput(
             {reinterpret_cast<const std::byte*>(bytes.data()), bytes.size()},
             now, target());
@@ -406,11 +468,12 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data,
             for (std::size_t k = 0; k < replies.size();) {
                 if (replies[k].At <= now) {
                     const std::string r = replies[k].Bytes;
+                    const bool own = replies[k].Own;
                     replies.erase(replies.begin() +
                                   static_cast<std::ptrdiff_t>(k));
                     const std::size_t cut = r.size() > 3 ? r.size() / 2 : 0;
-                    stdinBytes(std::string_view(r).substr(0, cut));
-                    stdinBytes(std::string_view(r).substr(cut));
+                    stdinBytes(std::string_view(r).substr(0, cut), own);
+                    stdinBytes(std::string_view(r).substr(cut), own);
                     did = true;
                 } else {
                     ++k;
@@ -441,7 +504,7 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data,
 
     std::size_t i = 3;
     while (i + 1 < size) {
-        const std::uint8_t op = data[i] % 9;
+        const std::uint8_t op = data[i] % 10;
         const std::size_t want = data[i + 1] % 24;
         i += 2;
         const std::size_t n = want < size - i ? want : size - i;
@@ -457,15 +520,6 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data,
             shown[k] = NoLowercase(p[k]);
             typed[k] = TypedKey(p[k]);
             plain[k] = p[k];
-            if (calibrated) {
-                // The program asks no queries of its own (CSI c, CSI 6 n,
-                // ESC Z): a reply to one is rightly the agent's, and the
-                // no-leak invariant would not hold.
-                if (plain[k] == 'c' || plain[k] == 'n' || plain[k] == 'Z') {
-                    plain[k] = '.';
-                }
-                if (shown[k] == 'Z') shown[k] = '.';
-            }
         }
 
         switch (op) {
@@ -536,6 +590,8 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data,
                 undo();
                 if (cal) {
                     cal->OnResize(now, target());
+                    // A resize always leaves a reason to ask again.
+                    Check((cal->Reasons() & CalResize) != 0);
                     forward();
                 }
                 if (mirror->G->Resize(c, r).has_value()) {
@@ -562,8 +618,14 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data,
                 static constexpr std::uint8_t PREAMBLE[] = {
                     0x1B, '[', '?', '1', '0',  '4', '9', 'l',
                     0x1B, '[', '2', 'J', 0x1B, '[', 'H'};
-                const std::uint8_t* body =
-                    (echoOff ? shown.data() : plain.data()) + (n > 2 ? 2 : n);
+                // A real snapshot holds no query: the body is masked.
+                std::array<std::uint8_t, 24> clean = echoOff ? shown : plain;
+                for (std::size_t k = 0; k < n; ++k) {
+                    if (clean[k] == 'c' || clean[k] == 'n' || clean[k] == 'Z') {
+                        clean[k] = '.';
+                    }
+                }
+                const std::uint8_t* body = clean.data() + (n > 2 ? 2 : n);
                 for (Mirror* m : {fresh.get(), fresh2.get(), fresh3.get()}) {
                     m->Feed(PREAMBLE, sizeof(PREAMBLE));
                     m->Feed(body, n > 2 ? n - 2 : 0);
@@ -573,7 +635,20 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data,
                 ref = std::move(fresh3);
                 ++gen;
                 out = 0;
-                if (cal) cal->OnSnapshot(now, target());
+                refDa1 = 0;
+                refCpr = 0;
+                if (cal) {
+                    cal->OnSnapshot(now, target());
+                    // The terminal gets the snapshot's bytes too, and the
+                    // demultiplexer sees them (the client's NoteWritten).
+                    cal->OnWritten(
+                        {reinterpret_cast<const std::byte*>(PREAMBLE),
+                         sizeof(PREAMBLE)},
+                        now);
+                    cal->OnWritten({reinterpret_cast<const std::byte*>(body),
+                                    n > 2 ? n - 2 : 0},
+                                   now);
+                }
                 engine.OnSnapshot(gen, now, mirror->View());
                 break;
             }
@@ -600,6 +675,23 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data,
                 }
                 break;
             }
+            case 9: {  // the program asks the terminal something
+                static constexpr const char* QUERIES[] = {
+                    "\x1b[c", "\x1b[0c", "\x1bZ", "\x1b[6n", "\x1b[5n"};
+                const char* q = QUERIES[arg(0) % 5];
+                undo();
+                feed(reinterpret_cast<const std::uint8_t*>(q),
+                     std::char_traits<char>::length(q));
+                const std::size_t extra = arg(1) % 4;
+                if (extra != 0) {
+                    feed(shown.data(), extra < n ? extra : n);
+                    deliver(std::char_traits<char>::length(q) +
+                            (extra < n ? extra : n));
+                } else {
+                    deliver(std::char_traits<char>::length(q));
+                }
+                break;
+            }
             default:  // another look at the clock
                 engine.OnTick(now);
                 break;
@@ -607,13 +699,41 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data,
         settle();
         draw();
         CheckInvariants(engine, *mirror->G, seen);
-        if (cal && replyMode == 1) Check(forwardedAll == typedAll);
+        if (cal) {
+            const ByteSpan held = cal->Demux().HeldBytes();
+            const std::string heldStr(
+                reinterpret_cast<const char*>(held.data()), held.size());
+            Check(IsSubsequence(typedAll, forwardedAll + heldStr));
+            // Waiting for a program DA1 reply for ten seconds is forgotten.
+            if (cal->Demux().Ahead() + cal->Demux().Behind() == 0) {
+                waitingSince.reset();
+            } else if (!waitingSince) {
+                waitingSince = now;
+            }
+            const bool aged =
+                waitingSince && now - *waitingSince >= std::chrono::seconds(10);
+            if (replyMode == 1 && !aged) {
+                Check(forwardedAll + heldStr == expectedAll);
+            }
+            // Nothing is kept for a wait that is over.
+            if (!cal->Frozen()) {
+                Check(!cal->HoldsLag() && !cal->HoldsDeferredAck());
+            }
+        }
         if (echoOff) {
             Check(engine.ConfirmedEpoch() == 0);
             for (const Prediction& pr : engine.Predictions()) {
                 Check(!engine.IsVisible(pr));
             }
         }
+    }
+
+    // Every deadline passes: whatever the demux held is out, and the typed
+    // bytes are all among what reached the agent.
+    if (cal) {
+        advance(std::chrono::seconds(30));
+        settle();
+        Check(IsSubsequence(typedAll, forwardedAll));
     }
 
     // The engine reads the mirror and never writes it: a call that only reads
