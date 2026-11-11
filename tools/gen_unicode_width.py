@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Generate Unicode 16.0.0 width tables for zet_grid.
 
-Reads EastAsianWidth.txt and DerivedCoreProperties.txt from unicode.org
+Reads EastAsianWidth.txt, DerivedCoreProperties.txt, DerivedGeneralCategory.txt
+and emoji-variation-sequences.txt from unicode.org
 and writes src/grid/unicode_tables.cpp.
 
 Usage:
@@ -31,6 +32,7 @@ BASE_URL = f"https://www.unicode.org/Public/{UNICODE_VERSION}/ucd/"
 EAW_URL = BASE_URL + "EastAsianWidth.txt"
 DCP_URL = BASE_URL + "DerivedCoreProperties.txt"
 DC_URL  = BASE_URL + "extracted/DerivedGeneralCategory.txt"
+EVS_URL = BASE_URL + "emoji/emoji-variation-sequences.txt"
 
 # SHA-256 hashes pinned for Unicode 16.0.0 (computed from the canonical
 # unicode.org files; re-verify if UNICODE_VERSION is bumped).
@@ -41,6 +43,8 @@ HASHES: dict[str, str] = {
              "3f476a3d30222de20028feda36c1dabd",
     DC_URL:  "7676ab755a41ef82108460238569e60a"
              "d65c191ddafe61b36c6765ec1353f293",
+    EVS_URL: "71d93ec015011371a027ba2bc0a63155"
+             "d381c6e0b94a586c1a88a49400cd6864",
 }
 
 OUTPUT = "src/grid/unicode_tables.cpp"
@@ -128,6 +132,7 @@ def main() -> None:
     eaw_lines = fetch(EAW_URL)
     dcp_lines = fetch(DCP_URL)
     dc_lines = fetch(DC_URL)
+    evs_lines = fetch(EVS_URL)
 
     # Wide: W or F (Fullwidth)
     wide = parse_ranges(eaw_lines, lambda f: f.split()[0] in ("W", "F"))
@@ -146,6 +151,15 @@ def main() -> None:
     mn_me = parse_ranges(dc_lines, lambda f: f.split(";")[0].strip() in ("Mn", "Me"))
     zero_width_raw = merge(sorted(default_ignorable + mn_me))
     zero_width = subtract_ranges(zero_width_raw, wide)
+
+    # Bases of emoji variation sequences: a base followed by VS16 (U+FE0F)
+    # is drawn as an emoji, which terminals may draw two columns wide.
+    vs16_bases = []
+    for line in evs_lines:
+        fields = line.split("#")[0].split(";")[0].split()
+        if len(fields) == 2 and fields[1] == "FE0F":
+            vs16_bases.append((int(fields[0], 16),) * 2)
+    vs16_bases = merge(sorted(vs16_bases))
 
     # Write output
     lines = [
@@ -177,6 +191,10 @@ def main() -> None:
         "// Source: DerivedCoreProperties.txt + DerivedGeneralCategory.txt.",
         *emit_table("ZERO_WIDTH", zero_width),
         "",
+        "// Bases of emoji variation sequences with VS16 (U+FE0F).",
+        "// Source: emoji-variation-sequences.txt, Unicode 16.0.0.",
+        *emit_table("EMOJI_VS16_BASE", vs16_bases),
+        "",
         "// Binary search over a sorted range table.",
         "static bool InRanges(const Range* table, std::size_t n,",
         "                     char32_t cp) noexcept {",
@@ -194,6 +212,11 @@ def main() -> None:
         "    if (cp < 0xA1) return false;",
         "    return InRanges(AMBIGUOUS, sizeof(AMBIGUOUS) / sizeof(*AMBIGUOUS),",
         "                    cp);",
+        "}",
+        "",
+        "bool HasEmojiVariation(char32_t cp) noexcept {",
+        "    return InRanges(EMOJI_VS16_BASE,",
+        "                    sizeof(EMOJI_VS16_BASE) / sizeof(*EMOJI_VS16_BASE), cp);",
         "}",
         "",
         "bool IsClusterJoiner(char32_t cp) noexcept {",

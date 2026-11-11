@@ -166,11 +166,64 @@ void Grid::StoreCell(Cell& dst, const Cell& value) noexcept {
     dst = value;
 }
 
-void Grid::MarkWidthDoubt(std::uint16_t row, std::uint16_t col) noexcept {
+void Grid::RecomputeWidthDoubt(Line& line) noexcept {
+    std::uint16_t least = 0;
+    for (const std::uint16_t d : line.ClassDoubt)
+        if (d != 0 && (least == 0 || d < least)) least = d;
+    line.WidthDoubt = least;
+}
+
+void Grid::MarkWidthDoubt(std::uint16_t row, std::uint16_t col,
+                          EWidthClass cls) noexcept {
     if (row >= Rows_) return;
     Line& line = ActiveLine(row);
     const auto mark = static_cast<std::uint16_t>(col + 1);
+    std::uint16_t& d = line.ClassDoubt[static_cast<std::size_t>(cls)];
+    if (d == 0 || mark < d) d = mark;
     if (line.WidthDoubt == 0 || mark < line.WidthDoubt) line.WidthDoubt = mark;
+}
+
+void Grid::NoteClassGlyph(std::uint16_t row, std::uint16_t col,
+                          EWidthClass cls) noexcept {
+    std::uint32_t& n = Path_.Glyphs[static_cast<std::size_t>(cls)];
+    if (n != UINT32_MAX) ++n;
+    if (cls == EWidthClass::Cluster ||
+        (Policy_.DoubtClasses & WidthClassBit(cls)) != 0)
+        MarkWidthDoubt(row, col, cls);
+}
+
+void Grid::NoteColumnSet() noexcept {
+    ++ColumnSetCount_;
+    RestartPath();
+}
+
+void Grid::SetWidthPolicy(const WidthPolicy& policy) noexcept {
+    Policy_ = policy;
+    Policy_.Ambiguous = policy.Ambiguous == 2 ? 2 : 1;
+    Policy_.PrivateUse = policy.PrivateUse == 2 ? 2 : 1;
+}
+
+void Grid::ClearWidthClass(EWidthClass cls) noexcept {
+    const auto k = static_cast<std::size_t>(cls);
+    for (std::uint16_t r = 0; r < Rows_; ++r) {
+        for (Line* lines : {MainLines_, AltLines_}) {
+            lines[r].ClassDoubt[k] = 0;
+            RecomputeWidthDoubt(lines[r]);
+        }
+    }
+}
+
+void Grid::ForgetWidthClass(EWidthClass cls) noexcept {
+    const auto k = static_cast<std::size_t>(cls);
+    for (std::uint16_t r = 0; r < Rows_; ++r) {
+        for (Line* lines : {MainLines_, AltLines_}) {
+            Line& line = lines[r];
+            if (line.ClassDoubt[k] == 0) continue;
+            line.KnownFrom = Cols_;
+            line.ClassDoubt[k] = 0;
+            RecomputeWidthDoubt(line);
+        }
+    }
 }
 
 void Grid::BlankCell(Cell& cell) noexcept {
@@ -200,6 +253,17 @@ void Grid::PenToCell(Cell& cell) noexcept {
 void Grid::ClearLine(Line& line) noexcept {
     for (std::uint16_t c = 0; c < Cols_; ++c) BlankCell(line.Cells[c]);
     line.WidthDoubt = 0;
+    for (std::uint16_t& d : line.ClassDoubt) d = 0;
+    line.KnownFrom = 0;
+}
+
+// Blank with the default background, whatever the pen is (Resync: the
+// terminal's own blank cells are default ones).
+void Grid::ClearLinePlain(Line& line) noexcept {
+    for (std::uint16_t c = 0; c < Cols_; ++c) StoreCell(line.Cells[c], Cell{});
+    line.WidthDoubt = 0;
+    for (std::uint16_t& d : line.ClassDoubt) d = 0;
+    line.KnownFrom = 0;
 }
 
 void Grid::ClearCells(Cell* cells, std::uint16_t count) noexcept {
@@ -285,6 +349,9 @@ void Grid::ScrollRegionDown(std::uint16_t n) noexcept {
         const Line& src = ActiveLine(static_cast<std::uint16_t>(r - n));
         CopyCells(dst.Cells, src.Cells, Cols_);
         dst.WidthDoubt = src.WidthDoubt;
+        std::copy(std::begin(src.ClassDoubt), std::end(src.ClassDoubt),
+                  std::begin(dst.ClassDoubt));
+        dst.KnownFrom = src.KnownFrom;
     }
     for (std::uint16_t r = ScrollTop_; r < ScrollTop_ + n; ++r)
         ClearLine(ActiveLine(r));
@@ -302,12 +369,43 @@ static constexpr char32_t DEC_GFX[31] = {
     0x2502, 0x2264, 0x2265, 0x03C0, 0x2260, 0x00A3, 0x00B7,
 };
 
+bool Grid::WidenForVs16(std::uint16_t prev) noexcept {
+    // The glyph is in column `prev`, the cursor right after it, not in the
+    // last column: the wide cell fits. (In the last column terminals differ
+    // on wrapping; the caller marks that.)
+    if (PendingWrap_ || CursorCol_ != prev + 1U) return false;
+    Line& line = ActiveLine(CursorRow_);
+    Cell head = line.Cells[prev];
+    head.Width = 2;
+    StoreCell(line.Cells[prev], head);
+    // D2b: the continuation slot may hold a wide head whose tail would orphan.
+    if (line.Cells[CursorCol_].Width == 2 && CursorCol_ + 1U < Cols_)
+        BlankCell(line.Cells[CursorCol_ + 1]);
+    Cell tail{};
+    tail.Width = 0;
+    StoreCell(line.Cells[CursorCol_], tail);
+    NoteKnown(line, prev, 2);
+    LastPrintedWidth_ = 2;
+    const auto next = static_cast<std::uint16_t>(CursorCol_ + 1);
+    if (next >= Cols_) {
+        CursorCol_ = static_cast<std::uint16_t>(Cols_ - 1);
+        PendingWrap_ = true;
+    } else {
+        CursorCol_ = next;
+    }
+    return true;
+}
+
 void Grid::PutChar(char32_t cp, int width) noexcept {
     // Apply DEC Special Graphics charset when active (SO selects G1=charset 1,
     // SI restores G0).  Mapping covers 0x60–0x7E (30 entries + backtick).
+    bool mapped = false;
     {
         const std::uint8_t cs = (CharsetActive_ == 0) ? CharsetG0_ : CharsetG1_;
-        if (cs == 1 && cp >= 0x60 && cp <= 0x7E) cp = DEC_GFX[cp - 0x60];
+        if (cs == 1 && cp >= 0x60 && cp <= 0x7E) {
+            cp = DEC_GFX[cp - 0x60];
+            mapped = true;
+        }
     }
 
     // Zero-width combining mark: GRAPHEME_MAX_CODEPOINTS=1 — keep base, drop
@@ -315,17 +413,47 @@ void Grid::PutChar(char32_t cp, int width) noexcept {
     // its parts (VS16 makes a text glyph wide, ZWJ glues), and the cell
     // before this one then holds more than the grid knows.
     if (width == 0) {
+        // Whether the glyph printed last is right before the cursor, with
+        // nothing dropped after it.
+        const bool adjacent =
+            !LastPrintedMarked_ && LastPrintedChar_ != 0 &&
+            LastPrintedRow_ == CursorRow_ &&
+            (PendingWrap_ ? LastPrintedCol_ == CursorCol_
+                          : LastPrintedCol_ + LastPrintedWidth_ == CursorCol_);
         LastPrintedMarked_ = true;
         if (IsClusterJoiner(cp)) {
             const std::uint16_t prev =
                 (PendingWrap_ || CursorCol_ == 0)
                     ? CursorCol_
                     : static_cast<std::uint16_t>(CursorCol_ - 1);
-            MarkWidthDoubt(CursorRow_, prev);
+            EWidthClass cls = EWidthClass::Cluster;
+            // VS16 after a narrow text glyph that has an emoji presentation.
+            // Digits, # and * are keycap bases: the terminals that widen them
+            // do so for the whole keycap sequence, which has no verdict.
+            if (cp == 0xFE0F && adjacent && prev < Cols_ &&
+                LastPrintedChar_ >= 0x80) {
+                const Cell& base = CellAt(CursorRow_, prev);
+                if (base.Width == 1 && base.Codepoint == LastPrintedChar_ &&
+                    HasEmojiVariation(base.Codepoint))
+                    cls = EWidthClass::Emoji;
+            }
+            if (cls == EWidthClass::Emoji && Policy_.Vs16Widens) {
+                std::uint32_t& n =
+                    Path_.Glyphs[static_cast<std::size_t>(EWidthClass::Emoji)];
+                if (n != UINT32_MAX) ++n;
+                // In the last column the terminals wrap in different ways.
+                if (!WidenForVs16(prev)) {
+                    MarkWidthDoubt(CursorRow_, prev, EWidthClass::Cluster);
+                    BreakPath();
+                }
+            } else {
+                NoteClassGlyph(CursorRow_, prev, cls);
+            }
         }
         return;
     }
 
+    if (PendingWrap_) BreakPath();
     if (PendingWrap_ && ModeSet(EMode::Awm)) {
         CursorCol_ = 0;
         LineFeed();
@@ -336,10 +464,25 @@ void Grid::PutChar(char32_t cp, int width) noexcept {
         InsertChars(static_cast<std::uint16_t>(width));
     }
 
+    // Terminals set to wide ambiguous or to wide private use draw those in two
+    // columns; the policy says which this one is (design.md §9, round C). Not
+    // for the Special Graphics line drawing, which terminals draw themselves.
+    int baseWidth = width;
+    EWidthClass cls = EWidthClass::Ambiguous;
+    const bool classed = IsAmbiguousWidth(cp);
+    if (classed) cls = IsPrivateUse(cp) ? EWidthClass::PrivateUse : cls;
+    if (classed && width == 1 && !mapped) {
+        const std::uint8_t w = cls == EWidthClass::PrivateUse
+                                   ? Policy_.PrivateUse
+                                   : Policy_.Ambiguous;
+        if (w == 2) width = 2;
+    }
+
     // D4: in a 1-column grid a wide char can never fit regardless of AWM.
     // Replace with a narrow space placeholder (xterm behaviour).
     if (width == 2 && Cols_ == 1) {
         width = 1;
+        baseWidth = 1;
         cp = U' ';
     }
 
@@ -347,6 +490,7 @@ void Grid::PutChar(char32_t cp, int width) noexcept {
         if (ModeSet(EMode::Awm)) {
             CursorCol_ = 0;
             LineFeed();
+            BreakPath();
         } else {
             return;
         }
@@ -380,6 +524,8 @@ void Grid::PutChar(char32_t cp, int width) noexcept {
     written.Codepoint = cp;
     written.Width = static_cast<std::uint8_t>(width);
     StoreCell(cell, written);
+    NoteKnown(ActiveLine(CursorRow_), CursorCol_,
+              static_cast<std::uint16_t>(width));
 
     if (width == 2 && CursorCol_ + 1 < Cols_) {
         Cell& cont =
@@ -397,11 +543,14 @@ void Grid::PutChar(char32_t cp, int width) noexcept {
         StoreCell(cont, tail);
     }
 
-    if (IsAmbiguousWidth(cp) || IsClusterJoiner(cp)) {
-        MarkWidthDoubt(CursorRow_, CursorCol_);
+    if (IsAmbiguousWidth(cp)) {
+        NoteClassGlyph(CursorRow_, CursorCol_, cls);
+    } else if (IsClusterJoiner(cp)) {
+        NoteClassGlyph(CursorRow_, CursorCol_, EWidthClass::Cluster);
     }
     LastPrintedChar_ = cp;
     LastPrintedWidth_ = width;
+    LastPrintedBaseWidth_ = baseWidth;
     LastPrintedRow_ = CursorRow_;
     LastPrintedCol_ = CursorCol_;
     LastPrintedMarked_ = false;
@@ -416,14 +565,14 @@ void Grid::PutChar(char32_t cp, int width) noexcept {
 }
 
 void Grid::CarriageReturn() noexcept {
-    ++ColumnSetCount_;
+    NoteColumnSet();
     CursorCol_ = 0;
     PendingWrap_ = false;
 }
 
 void Grid::LineFeed() noexcept {
     if (ModeSet(EMode::Lnm)) {
-        ++ColumnSetCount_;
+        NoteColumnSet();
         CursorCol_ = 0;
     }
     PendingWrap_ = false;
@@ -457,11 +606,13 @@ void Grid::ReverseIndex() noexcept {
 
 void Grid::Backspace() noexcept {
     PendingWrap_ = false;
+    BreakPath();
     if (CursorCol_ > 0) --CursorCol_;
 }
 
 void Grid::HorizontalTab() noexcept {
     PendingWrap_ = false;
+    BreakPath();
     for (std::uint16_t c = static_cast<std::uint16_t>(CursorCol_ + 1);
          c < Cols_; ++c) {
         if ((TabStops_[c / 64] >> (c % 64)) & 1) {
@@ -474,6 +625,7 @@ void Grid::HorizontalTab() noexcept {
 
 void Grid::HorizontalTabBack(std::uint16_t n) noexcept {
     PendingWrap_ = false;
+    BreakPath();
     if (n == 0) n = 1;
     for (std::uint16_t step = 0; step < n; ++step) {
         if (CursorCol_ == 0) break;
@@ -541,6 +693,7 @@ void Grid::MoveCursorDown(std::uint16_t n) noexcept {
 void Grid::MoveCursorRight(std::uint16_t n) noexcept {
     PendingWrap_ = false;
     const std::uint16_t max = static_cast<std::uint16_t>(Cols_ - 1);
+    if (CursorCol_ + n > max) BreakPath();  // stopped at the edge
     CursorCol_ = (CursorCol_ + n <= max)
                      ? static_cast<std::uint16_t>(CursorCol_ + n)
                      : max;
@@ -548,12 +701,13 @@ void Grid::MoveCursorRight(std::uint16_t n) noexcept {
 
 void Grid::MoveCursorLeft(std::uint16_t n) noexcept {
     PendingWrap_ = false;
+    if (n > 0) BreakPath();
     CursorCol_ =
         (n <= CursorCol_) ? static_cast<std::uint16_t>(CursorCol_ - n) : 0;
 }
 
 void Grid::MoveCursorTo(std::uint16_t row1, std::uint16_t col1) noexcept {
-    ++ColumnSetCount_;
+    NoteColumnSet();
     NoteAbsoluteRow();
     PendingWrap_ = false;
     const std::uint16_t rowOff = ModeSet(EMode::Decom) ? ScrollTop_ : 0;
@@ -572,7 +726,7 @@ void Grid::MoveCursorTo(std::uint16_t row1, std::uint16_t col1) noexcept {
 }
 
 void Grid::MoveCursorToCol(std::uint16_t col1) noexcept {
-    ++ColumnSetCount_;
+    NoteColumnSet();
     PendingWrap_ = false;
     CursorCol_ = ClampCol(col1 > 0 ? static_cast<std::uint16_t>(col1 - 1) : 0);
 }
@@ -593,13 +747,13 @@ void Grid::MoveCursorToRow(std::uint16_t row1) noexcept {
 
 void Grid::CursorNextLine(std::uint16_t n) noexcept {
     MoveCursorDown(n);
-    ++ColumnSetCount_;
+    NoteColumnSet();
     CursorCol_ = 0;
 }
 
 void Grid::CursorPrevLine(std::uint16_t n) noexcept {
     MoveCursorUp(n);
-    ++ColumnSetCount_;
+    NoteColumnSet();
     CursorCol_ = 0;
 }
 
@@ -633,6 +787,7 @@ void Grid::RestoreCursor() noexcept {
     // The terminal's saved row is its own: the same as ours only if nothing
     // moved either of them since (a scroll on one side), which is not known.
     NoteDrift();
+    BreakPath();  // the terminal's saved column is its own
     const SavedCursor& sc = IsAltScreen() ? SavedCursorAlt_ : SavedCursorMain_;
     CursorRow_ = ClampRow(sc.Row);
     CursorCol_ = ClampCol(sc.Col);
@@ -709,6 +864,8 @@ void Grid::EraseInLine(std::uint8_t param) noexcept {
             RepairWideOrphans(line, CursorCol_, CursorCol_);
             for (std::uint16_t c = CursorCol_; c < Cols_; ++c)
                 BlankCell(line.Cells[c]);
+            NoteKnown(line, CursorCol_,
+                      static_cast<std::uint16_t>(Cols_ - CursorCol_));
             break;
         case 1: {
             const std::uint16_t last =
@@ -716,6 +873,7 @@ void Grid::EraseInLine(std::uint8_t param) noexcept {
             RepairWideOrphans(line, 0, last);
             for (std::uint16_t c = 0; c < last && c < Cols_; ++c)
                 BlankCell(line.Cells[c]);
+            NoteKnown(line, 0, last);
             break;
         }
         case 2:
@@ -735,6 +893,7 @@ void Grid::EraseChars(std::uint16_t n) noexcept {
                                   : Cols_;
     RepairWideOrphans(line, CursorCol_, end);
     for (std::uint16_t c = CursorCol_; c < end; ++c) BlankCell(line.Cells[c]);
+    NoteKnown(line, CursorCol_, static_cast<std::uint16_t>(end - CursorCol_));
 }
 
 void Grid::DeleteChars(std::uint16_t n) noexcept {
@@ -750,8 +909,15 @@ void Grid::DeleteChars(std::uint16_t n) noexcept {
         BlankCell(line.Cells[CursorCol_]);
     }
     // Doubtful glyphs may have shifted left past the old mark.
+    for (std::uint16_t& d : line.ClassDoubt)
+        if (d != 0 && d - 1 >= CursorCol_)
+            d = static_cast<std::uint16_t>(CursorCol_ + 1);
     if (line.WidthDoubt != 0 && line.WidthDoubt - 1 >= CursorCol_)
         line.WidthDoubt = static_cast<std::uint16_t>(CursorCol_ + 1);
+    // Known cells shift left with the text; the foreign ones to the left stay.
+    if (CursorCol_ < line.KnownFrom)
+        line.KnownFrom = static_cast<std::uint16_t>(
+            std::max<int>(CursorCol_, line.KnownFrom - n));
     MoveCells(line.Cells + CursorCol_, line.Cells + CursorCol_ + n,
               static_cast<std::uint16_t>(avail - n));
     ClearCells(line.Cells + Cols_ - n, n);
@@ -773,6 +939,9 @@ void Grid::InsertChars(std::uint16_t n) noexcept {
     MoveCells(line.Cells + CursorCol_ + n, line.Cells + CursorCol_,
               static_cast<std::uint16_t>(avail - n));
     ClearCells(line.Cells + CursorCol_, n);
+    if (CursorCol_ < line.KnownFrom)
+        line.KnownFrom = static_cast<std::uint16_t>(
+            std::min<int>(Cols_, line.KnownFrom + n));
     // The wide char whose lead was just before CursorCol may now have no
     // continuation; fix it.  The moved block may start with a continuation
     // whose lead was in the cleared range; fix that too.
@@ -797,6 +966,7 @@ void Grid::InsertLines(std::uint16_t n) noexcept {
     ScrollRegionDown(n);
     ScrollTop_ = savedTop;
     CursorCol_ = 0;
+    RestartPath();
 }
 
 void Grid::DeleteLines(std::uint16_t n) noexcept {
@@ -811,6 +981,7 @@ void Grid::DeleteLines(std::uint16_t n) noexcept {
     ScrollRegionUp(n, /*push=*/false);
     ScrollTop_ = savedTop;
     CursorCol_ = 0;
+    RestartPath();
 }
 
 void Grid::ScrollDown(std::uint16_t n) noexcept {
@@ -827,7 +998,7 @@ bool Grid::RepeatChar(std::uint16_t n) noexcept {
     if (LastPrintedChar_ == 0) return false;
     if (n == 0) return true;
     for (std::uint16_t i = 0; i < n; ++i)
-        PutChar(LastPrintedChar_, LastPrintedWidth_);
+        PutChar(LastPrintedChar_, LastPrintedBaseWidth_);
     return true;
 }
 
@@ -848,6 +1019,7 @@ void Grid::SetScrollRegion(std::uint16_t top1, std::uint16_t bot1) noexcept {
     CursorRow_ = ModeSet(EMode::Decom) ? ScrollTop_ : 0;
     CursorCol_ = 0;
     PendingWrap_ = false;
+    RestartPath();
 }
 
 // ---------------------------------------------------------------------------
@@ -874,6 +1046,7 @@ void Grid::SetMode(std::uint16_t param, bool value) noexcept {
             CursorRow_ = value ? ScrollTop_ : 0;
             CursorCol_ = 0;
             PendingWrap_ = false;
+            RestartPath();
             break;
         case 7:
             apply(EMode::Awm);
@@ -1250,7 +1423,7 @@ void Grid::Reset(bool hard) noexcept {
 
     if (hard) {
         // RIS: full reset — clear screen, scrollback, cursor, saved cursors.
-        ++ColumnSetCount_;
+        NoteColumnSet();
         CursorRow_ = 0;
         CursorCol_ = 0;
         PendingWrap_ = false;
@@ -1316,6 +1489,7 @@ void Grid::DesignateCharset(std::uint8_t g, std::uint8_t designator) noexcept {
 // clearFirst false (charproc.c); a switch into the current buffer is a no-op.
 void Grid::SwitchAltScreen(bool enter) noexcept {
     if (enter == IsAltScreen()) return;
+    BreakPath();
     if (enter)
         Modes_ |= ModeFlag(EMode::AltScreen);
     else
@@ -1327,6 +1501,54 @@ void Grid::SwitchAltScreen(bool enter) noexcept {
 void Grid::ClearAltScreen() noexcept {
     for (std::uint16_t r = 0; r < Rows_; ++r) ClearLine(AltLines_[r]);
     PendingWrap_ = false;
+}
+
+bool Grid::Resync(std::uint16_t row, std::uint16_t col,
+                  bool tailBlank) noexcept {
+    if (IsAltScreen()) return false;
+    row = ClampRow(row);
+    col = ClampCol(col);
+
+    for (std::uint16_t r = 0; r < Rows_; ++r) {
+        Line& line = MainLines_[r];
+        if (r > row) {
+            ClearLinePlain(line);
+            continue;
+        }
+        line.WidthDoubt = 0;
+        for (std::uint16_t& d : line.ClassDoubt) d = 0;
+        line.KnownFrom = Cols_;
+        if (r < row) continue;
+        if (tailBlank) {
+            // A wide glyph cut in two by the new tail would orphan its head.
+            if (col > 0 && line.Cells[col - 1].Width == 2)
+                StoreCell(line.Cells[col - 1], Cell{});
+            for (std::uint16_t c = col; c < Cols_; ++c)
+                StoreCell(line.Cells[c], Cell{});
+            line.KnownFrom = col;
+        }
+    }
+    for (std::uint16_t r = 0; r < Rows_; ++r) {
+        AltLines_[r].WidthDoubt = 0;
+        for (std::uint16_t& d : AltLines_[r].ClassDoubt) d = 0;
+    }
+
+    CursorRow_ = row;
+    CursorCol_ = col;
+    PendingWrap_ = false;
+    SavedCursorMain_ = {};
+    SavedCursorAlt_ = {};
+    LastPrintedChar_ = 0;
+    LastPrintedWidth_ = 1;
+    LastPrintedBaseWidth_ = 1;
+    LastPrintedRow_ = 0;
+    LastPrintedCol_ = 0;
+    LastPrintedMarked_ = false;
+    // The rows are the terminal's from here on: no drift to watch for.
+    Sync_ = RowSync{.Abs = true, .Eq = true, .Blank = false, .Drift = false};
+    SyncSaved_ = false;
+    NoteColumnSet();
+    return true;
 }
 
 GridResult<void> Grid::Resize(std::uint16_t newCols,
@@ -1423,6 +1645,17 @@ GridResult<void> Grid::Resize(std::uint16_t newCols,
         newMainLines[r].Cells = newMain + static_cast<std::size_t>(r) * newCols;
         newAltLines[r].Cells = newAlt + static_cast<std::size_t>(r) * newCols;
     }
+    // A foreign row stays foreign whole when the row grows; a partly known one
+    // keeps its known tail as far as the new width allows.
+    const std::uint16_t oldCols = Cols_;
+    const auto copyMeta = [&](Line& dst, const Line& src) noexcept {
+        dst.WidthDoubt = src.WidthDoubt;
+        std::copy(std::begin(src.ClassDoubt), std::end(src.ClassDoubt),
+                  std::begin(dst.ClassDoubt));
+        dst.KnownFrom = src.KnownFrom >= oldCols
+                            ? newCols
+                            : std::min(src.KnownFrom, newCols);
+    };
     const std::uint16_t copyRows = newRows < oldRows ? newRows : oldRows;
     const std::uint16_t srcStart =
         newRows < oldRows ? static_cast<std::uint16_t>(oldRows - newRows) : 0;
@@ -1430,8 +1663,8 @@ GridResult<void> Grid::Resize(std::uint16_t newCols,
         const std::uint16_t src = static_cast<std::uint16_t>(srcStart + r);
         CopyCells(newMainLines[r].Cells, MainLines_[src].Cells, clampCols);
         CopyCells(newAltLines[r].Cells, AltLines_[src].Cells, clampCols);
-        newMainLines[r].WidthDoubt = MainLines_[src].WidthDoubt;
-        newAltLines[r].WidthDoubt = AltLines_[src].WidthDoubt;
+        copyMeta(newMainLines[r], MainLines_[src]);
+        copyMeta(newAltLines[r], AltLines_[src]);
     }
 
     // Swap screen buffers.
@@ -1509,6 +1742,7 @@ GridResult<void> Grid::Resize(std::uint16_t newCols,
     };
     clampSC(SavedCursorMain_);
     clampSC(SavedCursorAlt_);
+    BreakPath();
     return {};
 }
 
