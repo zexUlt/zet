@@ -124,6 +124,19 @@ public:
         return BypassLimitCount_;
     }
 
+    /// Number of cursor position queries (`CSI 6 n`) and primary device
+    /// attributes queries (`CSI c`, `CSI 0 c`) dispatched since construction:
+    /// the replies a terminal will send back. Counted on the final byte, so a
+    /// query split across feeds counts once, and never inside an OSC, DCS,
+    /// APC, PM or SOS string. DECXCPR (`CSI ? 6 n`), DA2 (`CSI > c`) and
+    /// queries with intermediates are not counted. Monotonic, survive Reset.
+    [[nodiscard]] std::uint64_t Dsr6QueryCount() const noexcept {
+        return Dsr6QueryCount_;
+    }
+    [[nodiscard]] std::uint64_t Da1QueryCount() const noexcept {
+        return Da1QueryCount_;
+    }
+
     /// Whether the UTF-8 decoder is in the middle of a character: bytes
     /// written to the terminal now would split it (the overlay, design.md §9).
     [[nodiscard]] bool Utf8Pending() const noexcept {
@@ -201,6 +214,8 @@ private:
     std::uint64_t UnknownSeqCount_{0};
     std::uint64_t DcsApcCount_{0};
     std::uint64_t BypassLimitCount_{0};
+    std::uint64_t Dsr6QueryCount_{0};
+    std::uint64_t Da1QueryCount_{0};
 };
 
 }  // namespace zet::grid

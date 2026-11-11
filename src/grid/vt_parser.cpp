@@ -736,8 +736,20 @@ void VtParser::DispatchCsi(char32_t final, Grid& grid) noexcept {
             break;
 
         // Window ops / device attributes – ignore silently (not tracked).
-        case 'c':  // DA1/DA2
+        // They are not answered here, but counted: the sender of the bytes
+        // (the client's query demultiplexer) needs to know a terminal will
+        // reply. Only the plain forms count: DECXCPR (CSI ? 6 n) and DA2
+        // (CSI > c) never reach this switch, they carry a private marker.
+        case 'c':  // DA1
+            if (IntermediateCount_ == 0 &&
+                (nparams == 0 || (nparams == 1 && params[0] == 0))) {
+                ++Da1QueryCount_;
+            }
+            break;
         case 'n':  // DSR
+            if (IntermediateCount_ == 0 && nparams == 1 && params[0] == 6) {
+                ++Dsr6QueryCount_;
+            }
             break;
 
         default:

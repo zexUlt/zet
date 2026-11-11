@@ -14,6 +14,7 @@ add_executable(zet_tests
     main.cpp
     grid/grid_test.cpp
     grid/grid_fidelity_test.cpp
+    grid/vt_parser_query_count_test.cpp
     grid/probe_test.cpp
     grid/snapshot_test.cpp
     grid/snapshot_roundtrip_test.cpp
@@ -42,6 +43,7 @@ add_executable(zet_tests
     predict/predict_password_test.cpp
     predict/predict_tentative_test.cpp
     predict/predict_trigger_test.cpp
+    predict/cpr_demux_test.cpp
     core/byte_reader_test.cpp
     core/byte_writer_test.cpp
     core/log_test.cpp

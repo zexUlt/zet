@@ -40,4 +40,31 @@ inline constexpr std::uint32_t GLITCH_REPAIR_COUNT = 10;
 inline constexpr Duration GLITCH_REPAIR_MININTERVAL =
     std::chrono::milliseconds(150);
 
+// Cursor position calibration (design.md §9, "Калибровка зеркала запросом
+// позиции курсора", "Пределы").
+
+/// How long the client waits for the answer to its own `CSI 6n CSI c` before
+/// the terminal is declared silent.
+inline constexpr Duration CPR_TIMEOUT = std::chrono::seconds(1);
+/// How long a possible beginning of the client's own answer is held back from
+/// the agent while the query is pending. A terminal writes an answer in one
+/// piece, so a held beginning is rare.
+inline constexpr Duration CPR_HOLD = std::chrono::milliseconds(50);
+/// After CPR_TIMEOUT the queue of expected answers is kept this long, so that
+/// a late answer is still stripped; then it is dropped and stdin passes
+/// through untouched.
+inline constexpr Duration CPR_FORGET = std::chrono::seconds(10);
+
+/// Entries in the queue of expected answers. A program that asks for the
+/// cursor position and the device attributes in turn, to a terminal that
+/// never answers, would grow it without bound; the oldest is dropped.
+inline constexpr std::size_t CPR_QUEUE_MAX = 32;
+/// Longest answer the demultiplexer recognises: `CSI r ; c R` with five-digit
+/// numbers is 14 bytes, a device attributes answer is cut at 20. Position and
+/// the answer after it can be held together.
+inline constexpr std::size_t CPR_POSITION_REPLY_MAX = 14;
+inline constexpr std::size_t CPR_DA1_REPLY_MAX = 20;
+inline constexpr std::size_t CPR_HELD_MAX =
+    CPR_POSITION_REPLY_MAX + CPR_DA1_REPLY_MAX;
+
 }  // namespace zet::predict
