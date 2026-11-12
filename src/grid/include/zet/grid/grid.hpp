@@ -235,8 +235,11 @@ public:
     /// disagree on, so that where `col` is on the terminal is not certain:
     /// East Asian ambiguous, or followed by ZWJ, VS15, VS16 or a skin tone
     /// modifier. Stays set until the row is erased whole or scrolled away.
+    /// Also true, in every row, from a left move over such a glyph until the
+    /// column is set absolutely (CR, CHA, CUP, HVP, RIS, resync).
     [[nodiscard]] bool WidthDoubtBefore(std::uint16_t row,
                                         std::uint16_t col) const noexcept {
+        if (Path_.LeftOverDoubt) return true;
         const std::uint16_t d = ActiveLine(row).WidthDoubt;
         return d != 0 && d - 1U < col;
     }
@@ -562,6 +565,7 @@ private:
     void NoteClassGlyph(std::uint16_t row, std::uint16_t col,
                         EWidthClass cls) noexcept;
     static void RecomputeWidthDoubt(Line& line) noexcept;
+    void WrapToNextRow() noexcept;
     /// The cells [x, x+n) of `line` were written or erased: they are known.
     static void NoteKnown(Line& line, std::uint16_t x,
                           std::uint16_t n) noexcept {
@@ -573,6 +577,11 @@ private:
     void NoteColumnSet() noexcept;
     void RestartPath() noexcept { Path_ = WidthPath{}; }
     void BreakPath() noexcept { Path_.Broken = true; }
+    /// The cursor is about to move left from the current column.
+    void NoteLeftMove() noexcept {
+        if (WidthDoubtBefore(CursorRow_, CursorCol_))
+            Path_.LeftOverDoubt = true;
+    }
     /// A VS16 right after a narrow glyph with an emoji variation sequence:
     /// make the glyph wide when the policy says so. True if it did.
     bool WidenForVs16(std::uint16_t prev) noexcept;
@@ -682,6 +691,10 @@ private:
     struct WidthPath {
         std::uint32_t Glyphs[WIDTH_CLASS_COUNT]{};
         bool Broken{false};
+        /// A BS, CUB or CBT moved the cursor left with a doubtful glyph left
+        /// of where it was: the terminal's column is not the mirror's even
+        /// where no mark is left of the cursor any more.
+        bool LeftOverDoubt{false};
     };
     WidthPath Path_{};
     WidthPolicy Policy_{};
