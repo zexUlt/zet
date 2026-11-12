@@ -322,8 +322,14 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data,
     }
     // The model terminal's widths, from the last byte of the input.
     grid::WidthPolicy model;
+    // The Unicode version of the model terminal's table against the mirror's
+    // 16: 0 the same, 1 older (9), 2 newer (17). Code points with an Age above
+    // the version are narrow, and the unassigned ones of the mirror's table
+    // that the version knows are wide.
+    int skew = 0;
     if (calibrated) {
         const std::uint8_t b = data[size - 1];
+        skew = (b >> 4) % 3;
         if (((b >> 3) & 1) != 0) {
             model.Ambiguous = static_cast<std::uint8_t>(1 + (b & 1));
             model.PrivateUse = static_cast<std::uint8_t>(1 + ((b >> 1) & 1));
@@ -336,8 +342,16 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data,
     // when it does not, a prediction can land on a glyph the mirror has
     // narrower than the terminal, and invariant a. is not owed.
     const bool sameWidths = model == grid::WidthPolicy{};
-    // Set once the model has drawn a cluster narrower than the mirror does.
+    // Set once the model has drawn a cluster or an emoji of another Unicode
+    // version otherwise than the mirror does, so that the rows it laid out
+    // differ from the mirror's; cleared when a matched or fixed column leaves
+    // the cursor's row without marks (the overlay keeps off a row the mirror
+    // does not trust, and the undo owes the screen as it was again).
     bool drewClusters = false;
+    // Whether the last token of the last piece was a man and a joiner: the
+    // model glues the next glyph to it.
+    bool zwjPending = false;
+    std::uint32_t settledCols = 0;
     auto overlay = Overlay::Create();
     if (!overlay) return 0;
 
@@ -571,6 +585,8 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data,
             plain[k] = p[k];
         }
 
+        const bool glueIn = zwjPending;
+        zwjPending = false;
         switch (op) {
             case 0:  // agent output
                 if (echoOff && arg(0) % 4 == 0) {
@@ -747,6 +763,11 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data,
                     {"\xf0\x9f\x91\xa8\xe2\x80\x8d\xf0\x9f\x92\xbb",
                      "\xf0\x9f\x92\xbb"},
                     {"\xf0\x9f\x91\x8d\xf0\x9f\x8f\xbd", "\xf0\x9f\x91\x8d"},
+                    {"\xf0\x9f\x91\xa8\xe2\x80\x8d", "\xf0\x9f\x91\xa8"},
+                    {"\xf0\x9f\x92\xbb", "\xf0\x9f\x92\xbb"},
+                    {"\xf0\x9f\xab\xa9", "\xf0\x9f\xab\xa9"},  // Unicode 16
+                    {"\xf0\x9f\xab\xaa", "\xf0\x9f\xab\xaa"},  // Unicode 17
+                    {"\xf0\x9f\x9a\x80", "\xf0\x9f\x9a\x80"},  // Unicode 6
                     {"\xc2\xad", "-"},
                     {"\x1b"
                      "6",
@@ -762,6 +783,14 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data,
                 };
                 constexpr std::size_t TOKEN_COUNT =
                     sizeof(TOKENS) / sizeof(TOKENS[0]);
+                constexpr std::size_t MAN_ZWJ = 3;
+                constexpr std::size_t COMPUTER = 4;
+                constexpr std::size_t EMOJI_16 = 5;
+                constexpr std::size_t EMOJI_17 = 6;
+                // A terminal with an older table draws the emoji of 16 in one
+                // cell; one with a newer table draws the one of 17 in two.
+                static constexpr const char NARROW[] = "X";
+                static constexpr const char WIDE_NEW[] = "\xf0\x9f\x9a\x80";
                 // Only between sequences: what the model draws differently is
                 // a width, never how the bytes parse, so inside a sequence of
                 // an earlier piece (or of the mirror's own parser) the tokens
@@ -773,16 +802,48 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data,
                     mirror->P.Utf8Pending() || pieceLen != 0;
                 std::string wire;
                 std::string drawn;
+                // The piece may end inside a joined pair: the bytes so far go
+                // out as a piece of their own.
+                const std::size_t cut = arg(n > 5 ? 5 : 0) % 2 == 0 && n > 1
+                                            ? 1 + arg(n - 1) % (n - 1)
+                                            : n;
+                bool glue = glueIn;
+                undo();
                 for (std::size_t k = 0; k < n && k < 5; ++k) {
-                    const Token& t = TOKENS[p[k] % TOKEN_COUNT];
+                    if (k == cut) {
+                        feed(
+                            reinterpret_cast<const std::uint8_t*>(wire.data()),
+                            wire.size(),
+                            reinterpret_cast<const std::uint8_t*>(drawn.data()),
+                            drawn.size());
+                        deliver(wire.size());
+                        wire.clear();
+                        drawn.clear();
+                        undo();
+                    }
+                    const std::size_t idx = p[k] % TOKEN_COUNT;
+                    const Token& t = TOKENS[idx];
                     const char* drawnAs = plainWire ? t.Wire : t.Model;
+                    std::string glued;
+                    if (!plainWire && idx == COMPUTER && glue) {
+                        // kitty glues it to the man: two cells for the pair.
+                        glued = "\x1b[2D" + std::string(t.Model);
+                        drawnAs = glued.c_str();
+                    }
+                    if (!plainWire && skew == 1 && idx == EMOJI_16) {
+                        drawnAs = NARROW;
+                    }
+                    if (!plainWire && skew == 2 && idx == EMOJI_17) {
+                        drawnAs = WIDE_NEW;
+                    }
+                    glue = !plainWire && idx == MAN_ZWJ;
                     if (std::string_view(t.Wire) != std::string_view(drawnAs)) {
                         drewClusters = true;
                     }
                     wire += t.Wire;
                     drawn += drawnAs;
                 }
-                undo();
+                zwjPending = glue;
                 feed(reinterpret_cast<const std::uint8_t*>(wire.data()),
                      wire.size(),
                      reinterpret_cast<const std::uint8_t*>(drawn.data()),
@@ -813,6 +874,14 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data,
         }
         settle();
         draw();
+        if (cal && drewClusters &&
+            cal->Matched() + cal->ColumnFixed() != settledCols) {
+            settledCols = cal->Matched() + cal->ColumnFixed();
+            const grid::Grid& g = *mirror->G;
+            if (!g.WidthDoubtBefore(g.CursorRow(), g.Cols())) {
+                drewClusters = false;
+            }
+        }
         CheckInvariants(engine, *mirror->G, seen);
         if (cal) {
             const ByteSpan held = cal->Demux().HeldBytes();
