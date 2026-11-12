@@ -166,6 +166,23 @@ void Grid::StoreCell(Cell& dst, const Cell& value) noexcept {
     dst = value;
 }
 
+void Grid::WrapToNextRow() noexcept {
+    // The terminal may have wrapped elsewhere than the mirror did when a glyph
+    // of open width stands in the row: the continuation row is in doubt from
+    // its first column.
+    std::uint16_t doubt[WIDTH_CLASS_COUNT];
+    for (std::size_t k = 0; k < WIDTH_CLASS_COUNT; ++k)
+        doubt[k] = ActiveLine(CursorRow_).ClassDoubt[k];
+    CursorCol_ = 0;
+    LineFeed();
+    Line& line = ActiveLine(CursorRow_);
+    for (std::size_t k = 0; k < WIDTH_CLASS_COUNT; ++k)
+        if (doubt[k] != 0 &&
+            (line.ClassDoubt[k] == 0 || line.ClassDoubt[k] > 1))
+            line.ClassDoubt[k] = 1;
+    RecomputeWidthDoubt(line);
+}
+
 void Grid::RecomputeWidthDoubt(Line& line) noexcept {
     std::uint16_t least = 0;
     for (const std::uint16_t d : line.ClassDoubt)
@@ -512,8 +529,7 @@ void Grid::PutChar(char32_t cp, int width) noexcept {
 
     if (PendingWrap_) BreakPath();
     if (PendingWrap_ && ModeSet(EMode::Awm)) {
-        CursorCol_ = 0;
-        LineFeed();
+        WrapToNextRow();
         BreakPath();  // under LNM the LineFeed restarted it
     }
     PendingWrap_ = false;
@@ -547,8 +563,7 @@ void Grid::PutChar(char32_t cp, int width) noexcept {
 
     if (width == 2 && CursorCol_ + 1 >= Cols_) {
         if (ModeSet(EMode::Awm)) {
-            CursorCol_ = 0;
-            LineFeed();
+            WrapToNextRow();
             BreakPath();
         } else {
             return;
@@ -644,6 +659,7 @@ void Grid::LineFeed() noexcept {
         ScrollRegionUp(1);
     } else if (CursorRow_ < Rows_ - 1) {
         ++CursorRow_;
+        if (PenBgKind() != EColorKind::Default) NoteDrift();
     }
 }
 
@@ -653,6 +669,7 @@ void Grid::Index() noexcept {
         ScrollRegionUp(1);
     } else if (CursorRow_ < Rows_ - 1) {
         ++CursorRow_;
+        if (PenBgKind() != EColorKind::Default) NoteDrift();
     }
 }
 
@@ -669,8 +686,9 @@ void Grid::ReverseIndex() noexcept {
 }
 
 void Grid::Backspace() noexcept {
-    PendingWrap_ = false;
     BreakPath();
+    NoteLeftMove();
+    PendingWrap_ = false;
     if (CursorCol_ > 0) --CursorCol_;
 }
 
@@ -688,8 +706,9 @@ void Grid::HorizontalTab() noexcept {
 }
 
 void Grid::HorizontalTabBack(std::uint16_t n) noexcept {
-    PendingWrap_ = false;
     BreakPath();
+    NoteLeftMove();
+    PendingWrap_ = false;
     if (n == 0) n = 1;
     for (std::uint16_t step = 0; step < n; ++step) {
         if (CursorCol_ == 0) break;
@@ -764,8 +783,11 @@ void Grid::MoveCursorRight(std::uint16_t n) noexcept {
 }
 
 void Grid::MoveCursorLeft(std::uint16_t n) noexcept {
+    if (n > 0) {
+        BreakPath();
+        NoteLeftMove();
+    }
     PendingWrap_ = false;
-    if (n > 0) BreakPath();
     CursorCol_ =
         (n <= CursorCol_) ? static_cast<std::uint16_t>(CursorCol_ - n) : 0;
 }
@@ -845,6 +867,7 @@ void Grid::SaveCursor() noexcept {
     sc.CharsetG0 = CharsetG0_;
     sc.CharsetG1 = CharsetG1_;
     sc.CharsetActive = CharsetActive_;
+    sc.LeftOverDoubt = Path_.LeftOverDoubt;
 }
 
 void Grid::RestoreCursor() noexcept {
@@ -853,6 +876,8 @@ void Grid::RestoreCursor() noexcept {
     NoteDrift();
     BreakPath();  // the terminal's saved column is its own
     const SavedCursor& sc = IsAltScreen() ? SavedCursorAlt_ : SavedCursorMain_;
+    // ... and it is as far from the mirror's as it was at the save.
+    Path_.LeftOverDoubt = sc.LeftOverDoubt;
     CursorRow_ = ClampRow(sc.Row);
     CursorCol_ = ClampCol(sc.Col);
     // xterm CursorRestoreFlags restores DECOM from the save, then CursorSet

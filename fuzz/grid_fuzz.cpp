@@ -127,6 +127,11 @@ static void CheckInvariants(const Grid& g, const VtParser& p) noexcept {
         }
     }
 
+    // 10. A column left in doubt by a move over a doubtful glyph sits on a
+    //     broken width path: everything that sets the flag breaks the path,
+    //     everything that restarts the path clears the flag.
+    if (g.ColumnDoubt() && !g.PathBroken()) __builtin_trap();
+
     // 6. Wide-char pairing invariant.
     //    Lead (width==2) must NOT be in the last column.
     //    Lead must be followed by continuation (width==0).

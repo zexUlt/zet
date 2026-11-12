@@ -125,6 +125,9 @@ struct SavedCursor {
     std::uint8_t CharsetG0{0};
     std::uint8_t CharsetG1{0};
     std::uint8_t CharsetActive{0};
+    /// WidthPath::LeftOverDoubt at the save: the terminal restores its own
+    /// column, which is off from the mirror's as much as it was then.
+    bool LeftOverDoubt{false};
 };
 
 /// Sans-I/O terminal grid (design.md §9).
@@ -242,6 +245,13 @@ public:
                                         std::uint16_t col) const noexcept {
         const std::uint16_t d = ActiveLine(row).WidthDoubt;
         return d != 0 && d - 1U < col;
+    }
+
+    /// Whether the cursor moved left over such a glyph (BS, CUB, CBT) since
+    /// the column was last set absolutely (CR, CHA, CUP, HVP, RIS, resync):
+    /// the column is then in doubt in every row, even left of every mark.
+    [[nodiscard]] bool ColumnDoubt() const noexcept {
+        return Path_.LeftOverDoubt;
     }
 
     /// Same, for the classes in `classMask` (WidthClassBit) only.
@@ -587,6 +597,7 @@ private:
     void NoteClassGlyph(std::uint16_t row, std::uint16_t col,
                         EWidthClass cls) noexcept;
     static void RecomputeWidthDoubt(Line& line) noexcept;
+    void WrapToNextRow() noexcept;
     /// The cells [x, x+n) of `line` were written or erased: they are known.
     static void NoteKnown(Line& line, std::uint16_t x,
                           std::uint16_t n) noexcept {
@@ -601,6 +612,16 @@ private:
         ++PathEpoch_;
     }
     void BreakPath() noexcept { Path_.Broken = true; }
+    /// The cursor is about to move left from the current column.
+    /// Call before PendingWrap_ is cleared: with a wrap pending the terminal's
+    /// cursor stands past the last cell, so a glyph in it is left of the
+    /// cursor.
+    void NoteLeftMove() noexcept {
+        if (WidthDoubtBefore(
+                CursorRow_, static_cast<std::uint16_t>(CursorCol_ +
+                                                       (PendingWrap_ ? 1 : 0))))
+            Path_.LeftOverDoubt = true;
+    }
     /// A VS16 right after a narrow glyph with an emoji variation sequence:
     /// make the glyph wide when the policy says so. True if it did.
     bool WidenForVs16(std::uint16_t prev) noexcept;
@@ -710,6 +731,10 @@ private:
     struct WidthPath {
         std::uint32_t Glyphs[WIDTH_CLASS_COUNT]{};
         bool Broken{false};
+        /// A BS, CUB or CBT moved the cursor left with a doubtful glyph left
+        /// of where it was: the terminal's column is not the mirror's even
+        /// where no mark is left of the cursor any more.
+        bool LeftOverDoubt{false};
     };
     WidthPath Path_{};
     std::uint32_t PathEpoch_{0};  ///< bumped by every RestartPath

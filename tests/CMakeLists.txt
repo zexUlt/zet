@@ -16,6 +16,7 @@ add_executable(zet_tests
     grid/grid_fidelity_test.cpp
     grid/vt_parser_query_count_test.cpp
     grid/grid_known_test.cpp
+    grid/grid_lf_bg_drift_test.cpp
     grid/grid_width_policy_test.cpp
     grid/grid_row_primitives_test.cpp
     grid/probe_test.cpp
@@ -45,6 +46,8 @@ add_executable(zet_tests
     predict/predict_cap_test.cpp
     predict/predict_deadline_test.cpp
     predict/predict_column_trust_test.cpp
+    predict/doubt_wrap_leftmove_test.cpp
+    predict/doubt_leftmove_extra_test.cpp
     predict/grid_counters_test.cpp
     predict/predict_epoch_test.cpp
     predict/predict_input_test.cpp

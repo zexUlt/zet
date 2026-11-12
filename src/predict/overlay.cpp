@@ -222,13 +222,13 @@ ByteSpan Overlay::BuildUpdate(const PredictionEngine& engine,
     // The terminal takes bytes here only at a boundary of what the agent sent.
     const bool ground = mirror.Parser.State() == grid::EParserState::Ground &&
                         !mirror.Parser.Utf8Pending();
-    const bool canDraw = engine.Mode() != EDisplayMode::Never && ground &&
-                         !g.IsAltScreen() && !g.PendingWrap() &&
-                         !g.ModeSet(grid::EMode::Irm) && g.CharsetG0() == 0 &&
-                         g.CharsetActive() == 0 && engine.ColumnTrusted() &&
-                         g.CursorRow() < g.Rows() && g.CursorCol() < g.Cols() &&
-                         g.RowsTrusted() &&
-                         !g.WidthDoubtBefore(g.CursorRow(), g.CursorCol());
+    const bool canDraw =
+        engine.Mode() != EDisplayMode::Never && ground && !g.IsAltScreen() &&
+        !g.PendingWrap() && !g.ModeSet(grid::EMode::Irm) &&
+        g.CharsetG0() == 0 && g.CharsetActive() == 0 &&
+        engine.ColumnTrusted() && g.CursorRow() < g.Rows() &&
+        g.CursorCol() < g.Cols() && g.RowsTrusted() &&
+        !g.WidthDoubtBefore(g.CursorRow(), g.CursorCol()) && !g.ColumnDoubt();
     // What is drawn is taken off only at a point where bytes may go in; the
     // overlay is only ever drawn at one, and the next piece of bytes comes
     // after a restore, so a point that is not one has nothing to take off.
