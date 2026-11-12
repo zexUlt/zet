@@ -321,6 +321,7 @@ void VtParser::FeedByte(std::byte b, Grid& grid) noexcept {
         case EParserState::CsiIgnore:
             if (raw >= 0x40 && raw <= 0x7E) {
                 ++UnknownSeqCount_;
+                grid.NoteUnknownSequence();
                 TransitionTo(EParserState::Ground, grid);
             }
             break;
@@ -545,7 +546,7 @@ void VtParser::DispatchEsc(char32_t final, Grid& grid) noexcept {
             case 'Z':  // DECID – xterm answers it as DA1; counted, not acted on
                 ++Da1QueryCount_;
                 // Still an unknown sequence for the mirror, as before the
-                // DA1 count existed.
+                // DA1 count existed. The cursor stays: the path goes on.
                 ++UnknownSeqCount_;
                 return;
             case '\\':  // ST – string terminator (ends bypass)
@@ -555,6 +556,7 @@ void VtParser::DispatchEsc(char32_t final, Grid& grid) noexcept {
                 return;
             default:
                 ++UnknownSeqCount_;
+                grid.NoteUnknownSequence();
                 return;
         }
     }
@@ -575,6 +577,7 @@ void VtParser::DispatchEsc(char32_t final, Grid& grid) noexcept {
         }
     }
     ++UnknownSeqCount_;
+    grid.NoteUnknownSequence();
 }
 
 // ---------------------------------------------------------------------------
@@ -618,6 +621,7 @@ void VtParser::DispatchCsi(char32_t final, Grid& grid) noexcept {
             return;
         }
         ++UnknownSeqCount_;
+        grid.NoteUnknownSequence();
         return;
     }
 
@@ -725,6 +729,7 @@ void VtParser::DispatchCsi(char32_t final, Grid& grid) noexcept {
                     p(0, 1), p(1, static_cast<std::uint16_t>(grid.Rows())));
             } else {
                 ++UnknownSeqCount_;
+                grid.NoteUnknownSequence();
             }
             break;
 
@@ -747,6 +752,7 @@ void VtParser::DispatchCsi(char32_t final, Grid& grid) noexcept {
                 grid.Reset(/*hard=*/false);
             } else {
                 ++UnknownSeqCount_;
+                grid.NoteUnknownSequence();
             }
             break;
 
@@ -756,13 +762,16 @@ void VtParser::DispatchCsi(char32_t final, Grid& grid) noexcept {
                 grid.SetCursorStyle(static_cast<std::uint8_t>(p0(0)));
             } else {
                 ++UnknownSeqCount_;
+                grid.NoteUnknownSequence();
             }
             break;
 
         // Repeat char.
         case 'b':  // REP – repeat preceding character
-            if (!grid.RepeatChar(p(0, 1)))
+            if (!grid.RepeatChar(p(0, 1))) {
                 ++UnknownSeqCount_;  // nothing to repeat
+                grid.NoteUnknownSequence();
+            }
             break;
 
         // Window ops / device attributes – ignore silently (not tracked).

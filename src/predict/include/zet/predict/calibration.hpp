@@ -237,8 +237,11 @@ private:
                                           const grid::VtParser& p) noexcept;
     /// Whether the end of a portion gives a reason to ask about widths: a
     /// glyph of a class without a verdict on a path that can be solved, or a
-    /// cluster mark left of the cursor.
+    /// cluster on the path and a cluster mark left of the cursor.
     [[nodiscard]] bool WidthDue(const grid::Grid& g) const noexcept;
+    /// The path holds clusters and no glyph of a class whose width is open
+    /// (no verdict, or given up on).
+    [[nodiscard]] bool ClustersOnlyOpen(const grid::Grid& g) const noexcept;
     /// Settles what the answer says about widths: `d` is the answered column
     /// less the expected one, the path is the grid's, as the query froze it.
     void SolveWidth(grid::Grid& g, std::int64_t d) noexcept;

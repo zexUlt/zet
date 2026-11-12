@@ -179,6 +179,7 @@ void Grid::MarkWidthDoubt(std::uint16_t row, std::uint16_t col,
     Line& line = ActiveLine(row);
     const auto mark = static_cast<std::uint16_t>(col + 1);
     std::uint16_t& d = line.ClassDoubt[static_cast<std::size_t>(cls)];
+    if (line.WidthDoubt == 0) line.MarkPath = PathEpoch_;
     if (d == 0 || mark < d) d = mark;
     if (line.WidthDoubt == 0 || mark < line.WidthDoubt) line.WidthDoubt = mark;
 }
@@ -386,6 +387,7 @@ void Grid::ScrollRegionDown(std::uint16_t n) noexcept {
         std::copy(std::begin(src.ClassDoubt), std::end(src.ClassDoubt),
                   std::begin(dst.ClassDoubt));
         dst.KnownFrom = src.KnownFrom;
+        dst.MarkPath = src.MarkPath;
     }
     for (std::uint16_t r = ScrollTop_; r < ScrollTop_ + n; ++r)
         ClearLine(ActiveLine(r));
@@ -458,6 +460,17 @@ void Grid::PutChar(char32_t cp, int width) noexcept {
             (PendingWrap_ ? LastPrintedCol_ == CursorCol_
                           : LastPrintedCol_ + LastPrintedWidth_ == CursorCol_);
         LastPrintedMarked_ = true;
+        // SOFT HYPHEN: zero width here, one cell on xterm (mk_wcwidth) and
+        // VTE. Its width is open like a cluster's, where the terminal would
+        // draw it.
+        if (cp == 0x00AD) {
+            NoteClassGlyph(CursorRow_,
+                           CursorCol_ < Cols_
+                               ? CursorCol_
+                               : static_cast<std::uint16_t>(Cols_ - 1),
+                           EWidthClass::Cluster);
+            return;
+        }
         if (IsClusterJoiner(cp)) {
             const std::uint16_t prev =
                 (PendingWrap_ || CursorCol_ == 0)
@@ -1711,6 +1724,7 @@ GridResult<void> Grid::Resize(std::uint16_t newCols,
     const std::uint16_t oldCols = Cols_;
     const auto copyMeta = [&](Line& dst, const Line& src) noexcept {
         dst.WidthDoubt = src.WidthDoubt;
+        dst.MarkPath = src.MarkPath;
         std::copy(std::begin(src.ClassDoubt), std::end(src.ClassDoubt),
                   std::begin(dst.ClassDoubt));
         dst.KnownFrom = src.KnownFrom >= oldCols

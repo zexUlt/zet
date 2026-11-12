@@ -102,6 +102,9 @@ struct Line {
     /// ordinary row, cols for a foreign one. Not part of the content:
     /// snapshots do not carry it.
     std::uint16_t KnownFrom{0};
+    /// The width path (Grid's path epoch) on which the row got the first of
+    /// the marks it still holds. Meaningless while WidthDoubt is 0.
+    std::uint32_t MarkPath{0};
 };
 
 /// Saved cursor state (DECSC/DECRC and alt-screen switch).
@@ -305,6 +308,18 @@ public:
     /// it (HPA, say) and have moved the cursor: the path is broken. Nothing
     /// else changes.
     void NoteUnknownSequence() noexcept { BreakPath(); }
+    /// The terminal confirmed the cursor's column (a matching CPR): what the
+    /// path counted is settled and a new one starts. The cursor, and a
+    /// pending wrap, stay as they are.
+    void ConfirmColumn() noexcept { RestartPath(); }
+    /// Whether every width mark of `row` (active screen) was set on the
+    /// current path, or it holds none: what the row held before the path was
+    /// laid out with no glyph of open width, so it stands where the terminal
+    /// has it.
+    [[nodiscard]] bool MarksOnPath(std::uint16_t row) const noexcept {
+        const Line& line = ActiveLine(row);
+        return line.WidthDoubt == 0 || line.MarkPath == PathEpoch_;
+    }
 
     /// The first known column of `row` (Line::KnownFrom). Mirror cells right
     /// of it are known to match the terminal's, those left of it are not.
@@ -581,7 +596,10 @@ private:
     }
     /// The column was set absolutely: a new path, and ColumnSetCount.
     void NoteColumnSet() noexcept;
-    void RestartPath() noexcept { Path_ = WidthPath{}; }
+    void RestartPath() noexcept {
+        Path_ = WidthPath{};
+        ++PathEpoch_;
+    }
     void BreakPath() noexcept { Path_.Broken = true; }
     /// A VS16 right after a narrow glyph with an emoji variation sequence:
     /// make the glyph wide when the policy says so. True if it did.
@@ -694,6 +712,7 @@ private:
         bool Broken{false};
     };
     WidthPath Path_{};
+    std::uint32_t PathEpoch_{0};  ///< bumped by every RestartPath
     WidthPolicy Policy_{};
     int LastPrintedBaseWidth_{1};  ///< LastPrintedWidth_ before the policy
 

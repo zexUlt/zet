@@ -329,25 +329,34 @@ void Calibration::Apply(const CprEvent& event, Timestamp now,
         // still since the query, so its cursor is the one that was expected.
         const std::uint16_t expected = g.CursorCol();
         const bool colMatch = expected == col;
-        // Before the verdicts: a Wide one turns the cursor row foreign.
-        const bool tailKnownBlank =
-            !colMatch && TailKnownBlank(g, row, expected);
         // The difference is read as widths only when widths are the only
         // reason to ask: after a sequence the mirror does not know (or a
         // program leaving the alternate screen) the cursor may have moved for
         // a reason that is no glyph's.
-        const bool pathOk = QueryReasons_ == CalWidth && !g.PathBroken();
-        if (pathOk) {
+        const bool widthOnly = QueryReasons_ == CalWidth && !g.PathBroken();
+        // Before the verdicts: a Wide one turns the cursor row foreign. The
+        // tail is the terminal's only when the path laid the row out from
+        // what stood where the terminal has it (no marks from before the
+        // path) and only pushed it right.
+        const bool tailKnownBlank = !colMatch && widthOnly && col > expected &&
+                                    g.MarksOnPath(row) &&
+                                    TailKnownBlank(g, row, expected);
+        if (widthOnly) {
             SolveWidth(g, static_cast<std::int64_t>(col) -
                               static_cast<std::int64_t>(expected));
         }
         if (colMatch) {
-            // A cluster mark left of the cursor is confirmed by the match.
-            if (pathOk && g.WidthDoubtBefore(row, col,
-                                             grid::WidthClassBit(
-                                                 grid::EWidthClass::Cluster))) {
+            // A cluster mark is confirmed by the match only when every mark
+            // of the row is the path's and clusters are all it holds of open
+            // width.
+            if (widthOnly && ClustersOnlyOpen(g) && g.MarksOnPath(row) &&
+                g.WidthDoubtBefore(
+                    row, col,
+                    grid::WidthClassBit(grid::EWidthClass::Cluster))) {
                 g.ClearWidthClass(row, grid::EWidthClass::Cluster);
             }
+            // The column is the terminal's: the next path starts here.
+            g.ConfirmColumn();
             ++Matched_;
         } else {
             FixColumn(g, row, col, tailKnownBlank);
@@ -413,7 +422,8 @@ bool Calibration::WidthDue(const grid::Grid& g) const noexcept {
             return true;
         }
     }
-    return g.CursorRow() < g.Rows() &&
+    return g.PathGlyphs(grid::EWidthClass::Cluster) != 0 &&
+           g.CursorRow() < g.Rows() &&
            g.WidthDoubtBefore(g.CursorRow(), g.CursorCol(),
                               grid::WidthClassBit(grid::EWidthClass::Cluster));
 }
@@ -434,11 +444,32 @@ void Calibration::ApplyVerdict(grid::Grid& g,
     }
 }
 
+bool Calibration::ClustersOnlyOpen(const grid::Grid& g) const noexcept {
+    if (g.PathGlyphs(grid::EWidthClass::Cluster) == 0) {
+        return false;
+    }
+    for (const grid::EWidthClass cls : VERDICT_CLASSES) {
+        const EWidthVerdict v = Verdicts_[VerdictIndex(cls)];
+        if (g.PathGlyphs(cls) != 0 && v != EWidthVerdict::Narrow &&
+            v != EWidthVerdict::Wide) {
+            return false;
+        }
+    }
+    return true;
+}
+
 void Calibration::SolveWidth(grid::Grid& g, std::int64_t d) noexcept {
+    // A cluster may be drawn narrower than the mirror draws it (a ZWJ
+    // sequence as one glyph) or wider (a soft hyphen): it can hide or fake
+    // any difference. A cursor left of the mirror's is no glyph's doing
+    // either. Neither says anything of a class, nor counts against it.
+    if (g.PathGlyphs(grid::EWidthClass::Cluster) != 0 || d < 0) {
+        return;
+    }
     // Glyphs of the classes still open, and the glyphs whose width stays open
-    // whatever the answer: clusters, and classes given up on.
+    // whatever the answer: classes given up on.
     std::array<std::uint32_t, 3> open{};
-    std::uint64_t unresolved = g.PathGlyphs(grid::EWidthClass::Cluster);
+    std::uint64_t unresolved = 0;
     std::size_t openClasses = 0;
     std::size_t only = 0;
     for (const grid::EWidthClass cls : VERDICT_CLASSES) {
