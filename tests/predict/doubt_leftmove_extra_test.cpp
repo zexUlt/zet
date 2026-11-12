@@ -125,7 +125,7 @@ TEST_CASE("a column in doubt always sits on a broken path (random walk)") {
                                          "\x1b[?7l",
                                          "\x1b[?7h",
                                          "\x1b[4h"};
-    constexpr std::size_t N = sizeof(PIECES) / sizeof(PIECES[0]);
+    constexpr std::size_t pieceCount = sizeof(PIECES) / sizeof(PIECES[0]);
     std::uint32_t x = 12345;
     for (int round = 0; round < 300; ++round) {
         Mirror m(6 + round % 5, 4);
