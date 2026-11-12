@@ -762,15 +762,25 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data,
                 };
                 constexpr std::size_t TOKEN_COUNT =
                     sizeof(TOKENS) / sizeof(TOKENS[0]);
+                // Only between sequences: what the model draws differently is
+                // a width, never how the bytes parse, so inside a sequence of
+                // an earlier piece (or of the mirror's own parser) the tokens
+                // go to the model as they are.
+                const bool plainWire =
+                    term->P.State() != grid::EParserState::Ground ||
+                    term->P.Utf8Pending() ||
+                    mirror->P.State() != grid::EParserState::Ground ||
+                    mirror->P.Utf8Pending() || pieceLen != 0;
                 std::string wire;
                 std::string drawn;
                 for (std::size_t k = 0; k < n && k < 5; ++k) {
                     const Token& t = TOKENS[p[k] % TOKEN_COUNT];
-                    if (std::string_view(t.Wire) != std::string_view(t.Model)) {
+                    const char* drawnAs = plainWire ? t.Wire : t.Model;
+                    if (std::string_view(t.Wire) != std::string_view(drawnAs)) {
                         drewClusters = true;
                     }
                     wire += t.Wire;
-                    drawn += t.Model;
+                    drawn += drawnAs;
                 }
                 undo();
                 feed(reinterpret_cast<const std::uint8_t*>(wire.data()),
