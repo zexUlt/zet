@@ -336,6 +336,8 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data,
     // when it does not, a prediction can land on a glyph the mirror has
     // narrower than the terminal, and invariant a. is not owed.
     const bool sameWidths = model == grid::WidthPolicy{};
+    // Set once the model has drawn a cluster narrower than the mirror does.
+    bool drewClusters = false;
     auto overlay = Overlay::Create();
     if (!overlay) return 0;
 
@@ -389,7 +391,7 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data,
         term->P.Feed(b.data(), b.size(), *term->G);
         if (cal) cal->OnWritten(b, now);
         overlay->Commit(engine);
-        Check(!sameWidths || SameScreen(*term->G, *ref->G));
+        Check(!sameWidths || drewClusters || SameScreen(*term->G, *ref->G));
     };
     const auto draw = [&] {
         if (cal && cal->Frozen()) return;
@@ -410,9 +412,17 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data,
     std::size_t pieceLen = 0;
     std::uint64_t refDa1 = 0;  // the queries of the program already answered
     std::uint64_t refCpr = 0;
-    const auto feed = [&](const std::uint8_t* d, std::size_t n) {
-        term->Feed(d, n);
-        ref->Feed(d, n);
+    // `md`: what the model terminal draws when it is not what the mirror is
+    // fed (a ZWJ pair as one glyph, the cursor moved by DECBI).
+    const auto feed = [&](const std::uint8_t* d, std::size_t n,
+                          const std::uint8_t* md = nullptr,
+                          std::size_t mn = 0) {
+        if (md == nullptr) {
+            md = d;
+            mn = n;
+        }
+        term->Feed(md, mn);
+        ref->Feed(md, mn);
         if (cal) {
             // The terminal answers the program's queries, whole, one reply
             // each, in the order they came.
@@ -722,6 +732,52 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data,
                 } else {
                     engine.SetDrawn(arg(0) % count, arg(1) % 2 == 0);
                 }
+                break;
+            }
+            case 8: {  // agent output of glyph tokens (round C4)
+                // The mirror gets the tokens as they are; the model terminal
+                // draws a ZWJ pair or a skin-tone pair in one wide glyph (as
+                // kitty and wezterm do), a soft hyphen in one cell (as xterm
+                // does), and moves the cursor left for DECBI.
+                struct Token {
+                    const char* Wire;
+                    const char* Model;
+                };
+                static constexpr Token TOKENS[] = {
+                    {"\xf0\x9f\x91\xa8\xe2\x80\x8d\xf0\x9f\x92\xbb",
+                     "\xf0\x9f\x92\xbb"},
+                    {"\xf0\x9f\x91\x8d\xf0\x9f\x8f\xbd", "\xf0\x9f\x91\x8d"},
+                    {"\xc2\xad", "-"},
+                    {"\x1b"
+                     "6",
+                     "\x1b[D"},
+                    {"\xd0\x96", "\xd0\x96"},
+                    {"\xee\x82\xb0", "\xee\x82\xb0"},
+                    {"\xe2\x98\x81\xef\xb8\x8f", "\xe2\x98\x81\xef\xb8\x8f"},
+                    {"X", "X"},
+                    {" ", " "},
+                    {"\r", "\r"},
+                    {"\x1b[3C", "\x1b[3C"},
+                    {"\x1b[2D", "\x1b[2D"},
+                };
+                constexpr std::size_t TOKEN_COUNT =
+                    sizeof(TOKENS) / sizeof(TOKENS[0]);
+                std::string wire;
+                std::string drawn;
+                for (std::size_t k = 0; k < n && k < 5; ++k) {
+                    const Token& t = TOKENS[p[k] % TOKEN_COUNT];
+                    if (std::string_view(t.Wire) != std::string_view(t.Model)) {
+                        drewClusters = true;
+                    }
+                    wire += t.Wire;
+                    drawn += t.Model;
+                }
+                undo();
+                feed(reinterpret_cast<const std::uint8_t*>(wire.data()),
+                     wire.size(),
+                     reinterpret_cast<const std::uint8_t*>(drawn.data()),
+                     drawn.size());
+                deliver(wire.size());
                 break;
             }
             case 9: {  // the program asks the terminal something
