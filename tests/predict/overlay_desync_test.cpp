@@ -462,3 +462,34 @@ TEST_CASE("rep: before any glyph a REP is not modelled, the column is lost") {
     c.Agent("\r\x1b[2b");
     CHECK_FALSE(c.R.E.ColumnTrusted());
 }
+
+TEST_CASE("desync: a coloured line feed on the terminal's bottom row") {
+    // The terminal scrolls and fills the new row with the pen background (BCE);
+    // the mirror, higher up, only moves its cursor onto a blank row.
+    Client c(30, 6, EDisplayMode::Always);
+    FillToBottom(c, 6);
+    c.Start();
+    c.Agent("\x1b[100m\n");
+    CHECK_FALSE(c.R.G->RowsTrusted());
+    const std::size_t drawsBefore = c.Draws;
+    c.Key("c");
+    CHECK(c.Draws == drawsBefore);
+    c.Agent("");  // the restore leaves the terminal's colour: Real == Ref
+}
+
+TEST_CASE("desync: IND, NEL and an auto-wrap under a coloured pen") {
+    for (const char* seq : {"\x1b"
+                            "D",
+                            "\x1b"
+                            "E",
+                            "0123456789012345678901234567890"}) {
+        Client c(30, 6, EDisplayMode::Always);
+        FillToBottom(c, 6);
+        c.Start();
+        c.Agent("\x1b[100m");
+        c.Agent(seq);
+        CHECK_FALSE(c.R.G->RowsTrusted());
+        c.Key("c");
+        c.Agent("");
+    }
+}

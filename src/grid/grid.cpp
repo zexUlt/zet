@@ -619,6 +619,7 @@ void Grid::LineFeed() noexcept {
         ScrollRegionUp(1);
     } else if (CursorRow_ < Rows_ - 1) {
         ++CursorRow_;
+        if (PenBgKind() != EColorKind::Default) NoteDrift();
     }
 }
 
@@ -628,6 +629,7 @@ void Grid::Index() noexcept {
         ScrollRegionUp(1);
     } else if (CursorRow_ < Rows_ - 1) {
         ++CursorRow_;
+        if (PenBgKind() != EColorKind::Default) NoteDrift();
     }
 }
 
