@@ -235,13 +235,17 @@ public:
     /// disagree on, so that where `col` is on the terminal is not certain:
     /// East Asian ambiguous, or followed by ZWJ, VS15, VS16 or a skin tone
     /// modifier. Stays set until the row is erased whole or scrolled away.
-    /// Also true, in every row, from a left move over such a glyph until the
-    /// column is set absolutely (CR, CHA, CUP, HVP, RIS, resync).
     [[nodiscard]] bool WidthDoubtBefore(std::uint16_t row,
                                         std::uint16_t col) const noexcept {
-        if (Path_.LeftOverDoubt) return true;
         const std::uint16_t d = ActiveLine(row).WidthDoubt;
         return d != 0 && d - 1U < col;
+    }
+
+    /// Whether the cursor moved left over such a glyph (BS, CUB, CBT) since
+    /// the column was last set absolutely (CR, CHA, CUP, HVP, RIS, resync):
+    /// the column is then in doubt in every row, even left of every mark.
+    [[nodiscard]] bool ColumnDoubt() const noexcept {
+        return Path_.LeftOverDoubt;
     }
 
     /// Same, for the classes in `classMask` (WidthClassBit) only.

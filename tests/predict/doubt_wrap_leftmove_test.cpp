@@ -27,7 +27,7 @@ struct Mirror {
     Mirror(int cols, int rows) : T(cols, rows) {}
     void Feed(std::string_view s) { T.Feed(s); }
     [[nodiscard]] bool Before(std::uint16_t row, std::uint16_t col) const {
-        return T.G->WidthDoubtBefore(row, col);
+        return T.G->WidthDoubtBefore(row, col) || T.G->ColumnDoubt();
     }
 };
 

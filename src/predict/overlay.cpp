@@ -222,13 +222,13 @@ ByteSpan Overlay::BuildUpdate(const PredictionEngine& engine,
     // The terminal takes bytes here only at a boundary of what the agent sent.
     const bool ground = mirror.Parser.State() == grid::EParserState::Ground &&
                         !mirror.Parser.Utf8Pending();
-    const bool canDraw = engine.Mode() != EDisplayMode::Never && ground &&
-                         !g.IsAltScreen() && !g.PendingWrap() &&
-                         !g.ModeSet(grid::EMode::Irm) && g.CharsetG0() == 0 &&
-                         g.CharsetActive() == 0 && engine.ColumnTrusted() &&
-                         g.CursorRow() < g.Rows() && g.CursorCol() < g.Cols() &&
-                         g.RowsTrusted() &&
-                         !g.WidthDoubtBefore(g.CursorRow(), g.CursorCol());
+    const bool canDraw =
+        engine.Mode() != EDisplayMode::Never && ground && !g.IsAltScreen() &&
+        !g.PendingWrap() && !g.ModeSet(grid::EMode::Irm) &&
+        g.CharsetG0() == 0 && g.CharsetActive() == 0 &&
+        engine.ColumnTrusted() && g.CursorRow() < g.Rows() &&
+        g.CursorCol() < g.Cols() && g.RowsTrusted() &&
+        !g.WidthDoubtBefore(g.CursorRow(), g.CursorCol()) && !g.ColumnDoubt();
     // What is drawn is taken off only at a point where bytes may go in; the
     // overlay is only ever drawn at one, and the next piece of bytes comes
     // after a restore, so a point that is not one has nothing to take off.
@@ -251,7 +251,7 @@ ByteSpan Overlay::BuildUpdate(const PredictionEngine& engine,
             // one would break. A head the grid has broken (a narrow cell that
             // holds a wide codepoint, its tail overwritten) is one too: put
             // back, the terminal would print it two columns wide.
-            if (g.WidthDoubtBefore(p.Row, p.Col)) continue;
+            if (g.WidthDoubtBefore(p.Row, p.Col) || g.ColumnDoubt()) continue;
             if (cell.Width != 1 ||
                 (cell.Codepoint != 0 && grid::Wcwidth(cell.Codepoint) == 2) ||
                 (p.Col > 0 &&
