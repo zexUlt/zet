@@ -16,6 +16,7 @@ add_executable(zet_tests
     grid/grid_fidelity_test.cpp
     grid/vt_parser_query_count_test.cpp
     grid/grid_known_test.cpp
+    grid/grid_lf_bg_drift_test.cpp
     grid/grid_width_policy_test.cpp
     grid/probe_test.cpp
     grid/snapshot_test.cpp
