@@ -33,11 +33,25 @@ namespace zet::grid {
 /// U+2601 and U+2764 that some terminals then draw two columns wide.
 [[nodiscard]] bool HasEmojiVariation(char32_t cp) noexcept;
 
-/// A codepoint whose width depends on the Unicode version of the terminal's
-/// table: a wide one added after Unicode 9.0 (an older table draws it in one
-/// column) or an unassigned one in an emoji block (a newer table may draw it in
-/// two). Table generated from DerivedAge.txt of Unicode 16.0.0.
-[[nodiscard]] bool IsVersionVolatileWidth(char32_t cp) noexcept;
+/// Cyrillic of East Asian ambiguous width: U+0401, U+0410-044F, U+0451. The
+/// one ambiguous class the width solver gives a verdict besides private use.
+[[nodiscard]] inline bool IsCyrillicAmbiguous(char32_t cp) noexcept {
+    return cp >= 0x0400 && cp <= 0x052F && IsAmbiguousWidth(cp);
+}
+
+/// A reference glyph: one the width solver trusts to be one cell wide on every
+/// terminal. Printable ASCII, and what the mirror draws in one cell, is not
+/// East Asian ambiguous, wide, combining or a format character, and lies in
+/// the Latin blocks (Latin-1 Supplement without the no-break space, Latin
+/// Extended-A and -B, Latin Extended Additional) or the Cyrillic blocks
+/// (U+0400-052F). Derived from the width tables: nothing else is new.
+[[nodiscard]] inline bool IsReferenceWidth(char32_t cp) noexcept {
+    if (cp >= 0x20 && cp <= 0x7E) return true;
+    const bool block = (cp >= 0x00A1 && cp <= 0x024F) ||
+                       (cp >= 0x0400 && cp <= 0x052F) ||
+                       (cp >= 0x1E00 && cp <= 0x1EFF);
+    return block && !IsAmbiguousWidth(cp) && Wcwidth(cp) == 1;
+}
 
 /// A codepoint that glues to the glyph before it into a cluster some terminals
 /// draw in a different width than a per-codepoint wcwidth gives: ZWJ, the

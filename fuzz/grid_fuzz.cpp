@@ -40,6 +40,7 @@ static WidthPolicy PolicyFrom(std::uint8_t a, std::uint8_t b) noexcept {
     WidthPolicy w;
     w.Ambiguous = (a & 1) != 0 ? 2 : 1;
     w.PrivateUse = (a & 2) != 0 ? 2 : 1;
+    w.Cyrillic = (a & 8) != 0 ? 2 : 1;
     w.Vs16Widens = (a & 4) != 0;
     switch (b & 3) {
         case 0:
@@ -47,7 +48,8 @@ static WidthPolicy PolicyFrom(std::uint8_t a, std::uint8_t b) noexcept {
             break;
         case 1:
             w.DoubtClasses = static_cast<std::uint8_t>(
-                WIDTH_CLASSES_ALL & ~WidthClassBit(EWidthClass::Ambiguous));
+                WIDTH_CLASSES_ALL & ~WidthClassBit(EWidthClass::Ambiguous) &
+                ~WidthClassBit(EWidthClass::Cyrillic));
             break;
         case 2:
             w.DoubtClasses = 0;
@@ -187,7 +189,7 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data,
             Grid* gByte = rByte.value();
             Grid* gBulk = rBulk.value();
             VtParser pByte, pBulk;
-            const WidthPolicy pol = PolicyFrom(data[0] >> 5, data[1] >> 6);
+            const WidthPolicy pol = PolicyFrom(data[0] >> 4, data[1] >> 6);
             gByte->SetWidthPolicy(pol);
             gBulk->SetWidthPolicy(pol);
 
@@ -241,7 +243,7 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data,
 
     VtParser p;
     p.SetBypassCallback([](EBypassEvent, std::byte, void*) {}, nullptr);
-    g->SetWidthPolicy(PolicyFrom(data[0] >> 5, data[1] >> 6));
+    g->SetWidthPolicy(PolicyFrom(data[0] >> 4, data[1] >> 6));
 
     // 10. Two grids that differ only in which classes mark.
     Grid* gDef = nullptr;
@@ -272,6 +274,7 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data,
             WidthPolicy w;
             gNarrow->SetWidthPolicy(w);
             w.Ambiguous = 2;
+            w.Cyrillic = 2;
             gWide->SetWidthPolicy(w);
         }
     }
@@ -346,7 +349,8 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data,
                     (gNarrow->PendingWrap() != gWide->PendingWrap() ||
                      gWide->CursorCol() !=
                          gNarrow->CursorCol() +
-                             gNarrow->PathGlyphs(EWidthClass::Ambiguous)))
+                             gNarrow->PathGlyphs(EWidthClass::Ambiguous) +
+                             gNarrow->PathGlyphs(EWidthClass::Cyrillic)))
                     __builtin_trap();
             }
         }

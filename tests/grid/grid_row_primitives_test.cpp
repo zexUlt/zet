@@ -55,7 +55,7 @@ TEST_CASE("SetKnownFrom clamps to the width and ignores rows out of range") {
 TEST_CASE("ClearWidthClass on a row clears that row's class only") {
     Rig r;
     // Row 0: A and P; row 1: A.
-    r.Feed("\xd0\xb6\xee\x82\xb0\r\n\xd0\xb6");
+    r.Feed("\xce\xb1\xee\x82\xb0\r\n\xce\xb1");
     REQUIRE(r.G->WidthDoubtClasses(0) == (A | P));
     REQUIRE(r.G->WidthDoubtClasses(1) == A);
     r.G->ClearWidthClass(0, EWidthClass::Ambiguous);
@@ -66,7 +66,7 @@ TEST_CASE("ClearWidthClass on a row clears that row's class only") {
     CHECK(r.G->WidthDoubtClasses(0) == 0);
     CHECK_FALSE(r.G->WidthDoubtBefore(0, 10));
     // Contents and KnownFrom stay.
-    CHECK(r.G->CellAt(0, 0).Codepoint == U'ж');
+    CHECK(r.G->CellAt(0, 0).Codepoint == U'α');
     CHECK(r.G->KnownFrom(0) == 0);
     // Out of range rows are ignored.
     r.G->ClearWidthClass(9, EWidthClass::Ambiguous);

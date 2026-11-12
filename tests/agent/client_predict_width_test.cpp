@@ -24,7 +24,7 @@ TEST_CASE_FIXTURE(SodiumFixture,
                    .GiveUp = 5000ms,
                    .ForcePath = session::EForcePath::B,
                    .Calibrate = true,
-                   .TerminalPolicy = {.Ambiguous = 2}}};
+                   .TerminalPolicy = {.Ambiguous = 2, .Cyrillic = 2}}};
     rig.Warm();
     rig.Pump(1500ms);
     REQUIRE(rig.QueriesSeen() == 0);

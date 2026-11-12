@@ -34,15 +34,16 @@ struct TermModel {
     std::chrono::milliseconds Delay{0};
 };
 
-/// How a terminal draws the three glyph classes of round C4: East Asian
-/// ambiguous (A) in one or two cells, private use (P) in one or two, and
-/// whether VS16 widens a text glyph that has an emoji variation sequence (E).
-/// The terminal is a grid with this width policy; the mirror starts with the
-/// default one and has to learn it.
+/// How a terminal draws the glyph classes of round C4: East Asian ambiguous
+/// (Cyrillic included; a terminal in a CJK mode draws both alike) in one or two
+/// cells, private use (P) in one or two, and whether VS16 widens a text glyph
+/// that has an emoji variation sequence (E). The terminal is a grid with this
+/// width policy; the mirror starts with the default one and has to learn it.
 inline grid::WidthPolicy Terminal(int ambiguous, int privateUse,
                                   bool vs16Widens) {
     grid::WidthPolicy p;
     p.Ambiguous = static_cast<std::uint8_t>(ambiguous);
+    p.Cyrillic = static_cast<std::uint8_t>(ambiguous);
     p.PrivateUse = static_cast<std::uint8_t>(privateUse);
     p.Vs16Widens = vs16Widens;
     return p;

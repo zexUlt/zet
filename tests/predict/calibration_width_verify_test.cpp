@@ -53,8 +53,7 @@ void StartScripted(CalClient& t) {
 
 bool NoVerdict(CalClient& t) {
     for (const EWidthClass cls :
-         {EWidthClass::Ambiguous, EWidthClass::PrivateUse,
-          EWidthClass::Emoji}) {
+         {EWidthClass::Cyrillic, EWidthClass::PrivateUse}) {
         const EWidthVerdict v = t.Cal->Verdict(cls);
         if (v == EWidthVerdict::Narrow || v == EWidthVerdict::Wide) {
             return false;
@@ -76,12 +75,14 @@ TEST_CASE("Verify C4: REP after a soft hyphen gives no verdict") {
     CalClient t(40, 6);
     StartScripted(t);
     t.Agent("\r" + PL + SHY);
-    REQUIRE(t.Frozen());
-    t.Scripted(0, 3);
-    REQUIRE(t.Cal->ColumnFixed() == 1);
+    CHECK_FALSE(t.Frozen());
     t.Agent("\x1b[b");
-    if (t.Frozen()) t.Scripted(0, 4);
-    CHECK(t.Cal->Verdict(EWidthClass::PrivateUse) != EWidthVerdict::Narrow);
+    CHECK_FALSE(t.Frozen());
+    CHECK(NoVerdict(t));
+    // Ж in place of the arrow: the same.
+    t.Agent("\r" + ZHE + SHY + "\x1b[b");
+    CHECK_FALSE(t.Frozen());
+    CHECK(NoVerdict(t));
 }
 
 TEST_CASE("Verify C4: an emoji of another Unicode version than the mirror's") {
@@ -93,7 +94,7 @@ TEST_CASE("Verify C4: an emoji of another Unicode version than the mirror's") {
         t.Agent("\r" + ZHE + FACE16);
         REQUIRE(t.R().G->CursorCol() == 3);
         if (t.Frozen()) t.Scripted(0, 3);
-        CHECK(t.Cal->Verdict(EWidthClass::Ambiguous) != EWidthVerdict::Narrow);
+        CHECK(t.Cal->Verdict(EWidthClass::Cyrillic) != EWidthVerdict::Narrow);
     }
     SUBCASE("newer terminal table fakes wide A") {
         // kitty with the default narrow A: Ж one cell, the Unicode 17 emoji
@@ -103,20 +104,17 @@ TEST_CASE("Verify C4: an emoji of another Unicode version than the mirror's") {
         t.Agent("\r" + ZHE + FACE17);
         REQUIRE(t.R().G->CursorCol() == 2);
         if (t.Frozen()) t.Scripted(0, 3);
-        CHECK(t.Cal->Verdict(EWidthClass::Ambiguous) != EWidthVerdict::Wide);
+        CHECK(t.Cal->Verdict(EWidthClass::Cyrillic) != EWidthVerdict::Wide);
     }
 }
 
-TEST_CASE("Verify C4: an old emoji does not block the verdict") {
-    // kitty with ambiguous wide: Ж two cells, the rocket two in the mirror
-    // and on the terminal alike. The difference is Ж's.
+TEST_CASE("Verify C4: an emoji, old or new, gives no verdict and no query") {
     CalClient t(40, 6);
     StartScripted(t);
     t.Agent("\r" + ZHE + ROCKET);
-    REQUIRE(t.R().G->PathVolatile() == 0);
-    REQUIRE(t.Frozen());
-    t.Scripted(0, 4);
-    CHECK(t.Cal->Verdict(EWidthClass::Ambiguous) == EWidthVerdict::Wide);
+    CHECK(t.R().G->PathForeign() == 1);
+    CHECK_FALSE(t.Frozen());
+    CHECK(NoVerdict(t));
 }
 
 TEST_CASE("Verify C4: an unassigned emoji-block code point blocks") {
@@ -124,7 +122,7 @@ TEST_CASE("Verify C4: an unassigned emoji-block code point blocks") {
     CalClient t(40, 6);
     StartScripted(t);
     t.Agent("\r" + ZHE + UNASSIGNED_EMOJI);
-    REQUIRE(t.R().G->PathVolatile() == 1);
+    REQUIRE(t.R().G->PathForeign() == 1);
     if (t.Frozen()) t.Scripted(0, 3);
     CHECK(NoVerdict(t));
 }
@@ -137,10 +135,9 @@ TEST_CASE("Verify C4: a match does not settle a ZWJ the next piece completes") {
     CalClient t(40, 6);
     StartScripted(t);
     t.Agent("\r" + MAN + ZWJ);
-    REQUIRE(t.Frozen());
-    t.Agent(COMPUTER);  // held for the wait
-    t.Scripted(0, 2);
-    REQUIRE(t.Cal->Matched() >= 1);
+    CHECK_FALSE(t.Frozen());
+    t.Agent(COMPUTER);
+    CHECK_FALSE(t.Frozen());
     REQUIRE(t.R().G->CursorCol() == 4);
     CHECK(t.R().G->WidthDoubtBefore(0, t.R().G->CursorCol()));
 }
@@ -154,7 +151,7 @@ TEST_CASE("Verify C4: a soft hyphen at the cursor puts the cursor in doubt") {
     t.Agent("\rab" + SHY);
     REQUIRE(t.R().G->CursorCol() == 2);
     CHECK(t.R().G->WidthDoubtBefore(0, 2));
-    CHECK(t.Frozen());
+    CHECK_FALSE(t.Frozen());
 }
 
 TEST_CASE("Verify C4: two clusters that cancel out leave their marks") {
@@ -165,9 +162,7 @@ TEST_CASE("Verify C4: two clusters that cancel out leave their marks") {
     StartScripted(t);
     t.Agent("\r" + MAN + ZWJ + COMPUTER + SHY + SHY);
     REQUIRE(t.R().G->CursorCol() == 4);
-    REQUIRE(t.Frozen());
-    t.Scripted(0, 4);
-    REQUIRE(t.Cal->Matched() >= 1);
+    CHECK_FALSE(t.Frozen());
     CHECK(t.R().G->WidthDoubtBefore(0, t.R().G->CursorCol()));
 }
 
@@ -200,16 +195,14 @@ TEST_CASE("Verify C4: keycap and VS15 keep a verdict away") {
         CalClient t(40, 6);
         StartScripted(t);
         t.Agent("\r" + ZHE + KEYCAP);
-        REQUIRE(t.Frozen());
-        t.Scripted(0, 3);  // d = 1, one A glyph: Wide if read as A's
+        CHECK_FALSE(t.Frozen());
         CHECK(NoVerdict(t));
     }
     SUBCASE("VS15: a terminal drawing the text cloud wide anyway") {
         CalClient t(40, 6);
         StartScripted(t);
         t.Agent("\r" + ZHE + CLOUD15);
-        REQUIRE(t.Frozen());
-        t.Scripted(0, 3);
+        CHECK_FALSE(t.Frozen());
         CHECK(NoVerdict(t));
     }
 }
@@ -227,7 +220,7 @@ TEST_CASE(
         "6" +
         ZHE);
     t.Scripted(0, 2);
-    CHECK(t.Cal->Verdict(EWidthClass::Ambiguous) == EWidthVerdict::Wide);
+    CHECK(t.Cal->Verdict(EWidthClass::Cyrillic) == EWidthVerdict::Wide);
     CHECK(t.R().G->PathBroken());
 }
 

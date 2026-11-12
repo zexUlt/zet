@@ -13,12 +13,18 @@ constexpr std::array<std::byte, Calibration::QUERY_SIZE> QUERY_BYTES{
     std::byte{0x1b}, std::byte{'['}, std::byte{'6'}, std::byte{'n'},
     std::byte{0x1b}, std::byte{'['}, std::byte{'c'}};
 
-constexpr std::array<grid::EWidthClass, 3> VERDICT_CLASSES{
-    grid::EWidthClass::Ambiguous, grid::EWidthClass::PrivateUse,
-    grid::EWidthClass::Emoji};
+// The classes that get a verdict (design.md §9): Cyrillic of East Asian
+// ambiguous width and private use. Every other glyph that is not a reference
+// glyph keeps the doubt of step 5 for the whole session.
+constexpr std::array<grid::EWidthClass, 2> VERDICT_CLASSES{
+    grid::EWidthClass::Cyrillic, grid::EWidthClass::PrivateUse};
 
+/// Index into VERDICT_CLASSES; its size for a class without a verdict.
 constexpr std::size_t VerdictIndex(grid::EWidthClass cls) noexcept {
-    return static_cast<std::size_t>(cls);
+    for (std::size_t k = 0; k < VERDICT_CLASSES.size(); ++k) {
+        if (VERDICT_CLASSES[k] == cls) return k;
+    }
+    return VERDICT_CLASSES.size();
 }
 
 }  // namespace
@@ -333,7 +339,7 @@ void Calibration::Apply(const CprEvent& event, Timestamp now,
         // reason to ask: after a sequence the mirror does not know (or a
         // program leaving the alternate screen) the cursor may have moved for
         // a reason that is no glyph's.
-        const bool widthOnly = QueryReasons_ == CalWidth && !g.PathBroken();
+        const bool widthOnly = QueryReasons_ == CalWidth && PathSolvable(g);
         // Before the verdicts: a Wide one turns the cursor row foreign. The
         // tail is the terminal's only when the path laid the row out from
         // what stood where the terminal has it (no marks from before the
@@ -346,15 +352,6 @@ void Calibration::Apply(const CprEvent& event, Timestamp now,
                               static_cast<std::int64_t>(expected));
         }
         if (colMatch) {
-            // A cluster mark is confirmed by the match only when every mark
-            // of the row is the path's and clusters are all it holds of open
-            // width.
-            if (widthOnly && ClustersOnlyOpen(g) && g.MarksOnPath(row) &&
-                g.WidthDoubtBefore(
-                    row, col,
-                    grid::WidthClassBit(grid::EWidthClass::Cluster))) {
-                g.ClearWidthClass(row, grid::EWidthClass::Cluster);
-            }
             // The column is the terminal's: the next path starts here.
             g.ConfirmColumn();
             ++Matched_;
@@ -395,25 +392,21 @@ grid::WidthPolicy Calibration::Policy() const noexcept {
             policy.DoubtClasses = static_cast<std::uint8_t>(
                 policy.DoubtClasses & ~grid::WidthClassBit(cls));
         }
-        switch (cls) {
-            case grid::EWidthClass::Ambiguous:
-                policy.Ambiguous = width;
-                break;
-            case grid::EWidthClass::PrivateUse:
-                policy.PrivateUse = width;
-                break;
-            case grid::EWidthClass::Emoji:
-                policy.Vs16Widens = width == 2;
-                break;
-            case grid::EWidthClass::Cluster:
-                break;
+        if (cls == grid::EWidthClass::Cyrillic) {
+            policy.Cyrillic = width;
+        } else {
+            policy.PrivateUse = width;
         }
     }
     return policy;
 }
 
+bool Calibration::PathSolvable(const grid::Grid& g) noexcept {
+    return !g.IsAltScreen() && !g.PathBroken() && g.PathForeign() == 0;
+}
+
 bool Calibration::WidthDue(const grid::Grid& g) const noexcept {
-    if (g.IsAltScreen() || g.PathBroken()) {
+    if (!PathSolvable(g)) {
         return false;
     }
     for (const grid::EWidthClass cls : VERDICT_CLASSES) {
@@ -422,10 +415,7 @@ bool Calibration::WidthDue(const grid::Grid& g) const noexcept {
             return true;
         }
     }
-    return g.PathGlyphs(grid::EWidthClass::Cluster) != 0 &&
-           g.CursorRow() < g.Rows() &&
-           g.WidthDoubtBefore(g.CursorRow(), g.CursorCol(),
-                              grid::WidthClassBit(grid::EWidthClass::Cluster));
+    return false;
 }
 
 void Calibration::ApplyVerdict(grid::Grid& g,
@@ -444,35 +434,16 @@ void Calibration::ApplyVerdict(grid::Grid& g,
     }
 }
 
-bool Calibration::ClustersOnlyOpen(const grid::Grid& g) const noexcept {
-    // One cluster: two could err the opposite ways (a ZWJ pair glued, two
-    // columns fewer; two soft hyphens drawn, two more) and cancel out.
-    if (g.PathGlyphs(grid::EWidthClass::Cluster) != 1) {
-        return false;
-    }
-    for (const grid::EWidthClass cls : VERDICT_CLASSES) {
-        const EWidthVerdict v = Verdicts_[VerdictIndex(cls)];
-        if (g.PathGlyphs(cls) != 0 && v != EWidthVerdict::Narrow &&
-            v != EWidthVerdict::Wide) {
-            return false;
-        }
-    }
-    return true;
-}
-
 void Calibration::SolveWidth(grid::Grid& g, std::int64_t d) noexcept {
-    // A cluster may be drawn narrower than the mirror draws it (a ZWJ
-    // sequence as one glyph) or wider (a soft hyphen): it can hide or fake
-    // any difference, and so can an emoji sized by another Unicode version
-    // than the mirror's. A cursor left of the mirror's is no glyph's doing
-    // either. Neither says anything of a class, nor counts against it.
-    if (g.PathGlyphs(grid::EWidthClass::Cluster) != 0 ||
-        g.PathVolatile() != 0 || d < 0) {
+    // A cursor left of the mirror's is no glyph's doing: it says nothing of a
+    // class, nor counts against it. A foreign glyph on the path could hide or
+    // fake any difference (WidthDue keeps such paths from being asked about).
+    if (g.PathForeign() != 0 || d < 0) {
         return;
     }
     // Glyphs of the classes still open, and the glyphs whose width stays open
     // whatever the answer: classes given up on.
-    std::array<std::uint32_t, 3> open{};
+    std::array<std::uint32_t, VERDICT_CLASSES.size()> open{};
     std::uint64_t unresolved = 0;
     std::size_t openClasses = 0;
     std::size_t only = 0;
@@ -546,10 +517,8 @@ void Calibration::FixColumn(grid::Grid& g, std::uint16_t row, std::uint16_t col,
         g.SetKnownFrom(row, g.Cols());
     }
     // Nothing the row's marks say can be checked any more.
-    for (const grid::EWidthClass cls :
-         {grid::EWidthClass::Ambiguous, grid::EWidthClass::PrivateUse,
-          grid::EWidthClass::Emoji, grid::EWidthClass::Cluster}) {
-        g.ClearWidthClass(row, cls);
+    for (std::size_t k = 0; k < grid::WIDTH_CLASS_COUNT; ++k) {
+        g.ClearWidthClass(row, static_cast<grid::EWidthClass>(k));
     }
 }
 

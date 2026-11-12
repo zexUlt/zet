@@ -44,7 +44,7 @@ enum ECalReason : std::uint8_t {
 };
 
 /// What the session knows about how the terminal draws one class of glyphs
-/// (grid::EWidthClass Ambiguous, PrivateUse and Emoji; Cluster has none).
+/// (grid::EWidthClass Cyrillic and PrivateUse; no other class has a verdict).
 /// Narrow and Wide are final. Unsolved: answers did not settle it
 /// CPR_SOLVE_FAILS_MAX times, the class is never asked about again and the
 /// conservative rules of step 5 hold for it.
@@ -177,7 +177,7 @@ public:
     // --- State ---------------------------------------------------------------
 
     /// The session's verdict on a class of glyphs, and the grid policy the
-    /// verdicts make. Cluster has no verdict (always Unknown).
+    /// verdicts make. A class without a verdict is always Unknown.
     [[nodiscard]] EWidthVerdict Verdict(grid::EWidthClass cls) const noexcept;
     [[nodiscard]] grid::WidthPolicy Policy() const noexcept;
 
@@ -235,13 +235,13 @@ private:
     void Rebase(const CalibrationTarget& target) noexcept;
     [[nodiscard]] static bool MirrorReady(const grid::Grid& g,
                                           const grid::VtParser& p) noexcept;
+    /// Whether the path can be read for widths: not on the alternate screen,
+    /// unbroken, and every glyph on it a reference glyph or of a class with a
+    /// verdict.
+    [[nodiscard]] static bool PathSolvable(const grid::Grid& g) noexcept;
     /// Whether the end of a portion gives a reason to ask about widths: a
-    /// glyph of a class without a verdict on a path that can be solved, or a
-    /// cluster on the path and a cluster mark left of the cursor.
+    /// solvable path with a glyph of a class that has no verdict yet.
     [[nodiscard]] bool WidthDue(const grid::Grid& g) const noexcept;
-    /// The path holds clusters and no glyph of a class whose width is open
-    /// (no verdict, or given up on).
-    [[nodiscard]] bool ClustersOnlyOpen(const grid::Grid& g) const noexcept;
     /// Settles what the answer says about widths: `d` is the answered column
     /// less the expected one, the path is the grid's, as the query froze it.
     void SolveWidth(grid::Grid& g, std::int64_t d) noexcept;
@@ -301,10 +301,10 @@ private:
     std::uint64_t SeenBypass_{0};
     std::uint64_t SeenAltExit_{0};
 
-    /// Per class Ambiguous, PrivateUse, Emoji.
-    std::array<EWidthVerdict, 3> Verdicts_{};
+    /// Per class Cyrillic, PrivateUse.
+    std::array<EWidthVerdict, 2> Verdicts_{};
     /// Answers that gave the class no verdict.
-    std::array<std::uint8_t, 3> SolveFails_{};
+    std::array<std::uint8_t, 2> SolveFails_{};
 
     std::uint32_t Resynced_{0};
     std::uint32_t Matched_{0};

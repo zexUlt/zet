@@ -39,6 +39,7 @@ add_executable(zet_tests
     predict/calibration_width_gaps_test.cpp
     predict/calibration_width_survivors_test.cpp
     predict/calibration_width_verify_test.cpp
+    predict/calibration_width_final_test.cpp
     predict/overlay_reserve_test.cpp
     predict/predict_baseline_drop_test.cpp
     predict/predict_ack_test.cpp

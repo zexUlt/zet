@@ -37,17 +37,17 @@ TEST_CASE("A difference outside 0 and n gives no verdict") {
     // Six glyphs of A: the answer is 6 columns further, 2 more than any
     // verdict explains (d is 0 or 6; here 3).
     t.Scripted(0, 2 + 6 + 2 + 3);
-    CHECK(t.Cal->Verdict(EWidthClass::Ambiguous) == EWidthVerdict::Unknown);
+    CHECK(t.Cal->Verdict(EWidthClass::Cyrillic) == EWidthVerdict::Unknown);
     CHECK(t.Cal->ColumnFixed() == 1);
     CHECK(t.R().G->CursorCol() == 13);
 }
 
-TEST_CASE("A cluster on the path with a difference of n gives no verdict") {
+TEST_CASE("A cluster on the path gives no verdict") {
     CalClient t(40, 6);
     t.SetTerminal(Terminal(2, 1, false));
     Start(t);
     t.Agent("\r" + RU + "x" + ZWJ + "> ");
-    CHECK(t.Cal->Verdict(EWidthClass::Ambiguous) == EWidthVerdict::Unknown);
+    CHECK(t.Cal->Verdict(EWidthClass::Cyrillic) == EWidthVerdict::Unknown);
 }
 
 TEST_CASE("A broken path sends no width query") {
@@ -56,7 +56,7 @@ TEST_CASE("A broken path sends no width query") {
     Start(t);
     // An unknown sequence breaks the path.
     t.Agent("\r" + RU + "\x1b[99z> ");
-    CHECK(t.Cal->Verdict(EWidthClass::Ambiguous) == EWidthVerdict::Unknown);
+    CHECK(t.Cal->Verdict(EWidthClass::Cyrillic) == EWidthVerdict::Unknown);
 }
 
 TEST_CASE("Verdicts survive a snapshot, a resize and a second snapshot") {
@@ -65,14 +65,14 @@ TEST_CASE("Verdicts survive a snapshot, a resize and a second snapshot") {
     Start(t);
     t.Agent("\r" + RU + "> ");
     t.Agent("\r" + PL + "> ");
-    t.Agent("\r\xe2\x98\x81\xef\xb8\x8f> ");
-    for (const EWidthClass c : {EWidthClass::Ambiguous, EWidthClass::PrivateUse,
-                                EWidthClass::Emoji}) {
+    for (const EWidthClass c :
+         {EWidthClass::Cyrillic, EWidthClass::PrivateUse}) {
         REQUIRE(t.Cal->Verdict(c) == EWidthVerdict::Wide);
     }
     t.Snapshot("\x1b[2J\x1b[H$ ");
     CHECK(t.R().G->Policy() == t.Cal->Policy());
-    CHECK(t.R().G->Policy().Ambiguous == 2);
+    CHECK(t.R().G->Policy().Cyrillic == 2);
+    CHECK(t.R().G->Policy().Ambiguous == 1);
     t.Resize(30, 8);
     CHECK(t.R().G->Policy() == t.Cal->Policy());
     t.Snapshot("\x1b[2J\x1b[H$ ");
@@ -82,7 +82,7 @@ TEST_CASE("Verdicts survive a snapshot, a resize and a second snapshot") {
     const std::size_t asked = t.Queries();
     t.Agent("\r" + RU + PL + "> ");
     CHECK(t.Queries() == asked);
-    CHECK(t.Cal->Verdict(EWidthClass::Ambiguous) == EWidthVerdict::Wide);
+    CHECK(t.Cal->Verdict(EWidthClass::Cyrillic) == EWidthVerdict::Wide);
     CHECK(t.R().G->CursorCol() == t.C.Real.G->CursorCol());
 }
 
@@ -90,7 +90,7 @@ TEST_CASE("A Narrow verdict survives a snapshot: the class stays off") {
     CalClient t(40, 6);
     Start(t);
     t.Agent("\r" + RU + "> ");
-    REQUIRE(t.Cal->Verdict(EWidthClass::Ambiguous) == EWidthVerdict::Narrow);
+    REQUIRE(t.Cal->Verdict(EWidthClass::Cyrillic) == EWidthVerdict::Narrow);
     const std::size_t asked = t.Queries();
     t.Snapshot("\x1b[2J\x1b[H$ ");
     t.Agent("\r" + RU + "> ");

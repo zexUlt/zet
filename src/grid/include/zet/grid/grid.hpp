@@ -51,28 +51,35 @@ enum class EMode : std::uint32_t {
 }
 
 /// A class of glyphs whose width terminals disagree on (design.md §9, round C).
-/// The first three get a verdict per session; Cluster (ZWJ, skin tone, VS15,
-/// VS16 outside the emoji case, and wrap doubts) does not.
+/// Only Cyrillic and PrivateUse get a verdict per session (design.md §9); the
+/// others only mark rows as doubtful: Ambiguous (the rest of East Asian
+/// ambiguous), Emoji (a narrow text glyph followed by VS16) and Cluster (ZWJ,
+/// skin tone, VS15, VS16 outside the emoji case, SHY and wrap doubts).
 enum class EWidthClass : std::uint8_t {
-    Ambiguous = 0,   ///< East Asian ambiguous, except private use
+    Ambiguous = 0,   ///< East Asian ambiguous, except private use and Cyrillic
     PrivateUse = 1,  ///< U+E000-F8FF, planes 15-16
     Emoji = 2,       ///< a narrow text glyph followed by VS16
     Cluster = 3,     ///< clusters without a verdict
+    Cyrillic =
+        4,  ///< Cyrillic of East Asian ambiguous width (IsCyrillicAmbiguous)
 };
-inline constexpr std::size_t WIDTH_CLASS_COUNT = 4;
+inline constexpr std::size_t WIDTH_CLASS_COUNT = 5;
 
 /// Bit of a class in the masks the width doubt API takes and returns.
 [[nodiscard]] constexpr std::uint8_t WidthClassBit(EWidthClass c) noexcept {
     return static_cast<std::uint8_t>(1U << static_cast<unsigned>(c));
 }
-inline constexpr std::uint8_t WIDTH_CLASSES_ALL = 0x0F;
+inline constexpr std::uint8_t WIDTH_CLASSES_ALL = 0x1F;
 
 /// How the grid sizes the glyphs of the classes terminals disagree on. The
 /// default is the table as it always was: the agent's grid and the snapshot
 /// format never see anything else. A client sets it from its verdicts.
 struct WidthPolicy {
-    /// Columns of an East Asian ambiguous glyph (not private use): 1 or 2.
+    /// Columns of an East Asian ambiguous glyph that is neither private use nor
+    /// Cyrillic: 1 or 2.
     std::uint8_t Ambiguous{1};
+    /// Columns of a Cyrillic glyph of East Asian ambiguous width: 1 or 2.
+    std::uint8_t Cyrillic{1};
     /// Columns of a private use glyph: 1 or 2.
     std::uint8_t PrivateUse{1};
     /// Whether VS16 after a narrow glyph that has an emoji variation sequence
@@ -306,11 +313,12 @@ public:
     [[nodiscard]] std::uint32_t PathGlyphs(EWidthClass cls) const noexcept {
         return Path_.Glyphs[static_cast<std::size_t>(cls)];
     }
-    /// Code points on the path whose width depends on the terminal's Unicode
-    /// version (wide ones newer than Unicode 9, unassigned ones in the emoji
-    /// blocks): they belong to no class and get no mark.
-    [[nodiscard]] std::uint32_t PathVolatile() const noexcept {
-        return Path_.Volatile;
+    /// Glyphs on the path that are neither reference glyphs (IsReferenceWidth,
+    /// trusted to be one cell) nor of the classes that get a verdict (Cyrillic,
+    /// PrivateUse): every other glyph, zero-width code points and ones after a
+    /// ZWJ included. A path that holds one tells nothing about widths.
+    [[nodiscard]] std::uint32_t PathForeign() const noexcept {
+        return Path_.Foreign;
     }
     /// Whether the path can no longer tell where the terminal's cursor is from
     /// its glyphs alone: the line wrapped on it, or the cursor moved left, by
@@ -618,6 +626,9 @@ private:
         ++PathEpoch_;
     }
     void BreakPath() noexcept { Path_.Broken = true; }
+    void NoteForeign() noexcept {
+        if (Path_.Foreign != UINT32_MAX) ++Path_.Foreign;
+    }
     /// The cursor is about to move left from the current column.
     /// Call before PendingWrap_ is cleared: with a wrap pending the terminal's
     /// cursor stands past the last cell, so a glyph in it is left of the
@@ -740,8 +751,8 @@ private:
 
     struct WidthPath {
         std::uint32_t Glyphs[WIDTH_CLASS_COUNT]{};
-        /// Code points whose width depends on the terminal's Unicode version.
-        std::uint32_t Volatile{0};
+        /// Glyphs that are neither reference nor of a class with a verdict.
+        std::uint32_t Foreign{0};
         bool Broken{false};
         /// A BS, CUB or CBT moved the cursor left with a doubtful glyph left
         /// of where it was: the terminal's column is not the mirror's even

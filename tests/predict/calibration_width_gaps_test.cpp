@@ -52,7 +52,7 @@ TEST_CASE("A difference above the glyph count gives no verdict") {
     t.Agent("\r" + RU + "> ");  // the mirror stands at column 8
     REQUIRE(t.Frozen());
     t.Scripted(0, 8 + 6 + 1);  // d = n + 1: no width explains it
-    CHECK(t.Cal->Verdict(EWidthClass::Ambiguous) == EWidthVerdict::Unknown);
+    CHECK(t.Cal->Verdict(EWidthClass::Cyrillic) == EWidthVerdict::Unknown);
     CHECK(t.R().G->Policy().Ambiguous == 1);
 }
 
@@ -65,15 +65,15 @@ TEST_CASE(
     Start(t);
     t.Agent("\r" + ZH + PL + "> ");
     CHECK(t.Queries() == 2);
-    CHECK(t.Cal->Verdict(EWidthClass::Ambiguous) == EWidthVerdict::Unknown);
+    CHECK(t.Cal->Verdict(EWidthClass::Cyrillic) == EWidthVerdict::Unknown);
     CHECK(t.Cal->Verdict(EWidthClass::PrivateUse) == EWidthVerdict::Unknown);
-    // The same with E in the place of P.
+    // With an emoji in the place of P the path is not solvable: no query.
     CalClient u(40, 6);
     u.SetTerminal(Terminal(2, 1, false));
     Start(u);
     u.Agent("\r" + ZH + CLOUD + "> ");
-    CHECK(u.Queries() == 2);
-    CHECK(u.Cal->Verdict(EWidthClass::Ambiguous) == EWidthVerdict::Unknown);
+    CHECK(u.Queries() == 1);
+    CHECK(u.Cal->Verdict(EWidthClass::Cyrillic) == EWidthVerdict::Unknown);
     CHECK(u.Cal->Verdict(EWidthClass::Emoji) == EWidthVerdict::Unknown);
 }
 
@@ -86,7 +86,7 @@ TEST_CASE("A class given up on keeps another from a Wide verdict") {
         REQUIRE(t.Frozen());
         t.Scripted(0, 8 + 1);
     }
-    REQUIRE(t.Cal->Verdict(EWidthClass::Ambiguous) == EWidthVerdict::Unsolved);
+    REQUIRE(t.Cal->Verdict(EWidthClass::Cyrillic) == EWidthVerdict::Unsolved);
     // One glyph of A (given up on) and one of P: d = 1 is P's width or A's.
     const std::size_t asked = t.Queries();
     t.Agent("\r" + ZH + PL + "> ");
@@ -106,7 +106,7 @@ TEST_CASE(
         REQUIRE(t.Frozen());
         t.Scripted(0, 8 + 1);
     }
-    REQUIRE(t.Cal->Verdict(EWidthClass::Ambiguous) == EWidthVerdict::Unsolved);
+    REQUIRE(t.Cal->Verdict(EWidthClass::Cyrillic) == EWidthVerdict::Unsolved);
     CHECK(t.Cal->Verdict(EWidthClass::PrivateUse) == EWidthVerdict::Unknown);
     CHECK(t.Cal->Verdict(EWidthClass::Emoji) == EWidthVerdict::Unknown);
 }
@@ -116,7 +116,7 @@ TEST_CASE("Narrow for A does not lift the ban on a typed private use glyph") {
     t.SetTerminal(Terminal(1, 1, false));
     Start(t);
     t.Agent("\r" + RU + "> ");
-    REQUIRE(t.Cal->Verdict(EWidthClass::Ambiguous) == EWidthVerdict::Narrow);
+    REQUIRE(t.Cal->Verdict(EWidthClass::Cyrillic) == EWidthVerdict::Narrow);
     Confirm(t);
     t.Key(PL);
     CHECK(t.R().Count() == 0);
@@ -130,7 +130,7 @@ TEST_CASE("A cursor left of the mirror's gives no verdict and erases nothing") {
         REQUIRE(t.Frozen());
         t.Scripted(0, 4);
         // Not a width's doing, so not a failed solve either.
-        CHECK(t.Cal->Verdict(EWidthClass::Ambiguous) == EWidthVerdict::Unknown);
+        CHECK(t.Cal->Verdict(EWidthClass::Cyrillic) == EWidthVerdict::Unknown);
     }
     CHECK(t.Cal->ColumnFixed() == CPR_SOLVE_FAILS_MAX + 1);
     const auto& g = *t.R().G;

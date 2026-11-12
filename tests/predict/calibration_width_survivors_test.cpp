@@ -47,10 +47,10 @@ void GiveUpOnA(CalClient& t) {
         REQUIRE(t.Frozen());
         t.Scripted(0, 8 + 1);
     }
-    REQUIRE(t.Cal->Verdict(EWidthClass::Ambiguous) == EWidthVerdict::Unsolved);
+    REQUIRE(t.Cal->Verdict(EWidthClass::Cyrillic) == EWidthVerdict::Unsolved);
 }
 
-constexpr std::uint8_t A_BIT = grid::WidthClassBit(EWidthClass::Ambiguous);
+constexpr std::uint8_t A_BIT = grid::WidthClassBit(EWidthClass::Cyrillic);
 
 }  // namespace
 
@@ -85,7 +85,7 @@ TEST_CASE("A class given up on elsewhere does not hold back another's Wide") {
     t.Model.Reply = EReply::Normal;
     t.Agent("\r" + PL + PL + "> ");
     CHECK(t.Cal->Verdict(EWidthClass::PrivateUse) == EWidthVerdict::Wide);
-    CHECK(t.Cal->Verdict(EWidthClass::Ambiguous) == EWidthVerdict::Unsolved);
+    CHECK(t.Cal->Verdict(EWidthClass::Cyrillic) == EWidthVerdict::Unsolved);
     CHECK(t.R().G->CursorCol() == t.C.Real.G->CursorCol());
 }
 
@@ -123,7 +123,7 @@ TEST_CASE("A width reason gone stale asks nothing") {
     t.QueueRoom = true;
     t.Settle();
     CHECK(t.Queries() == 1);
-    CHECK(t.Cal->Verdict(EWidthClass::Ambiguous) == EWidthVerdict::Unknown);
+    CHECK(t.Cal->Verdict(EWidthClass::Cyrillic) == EWidthVerdict::Unknown);
 }
 
 TEST_CASE("A width reason gone stale is dropped when another reason asks") {
@@ -146,7 +146,7 @@ TEST_CASE("A path broken by a move left sends no width query") {
     Start(t);
     t.Agent("\r" + RU + "\x1b[D> ");
     CHECK(t.Queries() == 1);
-    CHECK(t.Cal->Verdict(EWidthClass::Ambiguous) == EWidthVerdict::Unknown);
+    CHECK(t.Cal->Verdict(EWidthClass::Cyrillic) == EWidthVerdict::Unknown);
 }
 
 TEST_CASE("Every unknown sequence of the parser breaks the width path") {
@@ -206,49 +206,40 @@ TEST_CASE("A column difference is no glyph's when something else asked too") {
     CHECK(g.KnownFrom(0) == g.Cols());
 }
 
-TEST_CASE("A matched answer clears a cluster mark of the path alone") {
-    CalClient t(40, 6);
-    Start(t);
-    t.Agent("\r" + TECH + "> ");
-    CHECK(t.Queries() == 2);
-    CHECK(t.R().G->WidthDoubtClasses(0) == 0);
-}
-
-TEST_CASE(
-    "A matched answer leaves a cluster mark when a glyph of open width shares "
-    "the path") {
-    // The A glyph could be wide and the cluster narrower, to the same column.
-    CalClient t(40, 6);
-    Start(t);
-    t.Agent("\r" + ZH + TECH + "> ");
-    REQUIRE(t.Queries() == 2);
-    CHECK((t.R().G->WidthDoubtClasses(0) & CLUSTER_BIT) != 0);
-}
-
-TEST_CASE(
-    "A matched answer clears a cluster mark when a class with a verdict shares "
-    "the path") {
-    CalClient t(40, 6);
-    t.SetTerminal(Terminal(2, 1, false));
-    Start(t);
-    t.Agent("\r" + RU + "> ");
-    REQUIRE(t.Cal->Verdict(EWidthClass::Ambiguous) == EWidthVerdict::Wide);
-    const std::size_t asked = t.Queries();
-    t.Agent("\r\n" + ZH + TECH + "> ");
-    REQUIRE(t.Queries() == asked + 1);
-    CHECK((t.R().G->WidthDoubtClasses(1) & CLUSTER_BIT) == 0);
-}
-
-TEST_CASE("A matched answer leaves the cluster mark of an earlier path") {
-    // One row, two paths: the pair of the first is not in the second's count,
-    // and the terminal may have drawn it narrower.
-    CalClient t(40, 6);
-    Start(t);
-    t.Agent("\r\n" + TECH + "\r");
-    REQUIRE(t.Queries() == 1);
-    t.Agent("\x1b[10C" + TECH + "> ");
-    REQUIRE(t.Queries() == 2);
-    CHECK((t.R().G->WidthDoubtClasses(1) & CLUSTER_BIT) != 0);
+TEST_CASE("A cluster mark is not asked about and stays") {
+    SUBCASE("alone on the path") {
+        CalClient t(40, 6);
+        Start(t);
+        t.Agent("\r" + TECH + "> ");
+        CHECK(t.Queries() == 1);
+        CHECK((t.R().G->WidthDoubtClasses(0) & CLUSTER_BIT) != 0);
+    }
+    SUBCASE("with a glyph of open width") {
+        CalClient t(40, 6);
+        Start(t);
+        t.Agent("\r" + ZH + TECH + "> ");
+        CHECK(t.Queries() == 1);
+        CHECK((t.R().G->WidthDoubtClasses(0) & CLUSTER_BIT) != 0);
+    }
+    SUBCASE("with a class that has a verdict") {
+        CalClient t(40, 6);
+        t.SetTerminal(Terminal(2, 1, false));
+        Start(t);
+        t.Agent("\r" + RU + "> ");
+        REQUIRE(t.Cal->Verdict(EWidthClass::Cyrillic) == EWidthVerdict::Wide);
+        const std::size_t asked = t.Queries();
+        t.Agent("\r\n" + ZH + TECH + "> ");
+        CHECK(t.Queries() == asked);
+        CHECK((t.R().G->WidthDoubtClasses(1) & CLUSTER_BIT) != 0);
+    }
+    SUBCASE("on an earlier path of the row") {
+        CalClient t(40, 6);
+        Start(t);
+        t.Agent("\r\n" + TECH + "\r");
+        t.Agent("\x1b[10C" + TECH + "> ");
+        CHECK(t.Queries() == 1);
+        CHECK((t.R().G->WidthDoubtClasses(1) & CLUSTER_BIT) != 0);
+    }
 }
 
 TEST_CASE(

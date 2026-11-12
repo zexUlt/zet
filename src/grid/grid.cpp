@@ -227,9 +227,7 @@ bool Grid::PathBroken() const noexcept {
     // exact. Needs no state of its own: the column only grows on a path,
     // everything that moves it left or sets it breaks or restarts the path.
     std::uint64_t doubtful =
-        static_cast<std::uint64_t>(
-            Path_.Glyphs[static_cast<std::size_t>(EWidthClass::Cluster)]) +
-        Path_.Volatile;
+        Path_.Glyphs[static_cast<std::size_t>(EWidthClass::Cluster)];
     for (std::size_t i = 0; i < WIDTH_CLASS_COUNT; ++i) {
         const auto cls = static_cast<EWidthClass>(i);
         if (cls != EWidthClass::Cluster &&
@@ -242,6 +240,7 @@ bool Grid::PathBroken() const noexcept {
 void Grid::SetWidthPolicy(const WidthPolicy& policy) noexcept {
     Policy_ = policy;
     Policy_.Ambiguous = policy.Ambiguous == 2 ? 2 : 1;
+    Policy_.Cyrillic = policy.Cyrillic == 2 ? 2 : 1;
     Policy_.PrivateUse = policy.PrivateUse == 2 ? 2 : 1;
 }
 
@@ -424,13 +423,6 @@ static constexpr char32_t DEC_GFX[31] = {
     0x2502, 0x2264, 0x2265, 0x03C0, 0x2260, 0x00A3, 0x00B7,
 };
 
-// A code point whose width depends on the terminal's Unicode version: a wide
-// one newer than Unicode 9 (an older table draws it in one column), or an
-// unassigned one in an emoji block (a newer table may draw it in two), see
-// IsVersionVolatileWidth and design.md §9, §18. No mark (the rows would lose
-// their predictions), but the path counts it: no width can be read from a path
-// that holds one, its difference could cancel a class's or fake one.
-
 bool Grid::WidenForVs16(std::uint16_t prev) noexcept {
     // The glyph is in column `prev`, the cursor right after it, not in the
     // last column: the wide cell fits. (In the last column terminals differ
@@ -486,6 +478,8 @@ void Grid::PutChar(char32_t cp, int width) noexcept {
             (PendingWrap_ ? LastPrintedCol_ == CursorCol_
                           : LastPrintedCol_ + LastPrintedWidth_ == CursorCol_);
         LastPrintedMarked_ = true;
+        // A zero-width code point: terminals draw some of them in a cell.
+        NoteForeign();
         if (cp == 0x200D) {
             AfterZwj_ = true;
             ZwjPath_ = PathEpoch_;
@@ -495,6 +489,13 @@ void Grid::PutChar(char32_t cp, int width) noexcept {
         // draw it: in the cursor's column, so the mark goes on the cell before
         // (as a joiner's does) and the cursor's column is in doubt.
         if (cp == 0x00AD) {
+            // In the first column, or with a wrap pending, no cell before
+            // the cursor's own holds the hyphen: the column itself is in
+            // doubt.
+            if (PendingWrap_ || CursorCol_ == 0) {
+                BreakPath();
+                Path_.LeftOverDoubt = true;
+            }
             NoteClassGlyph(CursorRow_,
                            (PendingWrap_ || CursorCol_ == 0)
                                ? CursorCol_
@@ -557,16 +558,26 @@ void Grid::PutChar(char32_t cp, int width) noexcept {
     int baseWidth = width;
     EWidthClass cls = EWidthClass::Ambiguous;
     const bool classed = IsAmbiguousWidth(cp);
-    if (classed) cls = IsPrivateUse(cp) ? EWidthClass::PrivateUse : cls;
+    if (classed) {
+        if (IsPrivateUse(cp)) {
+            cls = EWidthClass::PrivateUse;
+        } else if (IsCyrillicAmbiguous(cp)) {
+            cls = EWidthClass::Cyrillic;
+        }
+    }
     if (classed && width == 1 && !mapped) {
-        const std::uint8_t w = cls == EWidthClass::PrivateUse
-                                   ? Policy_.PrivateUse
-                                   : Policy_.Ambiguous;
+        std::uint8_t w = Policy_.Ambiguous;
+        if (cls == EWidthClass::PrivateUse) w = Policy_.PrivateUse;
+        if (cls == EWidthClass::Cyrillic) w = Policy_.Cyrillic;
         if (w == 2) width = 2;
     }
 
-    if (IsVersionVolatileWidth(cp) && Path_.Volatile != UINT32_MAX) {
-        ++Path_.Volatile;
+    // Only reference glyphs and the classes with a verdict leave the path
+    // readable: any other glyph may be drawn in a width the mirror does not
+    // know (design.md §9).
+    if (mapped || !(cls == EWidthClass::PrivateUse ||
+                    cls == EWidthClass::Cyrillic || IsReferenceWidth(cp))) {
+        NoteForeign();
     }
 
     // Insert mode makes room for the glyph as it will be, after the policy.
@@ -652,6 +663,7 @@ void Grid::PutChar(char32_t cp, int width) noexcept {
     // the same cluster (counted once); on a later one (the pair came in two
     // pieces and the column was confirmed between them) it is a new one.
     if (glued) {
+        NoteForeign();
         if (ZwjPath_ == PathEpoch_) {
             MarkWidthDoubt(CursorRow_, CursorCol_, EWidthClass::Cluster);
         } else {

@@ -60,12 +60,10 @@ TEST_CASE("Review C4: a ZWJ sequence drawn as one glyph hides wide A") {
     CalClient t(40, 6);
     StartScripted(t);
     t.Agent("\r" + TECH + ZHE + ZHE);
-    REQUIRE(t.Frozen());
     REQUIRE(t.R().G->CursorCol() == 6);
-    t.Scripted(0, 2 + 4);
-    CHECK(t.Cal->Verdict(EWidthClass::Ambiguous) != EWidthVerdict::Narrow);
-    // No verdict and no new query on the same path.
+    // A cluster is no reference glyph: no query, no verdict.
     CHECK_FALSE(t.Frozen());
+    CHECK(t.Cal->Verdict(EWidthClass::Cyrillic) == EWidthVerdict::Unknown);
 }
 
 TEST_CASE("Review C4: a matched answer after an unknown ESC leaves the path") {
@@ -84,7 +82,7 @@ TEST_CASE("Review C4: a matched answer after an unknown ESC leaves the path") {
     CHECK(t.Cal->Matched() == 1);
     // The width reason is still due on the same path and asks again at once.
     if (t.Frozen()) t.Scripted(0, 1);
-    CHECK(t.Cal->Verdict(EWidthClass::Ambiguous) != EWidthVerdict::Narrow);
+    CHECK(t.Cal->Verdict(EWidthClass::Cyrillic) != EWidthVerdict::Narrow);
 }
 
 TEST_CASE("Review C4: REP after a resync alone gives no verdict (guarded)") {
@@ -95,10 +93,10 @@ TEST_CASE("Review C4: REP after a resync alone gives no verdict (guarded)") {
     CalClient t(40, 6);
     Start(t);
     t.Agent("\x1b[b" + ZHE);
-    CHECK(t.Cal->Verdict(EWidthClass::Ambiguous) == EWidthVerdict::Unknown);
+    CHECK(t.Cal->Verdict(EWidthClass::Cyrillic) == EWidthVerdict::Unknown);
     CHECK(t.R().G->CursorCol() == t.C.Real.G->CursorCol());
     t.Agent("\r" + ZHE + "> ");
-    CHECK(t.Cal->Verdict(EWidthClass::Ambiguous) == EWidthVerdict::Narrow);
+    CHECK(t.Cal->Verdict(EWidthClass::Cyrillic) == EWidthVerdict::Narrow);
 }
 
 TEST_CASE("Review C4: a Wide verdict keeps the row known where it is not") {
@@ -111,7 +109,7 @@ TEST_CASE("Review C4: a Wide verdict keeps the row known where it is not") {
     REQUIRE(t.Queries() == 1);
     t.Agent("abcde" + ZHE);
     REQUIRE(t.Queries() == 2);
-    CHECK(t.Cal->Verdict(EWidthClass::Ambiguous) == EWidthVerdict::Wide);
+    CHECK(t.Cal->Verdict(EWidthClass::Cyrillic) == EWidthVerdict::Wide);
     CHECK(t.R().G->CursorCol() == t.C.Real.G->CursorCol());
     REQUIRE(t.C.Ref.G->CellAt(1, 8).Codepoint == U'x');
     KnownAgree(t, 1);
@@ -137,14 +135,11 @@ TEST_CASE("Review C4: a column left of the expected one erases nothing known") {
         t.Agent("\r\nabcdefg\r");
         REQUIRE_FALSE(t.Frozen());
         t.Agent(TECH + "xyz");
-        REQUIRE(t.Frozen());
-        // kitty: the pair at 0-1, "xyz" at 2-4, cursor 5; "fg" of the old
-        // line are still at 5 and 6.
-        t.Scripted(1, 5);
+        // kitty: the pair at 0-1, "xyz" at 2-4, cursor 5. No query is asked:
+        // the cursor stays in doubt.
+        CHECK_FALSE(t.Frozen());
         const grid::Grid& g = *t.R().G;
-        CHECK(g.CursorCol() == 5);
-        CHECK((g.KnownFrom(1) > 5 || g.CellAt(1, 5).Codepoint == U'f'));
-        CHECK((g.KnownFrom(1) > 6 || g.CellAt(1, 6).Codepoint == U'g'));
+        CHECK(g.WidthDoubtBefore(1, g.CursorCol()));
     }
 }
 
@@ -173,23 +168,25 @@ TEST_CASE("Review C4: a soft hyphen the terminal draws gives no Wide") {
     CalClient t(40, 6);
     StartScripted(t);
     t.Agent("\r" + ZHE + SHY);
-    REQUIRE(t.Frozen());
     REQUIRE(t.R().G->CursorCol() == 1);
-    t.Scripted(0, 2);
-    CHECK(t.Cal->Verdict(EWidthClass::Ambiguous) != EWidthVerdict::Wide);
+    CHECK_FALSE(t.Frozen());
+    CHECK(t.Cal->Verdict(EWidthClass::Cyrillic) == EWidthVerdict::Unknown);
 }
 
-TEST_CASE("Review C4: a cluster in the prompt does not keep A from a verdict") {
-    // A prompt with a ZWJ sequence (drawn as the mirror does here), then a
-    // typed Ж on the same line: the matched answer about the prompt settles
-    // its path, the next is about Ж alone.
+TEST_CASE(
+    "Review C4: a cluster in the prompt keeps A from a verdict to the CR") {
+    // A prompt with a ZWJ sequence, then a typed Ж on the same line: no
+    // query and no verdict on this path. The next line is solvable.
     CalClient t(40, 6);
     t.SetTerminal(Terminal(2, 1, false));
     Start(t);
     t.Agent("\r" + TECH + "> ");
-    REQUIRE(t.Queries() == 2);
+    CHECK(t.Queries() == 1);
     t.Agent(ZHE);
-    CHECK(t.Queries() == 3);
-    CHECK(t.Cal->Verdict(EWidthClass::Ambiguous) == EWidthVerdict::Wide);
+    CHECK(t.Queries() == 1);
+    CHECK(t.Cal->Verdict(EWidthClass::Cyrillic) == EWidthVerdict::Unknown);
+    t.Agent("\r" + ZHE + "> ");
+    CHECK(t.Queries() == 2);
+    CHECK(t.Cal->Verdict(EWidthClass::Cyrillic) == EWidthVerdict::Wide);
     CHECK(t.R().G->CursorCol() == t.C.Real.G->CursorCol());
 }

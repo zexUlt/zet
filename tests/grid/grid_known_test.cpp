@@ -129,7 +129,7 @@ TEST_CASE("Resync forgets the saved cursor, REP, width marks and the path") {
     r.Feed(
         "\x1b[3;4H\x1b"
         "7");            // DECSC at (2,3)
-    r.Feed("\xD0\xB6");  // Cyrillic zhe: ambiguous width
+    r.Feed("\xCE\xB1");  // Greek alpha: ambiguous width
     REQUIRE(r.G->WidthDoubtBefore(2, 9));
     REQUIRE(r.G->PathGlyphs(EWidthClass::Ambiguous) == 1);
     r.G->Resync(1, 2, true);

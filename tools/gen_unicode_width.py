@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Generate Unicode 16.0.0 width tables for zet_grid.
 
-Reads EastAsianWidth.txt, DerivedCoreProperties.txt, DerivedGeneralCategory.txt,
-DerivedAge.txt and emoji-variation-sequences.txt from unicode.org
+Reads EastAsianWidth.txt, DerivedCoreProperties.txt, DerivedGeneralCategory.txt
+and emoji-variation-sequences.txt from unicode.org
 and writes src/grid/unicode_tables.cpp.
 
 Usage:
@@ -33,13 +33,6 @@ EAW_URL = BASE_URL + "EastAsianWidth.txt"
 DCP_URL = BASE_URL + "DerivedCoreProperties.txt"
 DC_URL  = BASE_URL + "extracted/DerivedGeneralCategory.txt"
 EVS_URL = BASE_URL + "emoji/emoji-variation-sequences.txt"
-AGE_URL = BASE_URL + "DerivedAge.txt"
-
-# Wide code points added after this Unicode version are "volatile": a terminal
-# on an older table draws them in one column. So are the unassigned code points
-# of the emoji blocks below: a terminal on a newer table may draw them wide.
-VOLATILE_AFTER_AGE = (9, 0)
-EMOJI_BLOCKS = [(0x1F000, 0x1FAFF)]
 
 # SHA-256 hashes pinned for Unicode 16.0.0 (computed from the canonical
 # unicode.org files; re-verify if UNICODE_VERSION is bumped).
@@ -52,8 +45,6 @@ HASHES: dict[str, str] = {
              "d65c191ddafe61b36c6765ec1353f293",
     EVS_URL: "71d93ec015011371a027ba2bc0a63155"
              "d381c6e0b94a586c1a88a49400cd6864",
-    AGE_URL: "60caa81b99a4dfb0bc5d38440d323073"
-             "e3f356f46f9ca7869da848cd0715408b",
 }
 
 OUTPUT = "src/grid/unicode_tables.cpp"
@@ -142,7 +133,6 @@ def main() -> None:
     dcp_lines = fetch(DCP_URL)
     dc_lines = fetch(DC_URL)
     evs_lines = fetch(EVS_URL)
-    age_lines = fetch(AGE_URL)
 
     # Wide: W or F (Fullwidth)
     wide = parse_ranges(eaw_lines, lambda f: f.split()[0] in ("W", "F"))
@@ -170,19 +160,6 @@ def main() -> None:
         if len(fields) == 2 and fields[1] == "FE0F":
             vs16_bases.append((int(fields[0], 16),) * 2)
     vs16_bases = merge(sorted(vs16_bases))
-
-    # Version-volatile: wide code points newer than Unicode 9.0, plus the
-    # unassigned (Cn) code points of the emoji blocks.
-    def newer_than_9(f: str) -> bool:
-        age = tuple(int(x) for x in f.split()[0].split("."))
-        return age > VOLATILE_AFTER_AGE
-    newer = parse_ranges(age_lines, newer_than_9)
-    wide_newer = subtract_ranges(wide, subtract_ranges(wide, newer))
-    unassigned = parse_ranges(
-        dc_lines, lambda f: f.split(";")[0].strip() == "Cn")
-    unassigned_emoji = subtract_ranges(
-        unassigned, subtract_ranges(unassigned, EMOJI_BLOCKS))
-    version_volatile = merge(sorted(wide_newer + unassigned_emoji))
 
     # Write output
     lines = [
@@ -218,13 +195,6 @@ def main() -> None:
         "// Source: emoji-variation-sequences.txt, Unicode 16.0.0.",
         *emit_table("EMOJI_VS16_BASE", vs16_bases),
         "",
-        "// Code points whose width depends on the terminal's Unicode version:",
-        "// wide ones newer than Unicode 9.0 (older tables draw them narrow) and",
-        "// unassigned ones in the emoji blocks (newer tables may draw them wide).",
-        "// Source: DerivedAge.txt, EastAsianWidth.txt, DerivedGeneralCategory.txt,",
-        f"// Unicode {UNICODE_VERSION}.",
-        *emit_table("VERSION_VOLATILE", version_volatile),
-        "",
         "// Binary search over a sorted range table.",
         "static bool InRanges(const Range* table, std::size_t n,",
         "                     char32_t cp) noexcept {",
@@ -247,12 +217,6 @@ def main() -> None:
         "bool HasEmojiVariation(char32_t cp) noexcept {",
         "    return InRanges(EMOJI_VS16_BASE,",
         "                    sizeof(EMOJI_VS16_BASE) / sizeof(*EMOJI_VS16_BASE), cp);",
-        "}",
-        "",
-        "bool IsVersionVolatileWidth(char32_t cp) noexcept {",
-        "    return InRanges(VERSION_VOLATILE,",
-        "                    sizeof(VERSION_VOLATILE) / sizeof(*VERSION_VOLATILE),",
-        "                    cp);",
         "}",
         "",
         "bool IsClusterJoiner(char32_t cp) noexcept {",
