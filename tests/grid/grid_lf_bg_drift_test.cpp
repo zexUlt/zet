@@ -77,3 +77,39 @@ TEST_CASE("lf bg drift: after a sync a coloured line feed changes nothing") {
         "E");
     CHECK(r.G->RowsTrusted());
 }
+
+TEST_CASE("lf bg drift: VT, FF, REP across the edge, a wide glyph wrap") {
+    for (const char* seq : {"\x0b", "\x0c"}) {
+        Rig r;
+        r.Feed("\x1b[100m");
+        r.Feed(seq);
+        CHECK_FALSE(r.G->RowsTrusted());
+    }
+    {
+        Rig r;  // pending wrap resolved by REP
+        r.Feed("\x1b[41m0123456789");
+        REQUIRE(r.G->RowsTrusted());
+        r.Feed("\x1b[2b");
+        CHECK_FALSE(r.G->RowsTrusted());
+    }
+    {
+        Rig r;  // wide glyph that does not fit in the last column
+        r.Feed("\x1b[41m012345678");
+        REQUIRE(r.G->RowsTrusted());
+        r.Feed("\xe3\x81\x82");
+        CHECK_FALSE(r.G->RowsTrusted());
+    }
+}
+
+TEST_CASE("lf bg drift: indexed 256 and RGB backgrounds count") {
+    for (const char* sgr :
+         {"\x1b[48;5;200m", "\x1b[48;2;1;2;3m", "\x1b[42m", "\x1b[105m"}) {
+        Rig r;
+        r.Feed(sgr);
+        r.Feed("\n");
+        CHECK_FALSE(r.G->RowsTrusted());
+    }
+    Rig r;  // SGR 49 returns to the default
+    r.Feed("\x1b[41m\x1b[49m\n");
+    CHECK(r.G->RowsTrusted());
+}
