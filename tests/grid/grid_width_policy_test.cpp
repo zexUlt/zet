@@ -84,7 +84,7 @@ struct Rig {
 };
 
 constexpr std::uint8_t A = WidthClassBit(EWidthClass::Ambiguous);
-constexpr std::uint8_t Cy = WidthClassBit(EWidthClass::Cyrillic);
+constexpr std::uint8_t CY = WidthClassBit(EWidthClass::Cyrillic);
 constexpr std::uint8_t P = WidthClassBit(EWidthClass::PrivateUse);
 constexpr std::uint8_t E = WidthClassBit(EWidthClass::Emoji);
 constexpr std::uint8_t C = WidthClassBit(EWidthClass::Cluster);
@@ -950,9 +950,9 @@ TEST_CASE(
     "Cyrillic of ambiguous width is class Cyrillic, the rest of A is not") {
     Rig r;
     r.Put({ZHE});
-    CHECK(r.Classes(0) == Cy);
+    CHECK(r.Classes(0) == CY);
     r.Put({ALPHA});
-    CHECK(r.Classes(0) == (Cy | A));
+    CHECK(r.Classes(0) == (CY | A));
     CHECK(r.G->PathGlyphs(EWidthClass::Cyrillic) == 1);
     CHECK(r.G->PathGlyphs(EWidthClass::Ambiguous) == 1);
 }
