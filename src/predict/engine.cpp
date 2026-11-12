@@ -271,7 +271,7 @@ void PredictionEngine::PredictChar(char32_t cp, std::uint64_t end,
     const Position at = BaseCursor(mirror);
     const grid::Grid& g = mirror.Screen;
     if (at.Row >= g.Rows() || at.Col + 1 >= g.Cols() ||
-        g.WidthDoubtBefore(at.Row, at.Col) ||
+        g.WidthDoubtBefore(at.Row, at.Col) || g.ColumnDoubt() ||
         !TailEmpty(mirror, at.Row, at.Col) || !HasRoomFor(at.Row, at.Col)) {
         // Last column, text to the right, or the list is full.
         BecomeTentative();
@@ -305,7 +305,7 @@ void PredictionEngine::PredictBackspace(std::uint64_t end, Timestamp now,
     // At or before the start of input the cell to the left is not ours.
     if (!InputStartCol_ || at.Col == 0 || at.Col <= *InputStartCol_ ||
         at.Row >= g.Rows() || at.Col >= g.Cols() ||
-        g.WidthDoubtBefore(at.Row, at.Col)) {
+        g.WidthDoubtBefore(at.Row, at.Col) || g.ColumnDoubt()) {
         BecomeTentative();
         return;
     }
