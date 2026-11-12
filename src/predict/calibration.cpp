@@ -445,7 +445,9 @@ void Calibration::ApplyVerdict(grid::Grid& g,
 }
 
 bool Calibration::ClustersOnlyOpen(const grid::Grid& g) const noexcept {
-    if (g.PathGlyphs(grid::EWidthClass::Cluster) == 0) {
+    // One cluster: two could err the opposite ways (a ZWJ pair glued, two
+    // columns fewer; two soft hyphens drawn, two more) and cancel out.
+    if (g.PathGlyphs(grid::EWidthClass::Cluster) != 1) {
         return false;
     }
     for (const grid::EWidthClass cls : VERDICT_CLASSES) {
@@ -461,9 +463,11 @@ bool Calibration::ClustersOnlyOpen(const grid::Grid& g) const noexcept {
 void Calibration::SolveWidth(grid::Grid& g, std::int64_t d) noexcept {
     // A cluster may be drawn narrower than the mirror draws it (a ZWJ
     // sequence as one glyph) or wider (a soft hyphen): it can hide or fake
-    // any difference. A cursor left of the mirror's is no glyph's doing
+    // any difference, and so can an emoji sized by another Unicode version
+    // than the mirror's. A cursor left of the mirror's is no glyph's doing
     // either. Neither says anything of a class, nor counts against it.
-    if (g.PathGlyphs(grid::EWidthClass::Cluster) != 0 || d < 0) {
+    if (g.PathGlyphs(grid::EWidthClass::Cluster) != 0 ||
+        g.PathVolatile() != 0 || d < 0) {
         return;
     }
     // Glyphs of the classes still open, and the glyphs whose width stays open

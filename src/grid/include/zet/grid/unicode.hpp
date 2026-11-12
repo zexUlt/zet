@@ -33,6 +33,12 @@ namespace zet::grid {
 /// U+2601 and U+2764 that some terminals then draw two columns wide.
 [[nodiscard]] bool HasEmojiVariation(char32_t cp) noexcept;
 
+/// A codepoint whose width depends on the Unicode version of the terminal's
+/// table: a wide one added after Unicode 9.0 (an older table draws it in one
+/// column) or an unassigned one in an emoji block (a newer table may draw it in
+/// two). Table generated from DerivedAge.txt of Unicode 16.0.0.
+[[nodiscard]] bool IsVersionVolatileWidth(char32_t cp) noexcept;
+
 /// A codepoint that glues to the glyph before it into a cluster some terminals
 /// draw in a different width than a per-codepoint wcwidth gives: ZWJ, the
 /// variation selectors VS15 and VS16 and the emoji skin tone modifiers.

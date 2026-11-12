@@ -306,6 +306,12 @@ public:
     [[nodiscard]] std::uint32_t PathGlyphs(EWidthClass cls) const noexcept {
         return Path_.Glyphs[static_cast<std::size_t>(cls)];
     }
+    /// Code points on the path whose width depends on the terminal's Unicode
+    /// version (wide ones newer than Unicode 9, unassigned ones in the emoji
+    /// blocks): they belong to no class and get no mark.
+    [[nodiscard]] std::uint32_t PathVolatile() const noexcept {
+        return Path_.Volatile;
+    }
     /// Whether the path can no longer tell where the terminal's cursor is from
     /// its glyphs alone: the line wrapped on it, or the cursor moved left, by
     /// a tab, against an edge, by DECRC or across a screen switch or resize,
@@ -727,9 +733,15 @@ private:
     std::uint16_t LastPrintedRow_{0};
     std::uint16_t LastPrintedCol_{0};
     bool LastPrintedMarked_{false};
+    /// A ZWJ came last: a terminal may glue the next glyph to the cluster
+    /// before it and draw it in no column of its own.
+    bool AfterZwj_{false};
+    std::uint32_t ZwjPath_{0};  ///< PathEpoch_ when that ZWJ was noted
 
     struct WidthPath {
         std::uint32_t Glyphs[WIDTH_CLASS_COUNT]{};
+        /// Code points whose width depends on the terminal's Unicode version.
+        std::uint32_t Volatile{0};
         bool Broken{false};
         /// A BS, CUB or CBT moved the cursor left with a doubtful glyph left
         /// of where it was: the terminal's column is not the mirror's even

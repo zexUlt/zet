@@ -227,7 +227,9 @@ bool Grid::PathBroken() const noexcept {
     // exact. Needs no state of its own: the column only grows on a path,
     // everything that moves it left or sets it breaks or restarts the path.
     std::uint64_t doubtful =
-        Path_.Glyphs[static_cast<std::size_t>(EWidthClass::Cluster)];
+        static_cast<std::uint64_t>(
+            Path_.Glyphs[static_cast<std::size_t>(EWidthClass::Cluster)]) +
+        Path_.Volatile;
     for (std::size_t i = 0; i < WIDTH_CLASS_COUNT; ++i) {
         const auto cls = static_cast<EWidthClass>(i);
         if (cls != EWidthClass::Cluster &&
@@ -422,6 +424,13 @@ static constexpr char32_t DEC_GFX[31] = {
     0x2502, 0x2264, 0x2265, 0x03C0, 0x2260, 0x00A3, 0x00B7,
 };
 
+// A code point whose width depends on the terminal's Unicode version: a wide
+// one newer than Unicode 9 (an older table draws it in one column), or an
+// unassigned one in an emoji block (a newer table may draw it in two), see
+// IsVersionVolatileWidth and design.md §9, §18. No mark (the rows would lose
+// their predictions), but the path counts it: no width can be read from a path
+// that holds one, its difference could cancel a class's or fake one.
+
 bool Grid::WidenForVs16(std::uint16_t prev) noexcept {
     // The glyph is in column `prev`, the cursor right after it, not in the
     // last column: the wide cell fits. (In the last column terminals differ
@@ -477,14 +486,19 @@ void Grid::PutChar(char32_t cp, int width) noexcept {
             (PendingWrap_ ? LastPrintedCol_ == CursorCol_
                           : LastPrintedCol_ + LastPrintedWidth_ == CursorCol_);
         LastPrintedMarked_ = true;
+        if (cp == 0x200D) {
+            AfterZwj_ = true;
+            ZwjPath_ = PathEpoch_;
+        }
         // SOFT HYPHEN: zero width here, one cell on xterm (mk_wcwidth) and
         // VTE. Its width is open like a cluster's, where the terminal would
-        // draw it.
+        // draw it: in the cursor's column, so the mark goes on the cell before
+        // (as a joiner's does) and the cursor's column is in doubt.
         if (cp == 0x00AD) {
             NoteClassGlyph(CursorRow_,
-                           CursorCol_ < Cols_
+                           (PendingWrap_ || CursorCol_ == 0)
                                ? CursorCol_
-                               : static_cast<std::uint16_t>(Cols_ - 1),
+                               : static_cast<std::uint16_t>(CursorCol_ - 1),
                            EWidthClass::Cluster);
             return;
         }
@@ -527,6 +541,9 @@ void Grid::PutChar(char32_t cp, int width) noexcept {
         return;
     }
 
+    const bool glued = AfterZwj_;
+    AfterZwj_ = false;
+
     if (PendingWrap_) BreakPath();
     if (PendingWrap_ && ModeSet(EMode::Awm)) {
         WrapToNextRow();
@@ -546,6 +563,10 @@ void Grid::PutChar(char32_t cp, int width) noexcept {
                                    ? Policy_.PrivateUse
                                    : Policy_.Ambiguous;
         if (w == 2) width = 2;
+    }
+
+    if (IsVersionVolatileWidth(cp) && Path_.Volatile != UINT32_MAX) {
+        ++Path_.Volatile;
     }
 
     // Insert mode makes room for the glyph as it will be, after the policy.
@@ -626,6 +647,16 @@ void Grid::PutChar(char32_t cp, int width) noexcept {
         NoteClassGlyph(CursorRow_, CursorCol_, cls);
     } else if (IsClusterJoiner(cp)) {
         NoteClassGlyph(CursorRow_, CursorCol_, EWidthClass::Cluster);
+    }
+    // A glyph after a ZWJ may take no column there. On the ZWJ's path it is
+    // the same cluster (counted once); on a later one (the pair came in two
+    // pieces and the column was confirmed between them) it is a new one.
+    if (glued) {
+        if (ZwjPath_ == PathEpoch_) {
+            MarkWidthDoubt(CursorRow_, CursorCol_, EWidthClass::Cluster);
+        } else {
+            NoteClassGlyph(CursorRow_, CursorCol_, EWidthClass::Cluster);
+        }
     }
     LastPrintedChar_ = cp;
     LastPrintedWidth_ = width;
@@ -1093,6 +1124,9 @@ void Grid::ScrollUp(std::uint16_t n) noexcept {
 bool Grid::RepeatChar(std::uint16_t n) noexcept {
     if (LastPrintedChar_ == 0) return false;
     if (n == 0) return true;
+    // A zero-width code point came after the glyph: the terminal may repeat
+    // that (xterm repeats a soft hyphen it drew), or the whole cluster.
+    if (LastPrintedMarked_) BreakPath();
     for (std::uint16_t i = 0; i < n; ++i)
         PutChar(LastPrintedChar_, LastPrintedBaseWidth_);
     return true;
@@ -1643,6 +1677,7 @@ bool Grid::Resync(std::uint16_t row, std::uint16_t col,
     LastPrintedRow_ = 0;
     LastPrintedCol_ = 0;
     LastPrintedMarked_ = false;
+    AfterZwj_ = false;
     // The rows are the terminal's from here on: no drift to watch for.
     Sync_ = RowSync{.Abs = true, .Eq = true, .Blank = false, .Drift = false};
     SyncSaved_ = false;
