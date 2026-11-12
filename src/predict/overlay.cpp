@@ -251,7 +251,7 @@ ByteSpan Overlay::BuildUpdate(const PredictionEngine& engine,
             // one would break. A head the grid has broken (a narrow cell that
             // holds a wide codepoint, its tail overwritten) is one too: put
             // back, the terminal would print it two columns wide.
-            if (g.WidthDoubtBefore(p.Row, p.Col) || g.ColumnDoubt()) continue;
+            if (g.WidthDoubtBefore(p.Row, p.Col)) continue;
             if (cell.Width != 1 ||
                 (cell.Codepoint != 0 && grid::Wcwidth(cell.Codepoint) == 2) ||
                 (p.Col > 0 &&

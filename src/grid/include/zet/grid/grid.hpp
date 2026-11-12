@@ -122,6 +122,9 @@ struct SavedCursor {
     std::uint8_t CharsetG0{0};
     std::uint8_t CharsetG1{0};
     std::uint8_t CharsetActive{0};
+    /// WidthPath::LeftOverDoubt at the save: the terminal restores its own
+    /// column, which is off from the mirror's as much as it was then.
+    bool LeftOverDoubt{false};
 };
 
 /// Sans-I/O terminal grid (design.md §9).
@@ -582,8 +585,13 @@ private:
     void RestartPath() noexcept { Path_ = WidthPath{}; }
     void BreakPath() noexcept { Path_.Broken = true; }
     /// The cursor is about to move left from the current column.
+    /// Call before PendingWrap_ is cleared: with a wrap pending the terminal's
+    /// cursor stands past the last cell, so a glyph in it is left of the
+    /// cursor.
     void NoteLeftMove() noexcept {
-        if (WidthDoubtBefore(CursorRow_, CursorCol_))
+        if (WidthDoubtBefore(
+                CursorRow_, static_cast<std::uint16_t>(CursorCol_ +
+                                                       (PendingWrap_ ? 1 : 0))))
             Path_.LeftOverDoubt = true;
     }
     /// A VS16 right after a narrow glyph with an emoji variation sequence:

@@ -661,9 +661,9 @@ void Grid::ReverseIndex() noexcept {
 }
 
 void Grid::Backspace() noexcept {
-    PendingWrap_ = false;
     BreakPath();
     NoteLeftMove();
+    PendingWrap_ = false;
     if (CursorCol_ > 0) --CursorCol_;
 }
 
@@ -681,9 +681,9 @@ void Grid::HorizontalTab() noexcept {
 }
 
 void Grid::HorizontalTabBack(std::uint16_t n) noexcept {
-    PendingWrap_ = false;
     BreakPath();
     NoteLeftMove();
+    PendingWrap_ = false;
     if (n == 0) n = 1;
     for (std::uint16_t step = 0; step < n; ++step) {
         if (CursorCol_ == 0) break;
@@ -758,11 +758,11 @@ void Grid::MoveCursorRight(std::uint16_t n) noexcept {
 }
 
 void Grid::MoveCursorLeft(std::uint16_t n) noexcept {
-    PendingWrap_ = false;
     if (n > 0) {
         BreakPath();
         NoteLeftMove();
     }
+    PendingWrap_ = false;
     CursorCol_ =
         (n <= CursorCol_) ? static_cast<std::uint16_t>(CursorCol_ - n) : 0;
 }
@@ -842,6 +842,7 @@ void Grid::SaveCursor() noexcept {
     sc.CharsetG0 = CharsetG0_;
     sc.CharsetG1 = CharsetG1_;
     sc.CharsetActive = CharsetActive_;
+    sc.LeftOverDoubt = Path_.LeftOverDoubt;
 }
 
 void Grid::RestoreCursor() noexcept {
@@ -850,6 +851,8 @@ void Grid::RestoreCursor() noexcept {
     NoteDrift();
     BreakPath();  // the terminal's saved column is its own
     const SavedCursor& sc = IsAltScreen() ? SavedCursorAlt_ : SavedCursorMain_;
+    // ... and it is as far from the mirror's as it was at the save.
+    Path_.LeftOverDoubt = sc.LeftOverDoubt;
     CursorRow_ = ClampRow(sc.Row);
     CursorCol_ = ClampCol(sc.Col);
     // xterm CursorRestoreFlags restores DECOM from the save, then CursorSet

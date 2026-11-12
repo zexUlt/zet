@@ -41,6 +41,7 @@ add_executable(zet_tests
     predict/predict_deadline_test.cpp
     predict/predict_column_trust_test.cpp
     predict/doubt_wrap_leftmove_test.cpp
+    predict/doubt_leftmove_extra_test.cpp
     predict/grid_counters_test.cpp
     predict/predict_epoch_test.cpp
     predict/predict_input_test.cpp
