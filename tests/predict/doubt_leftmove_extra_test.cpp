@@ -131,7 +131,7 @@ TEST_CASE("a column in doubt always sits on a broken path (random walk)") {
         Mirror m(6 + round % 5, 4);
         for (int i = 0; i < 80; ++i) {
             x = x * 1664525U + 1013904223U;
-            m.Feed(PIECES[(x >> 16) % N]);
+            m.Feed(PIECES[(x >> 16) % pieceCount]);
             if (m.T.G->ColumnDoubt()) CHECK(m.T.G->PathBroken());
         }
     }
