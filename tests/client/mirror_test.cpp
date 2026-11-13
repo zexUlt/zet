@@ -163,7 +163,7 @@ TEST_CASE("after a snapshot the mirror equals the agent's grid") {
     mirror->Feed(
         Bytes("junk\x1b[31m\x1b[5;5Hjunk\x1b[?1049h\x1b"
               "7\x1b["));
-    REQUIRE(mirror->ResetFromSnapshot(owned->Bytes()));
+    REQUIRE(mirror->ResetFromSnapshot(owned->Bytes(), {}));
 
     CHECK(mirror->Parser().State() == grid::EParserState::Ground);
     CHECK(EncodeScreen(mirror->Screen()) == EncodeScreen(*agent.Grid));
@@ -193,7 +193,7 @@ TEST_CASE("a snapshot leaves nothing of what the mirror held before") {
               "7"
               "\x1b[?1049l\x1b[3g\x1b[1;6H\x1bH\x1b[5 q\x1b[?1000h"
               "\x1b[?7l\x1b[4h\x1b(0\x1b[?1004h"));
-    REQUIRE(mirror->ResetFromSnapshot(owned->Bytes()));
+    REQUIRE(mirror->ResetFromSnapshot(owned->Bytes(), {}));
     CHECK(Encode(mirror->Screen()) == Encode(*fresh.Grid));
 }
 
@@ -204,7 +204,7 @@ TEST_CASE("a snapshot keeps the size the mirror had") {
     REQUIRE(snap.has_value());
     const std::unique_ptr<grid::Snapshot> owned(*snap);
     auto mirror = NewMirror(30, 7);
-    REQUIRE(mirror->ResetFromSnapshot(owned->Bytes()));
+    REQUIRE(mirror->ResetFromSnapshot(owned->Bytes(), {}));
     CHECK(mirror->Screen().Cols() == 30);
     CHECK(mirror->Screen().Rows() == 7);
     CHECK(mirror->Screen().ScrollbackLimit() == 0);
@@ -217,7 +217,7 @@ TEST_CASE("bytes after a snapshot land in the new grid") {
     REQUIRE(snap.has_value());
     const std::unique_ptr<grid::Snapshot> owned(*snap);
     auto mirror = NewMirror(40, 10);
-    REQUIRE(mirror->ResetFromSnapshot(owned->Bytes()));
+    REQUIRE(mirror->ResetFromSnapshot(owned->Bytes(), {}));
     agent.Feed("after\x1b[1;31m!\r\nmore");
     mirror->Feed(Bytes("after\x1b[1;31m!\r\nmore"));
     CHECK(EncodeScreen(mirror->Screen()) == EncodeScreen(*agent.Grid));
@@ -263,7 +263,7 @@ TEST_CASE("a snapshot after a resize keeps the new size") {
     auto snap = grid::Snapshot::Create(*agent.Grid);
     REQUIRE(snap.has_value());
     const std::unique_ptr<grid::Snapshot> owned(*snap);
-    REQUIRE(mirror->ResetFromSnapshot(owned->Bytes()));
+    REQUIRE(mirror->ResetFromSnapshot(owned->Bytes(), {}));
     CHECK(mirror->Screen().Cols() == 25);
     CHECK(mirror->Screen().Rows() == 6);
     CHECK(EncodeScreen(mirror->Screen()) == EncodeScreen(*agent.Grid));
@@ -276,7 +276,7 @@ TEST_CASE(
     auto mirror = NewMirror(40, 10);
     mirror->Feed(Bytes("\x1bP1;2|swallowed by a device control string"));
     REQUIRE(mirror->Parser().State() != grid::EParserState::Ground);
-    REQUIRE(mirror->ResetFromSnapshot(Bytes("visible")));
+    REQUIRE(mirror->ResetFromSnapshot(Bytes("visible"), {}));
     CHECK(mirror->Parser().State() == grid::EParserState::Ground);
 
     AgentGrid expected{40, 10, 0};

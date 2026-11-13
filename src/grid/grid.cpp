@@ -196,6 +196,7 @@ void Grid::MarkWidthDoubt(std::uint16_t row, std::uint16_t col,
     Line& line = ActiveLine(row);
     const auto mark = static_cast<std::uint16_t>(col + 1);
     std::uint16_t& d = line.ClassDoubt[static_cast<std::size_t>(cls)];
+    if (line.WidthDoubt == 0) line.MarkPath = PathEpoch_;
     if (d == 0 || mark < d) d = mark;
     if (line.WidthDoubt == 0 || mark < line.WidthDoubt) line.WidthDoubt = mark;
 }
@@ -239,7 +240,9 @@ bool Grid::PathBroken() const noexcept {
 void Grid::SetWidthPolicy(const WidthPolicy& policy) noexcept {
     Policy_ = policy;
     Policy_.Ambiguous = policy.Ambiguous == 2 ? 2 : 1;
-    Policy_.PrivateUse = policy.PrivateUse == 2 ? 2 : 1;
+    Policy_.Cyrillic = policy.Cyrillic == 2 ? 2 : 1;
+    Policy_.PrivateUseBmp = policy.PrivateUseBmp == 2 ? 2 : 1;
+    Policy_.PrivateUsePlanes = policy.PrivateUsePlanes == 2 ? 2 : 1;
 }
 
 void Grid::ClearWidthClass(EWidthClass cls) noexcept {
@@ -250,6 +253,18 @@ void Grid::ClearWidthClass(EWidthClass cls) noexcept {
             RecomputeWidthDoubt(lines[r]);
         }
     }
+}
+
+void Grid::ClearWidthClass(std::uint16_t row, EWidthClass cls) noexcept {
+    if (row >= Rows_) return;
+    Line& line = ActiveLine(row);
+    line.ClassDoubt[static_cast<std::size_t>(cls)] = 0;
+    RecomputeWidthDoubt(line);
+}
+
+void Grid::SetKnownFrom(std::uint16_t row, std::uint16_t col) noexcept {
+    if (row >= Rows_) return;
+    ActiveLine(row).KnownFrom = col < Cols_ ? col : Cols_;
 }
 
 void Grid::ForgetWidthClass(EWidthClass cls) noexcept {
@@ -391,6 +406,7 @@ void Grid::ScrollRegionDown(std::uint16_t n) noexcept {
         std::copy(std::begin(src.ClassDoubt), std::end(src.ClassDoubt),
                   std::begin(dst.ClassDoubt));
         dst.KnownFrom = src.KnownFrom;
+        dst.MarkPath = src.MarkPath;
     }
     for (std::uint16_t r = ScrollTop_; r < ScrollTop_ + n; ++r)
         ClearLine(ActiveLine(r));
@@ -463,6 +479,31 @@ void Grid::PutChar(char32_t cp, int width) noexcept {
             (PendingWrap_ ? LastPrintedCol_ == CursorCol_
                           : LastPrintedCol_ + LastPrintedWidth_ == CursorCol_);
         LastPrintedMarked_ = true;
+        // A zero-width code point: terminals draw some of them in a cell.
+        NoteForeign();
+        if (cp == 0x200D) {
+            AfterZwj_ = true;
+            ZwjPath_ = PathEpoch_;
+        }
+        // SOFT HYPHEN: zero width here, one cell on xterm (mk_wcwidth) and
+        // VTE. Its width is open like a cluster's, where the terminal would
+        // draw it: in the cursor's column, so the mark goes on the cell before
+        // (as a joiner's does) and the cursor's column is in doubt.
+        if (cp == 0x00AD) {
+            // In the first column, or with a wrap pending, no cell before
+            // the cursor's own holds the hyphen: the column itself is in
+            // doubt.
+            if (PendingWrap_ || CursorCol_ == 0) {
+                BreakPath();
+                Path_.LeftOverDoubt = true;
+            }
+            NoteClassGlyph(CursorRow_,
+                           (PendingWrap_ || CursorCol_ == 0)
+                               ? CursorCol_
+                               : static_cast<std::uint16_t>(CursorCol_ - 1),
+                           EWidthClass::Cluster);
+            return;
+        }
         if (IsClusterJoiner(cp)) {
             const std::uint16_t prev =
                 (PendingWrap_ || CursorCol_ == 0)
@@ -502,6 +543,9 @@ void Grid::PutChar(char32_t cp, int width) noexcept {
         return;
     }
 
+    const bool glued = AfterZwj_;
+    AfterZwj_ = false;
+
     if (PendingWrap_) BreakPath();
     if (PendingWrap_ && ModeSet(EMode::Awm)) {
         WrapToNextRow();
@@ -515,12 +559,30 @@ void Grid::PutChar(char32_t cp, int width) noexcept {
     int baseWidth = width;
     EWidthClass cls = EWidthClass::Ambiguous;
     const bool classed = IsAmbiguousWidth(cp);
-    if (classed) cls = IsPrivateUse(cp) ? EWidthClass::PrivateUse : cls;
+    if (classed) {
+        if (IsPrivateUseBmp(cp)) {
+            cls = EWidthClass::PrivateUseBmp;
+        } else if (IsPrivateUsePlanes(cp)) {
+            cls = EWidthClass::PrivateUsePlanes;
+        } else if (IsCyrillicAmbiguous(cp)) {
+            cls = EWidthClass::Cyrillic;
+        }
+    }
     if (classed && width == 1 && !mapped) {
-        const std::uint8_t w = cls == EWidthClass::PrivateUse
-                                   ? Policy_.PrivateUse
-                                   : Policy_.Ambiguous;
+        std::uint8_t w = Policy_.Ambiguous;
+        if (cls == EWidthClass::PrivateUseBmp) w = Policy_.PrivateUseBmp;
+        if (cls == EWidthClass::PrivateUsePlanes) w = Policy_.PrivateUsePlanes;
+        if (cls == EWidthClass::Cyrillic) w = Policy_.Cyrillic;
         if (w == 2) width = 2;
+    }
+
+    // Only reference glyphs and the classes with a verdict leave the path
+    // readable: any other glyph may be drawn in a width the mirror does not
+    // know (design.md §9).
+    if (mapped || !(cls == EWidthClass::PrivateUseBmp ||
+                    cls == EWidthClass::PrivateUsePlanes ||
+                    cls == EWidthClass::Cyrillic || IsReferenceWidth(cp))) {
+        NoteForeign();
     }
 
     // Insert mode makes room for the glyph as it will be, after the policy.
@@ -601,6 +663,17 @@ void Grid::PutChar(char32_t cp, int width) noexcept {
         NoteClassGlyph(CursorRow_, CursorCol_, cls);
     } else if (IsClusterJoiner(cp)) {
         NoteClassGlyph(CursorRow_, CursorCol_, EWidthClass::Cluster);
+    }
+    // A glyph after a ZWJ may take no column there. On the ZWJ's path it is
+    // the same cluster (counted once); on a later one (the pair came in two
+    // pieces and the column was confirmed between them) it is a new one.
+    if (glued) {
+        NoteForeign();
+        if (ZwjPath_ == PathEpoch_) {
+            MarkWidthDoubt(CursorRow_, CursorCol_, EWidthClass::Cluster);
+        } else {
+            NoteClassGlyph(CursorRow_, CursorCol_, EWidthClass::Cluster);
+        }
     }
     LastPrintedChar_ = cp;
     LastPrintedWidth_ = width;
@@ -1068,6 +1141,9 @@ void Grid::ScrollUp(std::uint16_t n) noexcept {
 bool Grid::RepeatChar(std::uint16_t n) noexcept {
     if (LastPrintedChar_ == 0) return false;
     if (n == 0) return true;
+    // A zero-width code point came after the glyph: the terminal may repeat
+    // that (xterm repeats a soft hyphen it drew), or the whole cluster.
+    if (LastPrintedMarked_) BreakPath();
     for (std::uint16_t i = 0; i < n; ++i)
         PutChar(LastPrintedChar_, LastPrintedBaseWidth_);
     return true;
@@ -1122,6 +1198,19 @@ void Grid::SetMode(std::uint16_t param, bool value) noexcept {
         case 7:
             apply(EMode::Awm);
             break;
+        case 3:
+        case 45:
+        case 69: {
+            const auto bit = static_cast<std::uint8_t>(
+                param == 3    ? EUnmodelledMode::ColumnMode
+                : param == 45 ? EUnmodelledMode::ReverseWrap
+                              : EUnmodelledMode::LeftRightMargins);
+            if (value)
+                UnmodelledModes_ |= bit;
+            else
+                UnmodelledModes_ &= static_cast<std::uint8_t>(~bit);
+            break;
+        }
         case 20:
             apply(EMode::Lnm);
             break;
@@ -1500,6 +1589,7 @@ void Grid::Reset(bool hard) noexcept {
         PendingWrap_ = false;
         if (IsAltScreen()) ++AltExitCount_;
         Modes_ = ModeFlag(EMode::Awm) | ModeFlag(EMode::Dectcem);
+        UnmodelledModes_ = 0;
         for (std::uint16_t r = 0; r < Rows_; ++r) {
             ClearLine(MainLines_[r]);
             ClearLine(AltLines_[r]);
@@ -1521,6 +1611,7 @@ void Grid::Reset(bool hard) noexcept {
         const bool wasAlt = ModeSet(EMode::AltScreen);
         Modes_ = ModeFlag(EMode::Awm) | ModeFlag(EMode::Dectcem);
         if (wasAlt) Modes_ |= ModeFlag(EMode::AltScreen);
+        UnmodelledModes_ = 0;
         // Cursor position and PendingWrap are preserved by DECSTR.
     }
 }
@@ -1618,6 +1709,7 @@ bool Grid::Resync(std::uint16_t row, std::uint16_t col,
     LastPrintedRow_ = 0;
     LastPrintedCol_ = 0;
     LastPrintedMarked_ = false;
+    AfterZwj_ = false;
     // The rows are the terminal's from here on: no drift to watch for.
     Sync_ = RowSync{.Abs = true, .Eq = true, .Blank = false, .Drift = false};
     SyncSaved_ = false;
@@ -1724,6 +1816,7 @@ GridResult<void> Grid::Resize(std::uint16_t newCols,
     const std::uint16_t oldCols = Cols_;
     const auto copyMeta = [&](Line& dst, const Line& src) noexcept {
         dst.WidthDoubt = src.WidthDoubt;
+        dst.MarkPath = src.MarkPath;
         std::copy(std::begin(src.ClassDoubt), std::end(src.ClassDoubt),
                   std::begin(dst.ClassDoubt));
         dst.KnownFrom = src.KnownFrom >= oldCols

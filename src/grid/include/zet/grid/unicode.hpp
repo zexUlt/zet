@@ -21,17 +21,50 @@ namespace zet::grid {
 /// Cyrillic, box drawing, Greek and private use.
 [[nodiscard]] bool IsAmbiguousWidth(char32_t cp) noexcept;
 
-/// Private use: U+E000-F8FF and planes 15-16. Ambiguous in the width table;
-/// terminals draw powerline and Nerd Fonts glyphs here in one or two columns.
-[[nodiscard]] constexpr bool IsPrivateUse(char32_t cp) noexcept {
-    return (cp >= 0xE000 && cp <= 0xF8FF) || (cp >= 0xF0000 && cp <= 0xFFFFD) ||
+/// Private use in the BMP: U+E000-F8FF. Ambiguous in the width table;
+/// terminals draw powerline glyphs and the older Nerd Fonts here in one or two
+/// columns.
+[[nodiscard]] constexpr bool IsPrivateUseBmp(char32_t cp) noexcept {
+    return cp >= 0xE000 && cp <= 0xF8FF;
+}
+
+/// Private use in the supplementary planes 15 and 16: U+F0000-FFFFD and
+/// U+100000-10FFFD (Nerd Fonts v3 keeps its Material Design icons in plane 15).
+/// A terminal's width table can treat it apart from the BMP range.
+[[nodiscard]] constexpr bool IsPrivateUsePlanes(char32_t cp) noexcept {
+    return (cp >= 0xF0000 && cp <= 0xFFFFD) ||
            (cp >= 0x100000 && cp <= 0x10FFFD);
+}
+
+/// Private use anywhere: the two ranges above.
+[[nodiscard]] constexpr bool IsPrivateUse(char32_t cp) noexcept {
+    return IsPrivateUseBmp(cp) || IsPrivateUsePlanes(cp);
 }
 
 /// A codepoint with an emoji variation sequence (emoji-variation-sequences.txt:
 /// base + VS16 is drawn as an emoji), among them text glyphs of width 1 such as
 /// U+2601 and U+2764 that some terminals then draw two columns wide.
 [[nodiscard]] bool HasEmojiVariation(char32_t cp) noexcept;
+
+/// Cyrillic of East Asian ambiguous width: U+0401, U+0410-044F, U+0451. The
+/// one ambiguous class the width solver gives a verdict besides private use.
+[[nodiscard]] inline bool IsCyrillicAmbiguous(char32_t cp) noexcept {
+    return cp >= 0x0400 && cp <= 0x052F && IsAmbiguousWidth(cp);
+}
+
+/// A reference glyph: one the width solver trusts to be one cell wide on every
+/// terminal. Printable ASCII, and what the mirror draws in one cell, is not
+/// East Asian ambiguous, wide, combining or a format character, and lies in
+/// the Latin blocks (Latin-1 Supplement without the no-break space, Latin
+/// Extended-A and -B, Latin Extended Additional) or the Cyrillic blocks
+/// (U+0400-052F). Derived from the width tables: nothing else is new.
+[[nodiscard]] inline bool IsReferenceWidth(char32_t cp) noexcept {
+    if (cp >= 0x20 && cp <= 0x7E) return true;
+    const bool block = (cp >= 0x00A1 && cp <= 0x024F) ||
+                       (cp >= 0x0400 && cp <= 0x052F) ||
+                       (cp >= 0x1E00 && cp <= 0x1EFF);
+    return block && !IsAmbiguousWidth(cp) && Wcwidth(cp) == 1;
+}
 
 /// A codepoint that glues to the glyph before it into a cluster some terminals
 /// draw in a different width than a per-codepoint wcwidth gives: ZWJ, the

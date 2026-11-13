@@ -50,31 +50,53 @@ enum class EMode : std::uint32_t {
     return static_cast<std::uint32_t>(m);
 }
 
-/// A class of glyphs whose width terminals disagree on (design.md §9, round C).
-/// The first three get a verdict per session; Cluster (ZWJ, skin tone, VS15,
-/// VS16 outside the emoji case, and wrap doubts) does not.
-enum class EWidthClass : std::uint8_t {
-    Ambiguous = 0,   ///< East Asian ambiguous, except private use
-    PrivateUse = 1,  ///< U+E000-F8FF, planes 15-16
-    Emoji = 2,       ///< a narrow text glyph followed by VS16
-    Cluster = 3,     ///< clusters without a verdict
+/// Modes that move the cursor or wrap the line in ways the grid does not model
+/// (design.md §9, round C, "Режимы, которых зеркало не знает"). The grid only
+/// remembers that one is set: nothing is simulated, so while any is, the
+/// mirror's column is a guess. Kept apart from Grid::Modes_: snapshots do not
+/// carry them. RIS and DECSTR clear them.
+enum class EUnmodelledMode : std::uint8_t {
+    LeftRightMargins = 1U << 0,  ///< DECLRMM ?69: CR goes to the left margin
+    ReverseWrap = 1U << 1,       ///< ?45: BS and CUB in column 0 go up a row
+    ColumnMode = 1U << 2,        ///< DECCOLM ?3: 80/132 columns, clears, homes
 };
-inline constexpr std::size_t WIDTH_CLASS_COUNT = 4;
+
+/// A class of glyphs whose width terminals disagree on (design.md §9, round C).
+/// Only Cyrillic, PrivateUseBmp and PrivateUsePlanes get a verdict per session
+/// (design.md §9); the others only mark rows as doubtful: Ambiguous (the rest
+/// of East Asian ambiguous), Emoji (a narrow text glyph followed by VS16) and
+/// Cluster (ZWJ, skin tone, VS15, VS16 outside the emoji case, SHY and wrap
+/// doubts).
+enum class EWidthClass : std::uint8_t {
+    Ambiguous = 0,      ///< East Asian ambiguous, except private use, Cyrillic
+    PrivateUseBmp = 1,  ///< U+E000-F8FF
+    Emoji = 2,          ///< a narrow text glyph followed by VS16
+    Cluster = 3,        ///< clusters without a verdict
+    Cyrillic =
+        4,  ///< Cyrillic of East Asian ambiguous width (IsCyrillicAmbiguous)
+    PrivateUsePlanes = 5,  ///< U+F0000-FFFFD, U+100000-10FFFD (planes 15-16)
+};
+inline constexpr std::size_t WIDTH_CLASS_COUNT = 6;
 
 /// Bit of a class in the masks the width doubt API takes and returns.
 [[nodiscard]] constexpr std::uint8_t WidthClassBit(EWidthClass c) noexcept {
     return static_cast<std::uint8_t>(1U << static_cast<unsigned>(c));
 }
-inline constexpr std::uint8_t WIDTH_CLASSES_ALL = 0x0F;
+inline constexpr std::uint8_t WIDTH_CLASSES_ALL = 0x3F;
 
 /// How the grid sizes the glyphs of the classes terminals disagree on. The
 /// default is the table as it always was: the agent's grid and the snapshot
 /// format never see anything else. A client sets it from its verdicts.
 struct WidthPolicy {
-    /// Columns of an East Asian ambiguous glyph (not private use): 1 or 2.
+    /// Columns of an East Asian ambiguous glyph that is neither private use nor
+    /// Cyrillic: 1 or 2.
     std::uint8_t Ambiguous{1};
-    /// Columns of a private use glyph: 1 or 2.
-    std::uint8_t PrivateUse{1};
+    /// Columns of a Cyrillic glyph of East Asian ambiguous width: 1 or 2.
+    std::uint8_t Cyrillic{1};
+    /// Columns of a glyph of private use in the BMP (U+E000-F8FF): 1 or 2.
+    std::uint8_t PrivateUseBmp{1};
+    /// Columns of a glyph of private use in planes 15-16: 1 or 2.
+    std::uint8_t PrivateUsePlanes{1};
     /// Whether VS16 after a narrow glyph that has an emoji variation sequence
     /// makes its cell wide (and moves the cursor one column further).
     bool Vs16Widens{false};
@@ -102,6 +124,9 @@ struct Line {
     /// ordinary row, cols for a foreign one. Not part of the content:
     /// snapshots do not carry it.
     std::uint16_t KnownFrom{0};
+    /// The width path (Grid's path epoch) on which the row got the first of
+    /// the marks it still holds. Meaningless while WidthDoubt is 0.
+    std::uint32_t MarkPath{0};
 };
 
 /// Saved cursor state (DECSC/DECRC and alt-screen switch).
@@ -287,6 +312,9 @@ public:
     /// A verdict "narrow" for a class: drops its marks from every row of both
     /// screens, they were laid out right.
     void ClearWidthClass(EWidthClass cls) noexcept;
+    /// The same for one row of the active screen: the mark of `cls` goes, the
+    /// row's contents and KnownFrom stay. Out of range rows are ignored.
+    void ClearWidthClass(std::uint16_t row, EWidthClass cls) noexcept;
     /// A verdict "wide" for a class: every row of both screens that holds a
     /// mark of it becomes foreign (KnownFrom = cols), what was laid out in it
     /// no longer matches the terminal, and loses the mark.
@@ -300,6 +328,14 @@ public:
     [[nodiscard]] std::uint32_t PathGlyphs(EWidthClass cls) const noexcept {
         return Path_.Glyphs[static_cast<std::size_t>(cls)];
     }
+    /// Glyphs on the path that are neither reference glyphs (IsReferenceWidth,
+    /// trusted to be one cell) nor of the classes that get a verdict (Cyrillic,
+    /// PrivateUseBmp, PrivateUsePlanes): every other glyph, zero-width code
+    /// points and ones after a ZWJ included. A path that holds one tells
+    /// nothing about widths.
+    [[nodiscard]] std::uint32_t PathForeign() const noexcept {
+        return Path_.Foreign;
+    }
     /// Whether the path can no longer tell where the terminal's cursor is from
     /// its glyphs alone: the line wrapped on it, or the cursor moved left, by
     /// a tab, against an edge, by DECRC or across a screen switch or resize,
@@ -312,12 +348,31 @@ public:
     /// it (HPA, say) and have moved the cursor: the path is broken. Nothing
     /// else changes.
     void NoteUnknownSequence() noexcept { BreakPath(); }
+    /// The terminal confirmed the cursor's column (a matching CPR): what the
+    /// path counted is settled and a new one starts. The cursor, and a
+    /// pending wrap, stay as they are.
+    void ConfirmColumn() noexcept { RestartPath(); }
+    /// Whether every width mark of `row` (active screen) was set on the
+    /// current path, or it holds none: what the row held before the path was
+    /// laid out with no glyph of open width, so it stands where the terminal
+    /// has it.
+    [[nodiscard]] bool MarksOnPath(std::uint16_t row) const noexcept {
+        const Line& line = ActiveLine(row);
+        return line.WidthDoubt == 0 || line.MarkPath == PathEpoch_;
+    }
 
     /// The first known column of `row` (Line::KnownFrom). Mirror cells right
     /// of it are known to match the terminal's, those left of it are not.
     [[nodiscard]] std::uint16_t KnownFrom(std::uint16_t row) const noexcept {
         return ActiveLine(row).KnownFrom;
     }
+
+    /// Sets the first known column of `row` of the active screen outright, up
+    /// or down (`col` is clamped to cols). The rules of Line::KnownFrom only
+    /// ever lower it as the mirror writes; a caller that learned from the
+    /// terminal where the known part of a row begins says it here. Out of range
+    /// rows are ignored.
+    void SetKnownFrom(std::uint16_t row, std::uint16_t col) noexcept;
 
     /// Calibrates the grid by a cursor position the terminal reported
     /// (design.md §9, round C). The cursor goes to (`row`, `col`), 0-based and
@@ -360,6 +415,13 @@ public:
         return (Modes_ & ModeFlag(m)) != 0;
     }
     [[nodiscard]] std::uint32_t Modes() const noexcept { return Modes_; }
+    /// Whether a mode the grid does not model (EUnmodelledMode) is set.
+    [[nodiscard]] bool UnmodelledModeSet(EUnmodelledMode m) const noexcept {
+        return (UnmodelledModes_ & static_cast<std::uint8_t>(m)) != 0;
+    }
+    [[nodiscard]] bool AnyUnmodelledMode() const noexcept {
+        return UnmodelledModes_ != 0;
+    }
 
     [[nodiscard]] std::uint8_t CharsetG0() const noexcept { return CharsetG0_; }
     [[nodiscard]] std::uint8_t CharsetG1() const noexcept { return CharsetG1_; }
@@ -582,8 +644,14 @@ private:
     }
     /// The column was set absolutely: a new path, and ColumnSetCount.
     void NoteColumnSet() noexcept;
-    void RestartPath() noexcept { Path_ = WidthPath{}; }
+    void RestartPath() noexcept {
+        Path_ = WidthPath{};
+        ++PathEpoch_;
+    }
     void BreakPath() noexcept { Path_.Broken = true; }
+    void NoteForeign() noexcept {
+        if (Path_.Foreign != UINT32_MAX) ++Path_.Foreign;
+    }
     /// The cursor is about to move left from the current column.
     /// Call before PendingWrap_ is cleared: with a wrap pending the terminal's
     /// cursor stands past the last cell, so a glyph in it is left of the
@@ -672,6 +740,7 @@ private:
     // Modes and appearance
     // -----------------------------------------------------------------------
     std::uint32_t Modes_{0};
+    std::uint8_t UnmodelledModes_{0};  ///< EUnmodelledMode bits
     std::uint8_t PenAttrs_{0};
     EColorKind PenFgKind_{EColorKind::Default};
     EColorKind PenBgKind_{EColorKind::Default};
@@ -699,9 +768,15 @@ private:
     std::uint16_t LastPrintedRow_{0};
     std::uint16_t LastPrintedCol_{0};
     bool LastPrintedMarked_{false};
+    /// A ZWJ came last: a terminal may glue the next glyph to the cluster
+    /// before it and draw it in no column of its own.
+    bool AfterZwj_{false};
+    std::uint32_t ZwjPath_{0};  ///< PathEpoch_ when that ZWJ was noted
 
     struct WidthPath {
         std::uint32_t Glyphs[WIDTH_CLASS_COUNT]{};
+        /// Glyphs that are neither reference nor of a class with a verdict.
+        std::uint32_t Foreign{0};
         bool Broken{false};
         /// A BS, CUB or CBT moved the cursor left with a doubtful glyph left
         /// of where it was: the terminal's column is not the mirror's even
@@ -709,6 +784,7 @@ private:
         bool LeftOverDoubt{false};
     };
     WidthPath Path_{};
+    std::uint32_t PathEpoch_{0};  ///< bumped by every RestartPath
     WidthPolicy Policy_{};
     int LastPrintedBaseWidth_{1};  ///< LastPrintedWidth_ before the policy
 

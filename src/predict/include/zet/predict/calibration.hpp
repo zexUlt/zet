@@ -40,10 +40,22 @@ enum ECalReason : std::uint8_t {
     CalDcs = 4,       ///< a DCS/SOS/PM/APC string passed through
     CalAltExit = 8,   ///< the program left the alternate screen
     CalUnknown = 16,  ///< a sequence the mirror does not know
+    CalWidth = 32,    ///< glyphs of unknown width on the cursor's path
 };
 
-/// Row synchronisation of the mirror by the terminal's cursor position report
-/// (design.md §9, round C, "Калибровка зеркала запросом позиции курсора").
+/// What the session knows about how the terminal draws one class of glyphs
+/// (grid::EWidthClass Cyrillic, PrivateUseBmp and PrivateUsePlanes; no other
+/// class has a verdict).
+/// Narrow and Wide are final. Unsolved: answers did not settle it
+/// CPR_SOLVE_FAILS_MAX times, the class is never asked about again and the
+/// conservative rules of step 5 hold for it.
+enum class EWidthVerdict : std::uint8_t { Unknown, Narrow, Wide, Unsolved };
+
+/// Row and width calibration of the mirror by the terminal's cursor position
+/// report (design.md §9, round C, "Калибровка зеркала запросом позиции
+/// курсора"). The width verdicts of the session live here, not in the grid: a
+/// snapshot, a resize and a reconnect leave them be: the client lays a snapshot
+/// out with Policy() already applied, and OnSnapshot sets it on the fresh grid.
 /// Sans-I/O, after PredictionEngine: the client, the test rig and the fuzzer
 /// drive it through the same calls, and no clock or system call is inside.
 ///
@@ -148,7 +160,8 @@ public:
 
     // --- Lifecycle -----------------------------------------------------------
 
-    /// A snapshot was applied to the mirror (a fresh grid): the wait ends, the
+    /// A snapshot was applied to the mirror (a fresh grid that was fed the
+    /// snapshot under Policy(), as the terminal drew it): the wait ends, the
     /// held output is thrown away with the old grid, the query's answer (if one
     /// is on its way) is stripped and ignored, and no query is due until the
     /// output gives a new reason.
@@ -164,6 +177,11 @@ public:
     void Detach(Timestamp now) noexcept;
 
     // --- State ---------------------------------------------------------------
+
+    /// The session's verdict on a class of glyphs, and the grid policy the
+    /// verdicts make. A class without a verdict is always Unknown.
+    [[nodiscard]] EWidthVerdict Verdict(grid::EWidthClass cls) const noexcept;
+    [[nodiscard]] grid::WidthPolicy Policy() const noexcept;
 
     /// The mirror waits for the answer.
     [[nodiscard]] bool Frozen() const noexcept { return Frozen_; }
@@ -187,6 +205,10 @@ public:
     [[nodiscard]] std::uint32_t Matched() const noexcept { return Matched_; }
     [[nodiscard]] std::uint32_t Abandoned() const noexcept {
         return Abandoned_;
+    }
+    /// Answers whose row matched and column did not (design.md "случай 2").
+    [[nodiscard]] std::uint32_t ColumnFixed() const noexcept {
+        return ColumnFixed_;
     }
 
 private:
@@ -215,6 +237,27 @@ private:
     void Rebase(const CalibrationTarget& target) noexcept;
     [[nodiscard]] static bool MirrorReady(const grid::Grid& g,
                                           const grid::VtParser& p) noexcept;
+    /// Whether the path can be read for widths: not on the alternate screen,
+    /// unbroken, and every glyph on it a reference glyph or of a class with a
+    /// verdict.
+    [[nodiscard]] static bool PathSolvable(const grid::Grid& g) noexcept;
+    /// Whether the end of a portion gives a reason to ask about widths: a
+    /// solvable path with a glyph of a class that has no verdict yet.
+    [[nodiscard]] bool WidthDue(const grid::Grid& g) const noexcept;
+    /// Settles what the answer says about widths: `d` is the answered column
+    /// less the expected one, the path is the grid's, as the query froze it.
+    void SolveWidth(grid::Grid& g, std::int64_t d) noexcept;
+    /// Puts a verdict on the grid: the policy, and the rows laid out under the
+    /// old one (Narrow: marks go; Wide: rows with marks become foreign).
+    void ApplyVerdict(grid::Grid& g, grid::EWidthClass cls) const noexcept;
+    /// Column mismatch: row matched, column did not (design.md "Расхождение
+    /// столбца"). `tailKnownBlank`: the mirror's tail from the expected column
+    /// was blank and known before the answer was applied.
+    static void FixColumn(grid::Grid& g, std::uint16_t row, std::uint16_t col,
+                          bool tailKnownBlank) noexcept;
+    [[nodiscard]] static bool TailKnownBlank(const grid::Grid& g,
+                                             std::uint16_t row,
+                                             std::uint16_t col) noexcept;
     /// Handles what the last demultiplexer call reported.
     void Dispatch(Timestamp now, const CalibrationTarget& target) noexcept;
     void Apply(const CprEvent& event, Timestamp now,
@@ -260,9 +303,15 @@ private:
     std::uint64_t SeenBypass_{0};
     std::uint64_t SeenAltExit_{0};
 
+    /// Per class Cyrillic, PrivateUseBmp, PrivateUsePlanes.
+    std::array<EWidthVerdict, 3> Verdicts_{};
+    /// Answers that gave the class no verdict.
+    std::array<std::uint8_t, 3> SolveFails_{};
+
     std::uint32_t Resynced_{0};
     std::uint32_t Matched_{0};
     std::uint32_t Abandoned_{0};
+    std::uint32_t ColumnFixed_{0};
 };
 
 }  // namespace zet::predict

@@ -65,6 +65,19 @@
 //  13. the hold buffer has the size the calibration was given: the fuzzer
 //      makes it small, and an overflow ends the wait with the output in
 //
+// Widths (round C4). With the calibration on, the model terminal (Real and
+// Ref, in every snapshot too) draws with a fixed width policy that the last
+// input byte picks (bit 3 clear: the default table): A and P one or two cells
+// wide, VS16 widening or not. The mirror starts from the default and learns it
+// by the replies. A snapshot body holds only ASCII then: the mirror's cells
+// of a real snapshot are the agent's, not laid out again. Invariant a. is owed
+// only when the model has the default table: the overlay may draw over a glyph
+// that the mirror has narrower than the terminal does, which the verdicts are
+// there to end. Asserted after every step:
+//  14. no verdict contradicts the model: Narrow means the model draws the
+//      class one cell wide, Wide means two (E: VS16 widens); the mirror's
+//      policy is the one the verdicts give
+//
 // Input: 3 header bytes (columns, rows, mode; what is left of them says the
 // pre-zet row N and the text above it), then operations: one byte selecting the
 // operation, one byte giving the operand length, the operand.
@@ -83,6 +96,7 @@
 
 #include "zet/core/time.hpp"
 #include "zet/grid/grid.hpp"
+#include "zet/grid/unicode.hpp"
 #include "zet/grid/vt_parser.hpp"
 #include "zet/predict/calibration.hpp"
 #include "zet/predict/engine.hpp"
@@ -186,6 +200,42 @@ void PreZet(Mirror& t, std::uint16_t row, std::uint32_t seed) {
         static constexpr std::uint8_t CRLF[] = {'\r', '\n'};
         t.Feed(CRLF, 2);
     }
+}
+
+// What the model terminal draws for `s`. Reference glyphs and the two target
+// classes (Cyrillic of ambiguous width, private use) are drawn as the grid
+// does, by the model policy. Every other code point has a width of its own
+// from a hash of the input and the code point, in {0, 1, 2}, whatever the
+// mirror's table says: nothing drawn, an "X", or a wide rocket.
+std::string ModelDraw(std::string_view s, std::uint32_t seed) {
+    std::string out;
+    std::size_t i = 0;
+    while (i < s.size()) {
+        const auto c = static_cast<unsigned char>(s[i]);
+        if (c < 0x80) {
+            out += s[i++];
+            continue;
+        }
+        std::size_t len = c >= 0xF0 ? 4 : (c >= 0xE0 ? 3 : 2);
+        if (i + len > s.size()) len = s.size() - i;
+        char32_t cp = len == 4 ? c & 0x07U : len == 3 ? c & 0x0FU : c & 0x1FU;
+        for (std::size_t k = 1; k < len; ++k) {
+            cp = (cp << 6) | (static_cast<unsigned char>(s[i + k]) & 0x3FU);
+        }
+        if (grid::IsReferenceWidth(cp) || grid::IsCyrillicAmbiguous(cp) ||
+            grid::IsPrivateUse(cp)) {
+            out.append(s.substr(i, len));
+        } else {
+            std::uint64_t h = (seed ^ cp) * 0x9E3779B97F4A7C15ULL;
+            h ^= h >> 29;
+            h *= 0xBF58476D1CE4E5B9ULL;
+            const std::uint64_t width = (h >> 32) % 3;
+            if (width == 1) out += 'X';
+            if (width == 2) out += "\xf0\x9f\x9a\x80";
+        }
+        i += len;
+    }
+    return out;
 }
 
 bool Has(ByteSpan b, std::initializer_list<unsigned char> seq) {
@@ -297,6 +347,61 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data,
         PreZet(*term, preRow, data[2] / 6U);
         PreZet(*ref, preRow, data[2] / 6U);
     }
+    // REP repeats the last printed character: the mirror, which starts blank,
+    // and the terminal, which has had a shell before, must agree on it, or a
+    // REP before the first character makes them differ for a reason that is
+    // no width at all. One character is printed and taken back on all three.
+    if (calibrated) {
+        static constexpr std::uint8_t SAME_LAST[] = {'x', 0x08, 0x1B, '[', 'K'};
+        for (Mirror* m : {mirror.get(), term.get(), ref.get()}) {
+            m->Feed(SAME_LAST, sizeof(SAME_LAST));
+        }
+    }
+    // The model terminal's widths, from the last byte of the input.
+    grid::WidthPolicy model;
+    // Seeds the widths of the code points the model draws by hash.
+    const std::uint32_t drawSeed =
+        static_cast<std::uint32_t>(data[0]) * 0x01000193U ^
+        static_cast<std::uint32_t>(data[1]) << 8 ^
+        static_cast<std::uint32_t>(data[size - 1]) << 16 ^
+        static_cast<std::uint32_t>(size);
+    if (calibrated) {
+        const std::uint8_t b = data[size - 1];
+        // Only the target classes follow the policy; the rest of A, VS16 and
+        // everything else is drawn by ModelDraw, never widened by a policy.
+        if (((b >> 3) & 1) != 0) {
+            model.Cyrillic = static_cast<std::uint8_t>(1 + (b & 1));
+            model.PrivateUseBmp = static_cast<std::uint8_t>(1 + ((b >> 1) & 1));
+            model.PrivateUsePlanes =
+                static_cast<std::uint8_t>(1 + ((b >> 2) & 1));
+        }
+        term->G->SetWidthPolicy(model);
+        ref->G->SetWidthPolicy(model);
+        // Wide Cyrillic widens Cyrillic alone: Greek, é and the rest stay one
+        // cell, so a verdict for Cyr says nothing the model contradicts.
+        auto probe = grid::Grid::Create(8, 2, 0);
+        if (probe.has_value()) {
+            std::unique_ptr<grid::Grid> pg(probe.value());
+            pg->SetWidthPolicy(model);
+            grid::VtParser pp;
+            static constexpr char GLYPHS[] =
+                "\xce\xb1\xc3\xa9\xd0\x96\xe2\x94\x80";
+            pp.Feed(reinterpret_cast<const std::byte*>(GLYPHS),
+                    sizeof(GLYPHS) - 1, *pg);
+            Check(pg->CursorCol() == 3 + model.Cyrillic);
+        }
+    }
+    // The overlay is built for a terminal that lays out as the mirror does;
+    // when it does not, a prediction can land on a glyph the mirror has
+    // narrower than the terminal, and invariant a. is not owed.
+    const bool sameWidths = model == grid::WidthPolicy{};
+    // Set once the model has drawn a code point otherwise than the mirror
+    // does, so that the rows it laid out
+    // differ from the mirror's; cleared when a matched or fixed column leaves
+    // the cursor's row without marks (the overlay keeps off a row the mirror
+    // does not trust, and the undo owes the screen as it was again).
+    bool drewClusters = false;
+    std::uint32_t settledCols = 0;
     auto overlay = Overlay::Create();
     if (!overlay) return 0;
 
@@ -350,7 +455,7 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data,
         term->P.Feed(b.data(), b.size(), *term->G);
         if (cal) cal->OnWritten(b, now);
         overlay->Commit(engine);
-        Check(SameScreen(*term->G, *ref->G));
+        Check(!sameWidths || drewClusters || SameScreen(*term->G, *ref->G));
     };
     const auto draw = [&] {
         if (cal && cal->Frozen()) return;
@@ -371,9 +476,17 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data,
     std::size_t pieceLen = 0;
     std::uint64_t refDa1 = 0;  // the queries of the program already answered
     std::uint64_t refCpr = 0;
-    const auto feed = [&](const std::uint8_t* d, std::size_t n) {
-        term->Feed(d, n);
-        ref->Feed(d, n);
+    // `md`: what the model terminal draws when it is not what the mirror is
+    // fed (a ZWJ pair as one glyph, the cursor moved by DECBI).
+    const auto feed = [&](const std::uint8_t* d, std::size_t n,
+                          const std::uint8_t* md = nullptr,
+                          std::size_t mn = 0) {
+        if (md == nullptr) {
+            md = d;
+            mn = n;
+        }
+        term->Feed(md, mn);
+        ref->Feed(md, mn);
         if (cal) {
             // The terminal answers the program's queries, whole, one reply
             // each, in the order they came.
@@ -585,7 +698,12 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data,
                 break;
             }
             case 3: {  // the local terminal is resized
-                const auto c = static_cast<std::uint16_t>(arg(0) % 60 + 1);
+                // With the calibration a terminal one column wide is not
+                // modelled: whether its cursor stays pending a wrap after a
+                // resize is the terminal's own, and a width verdict would
+                // read the difference as a glyph's.
+                const auto c =
+                    static_cast<std::uint16_t>(arg(0) % 60 + (cal ? 2 : 1));
                 const auto r = static_cast<std::uint16_t>(arg(1) % 10 + 1);
                 undo();
                 if (cal) {
@@ -621,11 +739,16 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data,
                 // A real snapshot holds no query: the body is masked.
                 std::array<std::uint8_t, 24> clean = echoOff ? shown : plain;
                 for (std::size_t k = 0; k < n; ++k) {
-                    if (clean[k] == 'c' || clean[k] == 'n' || clean[k] == 'Z') {
+                    if (clean[k] == 'c' || clean[k] == 'n' || clean[k] == 'Z' ||
+                        (!sameWidths && clean[k] >= 0x80)) {
                         clean[k] = '.';
                     }
                 }
                 const std::uint8_t* body = clean.data() + (n > 2 ? 2 : n);
+                if (calibrated) {
+                    fresh2->G->SetWidthPolicy(model);
+                    fresh3->G->SetWidthPolicy(model);
+                }
                 for (Mirror* m : {fresh.get(), fresh2.get(), fresh3.get()}) {
                     m->Feed(PREAMBLE, sizeof(PREAMBLE));
                     m->Feed(body, n > 2 ? n - 2 : 0);
@@ -675,6 +798,95 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data,
                 }
                 break;
             }
+            case 8: {  // agent output of glyph tokens (round C4)
+                // The mirror gets the tokens as they are; the model terminal
+                // draws every code point that is not a reference glyph or of
+                // a target class with a width of its own (ModelDraw), and
+                // moves the cursor left for DECBI.
+                struct Token {
+                    const char* Wire;
+                    const char* Model;
+                };
+                static constexpr Token TOKENS[] = {
+                    {"\xf0\x9f\x91\xa8\xe2\x80\x8d\xf0\x9f\x92\xbb",
+                     "\xf0\x9f\x91\xa8\xe2\x80\x8d\xf0\x9f\x92\xbb"},
+                    {"\xf0\x9f\x91\x8d\xf0\x9f\x8f\xbd",
+                     "\xf0\x9f\x91\x8d\xf0\x9f\x8f\xbd"},
+                    {"\xf0\x9f\x91\xa8\xe2\x80\x8d",
+                     "\xf0\x9f\x91\xa8\xe2\x80\x8d"},
+                    {"\xf0\x9f\x92\xbb", "\xf0\x9f\x92\xbb"},
+                    {"\xf0\x9f\xab\xa9", "\xf0\x9f\xab\xa9"},
+                    {"\xf0\x9f\xab\xaa", "\xf0\x9f\xab\xaa"},
+                    {"\xc2\xad", "\xc2\xad"},
+                    {"\x1b"
+                     "6",
+                     "\x1b[D"},
+                    {"\xd0\x96", "\xd0\x96"},
+                    {"\xee\x82\xb0", "\xee\x82\xb0"},
+                    {"\xe2\x98\x81\xef\xb8\x8f", "\xe2\x98\x81\xef\xb8\x8f"},
+                    {"\xce\xb1", "\xce\xb1"},          // Greek, A
+                    {"\xc3\xa9", "\xc3\xa9"},          // e acute, A
+                    {"\xc5\x82", "\xc5\x82"},          // Latin, reference
+                    {"\xe2\x94\x80", "\xe2\x94\x80"},  // box drawing, A
+                    {"\xe2\x98\xb0", "\xe2\x98\xb0"},  // trigram
+                    {"\xe1\x84\x80\xe1\x85\xa1", "\xe1\x84\x80\xe1\x85\xa1"},
+                    {"\xe3\x81\x8b\xe3\x82\x99", "\xe3\x81\x8b\xe3\x82\x99"},
+                    {"\xf0\x9f\x87\xb7", "\xf0\x9f\x87\xb7"},
+                    {"\xd8\x80", "\xd8\x80"},
+                    {"\xe4\xb8\xad", "\xe4\xb8\xad"},
+                    {"X", "X"},
+                    {" ", " "},
+                    {"\r", "\r"},
+                    {"\x1b[3C", "\x1b[3C"},
+                    {"\x1b[2D", "\x1b[2D"},
+                };
+                constexpr std::size_t TOKEN_COUNT =
+                    sizeof(TOKENS) / sizeof(TOKENS[0]);
+                // Only between sequences: what the model draws differently is
+                // a width, never how the bytes parse, so inside a sequence of
+                // an earlier piece (or of the mirror's own parser) the tokens
+                // go to the model as they are.
+                const bool plainWire =
+                    term->P.State() != grid::EParserState::Ground ||
+                    term->P.Utf8Pending() ||
+                    mirror->P.State() != grid::EParserState::Ground ||
+                    mirror->P.Utf8Pending() || pieceLen != 0;
+                std::string wire;
+                std::string drawn;
+                // The piece may end inside a joined pair: the bytes so far go
+                // out as a piece of their own.
+                const std::size_t cut = arg(n > 5 ? 5 : 0) % 2 == 0 && n > 1
+                                            ? 1 + arg(n - 1) % (n - 1)
+                                            : n;
+                undo();
+                for (std::size_t k = 0; k < n && k < 5; ++k) {
+                    if (k == cut) {
+                        feed(
+                            reinterpret_cast<const std::uint8_t*>(wire.data()),
+                            wire.size(),
+                            reinterpret_cast<const std::uint8_t*>(drawn.data()),
+                            drawn.size());
+                        deliver(wire.size());
+                        wire.clear();
+                        drawn.clear();
+                        undo();
+                    }
+                    const Token& tok = TOKENS[p[k] % TOKEN_COUNT];
+                    const std::string drawnAs =
+                        plainWire ? tok.Wire : ModelDraw(tok.Model, drawSeed);
+                    if (std::string_view(tok.Wire) != drawnAs) {
+                        drewClusters = true;
+                    }
+                    wire += tok.Wire;
+                    drawn += drawnAs;
+                }
+                feed(reinterpret_cast<const std::uint8_t*>(wire.data()),
+                     wire.size(),
+                     reinterpret_cast<const std::uint8_t*>(drawn.data()),
+                     drawn.size());
+                deliver(wire.size());
+                break;
+            }
             case 9: {  // the program asks the terminal something
                 static constexpr const char* QUERIES[] = {
                     "\x1b[c", "\x1b[0c", "\x1bZ", "\x1b[6n", "\x1b[5n"};
@@ -698,6 +910,13 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data,
         }
         settle();
         draw();
+        if (cal && cal->Matched() + cal->ColumnFixed() != settledCols) {
+            settledCols = cal->Matched() + cal->ColumnFixed();
+            const grid::Grid& g = *mirror->G;
+            if (drewClusters && !g.WidthDoubtBefore(g.CursorRow(), g.Cols())) {
+                drewClusters = false;
+            }
+        }
         CheckInvariants(engine, *mirror->G, seen);
         if (cal) {
             const ByteSpan held = cal->Demux().HeldBytes();
@@ -714,6 +933,24 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data,
                 waitingSince && now - *waitingSince >= std::chrono::seconds(10);
             if (replyMode == 1 && !aged) {
                 Check(forwardedAll + heldStr == expectedAll);
+            }
+            // No verdict contradicts the terminal.
+            const auto contradicts = [&](grid::EWidthClass cls, bool wide) {
+                const EWidthVerdict v = cal->Verdict(cls);
+                return (v == EWidthVerdict::Narrow && wide) ||
+                       (v == EWidthVerdict::Wide && !wide);
+            };
+            Check(
+                !contradicts(grid::EWidthClass::Cyrillic, model.Cyrillic == 2));
+            Check(!contradicts(grid::EWidthClass::PrivateUseBmp,
+                               model.PrivateUseBmp == 2));
+            Check(!contradicts(grid::EWidthClass::PrivateUsePlanes,
+                               model.PrivateUsePlanes == 2));
+            // The other classes have no verdict, whatever the model draws.
+            for (const auto cls :
+                 {grid::EWidthClass::Ambiguous, grid::EWidthClass::Emoji,
+                  grid::EWidthClass::Cluster}) {
+                Check(cal->Verdict(cls) == EWidthVerdict::Unknown);
             }
             // Nothing is kept for a wait that is over.
             if (!cal->Frozen()) {

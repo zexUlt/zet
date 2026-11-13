@@ -29,9 +29,13 @@ public:
     /// A path-B snapshot was written: the mirror becomes a fresh grid of the
     /// same size with the snapshot fed in, so nothing the preamble does not
     /// overwrite survives (second saved cursor, kitty keyboard, parser state).
+    /// The grid has `policy` (the session's width verdicts) before the
+    /// snapshot is fed: the terminal lays the snapshot out in the widths it
+    /// draws, and a row it wraps shifts every row below it.
     /// False when allocation failed; the mirror is then unchanged and no
     /// longer matches the terminal, so the caller drops it.
-    [[nodiscard]] bool ResetFromSnapshot(ByteSpan snapshot) noexcept;
+    [[nodiscard]] bool ResetFromSnapshot(
+        ByteSpan snapshot, const grid::WidthPolicy& policy) noexcept;
 
     /// The local terminal changed size: truncate or extend, no reflow, as the
     /// agent's grid does. False when allocation failed (mirror unchanged).

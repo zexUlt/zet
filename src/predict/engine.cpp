@@ -134,9 +134,19 @@ void PredictionEngine::StepInput(std::byte b, std::uint64_t end, Timestamp now,
                 const bool valid = cp >= minimum && cp <= 0x10FFFF &&
                                    !(cp >= 0xD800 && cp <= 0xDFFF);
                 // A glyph terminals disagree on the width of is not predicted:
-                // the column after it would be a guess.
+                // the column after it would be a guess. Once the terminal has
+                // shown that it draws Cyrillic of East Asian ambiguous width
+                // in one cell (a Narrow verdict on class Cyrillic), the guess
+                // is gone for it.
+                const grid::WidthPolicy& policy = mirror.Screen.Policy();
+                const bool cyrillicNarrow =
+                    policy.Cyrillic == 1 &&
+                    (policy.DoubtClasses &
+                     grid::WidthClassBit(grid::EWidthClass::Cyrillic)) == 0;
                 if (valid && grid::Wcwidth(cp) == 1 &&
-                    !grid::IsAmbiguousWidth(cp) && !grid::IsClusterJoiner(cp)) {
+                    (!grid::IsAmbiguousWidth(cp) ||
+                     (cyrillicNarrow && grid::IsCyrillicAmbiguous(cp))) &&
+                    !grid::IsClusterJoiner(cp)) {
                     PredictChar(cp, end, now, mirror);
                 } else {
                     BecomeTentative();
@@ -204,8 +214,8 @@ void PredictionEngine::StepCsi(std::uint8_t b) noexcept {
 bool PredictionEngine::Predictable(const MirrorView& mirror) const noexcept {
     const grid::Grid& g = mirror.Screen;
     return Trusted_ && !Lagging_ && g.RowsTrusted() && !g.IsAltScreen() &&
-           !g.ModeSet(grid::EMode::Irm) && g.CharsetG0() == 0 &&
-           g.CharsetActive() == 0 && !g.PendingWrap() &&
+           !g.AnyUnmodelledMode() && !g.ModeSet(grid::EMode::Irm) &&
+           g.CharsetG0() == 0 && g.CharsetActive() == 0 && !g.PendingWrap() &&
            g.CursorRow() < g.Rows() && g.CursorCol() < g.Cols();
 }
 

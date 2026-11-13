@@ -112,6 +112,7 @@ void VtParser::FeedByte(std::byte b, Grid& grid) noexcept {
     // -----------------------------------------------------------------------
     // CAN (0x18) / SUB (0x1A): abort current sequence, return to ground.
     if (raw == 0x18 || raw == 0x1A) {
+        if (Utf8Remaining_ > 0) CountUnknown(grid);  // a cut-off character
         Utf8Remaining_ = 0;
         TransitionTo(EParserState::Ground, grid);
         // SUB traditionally prints a substitution character (U+FFFD).
@@ -121,6 +122,7 @@ void VtParser::FeedByte(std::byte b, Grid& grid) noexcept {
 
     // ESC: start/restart escape processing (flushes pending UTF-8).
     if (raw == 0x1B) {
+        if (Utf8Remaining_ > 0) CountUnknown(grid);  // a cut-off character
         Utf8Remaining_ = 0;
         ClearParams();
         IntermediateCount_ = 0;
@@ -144,16 +146,21 @@ void VtParser::FeedByte(std::byte b, Grid& grid) noexcept {
                 if (cp < MIN_CP[sl < 4 ? sl : 3] || cp > 0x10FFFF ||
                     (cp >= 0xD800 && cp <= 0xDFFF)) {
                     cp = 0xFFFD;
+                    // Terminals draw U+FFFD for it, one for the sequence or
+                    // one per byte: the mirror draws one, and the column
+                    // after it is not certain.
+                    CountUnknown(grid);
                 }
                 // C1 controls (U+0080–U+009F): do not store as cell content.
                 //
-                // U+009B (C1 CSI) and U+009C (C1 ST) are included in this
-                // range and are silently dropped.  We do NOT treat C1 CSI as
-                // an alternative CSI introducer because real pty output uses
-                // ESC [ exclusively; C1 ST does NOT terminate an open
-                // DCS/OSC/SosPmApcString bypass — that terminator is ESC \.
-                // This matches xterm's behaviour in UTF-8 mode.
+                // VTE acts on them when they come decoded from UTF-8 (U+009B
+                // as CSI, U+009D as OSC); xterm in UTF-8 mode does not. The
+                // mirror does not execute them and cannot tell which terminal
+                // it is talking to, so they count as a sequence it does not
+                // know. C1 ST (U+009C) still does not end an open string: that
+                // terminator is ESC \.
                 if (cp >= 0x0080 && cp <= 0x009F) {
+                    CountUnknown(grid);
                     return;
                 }
                 if (State_ == EParserState::Ground) {
@@ -169,6 +176,7 @@ void VtParser::FeedByte(std::byte b, Grid& grid) noexcept {
             // Invalid continuation: emit replacement and re-process this byte.
             if (State_ == EParserState::Ground) grid.PutChar(0xFFFD, 1);
             Utf8Remaining_ = 0;
+            CountUnknown(grid);
         }
     }
 
@@ -183,8 +191,17 @@ void VtParser::FeedByte(std::byte b, Grid& grid) noexcept {
             Utf8SeqLen_ = extra;
             return;
         }
-        // 0xC0/0xC1 are overlong; 0xFE/0xFF are invalid: emit replacement.
+        // 0xF8-0xFF are invalid: emit replacement.
         grid.PutChar(0xFFFD, 1);
+        CountUnknown(grid);
+        return;
+    }
+
+    // A continuation byte with no lead before it in Ground, or any 8-bit byte
+    // inside an escape sequence: terminals differ in what they do with it
+    // (draw U+FFFD, ignore it, end the sequence), the mirror ignores it.
+    if (raw >= 0x80) {
+        CountUnknown(grid);
         return;
     }
 
@@ -321,6 +338,7 @@ void VtParser::FeedByte(std::byte b, Grid& grid) noexcept {
         case EParserState::CsiIgnore:
             if (raw >= 0x40 && raw <= 0x7E) {
                 ++UnknownSeqCount_;
+                grid.NoteUnknownSequence();
                 TransitionTo(EParserState::Ground, grid);
             }
             break;
@@ -370,6 +388,11 @@ void VtParser::FeedByte(std::byte b, Grid& grid) noexcept {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+void VtParser::CountUnknown(Grid& grid) noexcept {
+    ++UnknownSeqCount_;
+    grid.NoteUnknownSequence();
+}
 
 void VtParser::ClearParams() noexcept { ParamLen_ = 0; }
 
@@ -545,7 +568,7 @@ void VtParser::DispatchEsc(char32_t final, Grid& grid) noexcept {
             case 'Z':  // DECID – xterm answers it as DA1; counted, not acted on
                 ++Da1QueryCount_;
                 // Still an unknown sequence for the mirror, as before the
-                // DA1 count existed.
+                // DA1 count existed. The cursor stays: the path goes on.
                 ++UnknownSeqCount_;
                 return;
             case '\\':  // ST – string terminator (ends bypass)
@@ -555,6 +578,7 @@ void VtParser::DispatchEsc(char32_t final, Grid& grid) noexcept {
                 return;
             default:
                 ++UnknownSeqCount_;
+                grid.NoteUnknownSequence();
                 return;
         }
     }
@@ -575,11 +599,40 @@ void VtParser::DispatchEsc(char32_t final, Grid& grid) noexcept {
         }
     }
     ++UnknownSeqCount_;
+    grid.NoteUnknownSequence();
 }
 
 // ---------------------------------------------------------------------------
 // CSI dispatch
 // ---------------------------------------------------------------------------
+
+bool VtParser::CsiFormHandled(char32_t final, const bool* colon,
+                              std::size_t nparams) const noexcept {
+    const auto fin = static_cast<std::uint8_t>(final);
+    // xterm takes a marker after a parameter for an error and ignores the
+    // sequence.
+    if (HasMidParamMarker()) return false;
+    if (PrivateMarker_ != 0) {
+        return PrivateMarker_ == '?' && IntermediateCount_ == 0 &&
+               (fin == 'h' || fin == 'l');
+    }
+    if (IntermediateCount_ != 0) {
+        if (IntermediateCount_ != 1) return false;
+        return (Intermediates_[0] == '!' && fin == 'p') ||
+               (Intermediates_[0] == ' ' && fin == 'q');
+    }
+    // A colon is SGR's sub-parameter separator; elsewhere terminals differ in
+    // what it does to the parameters.
+    if (fin != 'm') {
+        for (std::size_t i = 0; i < nparams; ++i) {
+            if (colon[i]) return false;
+        }
+    }
+    // `CSI Pl ; Pr s` is DECSLRM when left and right margins are on, which the
+    // mirror does not model; only the bare form is SCP.
+    if (fin == 's' && ParamLen_ != 0) return false;
+    return true;
+}
 
 void VtParser::DispatchCsi(char32_t final, Grid& grid) noexcept {
     std::uint16_t params[MAX_PARAMS]{};
@@ -597,27 +650,33 @@ void VtParser::DispatchCsi(char32_t final, Grid& grid) noexcept {
         return idx < nparams ? params[idx] : 0;
     };
 
-    // Private-mode CSI ('?', '>', '<', '=').
+    // The mirror executes a sequence only in a form it handles. One with an
+    // intermediate, a private marker, a colon or a stray marker among the
+    // parameters that it does not specifically handle goes to the unknown
+    // path, not to the handler of its final byte: a terminal ignores `CSI 1 SP
+    // C` (GSS), and the handler of C would move the cursor.
+    if (!CsiFormHandled(final, colon, nparams)) {
+        CountUnknown(grid);
+        return;
+    }
+
+    // Private-mode CSI: only DECSET and DECRST with '?' get here.
     if (PrivateMarker_ != 0) {
-        // DECSET/DECRST are only valid for '?' (0x3F) private marker.
-        if (PrivateMarker_ == '?' && static_cast<std::uint8_t>(final) == 'h') {
-            // DECSET — skip params 4 (DECSCLM) and 20 (undefined private):
-            // IRM and LNM are ANSI modes set by non-private SM/RM (D6).
-            for (std::size_t i = 0; i < nparams; ++i) {
-                if (params[i] == 4 || params[i] == 20) continue;
-                grid.SetMode(params[i], true);
+        const bool value = static_cast<std::uint8_t>(final) == 'h';
+        // DECSET/DECRST skip params 4 (DECSCLM) and 20 (undefined private):
+        // IRM and LNM are ANSI modes set by non-private SM/RM (D6).
+        for (std::size_t i = 0; i < nparams; ++i) {
+            if (params[i] == 4 || params[i] == 20) continue;
+            // Modes that move the cursor or wrap the line in ways the grid
+            // does not model (EUnmodelledMode), and DECANM, which leaves for
+            // VT52 mode (its escape sequences are not these): the change is
+            // a sequence the mirror does not know.
+            if (params[i] == 2 || params[i] == 3 || params[i] == 45 ||
+                params[i] == 69) {
+                CountUnknown(grid);
             }
-            return;
+            grid.SetMode(params[i], value);
         }
-        if (PrivateMarker_ == '?' && static_cast<std::uint8_t>(final) == 'l') {
-            // DECRST — same exclusions as DECSET above.
-            for (std::size_t i = 0; i < nparams; ++i) {
-                if (params[i] == 4 || params[i] == 20) continue;
-                grid.SetMode(params[i], false);
-            }
-            return;
-        }
-        ++UnknownSeqCount_;
         return;
     }
 
@@ -725,6 +784,7 @@ void VtParser::DispatchCsi(char32_t final, Grid& grid) noexcept {
                     p(0, 1), p(1, static_cast<std::uint16_t>(grid.Rows())));
             } else {
                 ++UnknownSeqCount_;
+                grid.NoteUnknownSequence();
             }
             break;
 
@@ -734,7 +794,7 @@ void VtParser::DispatchCsi(char32_t final, Grid& grid) noexcept {
             break;
 
         // Cursor save/restore (ANSI).
-        case 's':  // SCP – save cursor position
+        case 's':  // SCP – save cursor position (CsiFormHandled: no params)
             grid.SaveCursor();
             break;
         case 'u':  // RCP – restore cursor position
@@ -747,6 +807,7 @@ void VtParser::DispatchCsi(char32_t final, Grid& grid) noexcept {
                 grid.Reset(/*hard=*/false);
             } else {
                 ++UnknownSeqCount_;
+                grid.NoteUnknownSequence();
             }
             break;
 
@@ -756,13 +817,16 @@ void VtParser::DispatchCsi(char32_t final, Grid& grid) noexcept {
                 grid.SetCursorStyle(static_cast<std::uint8_t>(p0(0)));
             } else {
                 ++UnknownSeqCount_;
+                grid.NoteUnknownSequence();
             }
             break;
 
         // Repeat char.
         case 'b':  // REP – repeat preceding character
-            if (!grid.RepeatChar(p(0, 1)))
+            if (!grid.RepeatChar(p(0, 1))) {
                 ++UnknownSeqCount_;  // nothing to repeat
+                grid.NoteUnknownSequence();
+            }
             break;
 
         // Window ops / device attributes – ignore silently (not tracked).

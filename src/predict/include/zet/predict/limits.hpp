@@ -67,6 +67,12 @@ inline constexpr Duration CPR_FORGET = std::chrono::seconds(10);
 /// freed when it ends.
 inline constexpr std::size_t CPR_LAG_BYTES_MAX = 1024 * 1024;
 
+/// Answers that settle nothing about a class of glyph widths (the column
+/// difference is neither 0 nor the number of glyphs, or other glyphs of open
+/// width share the path) before the class is Unsolved for the session
+/// (design.md §9, "Ширина").
+inline constexpr std::uint8_t CPR_SOLVE_FAILS_MAX = 3;
+
 /// Longest answer the demultiplexer recognises: `CSI r ; c R` with five-digit
 /// numbers is 14 bytes. A device attributes answer is `CSI ? Pm c`: xterm's
 /// default vt420 reply is 38 bytes and Windows Terminal's is 39, so the limit
