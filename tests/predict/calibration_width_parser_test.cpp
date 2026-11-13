@@ -199,12 +199,12 @@ TEST_CASE("width parser: the modes the grid does not model are remembered") {
         const char* Reset;
         grid::EUnmodelledMode Which;
     };
-    constexpr std::array modes{
+    constexpr std::array unmodelled{
         Mode{"\x1b[?3h", "\x1b[?3l", grid::EUnmodelledMode::ColumnMode},
         Mode{"\x1b[?45h", "\x1b[?45l", grid::EUnmodelledMode::ReverseWrap},
         Mode{"\x1b[?69h", "\x1b[?69l",
              grid::EUnmodelledMode::LeftRightMargins}};
-    for (const Mode& m : modes) {
+    for (const Mode& m : unmodelled) {
         CAPTURE(m.Set);
         for (const char* end : {m.Reset,
                                 "\x1b"
