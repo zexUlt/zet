@@ -502,6 +502,12 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data,
         }
     };
 
+    // The client asks its first question the moment the mirror begins
+    // (StartPredict), before any output reaches it. The start query takes the
+    // tail of the cursor row for blank, which only holds for a terminal that
+    // has had no output since.
+    settle();
+
     std::size_t i = 3;
     while (i + 1 < size) {
         const std::uint8_t op = data[i] % 10;
