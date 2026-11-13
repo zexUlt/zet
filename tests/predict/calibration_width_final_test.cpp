@@ -53,7 +53,7 @@ const std::string NUMBER_SIGN = "\xd8\x80";
 
 bool NoVerdict(CalClient& t) {
     for (const EWidthClass cls :
-         {EWidthClass::Cyrillic, EWidthClass::PrivateUse}) {
+         {EWidthClass::Cyrillic, EWidthClass::PrivateUseBmp}) {
         const EWidthVerdict v = t.Cal->Verdict(cls);
         if (v == EWidthVerdict::Narrow || v == EWidthVerdict::Wide)
             return false;
@@ -194,7 +194,7 @@ TEST_CASE("Final C4: a prompt with powerline glyphs and Cyrillic, in turn") {
     t.Begin();
     REQUIRE(t.Queries() == 1);
     t.Agent("\r" + PL + " ~ " + PL + " git " + PL + " ");
-    CHECK(t.Cal->Verdict(EWidthClass::PrivateUse) == EWidthVerdict::Narrow);
+    CHECK(t.Cal->Verdict(EWidthClass::PrivateUseBmp) == EWidthVerdict::Narrow);
     CHECK(t.Cal->Verdict(EWidthClass::Cyrillic) == EWidthVerdict::Unknown);
     t.Agent("\r" + ZHE + ZHE + "> ");
     CHECK(t.Cal->Verdict(EWidthClass::Cyrillic) == EWidthVerdict::Narrow);

@@ -14,10 +14,12 @@ constexpr std::array<std::byte, Calibration::QUERY_SIZE> QUERY_BYTES{
     std::byte{0x1b}, std::byte{'['}, std::byte{'c'}};
 
 // The classes that get a verdict (design.md §9): Cyrillic of East Asian
-// ambiguous width and private use. Every other glyph that is not a reference
-// glyph keeps the doubt of step 5 for the whole session.
-constexpr std::array<grid::EWidthClass, 2> VERDICT_CLASSES{
-    grid::EWidthClass::Cyrillic, grid::EWidthClass::PrivateUse};
+// ambiguous width and private use, in the BMP and in planes 15-16 apart. Every
+// other glyph that is not a reference glyph keeps the doubt of step 5 for the
+// whole session.
+constexpr std::array<grid::EWidthClass, 3> VERDICT_CLASSES{
+    grid::EWidthClass::Cyrillic, grid::EWidthClass::PrivateUseBmp,
+    grid::EWidthClass::PrivateUsePlanes};
 
 /// Index into VERDICT_CLASSES; its size for a class without a verdict.
 constexpr std::size_t VerdictIndex(grid::EWidthClass cls) noexcept {
@@ -77,7 +79,7 @@ std::unique_ptr<Calibration> Calibration::Create(
 bool Calibration::MirrorReady(const grid::Grid& g,
                               const grid::VtParser& p) noexcept {
     return p.State() == grid::EParserState::Ground && !p.Utf8Pending() &&
-           !g.IsAltScreen() && !g.PendingWrap() &&
+           !g.IsAltScreen() && !g.PendingWrap() && !g.AnyUnmodelledMode() &&
            !g.ModeSet(grid::EMode::Decom) &&
            !g.ModeSet(grid::EMode::SyncOutput);
 }
@@ -392,17 +394,26 @@ grid::WidthPolicy Calibration::Policy() const noexcept {
             policy.DoubtClasses = static_cast<std::uint8_t>(
                 policy.DoubtClasses & ~grid::WidthClassBit(cls));
         }
-        if (cls == grid::EWidthClass::Cyrillic) {
-            policy.Cyrillic = width;
-        } else {
-            policy.PrivateUse = width;
+        switch (cls) {
+            case grid::EWidthClass::Cyrillic:
+                policy.Cyrillic = width;
+                break;
+            case grid::EWidthClass::PrivateUseBmp:
+                policy.PrivateUseBmp = width;
+                break;
+            case grid::EWidthClass::PrivateUsePlanes:
+                policy.PrivateUsePlanes = width;
+                break;
+            default:
+                break;
         }
     }
     return policy;
 }
 
 bool Calibration::PathSolvable(const grid::Grid& g) noexcept {
-    return !g.IsAltScreen() && !g.PathBroken() && g.PathForeign() == 0;
+    return !g.IsAltScreen() && !g.AnyUnmodelledMode() && !g.PathBroken() &&
+           g.PathForeign() == 0;
 }
 
 bool Calibration::WidthDue(const grid::Grid& g) const noexcept {
@@ -575,11 +586,11 @@ void Calibration::OnSnapshot(Timestamp now,
     Sticky_ = false;
     if (target.Valid()) {
         Rebase(target);
-        // The grid is a fresh one with the default policy and the snapshot's
-        // rows laid out by it: the verdicts are the session's, not the grid's.
-        for (const grid::EWidthClass cls : VERDICT_CLASSES) {
-            ApplyVerdict(*target.Screen, cls);
-        }
+        // The grid is a fresh one. The client laid the snapshot out with
+        // Policy() already (Mirror::ResetFromSnapshot), as the terminal did,
+        // so no row needs forgetting: the verdicts are the session's, and a
+        // grid built any other way gets the policy here.
+        target.Screen->SetWidthPolicy(Policy());
     }
 }
 

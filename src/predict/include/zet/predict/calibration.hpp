@@ -44,7 +44,8 @@ enum ECalReason : std::uint8_t {
 };
 
 /// What the session knows about how the terminal draws one class of glyphs
-/// (grid::EWidthClass Cyrillic and PrivateUse; no other class has a verdict).
+/// (grid::EWidthClass Cyrillic, PrivateUseBmp and PrivateUsePlanes; no other
+/// class has a verdict).
 /// Narrow and Wide are final. Unsolved: answers did not settle it
 /// CPR_SOLVE_FAILS_MAX times, the class is never asked about again and the
 /// conservative rules of step 5 hold for it.
@@ -53,8 +54,8 @@ enum class EWidthVerdict : std::uint8_t { Unknown, Narrow, Wide, Unsolved };
 /// Row and width calibration of the mirror by the terminal's cursor position
 /// report (design.md §9, round C, "Калибровка зеркала запросом позиции
 /// курсора"). The width verdicts of the session live here, not in the grid: a
-/// snapshot, a resize and a reconnect leave them be (OnSnapshot puts them on
-/// the fresh grid).
+/// snapshot, a resize and a reconnect leave them be: the client lays a snapshot
+/// out with Policy() already applied, and OnSnapshot sets it on the fresh grid.
 /// Sans-I/O, after PredictionEngine: the client, the test rig and the fuzzer
 /// drive it through the same calls, and no clock or system call is inside.
 ///
@@ -159,7 +160,8 @@ public:
 
     // --- Lifecycle -----------------------------------------------------------
 
-    /// A snapshot was applied to the mirror (a fresh grid): the wait ends, the
+    /// A snapshot was applied to the mirror (a fresh grid that was fed the
+    /// snapshot under Policy(), as the terminal drew it): the wait ends, the
     /// held output is thrown away with the old grid, the query's answer (if one
     /// is on its way) is stripped and ignored, and no query is due until the
     /// output gives a new reason.
@@ -301,10 +303,10 @@ private:
     std::uint64_t SeenBypass_{0};
     std::uint64_t SeenAltExit_{0};
 
-    /// Per class Cyrillic, PrivateUse.
-    std::array<EWidthVerdict, 2> Verdicts_{};
+    /// Per class Cyrillic, PrivateUseBmp, PrivateUsePlanes.
+    std::array<EWidthVerdict, 3> Verdicts_{};
     /// Answers that gave the class no verdict.
-    std::array<std::uint8_t, 2> SolveFails_{};
+    std::array<std::uint8_t, 3> SolveFails_{};
 
     std::uint32_t Resynced_{0};
     std::uint32_t Matched_{0};

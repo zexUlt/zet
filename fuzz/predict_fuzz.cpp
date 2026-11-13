@@ -371,7 +371,9 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data,
         // everything else is drawn by ModelDraw, never widened by a policy.
         if (((b >> 3) & 1) != 0) {
             model.Cyrillic = static_cast<std::uint8_t>(1 + (b & 1));
-            model.PrivateUse = static_cast<std::uint8_t>(1 + ((b >> 1) & 1));
+            model.PrivateUseBmp = static_cast<std::uint8_t>(1 + ((b >> 1) & 1));
+            model.PrivateUsePlanes =
+                static_cast<std::uint8_t>(1 + ((b >> 2) & 1));
         }
         term->G->SetWidthPolicy(model);
         ref->G->SetWidthPolicy(model);
@@ -908,11 +910,10 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data,
         }
         settle();
         draw();
-        if (cal && drewClusters &&
-            cal->Matched() + cal->ColumnFixed() != settledCols) {
+        if (cal && cal->Matched() + cal->ColumnFixed() != settledCols) {
             settledCols = cal->Matched() + cal->ColumnFixed();
             const grid::Grid& g = *mirror->G;
-            if (!g.WidthDoubtBefore(g.CursorRow(), g.Cols())) {
+            if (drewClusters && !g.WidthDoubtBefore(g.CursorRow(), g.Cols())) {
                 drewClusters = false;
             }
         }
@@ -941,8 +942,10 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data,
             };
             Check(
                 !contradicts(grid::EWidthClass::Cyrillic, model.Cyrillic == 2));
-            Check(!contradicts(grid::EWidthClass::PrivateUse,
-                               model.PrivateUse == 2));
+            Check(!contradicts(grid::EWidthClass::PrivateUseBmp,
+                               model.PrivateUseBmp == 2));
+            Check(!contradicts(grid::EWidthClass::PrivateUsePlanes,
+                               model.PrivateUsePlanes == 2));
             // The other classes have no verdict, whatever the model draws.
             for (const auto cls :
                  {grid::EWidthClass::Ambiguous, grid::EWidthClass::Emoji,

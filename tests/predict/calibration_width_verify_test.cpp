@@ -53,7 +53,7 @@ void StartScripted(CalClient& t) {
 
 bool NoVerdict(CalClient& t) {
     for (const EWidthClass cls :
-         {EWidthClass::Cyrillic, EWidthClass::PrivateUse}) {
+         {EWidthClass::Cyrillic, EWidthClass::PrivateUseBmp}) {
         const EWidthVerdict v = t.Cal->Verdict(cls);
         if (v == EWidthVerdict::Narrow || v == EWidthVerdict::Wide) {
             return false;

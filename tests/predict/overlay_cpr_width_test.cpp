@@ -59,7 +59,7 @@ TEST_CASE("The glyphs the tests use are of the classes they are meant for") {
     t.Agent("\r" + RU);
     CHECK(t.R().G->PathGlyphs(EWidthClass::Cyrillic) == 6);
     t.Agent("\r" + PL);
-    CHECK(t.R().G->PathGlyphs(EWidthClass::PrivateUse) == 1);
+    CHECK(t.R().G->PathGlyphs(EWidthClass::PrivateUseBmp) == 1);
     t.Agent("\r" + CLOUD);
     CHECK(t.R().G->PathGlyphs(EWidthClass::Emoji) == 1);
     t.Agent("\rx" + ZWJ);
@@ -77,7 +77,7 @@ TEST_CASE("A is one cell: Cyrillic in the prompt gives Narrow in one query") {
     t.Agent("\r" + RU + "> ");
     CHECK(t.Queries() == 2);
     CHECK(t.Cal->Verdict(EWidthClass::Cyrillic) == EWidthVerdict::Narrow);
-    CHECK(Open(t, EWidthClass::PrivateUse));
+    CHECK(Open(t, EWidthClass::PrivateUseBmp));
     CHECK(Open(t, EWidthClass::Emoji));
     CHECK(t.Cal->Matched() == 1);
     const grid::Grid& g = *t.R().G;
@@ -155,10 +155,10 @@ TEST_CASE("A and P each get their verdict, whatever the terminal's modes") {
             t.Agent("\r" + RU + "> ");
             CHECK(t.Cal->Verdict(EWidthClass::Cyrillic) ==
                   (a == 2 ? EWidthVerdict::Wide : EWidthVerdict::Narrow));
-            CHECK(Open(t, EWidthClass::PrivateUse));
+            CHECK(Open(t, EWidthClass::PrivateUseBmp));
             SameCursor(t);
             t.Agent("\r" + PL + "> ");
-            CHECK(t.Cal->Verdict(EWidthClass::PrivateUse) ==
+            CHECK(t.Cal->Verdict(EWidthClass::PrivateUseBmp) ==
                   (p == 2 ? EWidthVerdict::Wide : EWidthVerdict::Narrow));
             CHECK(t.Queries() == 3);
             SameCursor(t);
@@ -190,7 +190,7 @@ TEST_CASE("A path with two open classes and a difference gives no verdict") {
     t.Agent("\r" + RU + PL + "> ");
     CHECK(t.Queries() == 2);
     CHECK(Open(t, EWidthClass::Cyrillic));
-    CHECK(Open(t, EWidthClass::PrivateUse));
+    CHECK(Open(t, EWidthClass::PrivateUseBmp));
     // The column differs all the same: the row case, on the answer's column.
     CHECK(t.Cal->ColumnFixed() == 1);
     CHECK(t.R().G->CursorCol() == 15);
@@ -213,7 +213,7 @@ TEST_CASE("Three answers without a verdict make the class Unsolved for good") {
         const auto want = i == CPR_SOLVE_FAILS_MAX ? EWidthVerdict::Unsolved
                                                    : EWidthVerdict::Unknown;
         CHECK(t.Cal->Verdict(EWidthClass::Cyrillic) == want);
-        CHECK(t.Cal->Verdict(EWidthClass::PrivateUse) == want);
+        CHECK(t.Cal->Verdict(EWidthClass::PrivateUseBmp) == want);
     }
     // The classes keep the rules of step 5: still marked, never asked about.
     const std::size_t asked = t.Queries();

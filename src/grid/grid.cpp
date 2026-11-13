@@ -241,7 +241,8 @@ void Grid::SetWidthPolicy(const WidthPolicy& policy) noexcept {
     Policy_ = policy;
     Policy_.Ambiguous = policy.Ambiguous == 2 ? 2 : 1;
     Policy_.Cyrillic = policy.Cyrillic == 2 ? 2 : 1;
-    Policy_.PrivateUse = policy.PrivateUse == 2 ? 2 : 1;
+    Policy_.PrivateUseBmp = policy.PrivateUseBmp == 2 ? 2 : 1;
+    Policy_.PrivateUsePlanes = policy.PrivateUsePlanes == 2 ? 2 : 1;
 }
 
 void Grid::ClearWidthClass(EWidthClass cls) noexcept {
@@ -559,15 +560,18 @@ void Grid::PutChar(char32_t cp, int width) noexcept {
     EWidthClass cls = EWidthClass::Ambiguous;
     const bool classed = IsAmbiguousWidth(cp);
     if (classed) {
-        if (IsPrivateUse(cp)) {
-            cls = EWidthClass::PrivateUse;
+        if (IsPrivateUseBmp(cp)) {
+            cls = EWidthClass::PrivateUseBmp;
+        } else if (IsPrivateUsePlanes(cp)) {
+            cls = EWidthClass::PrivateUsePlanes;
         } else if (IsCyrillicAmbiguous(cp)) {
             cls = EWidthClass::Cyrillic;
         }
     }
     if (classed && width == 1 && !mapped) {
         std::uint8_t w = Policy_.Ambiguous;
-        if (cls == EWidthClass::PrivateUse) w = Policy_.PrivateUse;
+        if (cls == EWidthClass::PrivateUseBmp) w = Policy_.PrivateUseBmp;
+        if (cls == EWidthClass::PrivateUsePlanes) w = Policy_.PrivateUsePlanes;
         if (cls == EWidthClass::Cyrillic) w = Policy_.Cyrillic;
         if (w == 2) width = 2;
     }
@@ -575,7 +579,8 @@ void Grid::PutChar(char32_t cp, int width) noexcept {
     // Only reference glyphs and the classes with a verdict leave the path
     // readable: any other glyph may be drawn in a width the mirror does not
     // know (design.md §9).
-    if (mapped || !(cls == EWidthClass::PrivateUse ||
+    if (mapped || !(cls == EWidthClass::PrivateUseBmp ||
+                    cls == EWidthClass::PrivateUsePlanes ||
                     cls == EWidthClass::Cyrillic || IsReferenceWidth(cp))) {
         NoteForeign();
     }
@@ -1193,6 +1198,19 @@ void Grid::SetMode(std::uint16_t param, bool value) noexcept {
         case 7:
             apply(EMode::Awm);
             break;
+        case 3:
+        case 45:
+        case 69: {
+            const auto bit = static_cast<std::uint8_t>(
+                param == 3    ? EUnmodelledMode::ColumnMode
+                : param == 45 ? EUnmodelledMode::ReverseWrap
+                              : EUnmodelledMode::LeftRightMargins);
+            if (value)
+                UnmodelledModes_ |= bit;
+            else
+                UnmodelledModes_ &= static_cast<std::uint8_t>(~bit);
+            break;
+        }
         case 20:
             apply(EMode::Lnm);
             break;
@@ -1571,6 +1589,7 @@ void Grid::Reset(bool hard) noexcept {
         PendingWrap_ = false;
         if (IsAltScreen()) ++AltExitCount_;
         Modes_ = ModeFlag(EMode::Awm) | ModeFlag(EMode::Dectcem);
+        UnmodelledModes_ = 0;
         for (std::uint16_t r = 0; r < Rows_; ++r) {
             ClearLine(MainLines_[r]);
             ClearLine(AltLines_[r]);
@@ -1592,6 +1611,7 @@ void Grid::Reset(bool hard) noexcept {
         const bool wasAlt = ModeSet(EMode::AltScreen);
         Modes_ = ModeFlag(EMode::Awm) | ModeFlag(EMode::Dectcem);
         if (wasAlt) Modes_ |= ModeFlag(EMode::AltScreen);
+        UnmodelledModes_ = 0;
         // Cursor position and PendingWrap are preserved by DECSTR.
     }
 }

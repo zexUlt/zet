@@ -66,7 +66,7 @@ TEST_CASE(
     t.Agent("\r" + ZH + PL + "> ");
     CHECK(t.Queries() == 2);
     CHECK(t.Cal->Verdict(EWidthClass::Cyrillic) == EWidthVerdict::Unknown);
-    CHECK(t.Cal->Verdict(EWidthClass::PrivateUse) == EWidthVerdict::Unknown);
+    CHECK(t.Cal->Verdict(EWidthClass::PrivateUseBmp) == EWidthVerdict::Unknown);
     // With an emoji in the place of P the path is not solvable: no query.
     CalClient u(40, 6);
     u.SetTerminal(Terminal(2, 1, false));
@@ -93,8 +93,8 @@ TEST_CASE("A class given up on keeps another from a Wide verdict") {
     REQUIRE(t.Queries() == asked + 1);
     REQUIRE(t.Frozen());
     t.Scripted(0, 4 + 1);
-    CHECK(t.Cal->Verdict(EWidthClass::PrivateUse) == EWidthVerdict::Unknown);
-    CHECK(t.R().G->Policy().PrivateUse == 1);
+    CHECK(t.Cal->Verdict(EWidthClass::PrivateUseBmp) == EWidthVerdict::Unknown);
+    CHECK(t.R().G->Policy().PrivateUseBmp == 1);
 }
 
 TEST_CASE(
@@ -107,7 +107,7 @@ TEST_CASE(
         t.Scripted(0, 8 + 1);
     }
     REQUIRE(t.Cal->Verdict(EWidthClass::Cyrillic) == EWidthVerdict::Unsolved);
-    CHECK(t.Cal->Verdict(EWidthClass::PrivateUse) == EWidthVerdict::Unknown);
+    CHECK(t.Cal->Verdict(EWidthClass::PrivateUseBmp) == EWidthVerdict::Unknown);
     CHECK(t.Cal->Verdict(EWidthClass::Emoji) == EWidthVerdict::Unknown);
 }
 

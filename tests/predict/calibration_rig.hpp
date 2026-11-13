@@ -36,17 +36,25 @@ struct TermModel {
 
 /// How a terminal draws the glyph classes of round C4: East Asian ambiguous
 /// (Cyrillic included; a terminal in a CJK mode draws both alike) in one or two
-/// cells, private use (P) in one or two, and whether VS16 widens a text glyph
-/// that has an emoji variation sequence (E). The terminal is a grid with this
-/// width policy; the mirror starts with the default one and has to learn it.
-inline grid::WidthPolicy Terminal(int ambiguous, int privateUse,
-                                  bool vs16Widens) {
+/// cells, private use in the BMP and in planes 15-16 (each in one or two), and
+/// whether VS16 widens a text glyph that has an emoji variation sequence (E).
+/// The terminal is a grid with this width policy; the mirror starts with the
+/// default one and has to learn it.
+inline grid::WidthPolicy Terminal(int ambiguous, int privateUseBmp,
+                                  int privateUsePlanes, bool vs16Widens) {
     grid::WidthPolicy p;
     p.Ambiguous = static_cast<std::uint8_t>(ambiguous);
     p.Cyrillic = static_cast<std::uint8_t>(ambiguous);
-    p.PrivateUse = static_cast<std::uint8_t>(privateUse);
+    p.PrivateUseBmp = static_cast<std::uint8_t>(privateUseBmp);
+    p.PrivateUsePlanes = static_cast<std::uint8_t>(privateUsePlanes);
     p.Vs16Widens = vs16Widens;
     return p;
+}
+
+/// The same with one width for all private use.
+inline grid::WidthPolicy Terminal(int ambiguous, int privateUse,
+                                  bool vs16Widens) {
+    return Terminal(ambiguous, privateUse, privateUse, vs16Widens);
 }
 
 inline std::string Cpr(int row, int col) {
@@ -352,6 +360,8 @@ struct CalClient {
         C.Ref.P.Reset();
         Emit(EKind::Agent, bytes);
         R().G = MakeGrid(cols, rows);
+        // As the client does: the snapshot is laid out under the verdicts.
+        if (Cal) R().G->SetWidthPolicy(Cal->Policy());
         R().P.Reset();
         R().P.Feed(Bytes(bytes).data(), bytes.size(), *R().G);
         ++R().Gen;

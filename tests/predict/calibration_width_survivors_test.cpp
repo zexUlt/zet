@@ -71,7 +71,7 @@ TEST_CASE("A class given up on stays in doubt when another gets a verdict") {
     GiveUpOnA(t);
     t.Model.Reply = EReply::Normal;
     t.Agent("\r" + PL + "> ");
-    REQUIRE(t.Cal->Verdict(EWidthClass::PrivateUse) == EWidthVerdict::Wide);
+    REQUIRE(t.Cal->Verdict(EWidthClass::PrivateUseBmp) == EWidthVerdict::Wide);
     t.Agent("\r\n" + ZH);
     CHECK((t.R().G->WidthDoubtClasses(1) & A_BIT) != 0);
 }
@@ -84,7 +84,7 @@ TEST_CASE("A class given up on elsewhere does not hold back another's Wide") {
     GiveUpOnA(t);
     t.Model.Reply = EReply::Normal;
     t.Agent("\r" + PL + PL + "> ");
-    CHECK(t.Cal->Verdict(EWidthClass::PrivateUse) == EWidthVerdict::Wide);
+    CHECK(t.Cal->Verdict(EWidthClass::PrivateUseBmp) == EWidthVerdict::Wide);
     CHECK(t.Cal->Verdict(EWidthClass::Cyrillic) == EWidthVerdict::Unsolved);
     CHECK(t.R().G->CursorCol() == t.C.Real.G->CursorCol());
 }
@@ -94,19 +94,24 @@ TEST_CASE("A snapshot re-applies every class's verdict to its rows") {
         CalClient t(40, 6);
         Start(t);
         t.Agent("\r" + PL + "> ");
-        REQUIRE(t.Cal->Verdict(EWidthClass::PrivateUse) ==
+        REQUIRE(t.Cal->Verdict(EWidthClass::PrivateUseBmp) ==
                 EWidthVerdict::Narrow);
         t.Snapshot("\x1b[2J\x1b[H$ " + PL);
         CHECK(t.R().G->WidthDoubtClasses(0) == 0);
     }
-    SUBCASE("Wide P: the rows with its glyphs in the snapshot are foreign") {
+    SUBCASE(
+        "Wide P: the snapshot is laid out at the verdict, its rows are known") {
         CalClient t(40, 6);
         t.SetTerminal(Terminal(1, 2, false));
         Start(t);
         t.Agent("\r" + PL + "> ");
-        REQUIRE(t.Cal->Verdict(EWidthClass::PrivateUse) == EWidthVerdict::Wide);
+        REQUIRE(t.Cal->Verdict(EWidthClass::PrivateUseBmp) ==
+                EWidthVerdict::Wide);
         t.Snapshot("\x1b[2J\x1b[H$ " + PL);
-        CHECK(t.R().G->KnownFrom(0) == t.R().G->Cols());
+        // "$ " and a glyph of two cells: the cursor is where the terminal's is.
+        CHECK(t.R().G->KnownFrom(0) == 0);
+        CHECK(t.R().G->CursorCol() == 4);
+        CHECK(t.R().G->CursorCol() == t.C.Real.G->CursorCol());
     }
 }
 

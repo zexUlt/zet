@@ -27,7 +27,7 @@ struct Rig {
 };
 
 constexpr std::uint8_t A = WidthClassBit(EWidthClass::Ambiguous);
-constexpr std::uint8_t P = WidthClassBit(EWidthClass::PrivateUse);
+constexpr std::uint8_t P = WidthClassBit(EWidthClass::PrivateUseBmp);
 
 }  // namespace
 
@@ -62,7 +62,7 @@ TEST_CASE("ClearWidthClass on a row clears that row's class only") {
     CHECK(r.G->WidthDoubtClasses(0) == P);
     CHECK(r.G->WidthDoubtClasses(1) == A);
     CHECK(r.G->WidthDoubtBefore(0, 10));
-    r.G->ClearWidthClass(0, EWidthClass::PrivateUse);
+    r.G->ClearWidthClass(0, EWidthClass::PrivateUseBmp);
     CHECK(r.G->WidthDoubtClasses(0) == 0);
     CHECK_FALSE(r.G->WidthDoubtBefore(0, 10));
     // Contents and KnownFrom stay.

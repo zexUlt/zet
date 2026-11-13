@@ -214,8 +214,8 @@ void PredictionEngine::StepCsi(std::uint8_t b) noexcept {
 bool PredictionEngine::Predictable(const MirrorView& mirror) const noexcept {
     const grid::Grid& g = mirror.Screen;
     return Trusted_ && !Lagging_ && g.RowsTrusted() && !g.IsAltScreen() &&
-           !g.ModeSet(grid::EMode::Irm) && g.CharsetG0() == 0 &&
-           g.CharsetActive() == 0 && !g.PendingWrap() &&
+           !g.AnyUnmodelledMode() && !g.ModeSet(grid::EMode::Irm) &&
+           g.CharsetG0() == 0 && g.CharsetActive() == 0 && !g.PendingWrap() &&
            g.CursorRow() < g.Rows() && g.CursorCol() < g.Cols();
 }
 

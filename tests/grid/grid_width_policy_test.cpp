@@ -85,14 +85,14 @@ struct Rig {
 
 constexpr std::uint8_t A = WidthClassBit(EWidthClass::Ambiguous);
 constexpr std::uint8_t CY = WidthClassBit(EWidthClass::Cyrillic);
-constexpr std::uint8_t P = WidthClassBit(EWidthClass::PrivateUse);
+constexpr std::uint8_t P = WidthClassBit(EWidthClass::PrivateUseBmp);
 constexpr std::uint8_t E = WidthClassBit(EWidthClass::Emoji);
 constexpr std::uint8_t C = WidthClassBit(EWidthClass::Cluster);
 
 WidthPolicy Wide(int a, int p, bool vs16) {
     WidthPolicy w;
     w.Ambiguous = static_cast<std::uint8_t>(a);
-    w.PrivateUse = static_cast<std::uint8_t>(p);
+    w.PrivateUseBmp = static_cast<std::uint8_t>(p);
     w.Vs16Widens = vs16;
     return w;
 }
@@ -125,7 +125,7 @@ TEST_CASE("the default policy is the table as it was") {
     Rig r;
     CHECK(r.G->Policy() == WidthPolicy{});
     CHECK(r.G->Policy().Ambiguous == 1);
-    CHECK(r.G->Policy().PrivateUse == 1);
+    CHECK(r.G->Policy().PrivateUseBmp == 1);
     CHECK_FALSE(r.G->Policy().Vs16Widens);
     r.Put({ALPHA, BOX, PUA});
     CHECK(r.At(0, 0).Width == 1);
@@ -235,13 +235,13 @@ TEST_CASE("SetWidthPolicy normalises widths") {
     Rig r;
     WidthPolicy w;
     w.Ambiguous = 7;
-    w.PrivateUse = 0;
+    w.PrivateUseBmp = 0;
     r.G->SetWidthPolicy(w);
     CHECK(r.G->Policy().Ambiguous == 1);
-    CHECK(r.G->Policy().PrivateUse == 1);
+    CHECK(r.G->Policy().PrivateUseBmp == 1);
     r.G->SetWidthPolicy(Wide(2, 2, false));
     CHECK(r.G->Policy().Ambiguous == 2);
-    CHECK(r.G->Policy().PrivateUse == 2);
+    CHECK(r.G->Policy().PrivateUseBmp == 2);
 }
 
 // ---------------------------------------------------------------------------
@@ -616,7 +616,7 @@ TEST_CASE("the path counts each class") {
     Rig r(40, 3);
     r.Put({ALPHA, ALPHA, BOX, PUA, 'a', CLOUD, VS16, MAN, ZWJ});
     CHECK(r.G->PathGlyphs(EWidthClass::Ambiguous) == 3);
-    CHECK(r.G->PathGlyphs(EWidthClass::PrivateUse) == 1);
+    CHECK(r.G->PathGlyphs(EWidthClass::PrivateUseBmp) == 1);
     CHECK(r.G->PathGlyphs(EWidthClass::Emoji) == 1);
     CHECK(r.G->PathGlyphs(EWidthClass::Cluster) == 1);  // the ZWJ
     CHECK_FALSE(r.G->PathBroken());

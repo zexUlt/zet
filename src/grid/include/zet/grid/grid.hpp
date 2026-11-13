@@ -50,26 +50,39 @@ enum class EMode : std::uint32_t {
     return static_cast<std::uint32_t>(m);
 }
 
+/// Modes that move the cursor or wrap the line in ways the grid does not model
+/// (design.md §9, round C, "Режимы, которых зеркало не знает"). The grid only
+/// remembers that one is set: nothing is simulated, so while any is, the
+/// mirror's column is a guess. Kept apart from Grid::Modes_: snapshots do not
+/// carry them. RIS and DECSTR clear them.
+enum class EUnmodelledMode : std::uint8_t {
+    LeftRightMargins = 1U << 0,  ///< DECLRMM ?69: CR goes to the left margin
+    ReverseWrap = 1U << 1,       ///< ?45: BS and CUB in column 0 go up a row
+    ColumnMode = 1U << 2,        ///< DECCOLM ?3: 80/132 columns, clears, homes
+};
+
 /// A class of glyphs whose width terminals disagree on (design.md §9, round C).
-/// Only Cyrillic and PrivateUse get a verdict per session (design.md §9); the
-/// others only mark rows as doubtful: Ambiguous (the rest of East Asian
-/// ambiguous), Emoji (a narrow text glyph followed by VS16) and Cluster (ZWJ,
-/// skin tone, VS15, VS16 outside the emoji case, SHY and wrap doubts).
+/// Only Cyrillic, PrivateUseBmp and PrivateUsePlanes get a verdict per session
+/// (design.md §9); the others only mark rows as doubtful: Ambiguous (the rest
+/// of East Asian ambiguous), Emoji (a narrow text glyph followed by VS16) and
+/// Cluster (ZWJ, skin tone, VS15, VS16 outside the emoji case, SHY and wrap
+/// doubts).
 enum class EWidthClass : std::uint8_t {
-    Ambiguous = 0,   ///< East Asian ambiguous, except private use and Cyrillic
-    PrivateUse = 1,  ///< U+E000-F8FF, planes 15-16
-    Emoji = 2,       ///< a narrow text glyph followed by VS16
-    Cluster = 3,     ///< clusters without a verdict
+    Ambiguous = 0,      ///< East Asian ambiguous, except private use, Cyrillic
+    PrivateUseBmp = 1,  ///< U+E000-F8FF
+    Emoji = 2,          ///< a narrow text glyph followed by VS16
+    Cluster = 3,        ///< clusters without a verdict
     Cyrillic =
         4,  ///< Cyrillic of East Asian ambiguous width (IsCyrillicAmbiguous)
+    PrivateUsePlanes = 5,  ///< U+F0000-FFFFD, U+100000-10FFFD (planes 15-16)
 };
-inline constexpr std::size_t WIDTH_CLASS_COUNT = 5;
+inline constexpr std::size_t WIDTH_CLASS_COUNT = 6;
 
 /// Bit of a class in the masks the width doubt API takes and returns.
 [[nodiscard]] constexpr std::uint8_t WidthClassBit(EWidthClass c) noexcept {
     return static_cast<std::uint8_t>(1U << static_cast<unsigned>(c));
 }
-inline constexpr std::uint8_t WIDTH_CLASSES_ALL = 0x1F;
+inline constexpr std::uint8_t WIDTH_CLASSES_ALL = 0x3F;
 
 /// How the grid sizes the glyphs of the classes terminals disagree on. The
 /// default is the table as it always was: the agent's grid and the snapshot
@@ -80,8 +93,10 @@ struct WidthPolicy {
     std::uint8_t Ambiguous{1};
     /// Columns of a Cyrillic glyph of East Asian ambiguous width: 1 or 2.
     std::uint8_t Cyrillic{1};
-    /// Columns of a private use glyph: 1 or 2.
-    std::uint8_t PrivateUse{1};
+    /// Columns of a glyph of private use in the BMP (U+E000-F8FF): 1 or 2.
+    std::uint8_t PrivateUseBmp{1};
+    /// Columns of a glyph of private use in planes 15-16: 1 or 2.
+    std::uint8_t PrivateUsePlanes{1};
     /// Whether VS16 after a narrow glyph that has an emoji variation sequence
     /// makes its cell wide (and moves the cursor one column further).
     bool Vs16Widens{false};
@@ -315,8 +330,9 @@ public:
     }
     /// Glyphs on the path that are neither reference glyphs (IsReferenceWidth,
     /// trusted to be one cell) nor of the classes that get a verdict (Cyrillic,
-    /// PrivateUse): every other glyph, zero-width code points and ones after a
-    /// ZWJ included. A path that holds one tells nothing about widths.
+    /// PrivateUseBmp, PrivateUsePlanes): every other glyph, zero-width code
+    /// points and ones after a ZWJ included. A path that holds one tells
+    /// nothing about widths.
     [[nodiscard]] std::uint32_t PathForeign() const noexcept {
         return Path_.Foreign;
     }
@@ -399,6 +415,13 @@ public:
         return (Modes_ & ModeFlag(m)) != 0;
     }
     [[nodiscard]] std::uint32_t Modes() const noexcept { return Modes_; }
+    /// Whether a mode the grid does not model (EUnmodelledMode) is set.
+    [[nodiscard]] bool UnmodelledModeSet(EUnmodelledMode m) const noexcept {
+        return (UnmodelledModes_ & static_cast<std::uint8_t>(m)) != 0;
+    }
+    [[nodiscard]] bool AnyUnmodelledMode() const noexcept {
+        return UnmodelledModes_ != 0;
+    }
 
     [[nodiscard]] std::uint8_t CharsetG0() const noexcept { return CharsetG0_; }
     [[nodiscard]] std::uint8_t CharsetG1() const noexcept { return CharsetG1_; }
@@ -717,6 +740,7 @@ private:
     // Modes and appearance
     // -----------------------------------------------------------------------
     std::uint32_t Modes_{0};
+    std::uint8_t UnmodelledModes_{0};  ///< EUnmodelledMode bits
     std::uint8_t PenAttrs_{0};
     EColorKind PenFgKind_{EColorKind::Default};
     EColorKind PenBgKind_{EColorKind::Default};

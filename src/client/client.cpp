@@ -1415,13 +1415,15 @@ void Client::PumpEvents(Timestamp now) noexcept {
                 SeededFromSnapshot_ = Mirror_ != nullptr;
             }
             if (Mirror_) {
+                // The terminal draws the snapshot in the widths of the
+                // verdicts, so the mirror lays it out under them from the
+                // first byte (design.md §9, "Ширина").
+                const grid::WidthPolicy policy =
+                    Cal_ ? Cal_->Policy() : grid::WidthPolicy{};
                 if (++SnapshotsApplied_ == Options_.LoseMirrorAtSnapshot ||
-                    !Mirror_->ResetFromSnapshot(snap->Bytes)) {
+                    !Mirror_->ResetFromSnapshot(snap->Bytes, policy)) {
                     LoseMirror();
                 } else if (Predict_) {
-                    // C4: ResetFromSnapshot built a fresh Grid, so the width
-                    // policy the solver settled on is gone with the old one;
-                    // C4 must apply it to the new grid here.
                     // The held output and the query's answer go with the old
                     // grid; no query is asked for the snapshot's sake.
                     if (Cal_) {

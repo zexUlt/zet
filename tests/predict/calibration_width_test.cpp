@@ -66,7 +66,7 @@ TEST_CASE("Verdicts survive a snapshot, a resize and a second snapshot") {
     t.Agent("\r" + RU + "> ");
     t.Agent("\r" + PL + "> ");
     for (const EWidthClass c :
-         {EWidthClass::Cyrillic, EWidthClass::PrivateUse}) {
+         {EWidthClass::Cyrillic, EWidthClass::PrivateUseBmp}) {
         REQUIRE(t.Cal->Verdict(c) == EWidthVerdict::Wide);
     }
     t.Snapshot("\x1b[2J\x1b[H$ ");
