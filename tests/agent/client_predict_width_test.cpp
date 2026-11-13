@@ -42,3 +42,64 @@ TEST_CASE_FIXTURE(SodiumFixture,
     CHECK(rig.QueriesSeen() == 1);
     rig.Finish();
 }
+
+TEST_CASE_FIXTURE(
+    SodiumFixture,
+    "Client: a path-B snapshot is laid out by the width verdict") {
+    ClientRig rig{238,
+                  {.Mode = EDisplayMode::Always,
+                   .GiveUp = 5000ms,
+                   .ForcePath = session::EForcePath::B,
+                   .Calibrate = true,
+                   .TerminalPolicy = {.Ambiguous = 2, .Cyrillic = 2}}};
+    rig.Warm();
+    rig.Pump(1500ms);
+    rig.Print(RU_LINE);
+    REQUIRE(rig.WaitFor([&] { return rig.QueriesSeen() == 1; }));
+    rig.Pump(300ms);
+    rig.Proxy().Cut();
+    REQUIRE(rig.WaitFor([&] { return rig.Proxy().Connections() == 2; }));
+    rig.Pump(1500ms);
+    // An epoch is confirmed on the row below the snapshot's line.
+    rig.Print("\r\n$ ");
+    rig.Pump(100ms);
+    rig.TypeAndEcho('a');
+    rig.TypeAndEcho('B');
+    rig.Print("\r\x1b[K$ ");
+    rig.Pump(100ms);
+    rig.TypeAndEcho('a');
+    rig.TypeAndEcho('B');
+    // The mirror draws on this row: the control for the check below.
+    rig.Keys("c");
+    CHECK(rig.WaitFor([&] {
+        for (const OverlayInsert& i : rig.Inserts()) {
+            if (rig.InsertBytes(i).find("\x1b[5Gc") != std::string::npos) {
+                return true;
+            }
+        }
+        return false;
+    }));
+    rig.Print("c");
+    rig.Pump(200ms);
+    // Back on the snapshot's line, past its end: the terminal's cursor is at
+    // column 14 (CHA 15), after six Cyrillic letters of two cells and "> ".
+    // Two echoes there confirm an epoch again.
+    rig.Print("\x1b[A\x1b[15G");
+    rig.Pump(200ms);
+    rig.TypeAndEcho('p');
+    rig.TypeAndEcho('q');
+    // The mirror holds the verdict for the letters of the snapshot's line, so
+    // the key is drawn at column 16. One that laid the snapshot out at the
+    // default width keeps the line under doubt and draws nothing.
+    rig.Keys("d");
+    CHECK(rig.WaitFor([&] {
+        for (const OverlayInsert& i : rig.Inserts()) {
+            if (rig.InsertBytes(i).find("\x1b[17Gd") != std::string::npos) {
+                return true;
+            }
+        }
+        return false;
+    }));
+    CHECK(rig.QueriesSeen() == 1);
+    rig.Finish();
+}
