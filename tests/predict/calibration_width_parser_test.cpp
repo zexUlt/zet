@@ -199,12 +199,12 @@ TEST_CASE("width parser: the modes the grid does not model are remembered") {
         const char* Reset;
         grid::EUnmodelledMode Which;
     };
-    constexpr std::array MODES{
+    constexpr std::array modes{
         Mode{"\x1b[?3h", "\x1b[?3l", grid::EUnmodelledMode::ColumnMode},
         Mode{"\x1b[?45h", "\x1b[?45l", grid::EUnmodelledMode::ReverseWrap},
         Mode{"\x1b[?69h", "\x1b[?69l",
              grid::EUnmodelledMode::LeftRightMargins}};
-    for (const Mode& m : MODES) {
+    for (const Mode& m : modes) {
         CAPTURE(m.Set);
         for (const char* end : {m.Reset,
                                 "\x1b"
@@ -308,7 +308,7 @@ TEST_CASE(
         std::string Bytes;
         std::uint16_t Col;  // the cursor after "ab" and the bytes
     };
-    const std::array<Case, 20> CASES{{
+    const std::array<Case, 20> cases{{
         {"a lead cut off by ESC", "\xd0\x1b[m", 2},
         {"a lead cut off by CAN", "\xd0\x18", 2},
         {"a lead cut off by SUB", "\xd0\x1a", 3},
@@ -333,7 +333,7 @@ TEST_CASE(
         {"C1 U+0080", "\xc2\x80", 2},
         {"C1 U+009F", "\xc2\x9f", 2},
     }};
-    for (const Case& c : CASES) {
+    for (const Case& c : cases) {
         INFO(std::string(c.Name));
         Parsed t;
         t.Feed("ab");
@@ -362,12 +362,12 @@ TEST_CASE(
 TEST_CASE("width parser: CSI forms the mirror does not handle are unknown") {
     // Every final that moves the cursor, with each intermediate and each
     // private marker: none may reach the handler of the plain final.
-    constexpr std::string_view FINALS = "ABCDEFGHIZadefbSTLMP@XJK";
-    const std::array<const char*, 12> FORMS{"1 ", "1!", "1\"", "1$",
+    constexpr std::string_view finals = "ABCDEFGHIZadefbSTLMP@XJK";
+    const std::array<const char*, 12> forms{"1 ", "1!", "1\"", "1$",
                                             "1'", "1*", "1 !", "?1",
                                             ">1", "<1", "=1",  "1:2"};
-    for (const char final : FINALS) {
-        for (const char* form : FORMS) {
+    for (const char final : finals) {
+        for (const char* form : forms) {
             // "1:2" is a colon among the parameters, not a marker; it is
             // illegal for all of them but SGR.
             const std::string seq =
