@@ -1451,3 +1451,34 @@ TEST_CASE("Silent is already set inside the event callback") {
         CHECK_FALSE(r.SilentInEvent[0]);
     }
 }
+
+TEST_CASE("a reply that starts behind an expired position keeps its own hold") {
+    // The program asked `CSI 6 n` alone, so the terminal's answer to it is a
+    // position that looks like ours. Our entry was abandoned by a resize (dead:
+    // the hold is CPR_HOLD from arrival). The program's position expires while
+    // the first byte of our own reply, which arrived 2 ms after it, is held
+    // behind it: only the position goes, and the rest of our reply is stripped.
+    Rig r;
+    REQUIRE(r.Query());
+    r.Resize();
+    CHECK(r.In(Pos(28, 10)).empty());
+    r.Advance(2ms);
+    CHECK(r.In("\x1b").empty());
+    r.Advance(CPR_HOLD - 2ms);
+    CHECK(r.Tick() == Pos(28, 10));
+    CHECK(r.D->HeldSize() == 1);
+    CHECK(r.In(Pos(1, 1).substr(1) + DA1).empty());
+    CHECK(r.Fwd == Pos(28, 10));
+    CHECK(r.Stripped == Pos(1, 1) + DA1);
+    CHECK_FALSE(r.D->Outstanding());
+}
+
+TEST_CASE("a tail as old as its position's hold goes with the position") {
+    Rig r;
+    REQUIRE(r.Query());
+    r.Resize();
+    CHECK(r.In(Pos(28, 10) + "\x1b[").empty());
+    r.Advance(CPR_HOLD);
+    CHECK(r.Tick() == Pos(28, 10) + "\x1b[");
+    CHECK(r.D->HeldSize() == 0);
+}
