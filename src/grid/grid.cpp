@@ -859,8 +859,10 @@ bool Grid::RestoreCursor() noexcept {
     // A slot written before the rows were synced holds a row of the terminal
     // that is not the mirror's row of the same number: once synced, the rows
     // are not the terminal's again until the next sync.
-    const bool stale = !sc.Fresh;
-    if (stale && RowsCalibrated())
+    // Before the first sync the rows are not trusted anyway (NoteDrift above),
+    // so a stale slot only counts once they are the terminal's.
+    const bool stale = !sc.Fresh && RowsCalibrated();
+    if (stale)
         Sync_ = RowSync{
             .Abs = false, .Eq = false, .Blank = Sync_.Blank, .Drift = true};
     // ... and it is as far from the mirror's as it was at the save.

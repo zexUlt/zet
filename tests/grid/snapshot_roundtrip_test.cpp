@@ -497,9 +497,7 @@ TEST_CASE("H1 hostile codepoints via PutChar") {
     Grid* dst = Mk(20, 3, 10);
     VtParser dp;
     dp.Feed(by.data(), by.size(), *dst);
-    // The preamble's ?1049l restores a slot a fresh mirror holds stale: the
-    // one unknown sequence, which the client rebases on a snapshot.
-    CHECK(dp.UnknownSeqCount() == 1);
+    CHECK(dp.UnknownSeqCount() == 0);
     // scan for C1 as raw single bytes or UTF-8 encoded C1 (C2 80..9F)
     int c1 = 0, esc = 0;
     const unsigned char* p = reinterpret_cast<const unsigned char*>(by.data());

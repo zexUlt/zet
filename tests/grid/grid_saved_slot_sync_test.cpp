@@ -103,11 +103,15 @@ TEST_CASE("saved slot: a restore with nothing saved is from a stale slot") {
     CHECK_FALSE(r.G->RowsTrusted());
 }
 
-TEST_CASE("saved slot: before the sync a restore counts and loses the rows") {
+TEST_CASE(
+    "saved slot: before the sync a restore loses the rows but does not count") {
+    // zsh's right prompt saves and restores the cursor before any answer
+    // came; counting it would reset the engine on every prompt of a terminal
+    // that never answers.
     Rig r;
     r.Feed(DECSC);
     CHECK(r.G->RowsTrusted());
-    CHECK(r.Unknown(DECRC) == 1);
+    CHECK(r.Unknown(DECRC) == 0);
     CHECK_FALSE(r.G->RowsTrusted());
 }
 
