@@ -394,10 +394,10 @@ TEST_CASE("A parser that gave up turns Cyrillic off") {
 TEST_CASE("A mirror that cannot hold the wait turns Cyrillic off") {
     CalClient t(30, 8);
     Shell(t);
-    constexpr std::size_t HOLD = 6'000'000;
-    t.LagMax = HOLD;
+    constexpr std::size_t holdBytes = 6'000'000;
+    t.LagMax = holdBytes;
     t.Before("");
-    G_REFUSE_NOTHROW_ARRAYS_FROM = HOLD;
+    G_REFUSE_NOTHROW_ARRAYS_FROM = holdBytes;
     t.Begin();
     G_REFUSE_NOTHROW_ARRAYS_FROM = SIZE_MAX;
     CHECK(t.Queries() == 0);
