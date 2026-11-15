@@ -18,6 +18,7 @@ add_executable(zet_tests
     grid/grid_known_test.cpp
     grid/grid_rep_unknown_test.cpp
     grid/grid_saved_slot_sync_test.cpp
+    grid/grid_cyr_path_test.cpp
     grid/grid_unknown_form_test.cpp
     grid/grid_lf_bg_drift_test.cpp
     grid/grid_width_policy_test.cpp
@@ -36,6 +37,7 @@ add_executable(zet_tests
     predict/overlay_review_test.cpp
     predict/overlay_desync_test.cpp
     predict/overlay_cpr_test.cpp
+    predict/overlay_cyr_tripwire_test.cpp
     predict/overlay_cpr_review_test.cpp
     predict/overlay_probe_test.cpp
     predict/calibration_start_query_test.cpp
@@ -162,6 +164,7 @@ if(ZET_HAVE_AGENT)
         agent/client_predict_baseline_test.cpp
         agent/client_predict_off_test.cpp
         agent/client_predict_cpr_test.cpp
+    agent/client_predict_width_test.cpp
         agent/client_predict_cpr_wiring_test.cpp
         agent/client_predict_overlay_test.cpp
         agent/client_predict_password_test.cpp

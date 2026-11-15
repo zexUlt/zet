@@ -60,6 +60,21 @@ std::unique_ptr<Calibration> Calibration::Create(
 // Reasons
 // ---------------------------------------------------------------------------
 
+bool Calibration::CyrNarrow(const grid::Grid& g) noexcept {
+    return (g.Policy().DoubtClasses &
+            grid::WidthClassBit(grid::EWidthClass::Cyrillic)) == 0;
+}
+
+void Calibration::CyrillicOff(const CalibrationTarget& target) noexcept {
+    Reasons_ &= static_cast<std::uint8_t>(~CalCyr);
+    if (!target.Valid() || !CyrNarrow(*target.Screen)) {
+        return;
+    }
+    grid::WidthPolicy policy = target.Screen->Policy();
+    policy.DoubtClasses |= grid::WidthClassBit(grid::EWidthClass::Cyrillic);
+    target.Screen->SetWidthPolicy(policy);
+}
+
 bool Calibration::MirrorReady(const grid::Grid& g,
                               const grid::VtParser& p) noexcept {
     return p.State() == grid::EParserState::Ground && !p.Utf8Pending() &&
@@ -84,6 +99,9 @@ void Calibration::Evaluate(const CalibrationTarget& target,
     if (p.BypassLimitCount() != SeenBypass_) {
         SeenBypass_ = p.BypassLimitCount();
         Sticky_ = true;
+        // No queries until a snapshot: nothing will say whether Cyrillic is
+        // narrow.
+        CyrillicOff(target);
     }
     // Counted, not compared at the call boundaries: an enter and an exit
     // inside one portion, or inside the wait, are seen too.
@@ -107,6 +125,11 @@ void Calibration::Evaluate(const CalibrationTarget& target,
         }
         if (dcs != SeenDcs_) {
             Reasons_ |= CalDcs;
+        }
+        // Cyrillic on the path of a mirror that takes it narrow, and no
+        // answer has yet shown it right: ask where the cursor is.
+        if (!CyrConfirmed_ && CyrNarrow(g) && g.PathHasCyrillic()) {
+            Reasons_ |= CalCyr;
         }
     }
     SeenUnknown_ = unknown;
@@ -221,6 +244,8 @@ bool Calibration::BeginQuery(Timestamp /*now*/,
     Lag_.reset(new (std::nothrow) std::byte[LagMax_]);
     if (!Lag_) {
         Disabled_ = true;
+        // No queries for the rest of the session.
+        CyrillicOff(target);
         return false;
     }
     const grid::Grid& g = *target.Screen;
@@ -278,6 +303,11 @@ void Calibration::OnQueryWritten(Timestamp now,
 
 void Calibration::Dispatch(Timestamp now,
                            const CalibrationTarget& target) noexcept {
+    // A terminal that did not answer in time (or answered the end marker
+    // alone) is silent until a resize: no answer will disprove the assumption.
+    if (Demux_->Silent()) {
+        CyrillicOff(target);
+    }
     if (Sink_.EventCount == 0) {
         return;
     }
@@ -307,8 +337,22 @@ void Calibration::Apply(const CprEvent& event, Timestamp now,
         static_cast<std::uint16_t>(event.Col > 0 ? event.Col - 1 : 0);
     const bool match =
         ExpectKnown_ && g.CursorRow() == row && g.CursorCol() == col;
+    // The mirror is held at the query's point, so this is the path the
+    // expected position came from.
+    const bool cyrPath = g.PathHasCyrillic();
+    // The tripwire: a column that disagrees, with Cyrillic on the path. One
+    // bit, one way; the cause is not looked for. Before the resync and the
+    // held output, so both lay Cyrillic out as doubtful.
+    if (ExpectKnown_ && g.CursorCol() != col && cyrPath) {
+        CyrillicOff(target);
+    }
     bool resynced = false;
-    if (!match) {
+    if (match) {
+        if (cyrPath) {
+            CyrConfirmed_ = true;
+        }
+        g.ConfirmPath();
+    } else {
         // The start is the only reason that says the tail of the cursor's row
         // is blank: the shell left the cursor on a fresh line.
         resynced = g.Resync(row, col, QueryReasons_ == CalStart);

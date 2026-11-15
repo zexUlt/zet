@@ -1415,10 +1415,11 @@ void Client::PumpEvents(Timestamp now) noexcept {
                 SeededFromSnapshot_ = Mirror_ != nullptr;
             }
             if (Mirror_) {
-                // The terminal draws the snapshot in the widths of the
-                // verdicts, so the mirror lays it out under them from the
-                // first byte (design.md §9, "Ширина"). A fresh Grid has the
-                // default policy: the old one's goes to the new.
+                // The terminal draws the snapshot in the widths it has, so
+                // the mirror lays it out under the session's policy from the
+                // first byte (design.md §9, "Ширина"): Cyrillic narrow, or
+                // doubtful again once the tripwire has fired. A fresh Grid has
+                // the default policy: the old one's goes to the new.
                 const grid::WidthPolicy policy = Mirror_->Screen().Policy();
                 if (++SnapshotsApplied_ == Options_.LoseMirrorAtSnapshot ||
                     !Mirror_->ResetFromSnapshot(snap->Bytes, policy)) {
@@ -1841,6 +1842,18 @@ void Client::StartPredict(std::uint32_t streamGen, Timestamp now) noexcept {
         // seeded it. A failed allocation leaves the session as with never.
         Cal_ = predict::Calibration::Create(seeded, CalTarget());
         CalibrationCreated_ = Cal_ != nullptr;
+        if (Cal_) {
+            // Cyrillic is one cell wide from the start and predicted; the
+            // calibration's tripwire takes it back on the first sign that the
+            // terminal draws it otherwise (design.md §9, "Кириллица"). Rows
+            // laid out before this point (a first-connection snapshot) keep
+            // their marks. Without a calibration nobody guards the
+            // assumption, and the policy stays as it was.
+            grid::WidthPolicy policy = Mirror_->Screen().Policy();
+            policy.DoubtClasses &= static_cast<std::uint8_t>(
+                ~grid::WidthClassBit(grid::EWidthClass::Cyrillic));
+            Mirror_->MutableScreen().SetWidthPolicy(policy);
+        }
     }
     if (seeded) {
         // The mirror was filled from a snapshot and fed everything since: the

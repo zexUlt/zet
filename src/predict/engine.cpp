@@ -134,9 +134,18 @@ void PredictionEngine::StepInput(std::byte b, std::uint64_t end, Timestamp now,
                 const bool valid = cp >= minimum && cp <= 0x10FFFF &&
                                    !(cp >= 0xD800 && cp <= 0xDFFF);
                 // A glyph terminals disagree on the width of is not predicted:
-                // the column after it would be a guess.
+                // the column after it would be a guess. Cyrillic is the
+                // exception while the mirror assumes it one cell wide (the
+                // tripwire has not fired, design.md §9, "Кириллица").
+                const grid::Grid& screen = mirror.Screen;
+                const bool narrowCyr =
+                    grid::IsCyrillicAmbiguous(cp) &&
+                    screen.Policy().Cyrillic == 1 &&
+                    (screen.Policy().DoubtClasses &
+                     grid::WidthClassBit(grid::EWidthClass::Cyrillic)) == 0;
                 if (valid && grid::Wcwidth(cp) == 1 &&
-                    !grid::IsAmbiguousWidth(cp) && !grid::IsClusterJoiner(cp)) {
+                    (narrowCyr || !grid::IsAmbiguousWidth(cp)) &&
+                    !grid::IsClusterJoiner(cp)) {
                     PredictChar(cp, end, now, mirror);
                 } else {
                     BecomeTentative();

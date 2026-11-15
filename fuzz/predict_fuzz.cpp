@@ -65,6 +65,22 @@
 //  13. the hold buffer has the size the calibration was given: the fuzzer
 //      makes it small, and an overflow ends the wait with the output in
 //
+// Cyrillic width (round C4d). The client's mirror takes Cyrillic for one cell
+// wide as soon as the calibration is built, and the engine predicts it. The
+// terminal ("Real" and "Ref") draws it 1 or 2 cells wide (data[2] / 6 % 2), and
+// operation 8 brings Cyrillic as agent output or as keystrokes. A snapshot's
+// mirror carries the policy. The tripwire's contract:
+//  14. once the mirror has Cyrillic among the doubted classes it never takes it
+//      out again
+//  15. Cyrillic goes back only with a reason: the terminal is silent, late,
+//      partial or the hold buffer is small, or the terminal is wide and an
+//      answer was resynced to
+//  16. a terminal that draws Cyrillic one cell wide, answers both replies in
+//      under a second, and a hold buffer of the default size: never turned off
+// While a wide terminal may have been shown a Cyrillic prediction drawn one
+// cell wide, Real is not asserted equal to Ref (a. above): that is the damage
+// the tripwire exists to stop, not one the overlay can undo.
+//
 // Input: 3 header bytes (columns, rows, mode; what is left of them says the
 // pre-zet row N and the text above it), then operations: one byte selecting the
 // operation, one byte giving the operand length, the operand.
@@ -286,12 +302,24 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data,
         std::chrono::milliseconds(1500)};
     const auto replyDelay = DELAYS[data[1] / 100 % 3];
 
+    const bool wideCyr = (data[2] / 6U) % 2 == 1;
+    constexpr std::uint8_t CYR_BIT =
+        grid::WidthClassBit(grid::EWidthClass::Cyrillic);
+    // The terminal draws Cyrillic 1 or 2 cells wide.
+    const auto terminalPolicy = [&](grid::Grid& g) {
+        grid::WidthPolicy policy = g.Policy();
+        policy.Cyrillic = wideCyr ? 2 : 1;
+        g.SetWidthPolicy(policy);
+    };
+
     auto mirror = std::make_unique<Mirror>(cols, rows);
     if (!mirror->G) return 0;
     auto term = std::make_unique<Mirror>(cols, rows);  // Real
     if (!term->G) return 0;
     auto ref = std::make_unique<Mirror>(cols, rows);
     if (!ref->G) return 0;
+    terminalPolicy(*term->G);
+    terminalPolicy(*ref->G);
     {
         const auto preRow = static_cast<std::uint16_t>((data[1] / 10) % rows);
         PreZet(*term, preRow, data[2] / 6U);
@@ -328,7 +356,22 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data,
     if (calibrated) {
         cal = Calibration::Create(false, target(), lagMax);
         if (!cal) return 0;
+        // The client's StartPredict: Cyrillic narrow until the tripwire.
+        grid::WidthPolicy policy = mirror->G->Policy();
+        policy.DoubtClasses &= static_cast<std::uint8_t>(~CYR_BIT);
+        mirror->G->SetWidthPolicy(policy);
     }
+    const auto doubted = [&] {
+        return (mirror->G->Policy().DoubtClasses & CYR_BIT) != 0;
+    };
+    bool cyrWasOff = cal ? doubted() : false;
+    std::uint64_t resyncedSeen = 0;
+    // The terminal has been shown a Cyrillic glyph the mirror took for narrow.
+    bool exposed = false;
+    // Replies late or missing, a small hold buffer: reasons to turn it off.
+    const bool quiet = replyMode == 2 || replyMode == 3 || replyMode == 4 ||
+                       replyDelay >= std::chrono::milliseconds(1500) ||
+                       lagMax != CPR_LAG_BYTES_MAX;
     // Stdin bytes the demux let through go to the engine, as the client's
     // FeedStdin does after the session write.
     const auto forward = [&] {
@@ -350,7 +393,7 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data,
         term->P.Feed(b.data(), b.size(), *term->G);
         if (cal) cal->OnWritten(b, now);
         overlay->Commit(engine);
-        Check(SameScreen(*term->G, *ref->G));
+        Check(exposed || SameScreen(*term->G, *ref->G));
     };
     const auto draw = [&] {
         if (cal && cal->Frozen()) return;
@@ -360,6 +403,13 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data,
               !term->P.Utf8Pending());
         Check(!Has(b, {0x1B, '7'}) && !Has(b, {0x1B, '8'}) &&
               !Has(b, {0x1B, '[', 's'}) && !Has(b, {0x1B, '[', 'u'}));
+        // A Cyrillic glyph drawn where the terminal is wide.
+        if (wideCyr && cal && !cyrWasOff) {
+            for (std::size_t k = 0; k + 1 < b.size(); ++k) {
+                const auto c = static_cast<unsigned char>(b[k]);
+                if (c >= 0xD0 && c <= 0xD3) exposed = true;
+            }
+        }
         term->P.Feed(b.data(), b.size(), *term->G);
         if (cal) cal->OnWritten(b, now);
         overlay->Commit(engine);
@@ -618,6 +668,10 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data,
                 auto fresh3 = std::make_unique<Mirror>(fresh->G->Cols(),
                                                        fresh->G->Rows());
                 if (!fresh3->G) break;
+                // The snapshot's mirror carries the session's policy.
+                if (cal) fresh->G->SetWidthPolicy(mirror->G->Policy());
+                terminalPolicy(*fresh2->G);
+                terminalPolicy(*fresh3->G);
                 undo();
                 // The snapshot's preamble: leave the alternate screen, clear,
                 // home. The terminal gets it with the rest.
@@ -698,6 +752,35 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data,
                 }
                 break;
             }
+            case 8: {  // Cyrillic: the agent prints it or the user types it
+                if (echoOff) {
+                    engine.OnTick(now);
+                    break;
+                }
+                static constexpr const char* GLYPHS[] = {
+                    "\xD0\xBF", "\xD1\x8F", "\xD0\xB6", "\xD0\x96"};
+                std::string cyr;
+                if (arg(1) % 3 == 0) cyr = "\r";
+                for (std::size_t k = 0; k < 1 + arg(2) % 4; ++k) {
+                    cyr += GLYPHS[(arg(3) + k) % 4];
+                }
+                if (arg(0) % 2 == 0) {
+                    undo();
+                    feed(reinterpret_cast<const std::uint8_t*>(cyr.data()),
+                         cyr.size());
+                    deliver(cyr.size());
+                } else if (cal) {
+                    typedAll.append(cyr);
+                    stdinBytes(cyr);
+                } else {
+                    in += cyr.size();
+                    engine.OnInput(
+                        {reinterpret_cast<const std::byte*>(cyr.data()),
+                         cyr.size()},
+                        in, now, mirror->View());
+                }
+                break;
+            }
             default:  // another look at the clock
                 engine.OnTick(now);
                 break;
@@ -725,6 +808,18 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data,
             if (!cal->Frozen()) {
                 Check(!cal->HoldsLag() && !cal->HoldsDeferredAck());
             }
+        }
+        if (cal) {
+            // The tripwire: one bit, one direction, and only for a reason.
+            const bool off = doubted();
+            if (cyrWasOff) Check(off);
+            if (off && !cyrWasOff) {
+                const bool resynced = cal->Resynced() > resyncedSeen;
+                Check(quiet || (wideCyr && resynced));
+            }
+            if (!wideCyr && !quiet) Check(!off);
+            cyrWasOff = off;
+            resyncedSeen = cal->Resynced();
         }
         if (echoOff) {
             Check(engine.ConfirmedEpoch() == 0);

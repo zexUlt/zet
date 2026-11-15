@@ -66,9 +66,29 @@ struct CalClient {
     bool QueueRoom = true;
     /// Bytes queue but are not written (a full terminal).
     bool Blocked = false;
+    /// The client's mirror takes Cyrillic for one cell wide from the moment
+    /// the calibration is created (design.md §9, "Ширина"): Begin sets the
+    /// policy the way Client::StartPredict does. Off, the mirror keeps the
+    /// default policy, as it does without a calibration.
+    bool CyrNarrow = false;
 
     CalClient(int cols, int rows, EDisplayMode mode = EDisplayMode::Always)
         : C(cols, rows, mode) {}
+
+    /// The terminal draws Cyrillic `cyr` and private use in the BMP `pua`
+    /// cells wide (1 or 2): Real and Ref, and the grids a snapshot replaces
+    /// them with.
+    void TerminalWidths(std::uint8_t cyr, std::uint8_t pua = 1) {
+        TermCyr = cyr;
+        TermPua = pua;
+        ApplyTerminalPolicy();
+    }
+    /// Whether the mirror's policy has Cyrillic among the doubted classes: the
+    /// tripwire has fired, or the client never took it out.
+    [[nodiscard]] bool CyrDoubted() {
+        return (R().G->Policy().DoubtClasses &
+                grid::WidthClassBit(grid::EWidthClass::Cyrillic)) != 0;
+    }
 
     Rig& R() { return C.R; }
     CalibrationTarget T() {
@@ -82,6 +102,12 @@ struct CalClient {
     void Begin(bool seeded = false, bool settle = true) {
         Cal = Calibration::Create(seeded, T(), LagMax);
         REQUIRE(Cal != nullptr);
+        if (CyrNarrow) {
+            grid::WidthPolicy policy = R().G->Policy();
+            policy.DoubtClasses &= static_cast<std::uint8_t>(
+                ~grid::WidthClassBit(grid::EWidthClass::Cyrillic));
+            R().G->SetWidthPolicy(policy);
+        }
         if (settle) Settle();
     }
 
@@ -315,12 +341,16 @@ struct CalClient {
         UndoOverlay();
         const int cols = R().G->Cols();
         const int rows = R().G->Rows();
+        // The client's policy goes to the new grid, the terminal's widths stay.
+        const grid::WidthPolicy policy = R().G->Policy();
         C.Real.G = MakeGrid(cols, rows);
         C.Real.P.Reset();
         C.Ref.G = MakeGrid(cols, rows);
         C.Ref.P.Reset();
+        ApplyTerminalPolicy();
         Emit(EKind::Agent, bytes);
         R().G = MakeGrid(cols, rows);
+        R().G->SetWidthPolicy(policy);
         R().P.Reset();
         R().P.Feed(Bytes(bytes).data(), bytes.size(), *R().G);
         ++R().Gen;
@@ -329,6 +359,17 @@ struct CalClient {
         R().E.OnSnapshot(R().Gen, R().Now, R().View());
         Settle();
     }
+
+    void ApplyTerminalPolicy() {
+        for (Term* t : {&C.Real, &C.Ref}) {
+            grid::WidthPolicy policy = t->G->Policy();
+            policy.Cyrillic = TermCyr;
+            policy.PrivateUseBmp = TermPua;
+            t->G->SetWidthPolicy(policy);
+        }
+    }
+    std::uint8_t TermCyr{1};
+    std::uint8_t TermPua{1};
 
     [[nodiscard]] std::string WireWithoutInserts() const {
         std::string out;
