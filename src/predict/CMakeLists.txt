@@ -3,6 +3,7 @@ add_library(zet_predict STATIC
     cpr_demux.cpp
     engine.cpp
     overlay.cpp
+    probe.cpp
 )
 add_library(zet::predict ALIAS zet_predict)
 
