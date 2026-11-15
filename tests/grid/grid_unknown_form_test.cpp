@@ -611,12 +611,18 @@ TEST_CASE("RIS makes a double width row single") {
     CHECK(r.Known(0) == 0);
 }
 
-TEST_CASE("a resync makes a double width row single") {
-    Rig r;
-    r.Feed("\x1b#6");
-    REQUIRE(r.G->Resync(0, 0, true));
-    r.Feed("\x1b[2K");
-    CHECK(r.Known(0) == 0);
+TEST_CASE("a double width row stays foreign through a resync") {
+    // Above the cursor row, the cursor row with its blank tail, and below it.
+    for (int row : {0, 1, 2}) {
+        CAPTURE(row);
+        Rig r;
+        const std::string at = "\x1b[" + std::to_string(row + 1) + ";1H";
+        r.Feed(at + "\x1b#6");
+        REQUIRE(r.G->Resync(1, 2, true));
+        CHECK(r.Known(row) == 10);
+        r.Feed(at + "\x1b[2K");
+        CHECK(r.Known(row) == 10);
+    }
 }
 
 TEST_CASE("a double width row keeps its mark through a resize") {

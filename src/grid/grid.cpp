@@ -1686,14 +1686,20 @@ bool Grid::Resync(std::uint16_t row, std::uint16_t col,
 
     for (std::uint16_t r = 0; r < Rows_; ++r) {
         Line& line = MainLines_[r];
+        // The answer places the cursor, not the line attribute: a double width
+        // row stays double on the terminal, so it stays foreign here.
+        const bool doubleRow = line.DoubleRow;
         if (r > row) {
             ClearLinePlain(line);
+            if (doubleRow) {
+                line.DoubleRow = true;
+                line.KnownFrom = Cols_;
+            }
             continue;
         }
         line.WidthDoubt = 0;
         for (std::uint16_t& d : line.ClassDoubt) d = 0;
         line.KnownFrom = Cols_;
-        line.DoubleRow = false;
         if (r < row) continue;
         if (tailBlank) {
             // A wide glyph cut in two by the new tail would orphan its head.
@@ -1701,13 +1707,12 @@ bool Grid::Resync(std::uint16_t row, std::uint16_t col,
                 StoreCell(line.Cells[col - 1], Cell{});
             for (std::uint16_t c = col; c < Cols_; ++c)
                 StoreCell(line.Cells[c], Cell{});
-            line.KnownFrom = col;
+            if (!doubleRow) line.KnownFrom = col;
         }
     }
     for (std::uint16_t r = 0; r < Rows_; ++r) {
         AltLines_[r].WidthDoubt = 0;
         for (std::uint16_t& d : AltLines_[r].ClassDoubt) d = 0;
-        AltLines_[r].DoubleRow = false;
     }
 
     CursorRow_ = row;
