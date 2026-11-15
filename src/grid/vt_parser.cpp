@@ -549,7 +549,7 @@ void VtParser::DispatchEsc(char32_t final, Grid& grid) noexcept {
                 grid.SaveCursor();
                 return;
             case '8':  // DECRC – restore cursor
-                grid.RestoreCursor();
+                if (!grid.RestoreCursor()) ++UnknownSeqCount_;  // stale slot
                 return;
             case 'D':  // IND – index (move down one line)
                 grid.Index();
@@ -713,7 +713,8 @@ void VtParser::DispatchCsi(char32_t final, Grid& grid) noexcept {
                 params[i] == 69) {
                 CountUnknown();
             }
-            grid.SetMode(params[i], value);
+            // ?1048l and ?1049l restore the cursor: false for a stale slot.
+            if (!grid.SetMode(params[i], value)) CountUnknown();
         }
         return;
     }
@@ -835,7 +836,7 @@ void VtParser::DispatchCsi(char32_t final, Grid& grid) noexcept {
             grid.SaveCursor();
             break;
         case 'u':  // RCP – restore cursor position
-            grid.RestoreCursor();
+            if (!grid.RestoreCursor()) ++UnknownSeqCount_;  // stale slot
             break;
 
         // Soft reset.

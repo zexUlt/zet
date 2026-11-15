@@ -197,6 +197,69 @@ TEST_CASE("desync: the alternate screen leaves the rows as they were") {
     CHECK_FALSE(c.R.G->RowsTrusted());
 }
 
+TEST_CASE("desync: a cursor restored from a slot saved before the sync") {
+    // The slot holds the terminal's row (here 3), the mirror's row 0: a
+    // restore after the sync puts the two cursors on different rows, and the
+    // overlay would draw, and undo, on the wrong one (red background here).
+    struct Case {
+        const char* Name;
+        const char* Before;  // the save, before the sync
+        const char* Sync;
+        const char* Restore;
+    };
+    const Case cases[] = {
+        {"?1049", "\x1b[?1049h\x1b[?1049l", "\x1b[2J\x1b[H", "\x1b[?1049l"},
+        {"ESC 7/8",
+         "\x1b"
+         "7",
+         "\x1b[2J\x1b[H",
+         "\x1b"
+         "8"},
+        {"?1048", "\x1b[?1048h", "\x1b[2J\x1b[H", "\x1b[?1048l"},
+    };
+    for (const Case& k : cases) {
+        CAPTURE(k.Name);
+        Client c(30, 6, EDisplayMode::Always);
+        c.Before(SHELL);
+        c.Start();
+        c.Agent(k.Before);
+        c.Agent(k.Sync);
+        REQUIRE(c.R.G->RowsTrusted());
+        c.Agent("\x1b[41m\x1b[K");
+        CHECK(c.R.G->RowsTrusted());
+        c.Agent(k.Restore);
+        CHECK_FALSE(c.R.G->RowsTrusted());
+        const std::size_t drawsBefore = c.Draws;
+        c.Key("c");
+        CHECK(c.Draws == drawsBefore);
+        c.Agent("");  // the undo: Real == Ref, no red under the overlay
+        c.Agent("\x1b[2J\x1b[H");  // the next sync gives the rows back
+        CHECK(c.R.G->RowsTrusted());
+    }
+}
+
+TEST_CASE("desync: a slot saved after the sync keeps the predictions") {
+    // zsh's right prompt, readline and less save and restore the cursor.
+    for (const bool slot : {false, true}) {
+        CAPTURE(slot);
+        Client c(30, 6, EDisplayMode::Always);
+        c.Before(SHELL);
+        c.Agent("\x1b[2J\x1b[H");
+        if (slot) {
+            c.Agent(
+                "\x1b"
+                "7\x1b[41m\x1b[K\x1b"
+                "8\x1b[0m");
+        }
+        c.Start();
+        CHECK(c.R.G->RowsTrusted());
+        const std::size_t drawsBefore = c.Draws;
+        c.Key("c");
+        CHECK(c.Draws > drawsBefore);
+        c.Agent("");
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Widths
 // ---------------------------------------------------------------------------

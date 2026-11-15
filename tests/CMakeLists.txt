@@ -17,6 +17,7 @@ add_executable(zet_tests
     grid/vt_parser_query_count_test.cpp
     grid/grid_known_test.cpp
     grid/grid_rep_unknown_test.cpp
+    grid/grid_saved_slot_sync_test.cpp
     grid/grid_unknown_form_test.cpp
     grid/grid_lf_bg_drift_test.cpp
     grid/grid_width_policy_test.cpp

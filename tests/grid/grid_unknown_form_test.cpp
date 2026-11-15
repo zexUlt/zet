@@ -205,7 +205,9 @@ TEST_CASE("CSI forms the grid handles count nothing") {
         "\x1b[4:3m",
         "\x1b[38:2::1:2:3m",
         "\x1b[s",
-        "\x1b[u",
+        // A restore from a slot written with the rows synced; from a stale
+        // one it counts (grid_saved_slot_sync_test).
+        "\x1b[2J\x1b[H\x1b[s\x1b[u",
         "\x1b[3C",
         "\x1b[2;5r",
         "\x1b[4h",
@@ -213,7 +215,7 @@ TEST_CASE("CSI forms the grid handles count nothing") {
         "\x1b[6n",
         "\x1b[c",
         "\x1b[0c",
-        "\x1b[?1049h\x1b[?1049l",
+        "\x1b[2J\x1b[H\x1b[?1049h\x1b[?1049l",
         "\x1b[?7l",
     };
     for (const char* f : forms) {
