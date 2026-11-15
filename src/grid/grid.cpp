@@ -848,7 +848,7 @@ void Grid::SaveCursor() noexcept {
     sc.LeftOverDoubt = Path_.LeftOverDoubt;
     sc.NonAsciiPath = Path_.NonAscii;
     sc.UnmodelledSgr = UnmodelledSgr_;
-    sc.Fresh = RowsSynced();
+    sc.Fresh = RowsCalibrated();
 }
 
 bool Grid::RestoreCursor() noexcept {
@@ -860,7 +860,7 @@ bool Grid::RestoreCursor() noexcept {
     // that is not the mirror's row of the same number: once synced, the rows
     // are not the terminal's again until the next sync.
     const bool stale = !sc.Fresh;
-    if (stale && Sync_.Abs && Sync_.Eq)
+    if (stale && RowsCalibrated())
         Sync_ = RowSync{
             .Abs = false, .Eq = false, .Blank = Sync_.Blank, .Drift = true};
     // ... and it is as far from the mirror's as it was at the save.
@@ -1627,8 +1627,8 @@ void Grid::Reset(bool hard) noexcept {
         // synced moment they hold the same row. DECSTR leaves them (below).
         SavedCursorMain_ = {};
         SavedCursorAlt_ = {};
-        SavedCursorMain_.Fresh = RowsSynced();
-        SavedCursorAlt_.Fresh = RowsSynced();
+        SavedCursorMain_.Fresh = RowsCalibrated();
+        SavedCursorAlt_.Fresh = RowsCalibrated();
         CursorStyle_ = 0;
     } else {
         // DECSTR (soft reset): keep cursor position, alt-screen flag, and

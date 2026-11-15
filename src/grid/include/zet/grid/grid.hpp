@@ -721,9 +721,6 @@ private:
     void NoteDrift() noexcept {
         if (!Sync_.Abs) Sync_.Drift = true;
     }
-    [[nodiscard]] bool RowsSynced() const noexcept {
-        return Sync_.Abs && Sync_.Eq;
-    }
     void NoteAbsoluteRow() noexcept {
         if (!Sync_.Abs) {
             Sync_.Abs = true;
