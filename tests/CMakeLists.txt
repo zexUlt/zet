@@ -17,6 +17,7 @@ add_executable(zet_tests
     grid/vt_parser_query_count_test.cpp
     grid/grid_known_test.cpp
     grid/grid_rep_unknown_test.cpp
+    grid/grid_unknown_form_test.cpp
     grid/grid_lf_bg_drift_test.cpp
     grid/grid_width_policy_test.cpp
     grid/probe_test.cpp
@@ -28,6 +29,7 @@ add_executable(zet_tests
     grid/snapshot_400x300_test.cpp
     grid/snapshot_mutant_test.cpp
     predict/overlay_bytes_test.cpp
+    predict/overlay_unmodelled_test.cpp
     predict/overlay_terminal_test.cpp
     predict/overlay_review_test.cpp
     predict/overlay_desync_test.cpp

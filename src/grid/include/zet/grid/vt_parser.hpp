@@ -176,8 +176,16 @@ private:
     // Dispatch the current CSI/ESC/DCS sequence to the Grid.
     void DispatchCsi(char32_t finalByte, Grid& grid) noexcept;
     void DispatchEsc(char32_t finalByte, Grid& grid) noexcept;
+    /// Whether the CSI collected so far has a form the mirror handles for this
+    /// final byte: the private marker, the intermediates and the parameters
+    /// are all ones its handler knows. Anything else is an unknown sequence.
+    [[nodiscard]] bool CsiFormHandled(char32_t finalByte, const bool* colon,
+                                      std::size_t nparams) const noexcept;
 
     // Helpers.
+    /// The mirror cannot say what the terminal does with these bytes: counted
+    /// as an unknown sequence.
+    void CountUnknown() noexcept;
     void TransitionTo(EParserState next, Grid& grid) noexcept;
     void ClearParams() noexcept;
     void AddParam(std::uint8_t ch) noexcept;
