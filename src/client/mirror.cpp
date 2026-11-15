@@ -22,12 +22,14 @@ void Mirror::Feed(ByteSpan bytes) noexcept {
     }
 }
 
-bool Mirror::ResetFromSnapshot(ByteSpan snapshot) noexcept {
+bool Mirror::ResetFromSnapshot(ByteSpan snapshot,
+                               const grid::WidthPolicy& policy) noexcept {
     auto fresh = grid::Grid::Create(Grid_->Cols(), Grid_->Rows(), 0);
     if (!fresh) {
         return false;
     }
     Grid_.reset(*fresh);
+    Grid_->SetWidthPolicy(policy);
     Parser_.Reset();
     Feed(snapshot);
     return true;

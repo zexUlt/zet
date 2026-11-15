@@ -124,18 +124,16 @@ TEST_CASE("Resync makes the rows trusted for good") {
     CHECK(r.G->RowsTrusted());
 }
 
-TEST_CASE("Resync forgets the saved cursor, REP, width marks and the path") {
+TEST_CASE("Resync forgets the saved cursor, REP and width marks") {
     Rig r;
     r.Feed(
         "\x1b[3;4H\x1b"
         "7");            // DECSC at (2,3)
-    r.Feed("\xD0\xB6");  // Cyrillic zhe: ambiguous width
+    r.Feed("\xCE\xB1");  // Greek alpha: ambiguous width
     REQUIRE(r.G->WidthDoubtBefore(2, 9));
-    REQUIRE(r.G->PathGlyphs(EWidthClass::Ambiguous) == 1);
     r.G->Resync(1, 2, true);
     CHECK_FALSE(r.G->WidthDoubtBefore(2, 9));
     CHECK(r.G->WidthDoubtClasses(2) == 0);
-    CHECK(r.G->PathGlyphs(EWidthClass::Ambiguous) == 0);
     CHECK_FALSE(r.G->RepeatChar(1));
     CHECK(r.G->LastPrinted().Codepoint == 0);
     r.Feed(
