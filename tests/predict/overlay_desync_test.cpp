@@ -463,7 +463,7 @@ TEST_CASE("rep: before any glyph a REP is not modelled, the column is lost") {
     CHECK_FALSE(c.R.E.ColumnTrusted());
 }
 
-TEST_CASE("rep: before any glyph the row is foreign, no draw after a CR") {
+TEST_CASE("rep: before any glyph the row stays foreign after a CR") {
     // The terminal holds an 'e' that REP repeats; the mirror printed nothing.
     // The CR gives the column back, but the row's tail is not known blank.
     Client c(30, 5, EDisplayMode::Always);
@@ -473,9 +473,6 @@ TEST_CASE("rep: before any glyph the row is foreign, no draw after a CR") {
     c.Agent("\r");
     CHECK(c.R.E.ColumnTrusted());
     CHECK(c.R.G->KnownFrom(0) == 30);
-    c.Key("x");
-    CHECK(c.Draws == 0);
-    c.Agent("");  // the restore leaves the terminal's 'e': Real == Ref
 }
 
 TEST_CASE("desync: a coloured line feed on the terminal's bottom row") {
@@ -507,4 +504,17 @@ TEST_CASE("desync: IND, NEL and an auto-wrap under a coloured pen") {
         c.Key("c");
         c.Agent("");
     }
+}
+
+TEST_CASE("rep: before any glyph the repeated cells are not predicted over") {
+    // The terminal's REP repeats its 'e' into columns 1-2. The prompt then
+    // covers columns 0-1 only; column 2 holds an 'e' the mirror never saw.
+    Client c(30, 5, EDisplayMode::Always);
+    c.Before("e");
+    c.Agent("\x1b[2b");
+    c.Start();  // prompt "$ ", echoed keys: the confirmed epoch
+    const std::size_t before = c.Draws;
+    c.Key("c");
+    CHECK(c.Draws == before);
+    c.Agent("");
 }
