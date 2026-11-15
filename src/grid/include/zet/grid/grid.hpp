@@ -289,6 +289,16 @@ public:
         return Sync_.Abs ? Sync_.Eq : !Sync_.Drift;
     }
 
+    /// Whether the rows were made the terminal's, not merely never moved
+    /// apart: an absolute row met a screen blank on both sides (Resync, RIS,
+    /// a path B snapshot, ED 2 then CUP). False on a fresh mirror, where
+    /// RowsTrusted() holds only until the first move that may differ. A probe
+    /// asks for the rows' answer on this one: an observer's grid starts at
+    /// row 0 whatever row the terminal's cursor is on.
+    [[nodiscard]] bool RowsCalibrated() const noexcept {
+        return Sync_.Abs && Sync_.Eq;
+    }
+
     /// Whether a glyph left of `col` in `row` has a width terminals may
     /// disagree on, so that where `col` is on the terminal is not certain:
     /// East Asian ambiguous, or followed by ZWJ, VS15, VS16 or a skin tone

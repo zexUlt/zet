@@ -79,4 +79,10 @@ inline constexpr std::size_t CPR_DA1_REPLY_MAX = 128;
 inline constexpr std::size_t CPR_HELD_MAX =
     CPR_POSITION_REPLY_MAX + CPR_DA1_REPLY_MAX;
 
+/// Glyphs in one width probe: up to four representatives of the class and the
+/// first code point of the class the session met (design.md §9, "Пределы").
+/// The probe's cells are twice that at most, plus the column the cursor stands
+/// in after it.
+inline constexpr std::size_t PROBE_GLYPHS_MAX = 5;
+
 }  // namespace zet::predict
