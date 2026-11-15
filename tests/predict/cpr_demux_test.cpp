@@ -1482,3 +1482,186 @@ TEST_CASE("a tail as old as its position's hold goes with the position") {
     CHECK(r.Tick() == Pos(28, 10) + "\x1b[");
     CHECK(r.D->HeldSize() == 0);
 }
+
+// ---------------------------------------------------------------------------
+// The hold of the bytes behind an expired position
+// ---------------------------------------------------------------------------
+
+TEST_CASE("own ESC after a live position's deadline keeps its hold") {
+    Rig r;
+    REQUIRE(r.Query());
+    const Timestamp deadline = r.Now + CPR_TIMEOUT;
+    r.Advance(100ms);
+    CHECK(r.In(Pos(28, 10)).empty());  // the program's, held for the entry
+    r.Now = deadline;
+    CHECK(r.Tick().empty());
+    CHECK(r.Count(ECprEvent::TimedOut) == 1);
+    r.Advance(30ms);
+    CHECK(r.In("\x1b").empty());
+    r.Now = deadline + CPR_HOLD;
+    CHECK(r.Tick() == Pos(28, 10));
+    CHECK(r.D->HeldSize() == 1);
+    REQUIRE(r.D->NextDeadline().has_value());
+    CHECK(*r.D->NextDeadline() == deadline + 30ms + CPR_HOLD);
+    r.Advance(10ms);
+    CHECK(r.In(Pos(1, 1).substr(1) + DA1).empty());
+    CHECK(r.Fwd == Pos(28, 10));
+    CHECK(r.Stripped == Pos(1, 1) + DA1);
+    CHECK_FALSE(r.D->Outstanding());
+}
+
+TEST_CASE("a cancel releases the position, not the younger tail") {
+    Rig r;
+    REQUIRE(r.Query());
+    CHECK(r.In(Pos(5, 6)).empty());
+    r.Advance(300ms);
+    CHECK(r.In("\x1b[?").empty());
+    r.Advance(20ms);
+    r.Cancel();
+    CHECK(r.Fwd == Pos(5, 6));
+    CHECK(r.D->HeldSize() == 3);
+    r.Advance(10ms);
+    CHECK(r.In(DA1.substr(3)).empty());
+    CHECK(r.Stripped == DA1);
+    CHECK(r.Events.empty());
+    CHECK_FALSE(r.D->Outstanding());
+}
+
+TEST_CASE("the tail behind a released position: tight deadline") {
+    Rig r;
+    REQUIRE(r.Query());
+    r.Resize();
+    const Timestamp t0 = r.Now;
+    CHECK(r.In(Pos(28, 10)).empty());
+    r.Advance(2ms);
+    CHECK(r.In("\x1b").empty());
+    REQUIRE(r.D->NextDeadline().has_value());
+    CHECK(*r.D->NextDeadline() == t0 + CPR_HOLD);
+    r.Now = t0 + CPR_HOLD - std::chrono::nanoseconds(1);
+    CHECK(r.Tick().empty());
+    r.Now = t0 + CPR_HOLD;
+    CHECK(r.Tick() == Pos(28, 10));
+    REQUIRE(r.D->NextDeadline().has_value());
+    CHECK(*r.D->NextDeadline() == t0 + 2ms + CPR_HOLD);
+    r.Now = t0 + 2ms + CPR_HOLD - std::chrono::nanoseconds(1);
+    CHECK(r.Tick().empty());
+    r.Now = t0 + 2ms + CPR_HOLD;
+    CHECK(r.Tick() == "\x1b");
+    CHECK(r.D->HeldSize() == 0);
+    CHECK(r.Stripped.empty());
+}
+
+TEST_CASE("a key after the released position follows the tail") {
+    Rig r;
+    REQUIRE(r.Query());
+    r.Resize();
+    CHECK(r.In("\x1b[1;2R").empty());  // Shift-F3
+    r.Advance(2ms);
+    CHECK(r.In("\x1b").empty());  // Esc
+    r.Advance(CPR_HOLD - 2ms);
+    CHECK(r.Tick() == "\x1b[1;2R");
+    r.Advance(1ms);
+    CHECK(r.In("x") == "\x1bx");
+    CHECK(r.Fwd == "\x1b[1;2R\x1bx");
+    CHECK(r.D->HeldSize() == 0);
+}
+
+TEST_CASE("forgetting releases the tail before its hold") {
+    Rig r;
+    REQUIRE(r.Query());
+    const Timestamp forget = r.Now + CPR_TIMEOUT + CPR_FORGET;
+    r.Resize();
+    r.Now = forget - 60ms;
+    CHECK(r.In(Pos(28, 10)).empty());
+    r.Now = forget - 30ms;
+    CHECK(r.In("\x1b[").empty());
+    r.Now = forget - 10ms;
+    CHECK(r.Tick() == Pos(28, 10));
+    CHECK(r.D->HeldSize() == 2);
+    r.Now = forget;
+    CHECK(r.Tick() == "\x1b[");
+    CHECK(r.D->Off());
+    CHECK(r.Fwd + r.Stripped == Pos(28, 10) + "\x1b[");
+}
+
+TEST_CASE("behind count moves ahead after the tail's reply") {
+    Rig r;
+    r.Output("\x1b[6n");  // bash: not counted
+    REQUIRE(r.Query());
+    r.Output("\x1b[6n\x1b[c");  // fish, behind ours
+    CHECK(r.D->Behind() == 1);
+    r.Resize();
+    CHECK(r.In(Pos(28, 10)).empty());
+    r.Advance(2ms);
+    CHECK(r.In("\x1b").empty());
+    r.Advance(CPR_HOLD - 2ms);
+    CHECK(r.Tick() == Pos(28, 10));
+    r.Advance(1ms);
+    CHECK(r.In(Pos(1, 1).substr(1) + DA1 + Pos(3, 3) + DA1) == Pos(3, 3) + DA1);
+    CHECK(r.Stripped == Pos(1, 1) + DA1);
+    CHECK(r.D->Ahead() == 0);
+    CHECK(r.Fwd == Pos(28, 10) + Pos(3, 3) + DA1);
+}
+
+TEST_CASE("the tail behind an expired position expires on its own arrival") {
+    Rig r;
+    REQUIRE(r.Query());
+    r.Resize();
+    CHECK(r.In(Pos(28, 10)).empty());
+    r.Advance(2ms);
+    CHECK(r.In("\x1b").empty());
+    r.Advance(CPR_HOLD - 2ms);
+    CHECK(r.Tick() == Pos(28, 10));
+    REQUIRE(r.D->NextDeadline().has_value());
+    CHECK(*r.D->NextDeadline() == r.Now + 2ms);
+    r.Advance(2ms - 1ns);
+    CHECK(r.Tick().empty());
+    CHECK(r.D->HeldSize() == 1);
+    r.Advance(1ns);
+    CHECK(r.Tick() == "\x1b");
+    CHECK(r.D->HeldSize() == 0);
+}
+
+TEST_CASE("the tail behind an expired position is split off by the next read") {
+    Rig r;
+    REQUIRE(r.Query());
+    r.Resize();
+    CHECK(r.In(Pos(28, 10)).empty());
+    r.Advance(2ms);
+    CHECK(r.In("\x1b").empty());
+    r.Advance(CPR_HOLD - 2ms);
+    // No tick: the read itself settles the due hold first.
+    CHECK(r.In(Pos(1, 1).substr(1) + DA1) == Pos(28, 10));
+    CHECK(r.Fwd == Pos(28, 10));
+    CHECK(r.Stripped == Pos(1, 1) + DA1);
+}
+
+TEST_CASE("a tail of a partial DA1 behind an expired position is split off") {
+    Rig r;
+    REQUIRE(r.Query());
+    r.Resize();
+    const std::string head = DA1.substr(0, 5);
+    CHECK(r.In(Pos(28, 10)).empty());
+    r.Advance(3ms);
+    CHECK(r.In(head).empty());
+    r.Advance(CPR_HOLD - 3ms);
+    CHECK(r.Tick() == Pos(28, 10));
+    CHECK(r.D->HeldSize() == head.size());
+    CHECK(r.In(DA1.substr(5)).empty());
+    CHECK(r.Fwd == Pos(28, 10));
+    CHECK(r.Stripped == head + DA1.substr(5));
+}
+
+TEST_CASE("a cancelled live entry splits the tail off the position too") {
+    Rig r;
+    REQUIRE(r.Query());
+    CHECK(r.In(Pos(28, 10)).empty());
+    r.Advance(2ms);
+    CHECK(r.In("\x1b").empty());
+    r.Advance(CPR_HOLD - 2ms);
+    r.Cancel();
+    CHECK(r.Fwd == Pos(28, 10));
+    CHECK(r.D->HeldSize() == 1);
+    CHECK(r.In(Pos(1, 1).substr(1) + DA1).empty());
+    CHECK(r.Stripped == Pos(1, 1) + DA1);
+}
