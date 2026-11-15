@@ -284,6 +284,7 @@ void Grid::ClearLine(Line& line) noexcept {
     line.WidthDoubt = 0;
     for (std::uint16_t& d : line.ClassDoubt) d = 0;
     line.KnownFrom = 0;
+    line.DoubleRow = false;
 }
 
 // Blank with the default background, whatever the pen is (Resync: the
@@ -293,6 +294,7 @@ void Grid::ClearLinePlain(Line& line) noexcept {
     line.WidthDoubt = 0;
     for (std::uint16_t& d : line.ClassDoubt) d = 0;
     line.KnownFrom = 0;
+    line.DoubleRow = false;
 }
 
 void Grid::ClearCells(Cell* cells, std::uint16_t count) noexcept {
@@ -381,6 +383,7 @@ void Grid::ScrollRegionDown(std::uint16_t n) noexcept {
         std::copy(std::begin(src.ClassDoubt), std::end(src.ClassDoubt),
                   std::begin(dst.ClassDoubt));
         dst.KnownFrom = src.KnownFrom;
+        dst.DoubleRow = src.DoubleRow;
     }
     for (std::uint16_t r = ScrollTop_; r < ScrollTop_ + n; ++r)
         ClearLine(ActiveLine(r));
@@ -917,8 +920,12 @@ void Grid::EraseInDisplay(std::uint8_t param) noexcept {
                 // ED 3 leaves the screen on a terminal, so what the mirror
                 // knew of it stays as it was.
                 const std::uint16_t known = line.KnownFrom;
+                const bool doubleRow = line.DoubleRow;
                 ClearLine(line);
-                if (param == 3) line.KnownFrom = known;
+                if (param == 3) {
+                    line.KnownFrom = known;
+                    line.DoubleRow = doubleRow;
+                }
             }
             if (param == 3 && !IsAltScreen()) {
                 HistoryStart_ = 0;
@@ -952,9 +959,16 @@ void Grid::EraseInLine(std::uint8_t param) noexcept {
             NoteKnown(line, 0, last);
             break;
         }
-        case 2:
+        case 2: {
+            // EL keeps the line attribute (xterm ClearInLine), ED resets it.
+            const bool doubleRow = line.DoubleRow;
             ClearLine(line);
+            if (doubleRow) {
+                line.DoubleRow = true;
+                line.KnownFrom = Cols_;
+            }
             break;
+        }
         default:
             break;
     }
@@ -991,7 +1005,7 @@ void Grid::DeleteChars(std::uint16_t n) noexcept {
     if (line.WidthDoubt != 0 && line.WidthDoubt - 1 >= CursorCol_)
         line.WidthDoubt = static_cast<std::uint16_t>(CursorCol_ + 1);
     // Known cells shift left with the text; the foreign ones to the left stay.
-    if (CursorCol_ < line.KnownFrom)
+    if (CursorCol_ < line.KnownFrom && !line.DoubleRow)
         line.KnownFrom = static_cast<std::uint16_t>(
             std::max<int>(CursorCol_, line.KnownFrom - n));
     MoveCells(line.Cells + CursorCol_, line.Cells + CursorCol_ + n,
@@ -1086,7 +1100,13 @@ bool Grid::RepeatChar(std::uint16_t n) noexcept {
 }
 
 void Grid::MarkCursorRowForeign() noexcept {
-    ActiveLine(CursorRow_).KnownFrom = Cols_;
+    Line& line = ActiveLine(CursorRow_);
+    line.KnownFrom = Cols_;
+    line.DoubleRow = true;
+}
+
+void Grid::ClearCursorRowDouble() noexcept {
+    ActiveLine(CursorRow_).DoubleRow = false;
 }
 
 // ---------------------------------------------------------------------------
@@ -1137,6 +1157,9 @@ void Grid::SetMode(std::uint16_t param, bool value) noexcept {
             break;
         case 7:
             apply(EMode::Awm);
+            break;
+        case 2:  // DECANM: reset enters VT52 mode, until ESC < or RIS
+            if (!value) SetUnmodelledMode(EUnmodelledMode::Vt52, true);
             break;
         case 3:
             SetUnmodelledMode(EUnmodelledMode::ColumnMode, value);
@@ -1484,12 +1507,17 @@ void Grid::ApplySgr(const std::uint16_t* params, const bool* colon,
                     const std::size_t nsub = sub - i;
                     if (nsub >= 2 && params[i + 1] == 5) {
                         PenUlIdx_ = static_cast<std::uint8_t>(params[i + 2]);
+                        // Index 0 reads as "default" in the pen.
+                        if (PenUlIdx_ == 0)
+                            setUnmodelled(EUnmodelledSgr::UnderlineColor);
                     } else if (params[i + 1] == 2) {
                         setUnmodelled(EUnmodelledSgr::UnderlineColor);
                     }
                     i = sub;
                 } else if (i + 2 < count && params[i + 1] == 5) {
                     PenUlIdx_ = static_cast<std::uint8_t>(params[i + 2]);
+                    if (PenUlIdx_ == 0)
+                        setUnmodelled(EUnmodelledSgr::UnderlineColor);
                     i += 2;
                 } else if (i + 4 < count && params[i + 1] == 2) {
                     // Truecolour underline: consume, the pen cannot hold it.
@@ -1570,7 +1598,9 @@ void Grid::Reset(bool hard) noexcept {
         PendingWrap_ = false;
         if (IsAltScreen()) ++AltExitCount_;
         Modes_ = ModeFlag(EMode::Awm) | ModeFlag(EMode::Dectcem);
-        UnmodelledModes_ &= static_cast<std::uint8_t>(~UNMODELLED_DEC_MODES);
+        UnmodelledModes_ &= static_cast<std::uint8_t>(
+            ~(UNMODELLED_DEC_MODES |
+              static_cast<std::uint8_t>(EUnmodelledMode::Vt52)));
         for (std::uint16_t r = 0; r < Rows_; ++r) {
             ClearLine(MainLines_[r]);
             ClearLine(AltLines_[r]);
@@ -1663,6 +1693,7 @@ bool Grid::Resync(std::uint16_t row, std::uint16_t col,
         line.WidthDoubt = 0;
         for (std::uint16_t& d : line.ClassDoubt) d = 0;
         line.KnownFrom = Cols_;
+        line.DoubleRow = false;
         if (r < row) continue;
         if (tailBlank) {
             // A wide glyph cut in two by the new tail would orphan its head.
@@ -1676,6 +1707,7 @@ bool Grid::Resync(std::uint16_t row, std::uint16_t col,
     for (std::uint16_t r = 0; r < Rows_; ++r) {
         AltLines_[r].WidthDoubt = 0;
         for (std::uint16_t& d : AltLines_[r].ClassDoubt) d = 0;
+        AltLines_[r].DoubleRow = false;
     }
 
     CursorRow_ = row;
@@ -1800,6 +1832,7 @@ GridResult<void> Grid::Resize(std::uint16_t newCols,
         dst.KnownFrom = src.KnownFrom >= oldCols
                             ? newCols
                             : std::min(src.KnownFrom, newCols);
+        dst.DoubleRow = src.DoubleRow;
     };
     const std::uint16_t copyRows = newRows < oldRows ? newRows : oldRows;
     const std::uint16_t srcStart =

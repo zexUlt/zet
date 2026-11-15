@@ -61,9 +61,10 @@ enum class EUnmodelledMode : std::uint8_t {
     ReverseWrap = 1U << 1,       ///< ?45: BS and CUB in column 0 go up a row
     ColumnMode = 1U << 2,        ///< DECCOLM ?3: 80/132 columns, clears, homes
     Utf8Off = 1U << 3,           ///< ESC % @: the bytes are not UTF-8
+    Vt52 = 1U << 4,              ///< DECANM ?2 reset: VT52 mode, until ESC <
 };
 /// The bits RIS and DECSTR clear: the DEC private modes. Utf8Off stays until
-/// ESC % G.
+/// ESC % G, Vt52 until ESC < or RIS (DECSTR does not clear it).
 inline constexpr std::uint8_t UNMODELLED_DEC_MODES = 0x07;
 
 /// SGR attributes the pen cannot hold (design.md §9, round C, "Атрибуты SGR,
@@ -76,7 +77,7 @@ enum class EUnmodelledSgr : std::uint8_t {
     Proportional = 1U << 1,    ///< 26; reset 50
     Frame = 1U << 2,           ///< 51, 52; reset 54
     Overline = 1U << 3,        ///< 53; reset 55
-    UnderlineColor = 1U << 4,  ///< 58 with a true colour; reset 59
+    UnderlineColor = 1U << 4,  ///< 58 with a true colour or index 0; reset 59
     Script = 1U << 5,          ///< 73, 74; reset 75
 };
 
@@ -141,6 +142,11 @@ struct Line {
     /// ordinary row, cols for a foreign one. Not part of the content:
     /// snapshots do not carry it.
     std::uint16_t KnownFrom{0};
+    /// The row was made double width or height (ESC # 3, 4, 6) and has not been
+    /// cleared by ED or made single again (ESC # 5, RIS). EL keeps the
+    /// attribute on a terminal, so while it is set KnownFrom stays at cols.
+    /// Moves with the row. Not part of the content: snapshots do not carry it.
+    bool DoubleRow{false};
 };
 
 /// Saved cursor state (DECSC/DECRC and alt-screen switch).
@@ -408,6 +414,11 @@ public:
     [[nodiscard]] bool AnyUnmodelledMode() const noexcept {
         return UnmodelledModes_ != 0;
     }
+    /// Whether a DEC private mode the grid does not model is set: the ones
+    /// RIS and DECSTR clear (UNMODELLED_DEC_MODES).
+    [[nodiscard]] bool AnyUnmodelledDecMode() const noexcept {
+        return (UnmodelledModes_ & UNMODELLED_DEC_MODES) != 0;
+    }
     /// Sets or clears a mode the grid does not model. The parser calls it for
     /// the sequences that change one; DECSET/DECRST of ?3, ?45 and ?69 get
     /// here through SetMode.
@@ -571,8 +582,11 @@ public:
 
     /// ESC # 3, ESC # 4, ESC # 6: the terminal draws the cursor row in double
     /// width, where the grid has single cells. The row becomes foreign
-    /// (KnownFrom = cols) until the program erases it.
+    /// (KnownFrom = cols) and stays so (Line::DoubleRow) until ED clears it.
     void MarkCursorRowForeign() noexcept;
+    /// ESC # 5: the cursor row is single width again. The cells drawn while it
+    /// was not stay foreign, but writes and erases make cells known again.
+    void ClearCursorRowDouble() noexcept;
 
     /// DECSTBM — set scroll region (1-based from caller).
     void SetScrollRegion(std::uint16_t top1, std::uint16_t bot1) noexcept;
@@ -653,6 +667,7 @@ private:
     /// The cells [x, x+n) of `line` were written or erased: they are known.
     static void NoteKnown(Line& line, std::uint16_t x,
                           std::uint16_t n) noexcept {
+        if (line.DoubleRow) return;  // EL keeps the attribute: still foreign
         if (static_cast<std::uint32_t>(x) + n >= line.KnownFrom &&
             x < line.KnownFrom)
             line.KnownFrom = x;

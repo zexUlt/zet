@@ -577,6 +577,10 @@ static void EncodeAll(EscWriter& w, const Grid& grid, const EncodeParams& ep,
     w.WriteByte('\x18');        // CAN — aborts in-flight DCS/OSC/APC
     w.WriteLiteral("\x1b\\");   // ESC \ = ST
     w.WriteLiteral("\x1b[!p");  // DECSTR soft-reset (D2: clean stale SGR/modes)
+    // The source's terminal is out of UTF-8 (ESC % @); the paint is UTF-8, so
+    // it goes under ESC % G and the mode is restored at the end.
+    const bool utf8Off = grid.UnmodelledModeSet(EUnmodelledMode::Utf8Off);
+    if (utf8Off) w.WriteLiteral("\x1b%G");
     w.WriteLiteral("\x1b[?1049l");    // ensure main screen
     w.WriteLiteral("\x1b[2J\x1b[H");  // erase + home
     w.WriteLiteral("\x1b[?25l");      // hide cursor (D13: with preamble)
@@ -671,6 +675,7 @@ static void EncodeAll(EscWriter& w, const Grid& grid, const EncodeParams& ep,
 
     // Mode restore + sync end (EncodeModeRestore ends with ?2026l).
     EncodeModeRestore(w, grid, pen, cm);
+    if (utf8Off) w.WriteLiteral("\x1b%@");
 }
 
 // ---------------------------------------------------------------------------

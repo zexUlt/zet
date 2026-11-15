@@ -228,6 +228,9 @@ private:
 
     // Bypass state
     bool InOsc_{false};  ///< true = OSC (accepts BEL terminator)
+    /// The last byte inside a string was 0xC2: a C1 control in UTF-8 follows
+    /// if the next one is 0x80-0x9F.
+    bool BypassC2_{false};
     std::size_t BypassBytes_{0};
 
     // Callbacks for bypass bytes

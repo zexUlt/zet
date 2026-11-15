@@ -20,6 +20,7 @@ void VtParser::Reset() noexcept {
     IntermediateCount_ = 0;
     PrivateMarker_ = 0;
     InOsc_ = false;
+    BypassC2_ = false;
     BypassBytes_ = 0;
     // Leave UnknownSeqCount_ intact (monotonic counter).
 }
@@ -60,6 +61,13 @@ void VtParser::FeedByte(std::byte b, Grid& grid) noexcept {
     // Bypass state: DCS/OSC/APC/PM/SOS payload forwarding.
     // -----------------------------------------------------------------------
     if (State_ == EParserState::Bypass) {
+        // A C1 control in UTF-8 (0xC2 0x80-0x9F) inside a string: VTE decodes
+        // UTF-8 before its parser, so U+009C ends the string there (and the
+        // text after it is printed), where the bytes of xterm's string go on.
+        // The mirror does not model where the string ends: it counts the
+        // form, as it does a C1 in Ground.
+        if (BypassC2_ && raw >= 0x80 && raw <= 0x9F) CountUnknown();
+        BypassC2_ = raw == 0xC2;
         // CAN (0x18) / SUB (0x1A) abort the sequence.
         if (raw == 0x18 || raw == 0x1A) {
             EmitBypassEnd();
@@ -420,6 +428,7 @@ void VtParser::EmitBypassByte(std::byte byt) noexcept {
 }
 
 void VtParser::EmitBypassStart() noexcept {
+    BypassC2_ = false;
     if (!InOsc_) ++DcsApcCount_;
     if (BypassFn_) BypassFn_(EBypassEvent::Start, std::byte{0}, BypassCtx_);
 }
@@ -558,6 +567,11 @@ void VtParser::DispatchEsc(char32_t final, Grid& grid) noexcept {
             case 'c':  // RIS – hard reset
                 grid.Reset(/*hard=*/true);
                 return;
+            case '<':  // leaves VT52 mode; counted, as every ESC form not
+                       // handled
+                grid.SetUnmodelledMode(EUnmodelledMode::Vt52, false);
+                ++UnknownSeqCount_;
+                return;
             case '=':  // DECKPAM – application keypad: no effect on the screen
             case '>':  // DECKPNM – numeric keypad: the same
                 return;
@@ -600,10 +614,12 @@ void VtParser::DispatchEsc(char32_t final, Grid& grid) noexcept {
         }
         // DECDHL (ESC # 3 top half, ESC # 4 bottom half) and DECDWL (ESC # 6):
         // the terminal draws the cursor row in double width. DECSWL (ESC # 5)
-        // turns that off, it adds nothing foreign.
+        // turns that off: the row's cells stay foreign, but EL no longer keeps
+        // it so (counted unknown below).
         if (inter == '#' && (fin == '3' || fin == '4' || fin == '6')) {
             grid.MarkCursorRowForeign();
         }
+        if (inter == '#' && fin == '5') grid.ClearCursorRowDouble();
     }
     CountUnknown();
 }
@@ -663,6 +679,16 @@ void VtParser::DispatchCsi(char32_t final, Grid& grid) noexcept {
     // C` (GSS), and the handler of C would move the cursor.
     if (!CsiFormHandled(final, colon, nparams)) {
         CountUnknown();
+        // XTRESTORE (CSI ? Pm r) brings back the value XTSAVE took, which the
+        // mirror does not know: for the modes it does not model it takes them
+        // as set.
+        if (PrivateMarker_ == '?' && IntermediateCount_ == 0 &&
+            static_cast<std::uint8_t>(final) == 'r' && !HasMidParamMarker()) {
+            for (std::size_t i = 0; i < nparams; ++i) {
+                if (params[i] == 3 || params[i] == 45 || params[i] == 69)
+                    grid.SetMode(params[i], true);
+            }
+        }
         // DECSLRM: margins the mirror does not model are set from here until
         // ?69l, RIS or DECSTR.
         if (static_cast<std::uint8_t>(final) == 's' && PrivateMarker_ == 0 &&
@@ -815,6 +841,9 @@ void VtParser::DispatchCsi(char32_t final, Grid& grid) noexcept {
         // Soft reset.
         case 'p':  // DECSTR (only with intermediate '!')
             if (IntermediateCount_ == 1 && Intermediates_[0] == '!') {
+                // DECSTR clears the modes the mirror does not model, and the
+                // cursor stays: one that diverged under them stays diverged.
+                if (grid.AnyUnmodelledDecMode()) CountUnknown();
                 grid.Reset(/*hard=*/false);
             } else {
                 ++UnknownSeqCount_;

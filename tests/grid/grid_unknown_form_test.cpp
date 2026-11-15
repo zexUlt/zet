@@ -11,6 +11,7 @@
 #include <string_view>
 
 #include "zet/grid/grid.hpp"
+#include "zet/grid/snapshot.hpp"
 #include "zet/grid/vt_parser.hpp"
 
 using namespace zet::grid;
@@ -119,6 +120,41 @@ TEST_CASE("C1 controls from UTF-8 count and draw nothing") {
     Rig r;
     r.Feed("\xC2\xA0");  // U+00A0 is no control
     CHECK(r.Unknown() == 0);
+}
+
+TEST_CASE("a C1 control from UTF-8 inside a string counts") {
+    // VTE decodes UTF-8 before its parser: U+009C ends the OSC and the rest is
+    // printed; the mirror does not model where the string ends.
+    const char* strings[] = {"\x1b]0;t", "\x1bP$qm", "\x1b_t", "\x1b^t",
+                             "\x1bXt"};
+    for (const char* open : strings) {
+        for (const char* c1 : {"\xC2\x80", "\xC2\x9C", "\xC2\x9F"}) {
+            CAPTURE(open);
+            CAPTURE(c1);
+            Rig r(20, 4);
+            r.Feed(S(open) + c1 + "hello\x1b\\");
+            CHECK(r.Unknown() == 1);
+        }
+    }
+}
+
+TEST_CASE("UTF-8 text inside a string that is no C1 control counts nothing") {
+    Rig r(20, 4);
+    // U+00A0 is no control; a 0xC2 at the end of one chunk and its second byte
+    // in the next is one character.
+    r.Feed("\x1b]0;\xC2\xA0\xD0\x9F\xD1\x80\xC2");
+    r.Feed("\xA0\x07");
+    CHECK(r.Unknown() == 0);
+}
+
+TEST_CASE("a C1 control split across two feeds inside a string counts once") {
+    Rig r(20, 4);
+    r.Feed("\x1b]0;t\xC2");
+    r.Feed("\x9C\x07");
+    CHECK(r.Unknown() == 1);
+    // The next string starts clean.
+    r.Feed("\x1b]0;\x9C\x07");
+    CHECK(r.Unknown() == 1);
 }
 
 // ---------------------------------------------------------------------------
@@ -342,11 +378,78 @@ TEST_CASE("the flag stays while another unmodelled mode is set") {
     CHECK_FALSE(r.G->AnyUnmodelledMode());
 }
 
-TEST_CASE("DECANM counts as unknown and sets nothing") {
+TEST_CASE("DECANM reset enters VT52 mode and only ESC < or RIS leaves it") {
     Rig r;
     r.Feed("\x1b[?2l");
     CHECK(r.Unknown() == 1);
+    CHECK(r.G->UnmodelledModeSet(EUnmodelledMode::Vt52));
+    CHECK(r.G->AnyUnmodelledMode());
+    // Nothing the program sends in ANSI mode undoes it, DECSTR included.
+    r.Feed("\x1b[?2h\x1b[!p\x1b[?69h\x1b[?69l");
+    CHECK(r.G->UnmodelledModeSet(EUnmodelledMode::Vt52));
+    const std::uint64_t before = r.Unknown();
+    r.Feed("\x1b<");
+    CHECK(r.Unknown() == before + 1);
     CHECK_FALSE(r.G->AnyUnmodelledMode());
+    r.Feed("\x1b[?2l\033c");
+    CHECK_FALSE(r.G->AnyUnmodelledMode());
+}
+
+TEST_CASE("ESC < outside VT52 mode counts and sets nothing") {
+    Rig r;
+    r.Feed("\x1b<");
+    CHECK(r.Unknown() == 1);
+    CHECK_FALSE(r.G->AnyUnmodelledMode());
+}
+
+TEST_CASE("DECSTR that clears a DEC mode the grid does not model counts") {
+    for (const char* set : {"\x1b[?69h", "\x1b[?45h", "\x1b[?3h"}) {
+        CAPTURE(set);
+        Rig r;
+        r.Feed(set);
+        r.Feed("\r\x1b[s");
+        const std::uint64_t before = r.Unknown();
+        r.Feed("\x1b[!p");
+        CHECK(r.Unknown() == before + 1);
+        CHECK_FALSE(r.G->AnyUnmodelledMode());
+    }
+}
+
+TEST_CASE("DECSTR with no DEC mode set, or only ESC % @, counts nothing") {
+    Rig r;
+    r.Feed("\x1b[!p");
+    CHECK(r.Unknown() == 0);
+    r.Feed("\x1b%@");
+    const std::uint64_t before = r.Unknown();
+    r.Feed("\x1b[!p");
+    CHECK(r.Unknown() == before);
+}
+
+TEST_CASE("XTRESTORE of a mode the grid does not model takes it as set") {
+    for (const char* mode : {"69", "45", "3"}) {
+        CAPTURE(mode);
+        Rig r;
+        r.Feed(S("\x1b[?") + mode + "h\x1b[?" + mode + "s\x1b[?" + mode + "l");
+        REQUIRE_FALSE(r.G->AnyUnmodelledMode());
+        const std::uint64_t before = r.Unknown();
+        r.Feed(S("\x1b[?") + mode + "r");
+        CHECK(r.Unknown() == before + 1);
+        CHECK(r.G->AnyUnmodelledDecMode());
+        r.Feed("\x1b[!p");
+        CHECK_FALSE(r.G->AnyUnmodelledMode());
+    }
+}
+
+TEST_CASE("XTRESTORE sets the unmodelled modes in a list and no others") {
+    Rig r;
+    r.Feed("\x1b[?25;1000;45r");
+    CHECK(r.G->UnmodelledModeSet(EUnmodelledMode::ReverseWrap));
+    CHECK_FALSE(r.G->UnmodelledModeSet(EUnmodelledMode::LeftRightMargins));
+    CHECK_FALSE(r.G->UnmodelledModeSet(EUnmodelledMode::ColumnMode));
+    CHECK_FALSE(r.G->ModeSet(EMode::Mouse1000));
+    Rig q;
+    q.Feed("\x1b[?25r");
+    CHECK_FALSE(q.G->AnyUnmodelledMode());
 }
 
 TEST_CASE("DECSLRM sets the margins flag and does not save the cursor") {
@@ -431,10 +534,97 @@ TEST_CASE("ESC # 3, 4 and 6 make the cursor row foreign") {
         CHECK(r.Known(1) == 0);
         CHECK(r.Known(3) == 0);
         CHECK(r.Unknown() == 1);
-        // The program's erase of the whole row brings it back.
-        r.Feed("\x1b[2K");
+        // The program's erase of the screen brings it back.
+        r.Feed("\x1b[2J");
         CHECK(r.Known(2) == 0);
     }
+}
+
+TEST_CASE("a double width row stays foreign under EL, ECH, text and DCH") {
+    for (const char* edit : {"\r\x1b[2K", "\x1b[K", "\x1b[1K", "\r\x1b[3X",
+                             "\rxy", "\r\x1b[2P", "\r\x1b[2@"}) {
+        CAPTURE(edit);
+        Rig r;
+        r.Feed("ab\x1b#6");
+        REQUIRE(r.Known(0) == 10);
+        r.Feed(edit);
+        CHECK(r.Known(0) == 10);
+    }
+}
+
+TEST_CASE("ED over a double width row makes it single again") {
+    struct Case {
+        const char* Form;
+        int Row;
+        int Known;  ///< KnownFrom of the row after the erase and an EL 2
+    };
+    const Case cases[] = {
+        {"\x1b[2J", 1, 0},           // the whole screen
+        {"\x1b[1;1H\x1b[J", 1, 0},   // from the cursor down: rows below
+        {"\x1b[3;1H\x1b[1J", 1, 0},  // from the top to the cursor: rows above
+    };
+    for (const Case& c : cases) {
+        CAPTURE(c.Form);
+        Rig r;
+        r.Feed("\x1b[2;1H\x1b#3");
+        REQUIRE(r.Known(c.Row) == 10);
+        r.Feed(c.Form);
+        r.Feed(S("\x1b[") + std::to_string(c.Row + 1) + ";1H\x1b[2K");
+        CHECK(r.Known(c.Row) == c.Known);
+    }
+}
+
+TEST_CASE("ED 3 leaves a double width row as it was") {
+    Rig r;
+    r.Feed("\x1b[2;1H\x1b#3\x1b[3J\x1b[2K");
+    CHECK(r.Known(1) == 10);
+}
+
+TEST_CASE("a double width row moves with its row when the screen scrolls") {
+    Rig r;
+    r.Feed("\x1b[2;1H\x1b#6\x1b[4;1H\n");  // up one: the row is row 0
+    CHECK(r.Known(0) == 10);
+    CHECK(r.Known(1) == 0);
+    r.Feed("\x1b[1;1H\x1b[2K");
+    CHECK(r.Known(0) == 10);
+    r.Feed("\x1b[1;1H\x1b[2T");  // SD two rows: it is row 2
+    CHECK(r.Known(2) == 10);
+    r.Feed("\x1b[3;1H\x1b[2K");
+    CHECK(r.Known(2) == 10);
+    // The row that scrolls in is single.
+    r.Feed("\x1b[4;1H\n\x1b[4;1H\x1b[2K");
+    CHECK(r.Known(3) == 0);
+}
+
+TEST_CASE("ESC # 5 lets EL make a double width row known again") {
+    Rig r;
+    r.Feed("ab\x1b#6\x1b#5");
+    CHECK(r.Known(0) == 10);  // what was drawn double stays foreign
+    CHECK(r.Unknown() == 2);
+    r.Feed("\r\x1b[2K");
+    CHECK(r.Known(0) == 0);
+}
+
+TEST_CASE("RIS makes a double width row single") {
+    Rig r;
+    r.Feed("\x1b#6\033c\x1b[2K");
+    CHECK(r.Known(0) == 0);
+}
+
+TEST_CASE("a resync makes a double width row single") {
+    Rig r;
+    r.Feed("\x1b#6");
+    REQUIRE(r.G->Resync(0, 0, true));
+    r.Feed("\x1b[2K");
+    CHECK(r.Known(0) == 0);
+}
+
+TEST_CASE("a double width row keeps its mark through a resize") {
+    Rig r;
+    r.Feed("\x1b[2;1H\x1b#6");
+    REQUIRE(r.G->Resize(12, 4).has_value());
+    r.Feed("\x1b[2;1H\x1b[2K");
+    CHECK(r.Known(1) == 12);
 }
 
 TEST_CASE("ESC # 5 leaves the row known") {
@@ -472,6 +662,23 @@ TEST_CASE("SGR 53, 6 and 58 with a true colour set the unmodelled mark") {
         CHECK(r.G->HasUnmodelledSgr());
         CHECK(r.Unknown() == 0);
     }
+}
+
+TEST_CASE(
+    "underline colour index 0 sets the mark, as the pen reads it as none") {
+    for (const char* sgr : {"\x1b[58:5:0m", "\x1b[58;5;0m"}) {
+        CAPTURE(sgr);
+        Rig r;
+        r.Feed(sgr);
+        CHECK(r.G->HasUnmodelledSgr());
+        CHECK((r.G->UnmodelledSgrMask() &
+               static_cast<std::uint8_t>(EUnmodelledSgr::UnderlineColor)) != 0);
+        r.Feed("\x1b[59m");
+        CHECK_FALSE(r.G->HasUnmodelledSgr());
+    }
+    Rig q;
+    q.Feed("\x1b[58:5:1m\x1b[58;5;9m");
+    CHECK_FALSE(q.G->HasUnmodelledSgr());
 }
 
 TEST_CASE("modelled SGR sets no unmodelled mark") {
@@ -730,4 +937,63 @@ TEST_CASE("the mark of the path sits beside the column doubt, apart from it") {
     q.Feed("\xE2\x80\xA6\x1b[D");  // an ambiguous glyph, CUB over it
     CHECK(q.G->ColumnDoubt());
     CHECK(q.G->PathHasNonAscii());
+}
+
+// ---------------------------------------------------------------------------
+// The snapshot carries the state of the terminal the program thinks it has
+// ---------------------------------------------------------------------------
+
+namespace {
+
+std::string SnapshotBytes(const Grid& g) {
+    auto snap = Snapshot::Create(g);
+    REQUIRE(snap.has_value());
+    std::unique_ptr<Snapshot> s(snap.value());
+    const auto bytes = s->Bytes();
+    return std::string(reinterpret_cast<const char*>(bytes.data()),
+                       bytes.size());
+}
+
+}  // namespace
+
+TEST_CASE(
+    "a snapshot of a grid out of UTF-8 draws under ESC % G and ends out") {
+    Rig src;
+    src.Feed("\x1b%@h\xC3\xA9llo");
+    REQUIRE(src.G->UnmodelledModeSet(EUnmodelledMode::Utf8Off));
+    const std::string bytes = SnapshotBytes(*src.G);
+    const auto g = bytes.find("\x1b%G");
+    const auto off = bytes.rfind("\x1b%@");
+    REQUIRE(g != std::string::npos);
+    REQUIRE(off != std::string::npos);
+    CHECK(g < bytes.find("\x1b[2J"));  // before anything is drawn
+    CHECK(off + 3 == bytes.size());    // the last thing
+    CHECK(bytes.find("\x1b%G", g + 1) == std::string::npos);
+    CHECK(bytes.find("\x1b%@") == off);
+    // A mirror rebuilt from the bytes is out of UTF-8 too.
+    Rig dst;
+    dst.Feed(bytes);
+    CHECK(dst.G->UnmodelledModeSet(EUnmodelledMode::Utf8Off));
+}
+
+TEST_CASE("a snapshot of a grid in UTF-8 has no ESC % G or ESC % @") {
+    Rig src;
+    src.Feed("h\xC3\xA9llo");
+    const std::string bytes = SnapshotBytes(*src.G);
+    CHECK(bytes.find("\x1b%") == std::string::npos);
+    Rig dst;
+    dst.Feed(bytes);
+    CHECK_FALSE(dst.G->AnyUnmodelledMode());
+}
+
+TEST_CASE(
+    "a snapshot taken on the alt screen of a grid out of UTF-8 ends out") {
+    Rig src;
+    src.Feed("\x1b%@\x1b[?1049hx");
+    const std::string bytes = SnapshotBytes(*src.G);
+    CHECK(bytes.rfind("\x1b%@") + 3 == bytes.size());
+    Rig dst;
+    dst.Feed(bytes);
+    CHECK(dst.G->UnmodelledModeSet(EUnmodelledMode::Utf8Off));
+    CHECK(dst.G->IsAltScreen());
 }
