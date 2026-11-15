@@ -174,6 +174,12 @@ struct SavedCursor {
     bool NonAsciiPath{false};
     /// Unmodelled SGR attributes (EUnmodelledSgr) the pen held at the save.
     std::uint8_t UnmodelledSgr{0};
+    /// The rows were synced (RowSync Abs and Eq) when the slot was written,
+    /// so the terminal's slot holds the row the mirror's does. A slot that
+    /// starts stale (before zet the local shell may have saved anything in
+    /// the terminal's slot), that a resync reset (it moves the mirror, not the
+    /// terminal's slot) or that was written before the sync is stale.
+    bool Fresh{false};
 };
 
 /// Sans-I/O terminal grid (design.md §9).
@@ -551,7 +557,11 @@ public:
 
     /// DECSC/DECRC — save/restore cursor (includes colors per design.md).
     void SaveCursor() noexcept;
-    void RestoreCursor() noexcept;
+    /// False when the slot was stale: the terminal restores a cursor the
+    /// mirror cannot place. With the rows synced they stop being trusted
+    /// (RowsTrusted false until the next sync); the parser counts it as an
+    /// unknown sequence, like a REP it cannot repeat.
+    [[nodiscard]] bool RestoreCursor() noexcept;
 
     /// ED — erase in display.
     void EraseInDisplay(std::uint8_t param) noexcept;
@@ -591,8 +601,9 @@ public:
     /// DECSTBM — set scroll region (1-based from caller).
     void SetScrollRegion(std::uint16_t top1, std::uint16_t bot1) noexcept;
 
-    /// DECSET/DECRST — set/reset private mode.
-    void SetMode(std::uint16_t param, bool value) noexcept;
+    /// DECSET/DECRST — set/reset private mode. False when it restored a stale
+    /// saved cursor (?1048l, ?1049l: RestoreCursor).
+    bool SetMode(std::uint16_t param, bool value) noexcept;
 
     /// SGR — set graphic rendition (attrs, colors).
     /// colon[k] is true when param k is a sub-param of the previous entry
@@ -699,6 +710,9 @@ private:
     };
     void NoteDrift() noexcept {
         if (!Sync_.Abs) Sync_.Drift = true;
+    }
+    [[nodiscard]] bool RowsSynced() const noexcept {
+        return Sync_.Abs && Sync_.Eq;
     }
     void NoteAbsoluteRow() noexcept {
         if (!Sync_.Abs) {

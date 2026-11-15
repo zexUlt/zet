@@ -848,13 +848,21 @@ void Grid::SaveCursor() noexcept {
     sc.LeftOverDoubt = Path_.LeftOverDoubt;
     sc.NonAsciiPath = Path_.NonAscii;
     sc.UnmodelledSgr = UnmodelledSgr_;
+    sc.Fresh = RowsSynced();
 }
 
-void Grid::RestoreCursor() noexcept {
+bool Grid::RestoreCursor() noexcept {
     // The terminal's saved row is its own: the same as ours only if nothing
     // moved either of them since (a scroll on one side), which is not known.
     NoteDrift();
     const SavedCursor& sc = IsAltScreen() ? SavedCursorAlt_ : SavedCursorMain_;
+    // A slot written before the rows were synced holds a row of the terminal
+    // that is not the mirror's row of the same number: once synced, the rows
+    // are not the terminal's again until the next sync.
+    const bool stale = !sc.Fresh;
+    if (stale && Sync_.Abs && Sync_.Eq)
+        Sync_ = RowSync{
+            .Abs = false, .Eq = false, .Blank = Sync_.Blank, .Drift = true};
     // ... and it is as far from the mirror's as it was at the save.
     Path_.LeftOverDoubt = sc.LeftOverDoubt;
     Path_.NonAscii = sc.NonAsciiPath;
@@ -888,6 +896,7 @@ void Grid::RestoreCursor() noexcept {
     // The wrap flag comes back as saved (xterm sets do_wrap after CursorSet);
     // it only makes sense in the last column.
     PendingWrap_ = sc.PendingWrap && CursorCol_ + 1u == Cols_;
+    return !stale;
 }
 
 // ---------------------------------------------------------------------------
@@ -1133,7 +1142,8 @@ void Grid::SetScrollRegion(std::uint16_t top1, std::uint16_t bot1) noexcept {
 // Mode set/reset
 // ---------------------------------------------------------------------------
 
-void Grid::SetMode(std::uint16_t param, bool value) noexcept {
+bool Grid::SetMode(std::uint16_t param, bool value) noexcept {
+    bool known = true;
     auto apply = [&](EMode m) noexcept {
         if (value)
             Modes_ |= ModeFlag(m);
@@ -1190,7 +1200,7 @@ void Grid::SetMode(std::uint16_t param, bool value) noexcept {
             if (value)
                 SaveCursor();
             else
-                RestoreCursor();
+                known = RestoreCursor();
             break;
         case 1000:
             apply(EMode::Mouse1000);
@@ -1229,7 +1239,7 @@ void Grid::SetMode(std::uint16_t param, bool value) noexcept {
             } else {
                 const bool fromAlt = IsAltScreen() && SyncSaved_;
                 SwitchAltScreen(false);
-                RestoreCursor();
+                known = RestoreCursor();
                 // The main screen was not touched meanwhile and the cursor
                 // is where ?1049h found it, on the terminal too.
                 if (fromAlt) Sync_ = SyncMain_;
@@ -1244,6 +1254,7 @@ void Grid::SetMode(std::uint16_t param, bool value) noexcept {
         default:
             break;
     }
+    return known;
 }
 
 // ---------------------------------------------------------------------------
@@ -1610,11 +1621,15 @@ void Grid::Reset(bool hard) noexcept {
         memset(TabStops_, 0, sizeof(TabStops_));
         for (std::uint16_t c = 0; c < Cols_; c += DEFAULT_TAB_INTERVAL)
             TabStops_[c / 64] |= (std::uint64_t{1} << (c % 64));
-        SavedCursorMain_ = {};
-        SavedCursorAlt_ = {};
-        CursorStyle_ = 0;
         Sync_ = RowSync{.Abs = true, .Eq = true, .Blank = true, .Drift = false};
         SyncSaved_ = false;
+        // The terminal resets its own slots as the mirror does, and at a
+        // synced moment they hold the same row. DECSTR leaves them (below).
+        SavedCursorMain_ = {};
+        SavedCursorAlt_ = {};
+        SavedCursorMain_.Fresh = RowsSynced();
+        SavedCursorAlt_.Fresh = RowsSynced();
+        CursorStyle_ = 0;
     } else {
         // DECSTR (soft reset): keep cursor position, alt-screen flag, and
         // tab stops.  Only reset DECOM, IRM, LNM, bracketed-paste, and
@@ -1718,6 +1733,8 @@ bool Grid::Resync(std::uint16_t row, std::uint16_t col,
     CursorRow_ = row;
     CursorCol_ = col;
     PendingWrap_ = false;
+    // Stale, not just empty: the resync moved the mirror, not the terminal's
+    // slots, which still hold rows of the terminal the mirror cannot match.
     SavedCursorMain_ = {};
     SavedCursorAlt_ = {};
     LastPrintedChar_ = 0;
