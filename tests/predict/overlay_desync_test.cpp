@@ -463,6 +463,21 @@ TEST_CASE("rep: before any glyph a REP is not modelled, the column is lost") {
     CHECK_FALSE(c.R.E.ColumnTrusted());
 }
 
+TEST_CASE("rep: before any glyph the row is foreign, no draw after a CR") {
+    // The terminal holds an 'e' that REP repeats; the mirror printed nothing.
+    // The CR gives the column back, but the row's tail is not known blank.
+    Client c(30, 5, EDisplayMode::Always);
+    c.Before("e");
+    c.Agent("\x1b[2b");
+    CHECK_FALSE(c.R.E.ColumnTrusted());
+    c.Agent("\r");
+    CHECK(c.R.E.ColumnTrusted());
+    CHECK(c.R.G->KnownFrom(0) == 30);
+    c.Key("x");
+    CHECK(c.Draws == 0);
+    c.Agent("");  // the restore leaves the terminal's 'e': Real == Ref
+}
+
 TEST_CASE("desync: a coloured line feed on the terminal's bottom row") {
     // The terminal scrolls and fills the new row with the pen background (BCE);
     // the mirror, higher up, only moves its cursor onto a blank row.
