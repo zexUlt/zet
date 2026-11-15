@@ -130,6 +130,8 @@ TEST_CASE("CSI forms the grid does not handle count and do not run") {
         "\x1b[3 C",   // intermediate: GSS-like, not CUF
         "\x1b[3$A",   // intermediate
         "\x1b[3 !A",  // two intermediates
+        "\x1b[!!p",   // two intermediates on DECSTR's final
+        "\x1b[ !q",   // two intermediates on DECSCUSR's final
         "\x1b[>3C",   // private marker on a cursor move
         "\x1b[=3C",   "\x1b[<3C",    "\x1b[?3C",
         "\x1b[3?C",   // a marker after a parameter

@@ -450,9 +450,10 @@ void Grid::PutChar(char32_t cp, int width) noexcept {
         }
     }
 
-    // Anything from U+0080 up, or a code point dropped for its zero width, may
-    // be drawn in another width than the table says (ColumnDoubt's sibling).
-    if (width == 0 || cp >= 0x80) Path_.NonAscii = true;
+    // Anything from U+0080 up (a code point dropped for its zero width is one)
+    // may be drawn in another width than the table says (ColumnDoubt's
+    // sibling).
+    if (cp >= 0x80) Path_.NonAscii = true;
 
     // Zero-width combining mark: GRAPHEME_MAX_CODEPOINTS=1 — keep base, drop
     // mark. A terminal may draw the cluster in another width than the sum of
