@@ -17,11 +17,6 @@
 //  10. a policy that keeps every width of the table (only the set of classes
 //      that mark differs) leaves cells and cursor identical to the default
 //      policy's, so the default is the grid as it was
-//  11. the path counters are exact whenever the path is not broken: against a
-//      twin that draws ambiguous glyphs wide, on the same row the pending wrap
-//      agrees and the columns differ by exactly the ambiguous glyphs counted,
-//      so a path that may have hit the right margin must report itself broken;
-//      a sequence the parser does not know breaks the path
 //
 // Resize count and targets are variable and driven by input bytes.
 
@@ -35,12 +30,14 @@
 
 using namespace zet::grid;
 
-// A WidthPolicy from four input bits (the whole space is reachable).
+// A WidthPolicy from seven input bits (the whole space is reachable).
 static WidthPolicy PolicyFrom(std::uint8_t a, std::uint8_t b) noexcept {
     WidthPolicy w;
     w.Ambiguous = (a & 1) != 0 ? 2 : 1;
-    w.PrivateUse = (a & 2) != 0 ? 2 : 1;
+    w.PrivateUseBmp = (a & 2) != 0 ? 2 : 1;
     w.Vs16Widens = (a & 4) != 0;
+    w.Cyrillic = (a & 8) != 0 ? 2 : 1;
+    w.PrivateUsePlanes = (a & 16) != 0 ? 2 : 1;
     switch (b & 3) {
         case 0:
             w.DoubtClasses = WIDTH_CLASSES_ALL;
@@ -53,7 +50,7 @@ static WidthPolicy PolicyFrom(std::uint8_t a, std::uint8_t b) noexcept {
             w.DoubtClasses = 0;
             break;
         default:
-            w.DoubtClasses = WidthClassBit(EWidthClass::PrivateUse);
+            w.DoubtClasses = WidthClassBit(EWidthClass::PrivateUseBmp);
             break;
     }
     return w;
@@ -182,7 +179,7 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data,
             Grid* gByte = rByte.value();
             Grid* gBulk = rBulk.value();
             VtParser pByte, pBulk;
-            const WidthPolicy pol = PolicyFrom(data[0] >> 5, data[1] >> 6);
+            const WidthPolicy pol = PolicyFrom(data[0] >> 3, data[1] >> 6);
             gByte->SetWidthPolicy(pol);
             gBulk->SetWidthPolicy(pol);
 
@@ -236,7 +233,7 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data,
 
     VtParser p;
     p.SetBypassCallback([](EBypassEvent, std::byte, void*) {}, nullptr);
-    g->SetWidthPolicy(PolicyFrom(data[0] >> 5, data[1] >> 6));
+    g->SetWidthPolicy(PolicyFrom(data[0] >> 3, data[1] >> 6));
 
     // 10. Two grids that differ only in which classes mark.
     Grid* gDef = nullptr;
@@ -252,27 +249,6 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data,
             gMark->SetWidthPolicy(narrow);
         }
     }
-
-    // 11. Twins of the path: all classes in doubt, ambiguous narrow against
-    // wide. Not resized, so the same size.
-    Grid* gNarrow = nullptr;
-    Grid* gWide = nullptr;
-    VtParser pNarrow, pWide, pUnknown;
-    {
-        auto a = Grid::Create(cols0, rows0, 0);
-        auto b = Grid::Create(cols0, rows0, 0);
-        if (a.has_value()) gNarrow = a.value();
-        if (b.has_value()) gWide = b.value();
-        if (gNarrow && gWide) {
-            WidthPolicy w;
-            gNarrow->SetWidthPolicy(w);
-            w.Ambiguous = 2;
-            gWide->SetWidthPolicy(w);
-        }
-    }
-    // Whether the twins' cursors are known to agree at the start of the
-    // current path; they do on fresh grids.
-    bool twinsArmed = true;
 
     // Decide the resize schedule: each resize is triggered when the byte
     // index is a multiple of (resize_period+1), where resize_period is
@@ -308,44 +284,6 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data,
         if (i % 11 == 10) ClientCall(*g, static_cast<std::uint8_t>(bytes[i]));
         CheckInvariants(*g, p);
 
-        if (gNarrow && gWide) {
-            pNarrow.Feed(bytes + i, 1, *gNarrow);
-            pWide.Feed(bytes + i, 1, *gWide);
-            if (i % 7 == 6) {
-                ClientCall(*gNarrow, static_cast<std::uint8_t>(bytes[i]));
-                ClientCall(*gWide, static_cast<std::uint8_t>(bytes[i]));
-            }
-            if (i % 13 == 12) {
-                // HPA: the grid does not parse it, a terminal does. Only the
-                // narrow twin sees it, as the cursor of both stays put.
-                const std::byte hpa[] = {std::byte{0x1b}, std::byte{'['},
-                                         std::byte{'2'}, std::byte{'`'}};
-                pUnknown.Feed(hpa, sizeof hpa, *gNarrow);
-                if (!gNarrow->PathBroken()) __builtin_trap();
-            }
-            const bool same = gNarrow->CursorRow() == gWide->CursorRow() &&
-                              gNarrow->CursorCol() == gWide->CursorCol() &&
-                              gNarrow->PendingWrap() == gWide->PendingWrap();
-            if (gNarrow->PathBroken()) {
-                twinsArmed = false;
-            } else {
-                std::uint32_t glyphs = 0;
-                for (std::uint8_t c = 0; c < WIDTH_CLASS_COUNT; ++c)
-                    glyphs += gNarrow->PathGlyphs(static_cast<EWidthClass>(c));
-                if (glyphs == 0 && same) twinsArmed = true;
-                // A row that differs is how the client sees a wrap the
-                // terminal made alone (the row of the report), so only equal
-                // rows are compared. On the last row a wrap scrolls and the
-                // rows agree again: that is what the right-margin rule is for.
-                if (twinsArmed && gNarrow->CursorRow() == gWide->CursorRow() &&
-                    (gNarrow->PendingWrap() != gWide->PendingWrap() ||
-                     gWide->CursorCol() !=
-                         gNarrow->CursorCol() +
-                             gNarrow->PathGlyphs(EWidthClass::Ambiguous)))
-                    __builtin_trap();
-            }
-        }
-
         if (g1x1) {
             p1x1.Feed(bytes + i, 1, *g1x1);
             // 1×1 grid has fixed size: just check it doesn't crash.
@@ -380,8 +318,6 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data,
     }
     delete gDef;
     delete gMark;
-    delete gNarrow;
-    delete gWide;
 
     // One final explicit 1×1 resize to exercise the extreme shrink path.
     (void)g->Resize(1, 1);

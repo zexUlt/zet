@@ -20,6 +20,7 @@ add_executable(zet_tests
     grid/grid_unknown_form_test.cpp
     grid/grid_lf_bg_drift_test.cpp
     grid/grid_width_policy_test.cpp
+    grid/grid_row_primitives_test.cpp
     grid/probe_test.cpp
     grid/snapshot_test.cpp
     grid/snapshot_roundtrip_test.cpp

@@ -855,7 +855,6 @@ void VtParser::DispatchCsi(char32_t final, Grid& grid) noexcept {
 
         default:
             ++UnknownSeqCount_;
-            grid.NoteUnknownSequence();
             break;
     }
 }

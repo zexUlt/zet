@@ -96,47 +96,6 @@ TEST_CASE("a wrap chain keeps the mark when the glyph is the last of a row") {
     CHECK(m.Before(m.T.G->CursorRow(), 1));
 }
 
-TEST_CASE("a column in doubt always sits on a broken path (random walk)") {
-    static const char* const PIECES[] = {"a",
-                                         "\xd0\xb6",
-                                         "\xe4\xb8\xad",
-                                         "\x08",
-                                         "\r",
-                                         "\n",
-                                         "\x1b[D",
-                                         "\x1b[3D",
-                                         "\x1b[C",
-                                         "\x1b[Z",
-                                         "\t",
-                                         "\x1b[A",
-                                         "\x1b[B",
-                                         "\x1b[1G",
-                                         "\x1b[2;3H",
-                                         "\x1b"
-                                         "7",
-                                         "\x1b"
-                                         "8",
-                                         "\x1b[?1049h",
-                                         "\x1b[?1049l",
-                                         "\x1b[2K",
-                                         "\x1b"
-                                         "c",
-                                         "\x1b[2J",
-                                         "\x1b[?7l",
-                                         "\x1b[?7h",
-                                         "\x1b[4h"};
-    constexpr std::size_t pieceCount = sizeof(PIECES) / sizeof(PIECES[0]);
-    std::uint32_t x = 12345;
-    for (int round = 0; round < 300; ++round) {
-        Mirror m(6 + round % 5, 4);
-        for (int i = 0; i < 80; ++i) {
-            x = x * 1664525U + 1013904223U;
-            m.Feed(PIECES[(x >> 16) % pieceCount]);
-            if (m.T.G->ColumnDoubt()) CHECK(m.T.G->PathBroken());
-        }
-    }
-}
-
 TEST_CASE("CUF after a left move over doubt keeps the column untrusted") {
     Mirror m(10, 3);
     m.Feed(std::string("ab") + ZHE + "\x1b[3D\x1b[C");

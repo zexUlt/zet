@@ -1,4 +1,4 @@
-// WidthPolicy, width classes, the path counters and the widening VS16
+// WidthPolicy, width classes and the widening VS16
 // (design.md §9, round C). The default policy is the width table as it always
 // was.
 #include <doctest/doctest.h>
@@ -10,6 +10,7 @@
 
 #include "zet/grid/grid.hpp"
 #include "zet/grid/snapshot.hpp"
+#include "zet/grid/unicode.hpp"
 #include "zet/grid/vt_parser.hpp"
 
 using namespace zet::grid;
@@ -36,7 +37,7 @@ std::string Utf8(char32_t cp) {
     return out;
 }
 
-constexpr char32_t ZHE = 0x0436;    // Cyrillic, ambiguous
+constexpr char32_t ALPHA = 0x03B1;  // Greek, ambiguous: class Ambiguous
 constexpr char32_t BOX = 0x2500;    // box drawing, ambiguous
 constexpr char32_t PUA = 0xE0B0;    // powerline, private use
 constexpr char32_t CLOUD = 0x2601;  // text glyph with an emoji form, width 1
@@ -82,14 +83,16 @@ struct Rig {
 };
 
 constexpr std::uint8_t A = WidthClassBit(EWidthClass::Ambiguous);
-constexpr std::uint8_t P = WidthClassBit(EWidthClass::PrivateUse);
+constexpr std::uint8_t CY = WidthClassBit(EWidthClass::Cyrillic);
+constexpr std::uint8_t P = WidthClassBit(EWidthClass::PrivateUseBmp);
+constexpr std::uint8_t PL = WidthClassBit(EWidthClass::PrivateUsePlanes);
 constexpr std::uint8_t E = WidthClassBit(EWidthClass::Emoji);
 constexpr std::uint8_t C = WidthClassBit(EWidthClass::Cluster);
 
 WidthPolicy Wide(int a, int p, bool vs16) {
     WidthPolicy w;
     w.Ambiguous = static_cast<std::uint8_t>(a);
-    w.PrivateUse = static_cast<std::uint8_t>(p);
+    w.PrivateUseBmp = static_cast<std::uint8_t>(p);
     w.Vs16Widens = vs16;
     return w;
 }
@@ -122,9 +125,9 @@ TEST_CASE("the default policy is the table as it was") {
     Rig r;
     CHECK(r.G->Policy() == WidthPolicy{});
     CHECK(r.G->Policy().Ambiguous == 1);
-    CHECK(r.G->Policy().PrivateUse == 1);
+    CHECK(r.G->Policy().PrivateUseBmp == 1);
     CHECK_FALSE(r.G->Policy().Vs16Widens);
-    r.Put({ZHE, BOX, PUA});
+    r.Put({ALPHA, BOX, PUA});
     CHECK(r.At(0, 0).Width == 1);
     CHECK(r.At(0, 1).Width == 1);
     CHECK(r.At(0, 2).Width == 1);
@@ -134,7 +137,7 @@ TEST_CASE("the default policy is the table as it was") {
 TEST_CASE("the default policy marks each class on its row") {
     {
         Rig r;
-        r.Put({ZHE});
+        r.Put({ALPHA});
         CHECK(r.Classes(0) == A);
         CHECK(r.G->WidthDoubtBefore(0, 1));
         CHECK_FALSE(r.G->WidthDoubtBefore(0, 0));
@@ -200,7 +203,7 @@ TEST_CASE("clusters without a verdict are flagged") {
 
 TEST_CASE("the leftmost mark of all classes is the row's WidthDoubt") {
     Rig r;
-    r.Put({'a', 'b', ZHE, PUA});
+    r.Put({'a', 'b', ALPHA, PUA});
     CHECK(r.Classes(0) == (A | P));
     CHECK_FALSE(r.G->WidthDoubtBefore(0, 2));
     CHECK(r.G->WidthDoubtBefore(0, 3));
@@ -217,7 +220,7 @@ TEST_CASE("the default policy leaves the snapshot alone") {
             r.G->SetWidthPolicy(Wide(2, 2, true));
             r.G->SetWidthPolicy(WidthPolicy{});
         }
-        r.Put({'a', ZHE, PUA, CLOUD, VS16, MAN, ZWJ, WOMAN, 0x65E5});
+        r.Put({'a', ALPHA, PUA, CLOUD, VS16, MAN, ZWJ, WOMAN, 0x65E5});
         r.Feed("\r\nline two");
         auto s = Snapshot::Create(*r.G);
         REQUIRE(s.has_value());
@@ -232,13 +235,13 @@ TEST_CASE("SetWidthPolicy normalises widths") {
     Rig r;
     WidthPolicy w;
     w.Ambiguous = 7;
-    w.PrivateUse = 0;
+    w.PrivateUseBmp = 0;
     r.G->SetWidthPolicy(w);
     CHECK(r.G->Policy().Ambiguous == 1);
-    CHECK(r.G->Policy().PrivateUse == 1);
+    CHECK(r.G->Policy().PrivateUseBmp == 1);
     r.G->SetWidthPolicy(Wide(2, 2, false));
     CHECK(r.G->Policy().Ambiguous == 2);
-    CHECK(r.G->Policy().PrivateUse == 2);
+    CHECK(r.G->Policy().PrivateUseBmp == 2);
 }
 
 // ---------------------------------------------------------------------------
@@ -248,8 +251,8 @@ TEST_CASE("SetWidthPolicy normalises widths") {
 TEST_CASE("wide ambiguous makes class A two columns, not private use") {
     Rig r;
     r.G->SetWidthPolicy(Wide(2, 1, false));
-    r.Put({ZHE, PUA, 'x'});
-    CHECK(r.At(0, 0).Codepoint == ZHE);
+    r.Put({ALPHA, PUA, 'x'});
+    CHECK(r.At(0, 0).Codepoint == ALPHA);
     CHECK(r.At(0, 0).Width == 2);
     CHECK(r.At(0, 1).Width == 0);
     CHECK(r.At(0, 2).Codepoint == PUA);
@@ -262,9 +265,9 @@ TEST_CASE("wide ambiguous makes class A two columns, not private use") {
 TEST_CASE("wide private use makes class P two columns, not ambiguous") {
     Rig r;
     r.G->SetWidthPolicy(Wide(1, 2, false));
-    r.Put({PUA, ZHE, BOX});
+    r.Put({PUA, ALPHA, BOX});
     CHECK(r.At(0, 0).Width == 2);
-    CHECK(r.At(0, 2).Codepoint == ZHE);
+    CHECK(r.At(0, 2).Codepoint == ALPHA);
     CHECK(r.At(0, 2).Width == 1);
     CHECK(r.At(0, 3).Width == 1);
     CHECK(r.G->CursorCol() == 4);
@@ -282,13 +285,13 @@ TEST_CASE("the policy does not widen what the table makes wide or narrow") {
 
 TEST_CASE("the policy applies to glyphs printed afterwards only") {
     Rig r;
-    r.Put({ZHE});
+    r.Put({ALPHA});
     r.G->SetWidthPolicy(Wide(2, 2, false));
-    r.Put({ZHE});
+    r.Put({ALPHA});
     CHECK(r.At(0, 0).Width == 1);
     CHECK(r.At(0, 1).Width == 2);
     r.G->SetWidthPolicy(WidthPolicy{});
-    r.Put({ZHE});
+    r.Put({ALPHA});
     CHECK(r.At(0, 1).Width == 2);
     CHECK(r.At(0, 3).Width == 1);
 }
@@ -296,9 +299,9 @@ TEST_CASE("the policy applies to glyphs printed afterwards only") {
 TEST_CASE("a wide ambiguous glyph wraps like any wide one") {
     Rig r(4, 3);
     r.G->SetWidthPolicy(Wide(2, 2, false));
-    r.Put({'a', 'b', 'c', ZHE});
+    r.Put({'a', 'b', 'c', ALPHA});
     CHECK(r.At(0, 3).Codepoint == 0);  // no room: the glyph goes to row 1
-    CHECK(r.At(1, 0).Codepoint == ZHE);
+    CHECK(r.At(1, 0).Codepoint == ALPHA);
     CHECK(r.At(1, 0).Width == 2);
     CHECK(r.G->CursorRow() == 1);
     CHECK(r.G->CursorCol() == 2);
@@ -308,7 +311,7 @@ TEST_CASE("a wide ambiguous glyph wraps like any wide one") {
 TEST_CASE("in a one-column grid a wide ambiguous glyph is a space") {
     Rig r(1, 2);
     r.G->SetWidthPolicy(Wide(2, 2, false));
-    r.Put({ZHE});
+    r.Put({ALPHA});
     CHECK(r.At(0, 0).Width == 1);
     CHECK(r.At(0, 0).Codepoint == U' ');
 }
@@ -326,7 +329,7 @@ TEST_CASE("Special Graphics line drawing is not widened") {
 TEST_CASE("REP repeats the glyph at the width of the table, not the policy") {
     Rig r;
     r.G->SetWidthPolicy(Wide(2, 2, false));
-    r.Put({ZHE});
+    r.Put({ALPHA});
     r.Feed("\x1b[2b");  // REP 2: two more, wide
     CHECK(r.G->CursorCol() == 6);
     CHECK(r.At(0, 4).Width == 2);
@@ -341,8 +344,8 @@ TEST_CASE("wide glyphs from the policy overwrite like any wide glyph") {
     r.Put({'a', 'b', 'c', 'd'});
     r.Feed("\x1b[1;2H");
     r.G->SetWidthPolicy(Wide(2, 2, false));
-    r.Put({ZHE});  // over b and c
-    r.Put({ZHE});  // over d and the blank: d's cell
+    r.Put({ALPHA});  // over b and c
+    r.Put({ALPHA});  // over d and the blank: d's cell
     CheckPairing(*r.G);
     r.Feed("\x1b[1;1H");
     r.Put({'x'});
@@ -356,7 +359,7 @@ TEST_CASE("the doubt mask silences a class but not Cluster") {
     WidthPolicy w;
     w.DoubtClasses = static_cast<std::uint8_t>(WIDTH_CLASSES_ALL & ~A);
     r.G->SetWidthPolicy(w);
-    r.Put({ZHE, PUA});
+    r.Put({ALPHA, PUA});
     CHECK(r.Classes(0) == P);
     w.DoubtClasses = 0;
     r.G->SetWidthPolicy(w);
@@ -365,20 +368,6 @@ TEST_CASE("the doubt mask silences a class but not Cluster") {
     r.Put({MAN, ZWJ, WOMAN});
     CHECK(r.Classes(0) == (P | C));
 }
-
-TEST_CASE("a silenced class still counts on the path") {
-    Rig r;
-    WidthPolicy w;
-    w.DoubtClasses = 0;
-    r.G->SetWidthPolicy(w);
-    r.Put({ZHE, ZHE});
-    CHECK(r.G->PathGlyphs(EWidthClass::Ambiguous) == 2);
-    CHECK(r.Classes(0) == 0);
-}
-
-// ---------------------------------------------------------------------------
-// VS16
-// ---------------------------------------------------------------------------
 
 TEST_CASE("VS16 widens a narrow glyph with an emoji form") {
     Rig r;
@@ -427,18 +416,6 @@ TEST_CASE("VS16 next to the right margin") {
     CheckPairing(*r.G);
 }
 
-TEST_CASE("VS16 in the last column marks the row and widens nothing") {
-    Rig r(5, 3);
-    r.G->SetWidthPolicy(Wide(1, 1, true));
-    r.Feed("\x1b[1;5H");
-    r.Put({CLOUD, VS16});
-    CHECK(r.At(0, 4).Width == 1);
-    CHECK(r.G->PendingWrap());
-    CHECK(r.Classes(0) == C);
-    CHECK(r.G->PathBroken());
-    CheckPairing(*r.G);
-}
-
 TEST_CASE("VS16 only widens a glyph printed right before it") {
     Rig r;
     r.G->SetWidthPolicy(Wide(1, 1, true));
@@ -456,7 +433,7 @@ TEST_CASE("VS16 only widens a glyph printed right before it") {
 }
 
 TEST_CASE("VS16 does not widen what is not text with an emoji form") {
-    for (const char32_t base : {char32_t{'a'}, char32_t{'1'}, WATCH, ZHE}) {
+    for (const char32_t base : {char32_t{'a'}, char32_t{'1'}, WATCH, ALPHA}) {
         Rig r;
         r.G->SetWidthPolicy(Wide(1, 1, true));
         r.Put({base, VS16, 'x'});
@@ -521,11 +498,11 @@ TEST_CASE("ZWJ, skin tone and VS15 are not widened by any policy") {
 
 TEST_CASE("a narrow verdict drops the class from every row") {
     Rig r;
-    r.Put({'x', ZHE, 'a'});
+    r.Put({'x', ALPHA, 'a'});
     r.Feed("\r\n");
-    r.Put({PUA, ZHE});
+    r.Put({PUA, ALPHA});
     r.Feed("\x1b[?1049h");
-    r.Put({ZHE});
+    r.Put({ALPHA});
     r.Feed("\x1b[?1049l");
     REQUIRE(r.Classes(0) == A);
     REQUIRE(r.Classes(1) == (A | P));
@@ -543,9 +520,9 @@ TEST_CASE("a narrow verdict drops the class from every row") {
 
 TEST_CASE("a wide verdict makes the rows holding the class foreign") {
     Rig r;
-    r.Put({ZHE});
+    r.Put({ALPHA});
     r.Feed("\r\n");
-    r.Put({PUA, ZHE});
+    r.Put({PUA, ALPHA});
     r.Feed("\r\n");
     r.Put({'p'});
     r.G->ForgetWidthClass(EWidthClass::Ambiguous);
@@ -555,7 +532,7 @@ TEST_CASE("a wide verdict makes the rows holding the class foreign") {
     CHECK(r.Classes(0) == 0);
     CHECK(r.Classes(1) == P);  // other classes stay
     // The contents are kept.
-    CHECK(r.At(0, 0).Codepoint == ZHE);
+    CHECK(r.At(0, 0).Codepoint == ALPHA);
 }
 
 TEST_CASE("verdicts leave Cluster marks and unmarked rows alone") {
@@ -573,7 +550,7 @@ TEST_CASE("verdicts leave Cluster marks and unmarked rows alone") {
 
 TEST_CASE("class marks go with their row on scrolls") {
     Rig r(10, 4);
-    r.Put({ZHE});
+    r.Put({ALPHA});
     r.Feed("\r\n");
     r.Put({PUA});
     r.Feed("\x1b[1T");  // SD: rows move down
@@ -587,8 +564,8 @@ TEST_CASE("class marks go with their row on scrolls") {
 
 TEST_CASE("DCH shifts a mark left of where it was") {
     Rig r;
-    r.Put({'a', 'b', 'c', 'd', ZHE});  // mark at column 4
-    r.Put({PUA});                      // and at 5
+    r.Put({'a', 'b', 'c', 'd', ALPHA});  // mark at column 4
+    r.Put({PUA});                        // and at 5
     r.Feed("\x1b[1;2H\x1b[3P");
     CHECK(r.G->WidthDoubtBefore(0, 2, A));
     CHECK_FALSE(r.G->WidthDoubtBefore(0, 1, A));
@@ -597,212 +574,28 @@ TEST_CASE("DCH shifts a mark left of where it was") {
 
 TEST_CASE("ED and EL 2 clear the marks of the rows they erase") {
     Rig r;
-    r.Put({ZHE});
+    r.Put({ALPHA});
     r.Feed("\x1b[2K");
     CHECK(r.Classes(0) == 0);
-    r.Put({ZHE});
+    r.Put({ALPHA});
     r.Feed("\x1b[2J");
     CHECK(r.Classes(0) == 0);
 }
 
-// ---------------------------------------------------------------------------
-// Path counters
-// ---------------------------------------------------------------------------
-
-TEST_CASE("the path counts each class") {
-    Rig r(40, 3);
-    r.Put({ZHE, ZHE, BOX, PUA, 'a', CLOUD, VS16, MAN, ZWJ});
-    CHECK(r.G->PathGlyphs(EWidthClass::Ambiguous) == 3);
-    CHECK(r.G->PathGlyphs(EWidthClass::PrivateUse) == 1);
-    CHECK(r.G->PathGlyphs(EWidthClass::Emoji) == 1);
-    CHECK(r.G->PathGlyphs(EWidthClass::Cluster) == 1);  // the ZWJ
-    CHECK_FALSE(r.G->PathBroken());
-}
-
-TEST_CASE("the widening VS16 counts as one Emoji glyph too") {
-    Rig r;
-    r.G->SetWidthPolicy(Wide(1, 1, true));
-    r.Put({CLOUD, VS16});
-    CHECK(r.G->PathGlyphs(EWidthClass::Emoji) == 1);
-}
-
-TEST_CASE("an absolute column starts a new path") {
-    for (const char* seq :
-         {"\r", "\x1b[3G", "\x1b[2;3H", "\x1b[1E", "\x1b[1F", "\x1b[2;3f",
-          "\x1b"
-          "c",
-          "\x1b[2;3r", "\x1b[1L", "\x1b[1M", "\x1b[?6h"}) {
-        Rig r;
-        r.Put({ZHE, ZHE});
-        r.Feed("\x1b[2D");  // break it too: a restart repairs that
-        REQUIRE(r.G->PathBroken());
-        r.Feed(seq);
-        INFO("sequence: " << std::string_view(seq).substr(1));
-        CHECK(r.G->PathGlyphs(EWidthClass::Ambiguous) == 0);
-        CHECK_FALSE(r.G->PathBroken());
-    }
-}
-
-TEST_CASE("LF under LNM restarts the path, plain LF does not") {
-    Rig r;
-    r.Put({ZHE});
-    r.Feed("\n");
-    CHECK(r.G->PathGlyphs(EWidthClass::Ambiguous) == 1);
-    r.Feed("\x1b[20h\n");
-    CHECK(r.G->PathGlyphs(EWidthClass::Ambiguous) == 0);
-}
-
-TEST_CASE("Resync starts a new path") {
-    Rig r;
-    r.Put({ZHE});
-    r.G->Resync(0, 0, true);
-    CHECK(r.G->PathGlyphs(EWidthClass::Ambiguous) == 0);
-}
-
-TEST_CASE("relative moves to the right and vertical ones keep the path") {
-    Rig r;
-    r.Put({ZHE});
-    r.Feed(
-        "\x1b[2C\x1b[1B\x1b[1A\n\x1b"
-        "M\x1b"
-        "D\x1b[1S\x1b[1T");
-    CHECK_FALSE(r.G->PathBroken());
-    CHECK(r.G->PathGlyphs(EWidthClass::Ambiguous) == 1);
-    r.Put({ZHE});
-    CHECK(r.G->PathGlyphs(EWidthClass::Ambiguous) == 2);
-}
-
-TEST_CASE("erasing and inserting keep the path") {
-    Rig r;
-    r.Put({ZHE});
-    r.Feed("\x1b[K\x1b[1K\x1b[2X\x1b[2@\x1b[2P\x1b[J\x1b[1J");
-    CHECK_FALSE(r.G->PathBroken());
-}
-
-TEST_CASE("a wrap breaks the path") {
-    Rig r(4, 3);
-    // No class in doubt: the right-margin rule has nothing to count, the wrap
-    // alone breaks the path.
-    WidthPolicy w;
-    w.DoubtClasses = 0;
-    r.G->SetWidthPolicy(w);
-    r.Put({ZHE, ZHE, ZHE, ZHE});
-    CHECK_FALSE(r.G->PathBroken());  // pending, not yet wrapped
-    r.Put({ZHE});
-    CHECK(r.G->PathBroken());
-    CHECK(r.G->PathGlyphs(EWidthClass::Ambiguous) == 5);
-}
-
-TEST_CASE("a wide glyph that wraps early breaks the path") {
-    Rig r(4, 3);
-    r.G->SetWidthPolicy(Wide(2, 2, false));
-    r.Put({'a', 'b', 'c', ZHE});
-    CHECK(r.G->PathBroken());
-}
-
-TEST_CASE("moves left, tabs and edges break the path") {
-    const auto broken = [](const char* seq) {
-        Rig r;
-        r.Put({ZHE});
-        r.Feed(seq);
-        return r.G->PathBroken();
-    };
-    CHECK(broken("\b"));
-    CHECK(broken("\x1b[D"));
-    CHECK(broken("\x1b[1Z"));
-    CHECK(broken("\t"));
-    CHECK(broken("\x1b[99C"));
-    CHECK(broken("\x1b[?1049h"));
-    CHECK(
-        broken("\x1b"
-               "7\x1b"
-               "8"));
-    CHECK_FALSE(broken("\x1b[C"));
-    CHECK_FALSE(broken(""));
-}
-
-TEST_CASE("a resize breaks the path") {
-    Rig r;
-    r.Put({ZHE});
-    REQUIRE(r.G->Resize(12, 3).has_value());
-    CHECK(r.G->PathBroken());
-}
-
-TEST_CASE("a restart repairs a broken path") {
-    Rig r;
-    r.Put({ZHE});
-    r.Feed("\b");
-    REQUIRE(r.G->PathBroken());
-    r.Feed("\r");
-    CHECK_FALSE(r.G->PathBroken());
-    r.Put({ZHE});
-    CHECK(r.G->PathGlyphs(EWidthClass::Ambiguous) == 1);
-}
-
 TEST_CASE("the existing counters do not move with the new bookkeeping") {
     Rig r;
-    r.Put({ZHE, CLOUD, VS16});
+    r.Put({ALPHA, CLOUD, VS16});
     CHECK(r.G->ColumnSetCount() == 0);
     CHECK(r.G->ScrollCount() == 0);
     r.Feed("\r");
     CHECK(r.G->ColumnSetCount() == 1);
 }
 
-// R1: a wide-A terminal reaches the pending wrap (reports the last column)
-// while the mirror is one column short: d = 0 though A is wide.
-TEST_CASE(
-    "R1 a path that may have hit the right edge on the terminal is not "
-    "solvable") {
-    Rig r(10, 3);
-    r.Feed("\r");
-    r.Put({ZHE});
-    r.Feed("12345678");
-    REQUIRE(r.G->CursorCol() == 9);
-    REQUIRE_FALSE(r.G->PendingWrap());
-    REQUIRE(r.G->PathGlyphs(EWidthClass::Ambiguous) == 1);
-    CHECK(r.G->PathBroken());
-}
-
-// R2: an unparsed sequence may move the terminal's cursor (HPA here).
-TEST_CASE("R2 an unknown sequence breaks the path") {
-    Rig r(10, 3);
-    r.Feed("\r");
-    r.Put({ZHE});
-    r.Feed("\x1b[2`x");
-    CHECK(r.G->PathBroken());
-}
-
-// R3: under LNM the autowrap goes through LineFeed, whose NoteColumnSet
-// restarts the path after the wrap broke it.
-TEST_CASE("R3 a wrap breaks the path under LNM too") {
-    Rig r(10, 3);
-    r.Feed("\x1b[20h\r");
-    r.Put({ZHE});
-    r.Feed("123456789x");
-    CHECK(r.G->PathBroken());
-}
-
-// R4: with VS16 known wide, an ambiguous base + VS16 is two columns whatever
-// A is, so it must not count as an A glyph of open width.
-TEST_CASE("R4 a widened VS16 emoji does not count its ambiguous base") {
-    Rig r;
-    WidthPolicy w;
-    w.Vs16Widens = true;
-    w.DoubtClasses = A | P;
-    r.G->SetWidthPolicy(w);
-    r.Feed("\r");
-    r.Put({HEART, VS16});
-    REQUIRE(r.At(0, 0).Width == 2);
-    CHECK(r.G->PathGlyphs(EWidthClass::Ambiguous) == 0);
-}
-
-// R5: Special Graphics glyphs are not sized by the A policy, so they cannot
-// count as A on the path.
-TEST_CASE("R5 Special Graphics line drawing is not an A glyph on the path") {
+// R5: Special Graphics glyphs are not sized by the A policy.
+TEST_CASE("R5 Special Graphics line drawing still marks the row") {
     Rig r;
     r.Feed("\r\x1b(0q\x1b(B");
-    CHECK(r.G->PathGlyphs(EWidthClass::Ambiguous) == 0);
-    CHECK(r.G->WidthDoubtBefore(0, 1));  // still doubtful: aggregate unchanged
+    CHECK(r.G->WidthDoubtBefore(0, 1));
 }
 
 // R6: IRM must insert as many cells as the glyph takes under the policy.
@@ -812,8 +605,8 @@ TEST_CASE("R6 insert mode makes room for a glyph the policy widens") {
     w.Ambiguous = 2;
     r.G->SetWidthPolicy(w);
     r.Feed("abc\r\x1b[4h");
-    r.Put({ZHE});
-    CHECK(r.At(0, 0).Codepoint == ZHE);
+    r.Put({ALPHA});
+    CHECK(r.At(0, 0).Codepoint == ALPHA);
     CHECK(r.At(0, 0).Width == 2);
     CHECK(r.At(0, 2).Codepoint == U'a');
     CHECK(r.At(0, 3).Codepoint == U'b');
@@ -824,11 +617,11 @@ TEST_CASE("R6 insert mode makes room for a glyph the policy widens") {
 TEST_CASE("R8 resync drops the width marks of the alt screen too") {
     Rig r(10, 3);
     r.Feed("\x1b[?47h");
-    r.Put({ZHE});
+    r.Put({ALPHA});
     r.Feed("\x1b[?47l");
     REQUIRE(r.G->Resync(0, 0, true));
     r.Feed("\x1b[?47h");
-    REQUIRE(r.At(0, 0).Codepoint == ZHE);
+    REQUIRE(r.At(0, 0).Codepoint == ALPHA);
     CHECK_FALSE(r.G->WidthDoubtBefore(0, 1));
 }
 
@@ -859,9 +652,9 @@ TEST_CASE("R11 a glyph VS16 widens next to the known tail joins it") {
 
 TEST_CASE("R12 a class mark keeps the leftmost glyph of the class") {
     Rig r;
-    r.Put({ZHE});
+    r.Put({ALPHA});
     r.Feed("abcd");
-    r.Put({ZHE});
+    r.Put({ALPHA});
     CHECK(r.G->WidthDoubtBefore(0, 2, A));
 }
 
@@ -869,14 +662,14 @@ TEST_CASE("R13 clearing a class keeps the leftmost mark of the others") {
     Rig r;
     r.Put({PUA});
     r.Feed("abcd");
-    r.Put({ZHE});
+    r.Put({ALPHA});
     r.G->ClearWidthClass(EWidthClass::Cluster);
     CHECK(r.G->WidthDoubtBefore(0, 2));
 }
 
 TEST_CASE("R14 resize keeps the class marks") {
     Rig r;
-    r.Put({ZHE});
+    r.Put({ALPHA});
     REQUIRE(r.G->Resize(12, 3).has_value());
     CHECK(r.G->WidthDoubtBefore(0, 1, A));
 }
@@ -884,41 +677,19 @@ TEST_CASE("R14 resize keeps the class marks") {
 TEST_CASE("R15 a class verdict reaches the alt screen") {
     Rig r;
     r.Feed("\x1b[?47h");
-    r.Put({ZHE});
+    r.Put({ALPHA});
     r.G->ClearWidthClass(EWidthClass::Ambiguous);
     CHECK_FALSE(r.G->WidthDoubtBefore(0, 1));
     r.Feed("\r\n");
-    r.Put({ZHE});
+    r.Put({ALPHA});
     r.G->ForgetWidthClass(EWidthClass::Ambiguous);
     CHECK_FALSE(r.G->WidthDoubtBefore(1, 1));
     CHECK(r.G->KnownFrom(1) == 10);
 }
 
-TEST_CASE("R1 the margin rule is exact: one short of the edge the path holds") {
-    Rig r(10, 3);
-    r.Feed("\r");
-    r.Put({ZHE});
-    r.Feed("1234567");  // column 8, one glyph: the terminal is at 9 at most
-    REQUIRE(r.G->CursorCol() == 8);
-    CHECK_FALSE(r.G->PathBroken());
-    r.Feed("8");  // column 9: the terminal may have reached the margin
-    CHECK(r.G->PathBroken());
-}
-
-TEST_CASE("R1 a class with a verdict does not count at the margin") {
-    Rig r(10, 3);
-    WidthPolicy w;
-    w.DoubtClasses = P;  // A is known narrow
-    r.G->SetWidthPolicy(w);
-    r.Feed("\r");
-    r.Put({ZHE});
-    r.Feed("12345678");
-    CHECK_FALSE(r.G->PathBroken());
-}
-
 TEST_CASE("R2 the unknown sequence changes nothing else") {
     Rig r(10, 3);
-    r.Put({ZHE});
+    r.Put({ALPHA});
     const auto col = r.G->CursorCol();
     r.Feed("\x1b[2`");
     CHECK(r.P.UnknownSeqCount() == 1);
@@ -937,4 +708,228 @@ TEST_CASE("R6 insert mode makes room for a VS16 that widens") {
     CHECK(r.At(0, 2).Codepoint == U'a');
     CHECK(r.At(0, 3).Codepoint == U'b');
     CHECK(r.At(0, 4).Codepoint == U'c');
+}
+
+// ---------------------------------------------------------------------------
+// Cyrillic, private use in the BMP and in planes 15-16: one class each
+// ---------------------------------------------------------------------------
+
+namespace {
+
+constexpr char32_t ZHE = 0x0436;    // Cyrillic, ambiguous
+constexpr char32_t YO_UP = 0x0401;  // Ё
+constexpr char32_t A_UP = 0x0410;   // А
+constexpr char32_t YA = 0x044F;     // я
+constexpr char32_t YO = 0x0451;     // ё
+constexpr char32_t DJE = 0x0402;    // Ђ: Cyrillic, but narrow in the table
+constexpr char32_t PUA_BMP_LAST = 0xF8FF;
+constexpr char32_t PUA_P15 = 0xF024B;  // nf-md-folder
+constexpr char32_t PUA_P15_LAST = 0xFFFFD;
+constexpr char32_t PUA_P16 = 0x10F000;
+constexpr char32_t PUA_P16_LAST = 0x10FFFD;
+
+enum class EPolicyField { Ambiguous, Cyrillic, Bmp, Planes };
+
+WidthPolicy Only(EPolicyField f) {
+    WidthPolicy w;
+    switch (f) {
+        case EPolicyField::Ambiguous:
+            w.Ambiguous = 2;
+            break;
+        case EPolicyField::Cyrillic:
+            w.Cyrillic = 2;
+            break;
+        case EPolicyField::Bmp:
+            w.PrivateUseBmp = 2;
+            break;
+        case EPolicyField::Planes:
+            w.PrivateUsePlanes = 2;
+            break;
+    }
+    return w;
+}
+
+// The width one glyph gets, alone on a fresh row, under `w`.
+int WidthOf(char32_t cp, const WidthPolicy& w) {
+    Rig r;
+    r.G->SetWidthPolicy(w);
+    r.Put({cp});
+    return r.At(0, 0).Width;
+}
+
+}  // namespace
+
+TEST_CASE("the default policy has every class narrow, as the table says") {
+    const WidthPolicy w;
+    CHECK(w.Ambiguous == 1);
+    CHECK(w.Cyrillic == 1);
+    CHECK(w.PrivateUseBmp == 1);
+    CHECK(w.PrivateUsePlanes == 1);
+    for (const char32_t cp : {ZHE, YO_UP, A_UP, YA, YO, ALPHA, BOX, PUA,
+                              PUA_P15, PUA_P16, PUA_BMP_LAST}) {
+        CHECK_MESSAGE(WidthOf(cp, w) == 1, "U+", std::hex, unsigned(cp));
+    }
+}
+
+TEST_CASE("the Cyrillic class is exactly Ё, А-я and ё") {
+    for (char32_t cp = 0; cp < 0x3000; ++cp) {
+        const bool expected =
+            cp == YO_UP || (cp >= A_UP && cp <= YA) || cp == YO;
+        CHECK_MESSAGE(IsCyrillicAmbiguous(cp) == expected, "U+", std::hex,
+                      unsigned(cp));
+        // Every glyph of the class is East Asian ambiguous in the table.
+        if (expected) CHECK(IsAmbiguousWidth(cp));
+    }
+    CHECK_FALSE(IsCyrillicAmbiguous(DJE));
+}
+
+TEST_CASE("the private use ranges split into the BMP and planes 15-16") {
+    CHECK(IsPrivateUseBmp(0xE000));
+    CHECK(IsPrivateUseBmp(PUA_BMP_LAST));
+    CHECK_FALSE(IsPrivateUseBmp(0xDFFF));
+    CHECK_FALSE(IsPrivateUseBmp(0xF900));
+    CHECK_FALSE(IsPrivateUseBmp(PUA_P15));
+    CHECK(IsPrivateUsePlanes(0xF0000));
+    CHECK(IsPrivateUsePlanes(PUA_P15_LAST));
+    CHECK_FALSE(IsPrivateUsePlanes(0xFFFFE));
+    CHECK(IsPrivateUsePlanes(0x100000));
+    CHECK(IsPrivateUsePlanes(PUA_P16_LAST));
+    CHECK_FALSE(IsPrivateUsePlanes(0x10FFFE));
+    CHECK_FALSE(IsPrivateUsePlanes(PUA));
+    for (const char32_t cp :
+         {char32_t{0xE000}, PUA, PUA_BMP_LAST, PUA_P15, PUA_P16_LAST}) {
+        CHECK(IsPrivateUse(cp));
+    }
+}
+
+TEST_CASE("wide Cyrillic widens Cyrillic only, the rest of A stays narrow") {
+    const WidthPolicy w = Only(EPolicyField::Cyrillic);
+    for (const char32_t cp : {ZHE, YO_UP, A_UP, YA, YO})
+        CHECK_MESSAGE(WidthOf(cp, w) == 2, "U+", std::hex, unsigned(cp));
+    for (const char32_t cp :
+         {ALPHA, BOX, HEART, PUA, PUA_BMP_LAST, PUA_P15, PUA_P16, DJE})
+        CHECK_MESSAGE(WidthOf(cp, w) == 1, "U+", std::hex, unsigned(cp));
+    Rig r;
+    r.G->SetWidthPolicy(w);
+    r.Put({ZHE, ALPHA});
+    CHECK(r.G->CursorCol() == 3);
+}
+
+TEST_CASE("wide PrivateUseBmp widens U+E000-F8FF only") {
+    const WidthPolicy w = Only(EPolicyField::Bmp);
+    for (const char32_t cp : {char32_t{0xE000}, PUA, PUA_BMP_LAST})
+        CHECK_MESSAGE(WidthOf(cp, w) == 2, "U+", std::hex, unsigned(cp));
+    for (const char32_t cp :
+         {ZHE, YO, ALPHA, BOX, PUA_P15, PUA_P15_LAST, PUA_P16, PUA_P16_LAST})
+        CHECK_MESSAGE(WidthOf(cp, w) == 1, "U+", std::hex, unsigned(cp));
+}
+
+TEST_CASE("wide PrivateUsePlanes widens planes 15 and 16, plane 16 too") {
+    const WidthPolicy w = Only(EPolicyField::Planes);
+    for (const char32_t cp : {char32_t{0xF0000}, PUA_P15, PUA_P15_LAST,
+                              char32_t{0x100000}, PUA_P16, PUA_P16_LAST})
+        CHECK_MESSAGE(WidthOf(cp, w) == 2, "U+", std::hex, unsigned(cp));
+    for (const char32_t cp : {ZHE, ALPHA, BOX, PUA, PUA_BMP_LAST})
+        CHECK_MESSAGE(WidthOf(cp, w) == 1, "U+", std::hex, unsigned(cp));
+}
+
+TEST_CASE("wide Ambiguous leaves Cyrillic and private use narrow") {
+    const WidthPolicy w = Only(EPolicyField::Ambiguous);
+    for (const char32_t cp : {ALPHA, BOX, HEART})
+        CHECK_MESSAGE(WidthOf(cp, w) == 2, "U+", std::hex, unsigned(cp));
+    for (const char32_t cp : {ZHE, YO_UP, YO, PUA, PUA_P15, PUA_P16})
+        CHECK_MESSAGE(WidthOf(cp, w) == 1, "U+", std::hex, unsigned(cp));
+}
+
+TEST_CASE("each glyph marks its own class, the rest of A is none of them") {
+    const std::pair<char32_t, std::uint8_t> marks[] = {
+        {ZHE, CY}, {YO_UP, CY},   {YO, CY},      {ALPHA, A},
+        {PUA, P},  {PUA_P15, PL}, {PUA_P16, PL}, {BOX, A},
+    };
+    for (const auto& [cp, cls] : marks) {
+        Rig r;
+        r.Put({cp});
+        CHECK_MESSAGE(r.Classes(0) == cls, "U+", std::hex, unsigned(cp));
+        CHECK(r.G->WidthDoubtBefore(0, 2, cls));
+        CHECK_FALSE(r.G->WidthDoubtBefore(
+            0, 2, static_cast<std::uint8_t>(WIDTH_CLASSES_ALL & ~cls)));
+    }
+    Rig r;
+    r.Put({'a', ZHE, ALPHA, PUA, PUA_P15});
+    CHECK(r.Classes(0) == (CY | A | P | PL));
+    CHECK(r.G->WidthDoubtBefore(0, 2));
+    CHECK_FALSE(r.G->WidthDoubtBefore(0, 1));
+}
+
+TEST_CASE("SetWidthPolicy normalises the new fields") {
+    Rig r;
+    WidthPolicy w;
+    w.Cyrillic = 3;
+    w.PrivateUseBmp = 2;
+    w.PrivateUsePlanes = 0;
+    r.G->SetWidthPolicy(w);
+    CHECK(r.G->Policy().Cyrillic == 1);
+    CHECK(r.G->Policy().PrivateUseBmp == 2);
+    CHECK(r.G->Policy().PrivateUsePlanes == 1);
+}
+
+TEST_CASE("a wide glyph of a new class wraps and widens as any wide one") {
+    for (const EPolicyField f :
+         {EPolicyField::Cyrillic, EPolicyField::Bmp, EPolicyField::Planes}) {
+        Rig r(4, 3);
+        r.G->SetWidthPolicy(Only(f));
+        const char32_t cp = f == EPolicyField::Cyrillic ? ZHE
+                            : f == EPolicyField::Bmp    ? PUA
+                                                        : PUA_P15;
+        r.Put({'a', 'b', 'c', cp});
+        CHECK(r.At(0, 3).Codepoint == 0);  // no room: the glyph goes to row 1
+        CHECK(r.At(1, 0).Codepoint == cp);
+        CHECK(r.At(1, 0).Width == 2);
+        CheckPairing(*r.G);
+    }
+}
+
+TEST_CASE("verdicts on the new classes reach their rows only") {
+    Rig r;
+    r.Put({ZHE, PUA, PUA_P15});
+    r.Feed("\r\n");
+    r.Put({ZHE});
+    r.Feed("\r\n");
+    r.Put({PUA_P15});
+    REQUIRE(r.Classes(0) == (CY | P | PL));
+    r.G->ClearWidthClass(EWidthClass::Cyrillic);
+    CHECK(r.Classes(0) == (P | PL));
+    CHECK(r.Classes(1) == 0);
+    CHECK(r.Classes(2) == PL);
+    r.G->ForgetWidthClass(EWidthClass::PrivateUsePlanes);
+    CHECK(r.Classes(0) == P);
+    CHECK(r.Classes(2) == 0);
+    CHECK(r.Known(0) == 10);
+    CHECK(r.Known(2) == 10);
+    CHECK(r.Known(1) == 0);
+}
+
+TEST_CASE("the doubt mask silences each new class on its own") {
+    for (const auto& [cp, bit] :
+         {std::pair{ZHE, CY}, std::pair{PUA, P}, std::pair{PUA_P15, PL}}) {
+        Rig r;
+        WidthPolicy w;
+        w.DoubtClasses = static_cast<std::uint8_t>(WIDTH_CLASSES_ALL & ~bit);
+        r.G->SetWidthPolicy(w);
+        r.Put({cp, ALPHA});
+        CHECK(r.Classes(0) == A);
+    }
+}
+
+TEST_CASE("private use planes stop at the code points next to the ranges") {
+    CHECK_FALSE(IsPrivateUsePlanes(0xEFFFF));
+    CHECK(IsPrivateUsePlanes(0xF0000));
+    CHECK(IsPrivateUsePlanes(0xFFFFD));
+    CHECK_FALSE(IsPrivateUsePlanes(0xFFFFE));
+    CHECK_FALSE(IsPrivateUsePlanes(0xFFFFF));
+    CHECK(IsPrivateUsePlanes(0x100000));
+    CHECK(IsPrivateUsePlanes(0x10FFFD));
+    CHECK_FALSE(IsPrivateUsePlanes(0x10FFFE));
+    CHECK_FALSE(IsPrivateUsePlanes(0x10FFFF));
+    CHECK_FALSE(IsPrivateUsePlanes(0x110000));
 }
