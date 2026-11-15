@@ -29,17 +29,19 @@ inline constexpr std::size_t PROBE_BYTES_MAX =
 enum class EProbeGate : std::uint8_t {
     Clean = 0,       ///< a probe can be written
     ClassNotProbed,  ///< the class has no probe (only Cyrillic and private use)
-    NoMirror,        ///< the engine is in `never`: there is no mirror
-    NotGround,       ///< the parser is inside a sequence or a UTF-8 character
-    AltScreen,       ///< alternate screen
-    PendingWrap,     ///< deferred wrap
-    Decom,           ///< origin mode
-    Irm,             ///< insert mode
-    Charset,         ///< G0 is not ASCII, or SO is active
-    SyncFrame,       ///< the program's own synchronised update is open
-    UnmodelledMode,  ///< DECLRMM, `?45`, `?3`, VT52, not UTF-8
-    UnmodelledSgr,   ///< an SGR attribute the pen cannot hold
-    RowsUntrusted,   ///< the rows of the mirror are not the terminal's
+    PointNotOfClass,  ///< `encountered` is not of the class (a bug)
+    NoMirror,         ///< the engine is in `never`: there is no mirror
+    NotGround,        ///< the parser is inside a sequence or a UTF-8 character
+    AltScreen,        ///< alternate screen
+    PendingWrap,      ///< deferred wrap
+    Decom,            ///< origin mode
+    Irm,              ///< insert mode
+    Charset,          ///< G0 is not ASCII, or SO is active
+    SyncFrame,        ///< the program's own synchronised update is open
+    UnmodelledMode,   ///< DECLRMM, `?45`, `?3`, VT52, not UTF-8
+    UnmodelledSgr,    ///< an SGR attribute the pen cannot hold
+    RowsUntrusted,    ///< the rows of the mirror were never made the terminal's
+                      ///< (no resync, no path B snapshot) or have drifted
     ColumnUntrusted,  ///< the column of the mirror is not the terminal's
     RowMark,          ///< a width doubt mark anywhere in the cursor row
     LeftOfCursor,     ///< left of the cursor is not empty or printable ASCII
@@ -50,6 +52,9 @@ enum class EProbeGate : std::uint8_t {
                       ///< column
     NoLastGlyph,      ///< the register REP reads is unknown, or lost a mark
 };
+
+/// The most bytes the exit tail of a probe is: `SGR 0`, `?25h`, `?2026l`.
+inline constexpr std::size_t PROBE_TAIL_BYTES_MAX = 18;
 
 /// A probe written to the bytes buffer: what the client queues and what it
 /// needs to read the answer.
@@ -67,6 +72,16 @@ struct WidthProbeWrite {
     std::uint16_t Col{0};
     /// The number of glyphs: the narrow answer is Col + Glyphs.
     std::uint8_t Glyphs{0};
+    /// The size of the mirror the probe was built for, in cells: the client
+    /// compares it with the terminal's before it accepts the answer, which
+    /// counts columns of a terminal of another size otherwise.
+    std::uint16_t Cols{0};
+    std::uint16_t Rows{0};
+    /// What the client writes after a rest of the probe that did not go out
+    /// whole (design.md §9, "Выход посреди пробы"): `SGR 0`, `?25h` if DECTCEM
+    /// was on in the mirror at Build, `?2026l`. Fixed at Build, since the
+    /// mirror may thaw before the probe is written. Valid like Bytes.
+    ByteSpan Tail;
 };
 
 /// The width probe's bytes (design.md §9, "Проба ширины"): glyphs of a class
@@ -111,6 +126,7 @@ private:
     WidthProbe() noexcept = default;
 
     std::array<std::byte, PROBE_BYTES_MAX> Buf_{};
+    std::array<std::byte, PROBE_TAIL_BYTES_MAX> Tail_{};
 };
 
 }  // namespace zet::predict

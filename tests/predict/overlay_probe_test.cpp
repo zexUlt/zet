@@ -130,16 +130,22 @@ struct Env {
 
     Env() {
         REQUIRE(P != nullptr);
+        // The terminal and the mirror both start on row 0, and a resync is
+        // what makes the rows the probe's to trust.
+        REQUIRE(C.R.G->Resync(0, 0, true));
         C.Start();
     }
 };
 
-/// A mirror alone, at a clean point: the prompt and two echoed keys.
+/// A mirror alone, at a clean point: resynced on row 0 (a fresh mirror's rows
+/// are the terminal's only by luck), the prompt and two echoed keys.
 struct Mirror {
     Rig R;
     explicit Mirror(int cols = 40, int rows = 5,
-                    EDisplayMode mode = EDisplayMode::Always)
+                    EDisplayMode mode = EDisplayMode::Always,
+                    bool resynced = true)
         : R(cols, rows, mode) {
+        if (resynced) REQUIRE(R.G->Resync(0, 0, true));
         R.Prompt();
         R.ConfirmEpoch();
     }
@@ -523,7 +529,7 @@ TEST_CASE(
     "no probe when the rows or the column of the mirror are not the "
     "terminal's") {
     {
-        Mirror m;
+        Mirror m(40, 5, EDisplayMode::Always, false);
         m.R.Output("\x1b[5A");  // up past the first row: the rows are lost
         REQUIRE_FALSE(m.R.G->RowsTrusted());
         CHECK(m.Gate() == EProbeGate::RowsUntrusted);
@@ -531,6 +537,7 @@ TEST_CASE(
     {
         Rig r(40, 5, EDisplayMode::Always);
         r.Output("abc");  // the column was never set absolutely
+        REQUIRE(r.G->Resync(0, 3, true));  // the engine has not seen it yet
         CHECK(WidthProbe::Check(r.E, r.View(), EWidthClass::Cyrillic, 0) ==
               EProbeGate::ColumnUntrusted);
         r.Output("\r\x1b[K$ ");
@@ -661,6 +668,7 @@ TEST_CASE("the probe and the cursor after it stay inside the row") {
 TEST_CASE("no probe until the program's last glyph is known") {
     {
         Rig r(40, 5, EDisplayMode::Always);
+        REQUIRE(r.G->Resync(0, 0, true));
         r.Output("\x1b[3G");  // the column is set, nothing was printed
         CHECK(WidthProbe::Check(r.E, r.View(), EWidthClass::Cyrillic, 0) ==
               EProbeGate::NoLastGlyph);
@@ -672,6 +680,7 @@ TEST_CASE("no probe until the program's last glyph is known") {
         // A mark after the glyph was dropped: the register holds more than
         // the mirror knows. The glyph is in another row, so the path is clean.
         Rig r(40, 5, EDisplayMode::Always);
+        REQUIRE(r.G->Resync(0, 0, true));
         r.Output("\rab\xCC\x81\r\n");
         CHECK(WidthProbe::Check(r.E, r.View(), EWidthClass::Cyrillic, 0) ==
               EProbeGate::NoLastGlyph);
@@ -685,7 +694,7 @@ TEST_CASE("no probe until the program's last glyph is known") {
 }
 
 TEST_CASE("after a path B snapshot, without a resync, the probe goes ahead") {
-    Mirror m;
+    Mirror m(40, 5, EDisplayMode::Always, false);
     m.R.Output("\x1b[5A");
     REQUIRE(m.Gate() == EProbeGate::RowsUntrusted);
 
@@ -704,6 +713,124 @@ TEST_CASE("after a path B snapshot, without a resync, the probe goes ahead") {
     m.R.E.OnSnapshot(0, m.R.Now, m.R.View());
     REQUIRE(m.R.G->RowsTrusted());
     CHECK(m.Gate() == EProbeGate::Clean);
+}
+
+TEST_CASE("no probe while the rows were never calibrated") {
+    // A fresh mirror starts at row 0 whatever row the terminal's cursor is on.
+    // Its rows are "trusted" in step 5's sense (nothing moved them apart yet)
+    // but nothing has made them the terminal's: no resync, no snapshot.
+    Rig r(40, 5, EDisplayMode::Always);
+    r.Prompt();
+    r.ConfirmEpoch();
+    REQUIRE(r.G->RowsTrusted());
+    CHECK(WidthProbe::Check(r.E, r.View(), EWidthClass::Cyrillic, 0) ==
+          EProbeGate::RowsUntrusted);
+    REQUIRE(r.G->Resync(0, 0, true));
+    r.Prompt();
+    r.ConfirmEpoch();
+    CHECK(WidthProbe::Check(r.E, r.View(), EWidthClass::Cyrillic, 0) ==
+          EProbeGate::Clean);
+}
+
+TEST_CASE(
+    "a probe on an uncalibrated mirror would be answered on another row") {
+    // The terminal printed two lines before zet started: its cursor is on
+    // row 2, the mirror's on row 0.
+    Client c(40, 5, EDisplayMode::Always);
+    c.Before("old shell line\r\nanother\r\n");
+    c.Start();
+    c.Undo();
+    auto p = WidthProbe::Create();
+    REQUIRE(p != nullptr);
+    CHECK(WidthProbe::Check(c.R.E, c.R.View(), EWidthClass::Cyrillic, 0) ==
+          EProbeGate::RowsUntrusted);
+    CHECK_FALSE(
+        p->Build(c.R.E, c.R.View(), EWidthClass::Cyrillic, 0).has_value());
+
+    // Once the terminal has answered a query, the rows are known and the
+    // probe is asked on the right row.
+    REQUIRE(c.R.G->Resync(2, 0, true));
+    c.R.Output("$ x");
+    const auto w = p->Build(c.R.E, c.R.View(), EWidthClass::Cyrillic, 0);
+    REQUIRE(w.has_value());
+    c.Real.Feed(w->Bytes.first(w->QueryOffset));
+    CHECK(c.Real.G->CursorRow() == w->Row);
+}
+
+TEST_CASE("the rows count as calibrated after a reset of the terminal") {
+    // RIS clears both screens and homes both cursors.
+    Rig r(40, 5, EDisplayMode::Always);
+    r.Output("old\r\n\r\n");
+    REQUIRE_FALSE(r.G->RowsCalibrated());
+    r.Output(
+        "\x1b"
+        "c\r$ x");
+    CHECK(r.G->RowsCalibrated());
+    CHECK(WidthProbe::Check(r.E, r.View(), EWidthClass::Cyrillic, 0) ==
+          EProbeGate::Clean);
+}
+
+TEST_CASE("no probe after a left move over a mark, from another row") {
+    // A left move over the row's mark sets the doubt; LF leaves that row, so
+    // neither RowMark nor PathNotAscii catches it.
+    Mirror m;
+    m.R.Output("\x1b[30G\xC3\xA9\r\x1b[31C\x1b[31D\n$ ");
+    REQUIRE(m.R.G->ColumnDoubt());
+    REQUIRE_FALSE(m.R.G->PathHasNonAscii());
+    REQUIRE(m.R.G->WidthDoubtClasses(m.R.G->CursorRow()) == 0);
+    CHECK(m.Gate() == EProbeGate::ColumnUntrusted);
+}
+
+TEST_CASE("no probe for an encountered point outside the class") {
+    Mirror m;
+    CHECK(m.Gate(EWidthClass::Cyrillic, U'a') == EProbeGate::PointNotOfClass);
+    CHECK(m.Gate(EWidthClass::Cyrillic, PUA_BMP_A) ==
+          EProbeGate::PointNotOfClass);
+    CHECK(m.Gate(EWidthClass::PrivateUseBmp, U'А') ==
+          EProbeGate::PointNotOfClass);
+    // None, a point of the class and a representative are fine.
+    CHECK(m.Gate(EWidthClass::Cyrillic, 0) == EProbeGate::Clean);
+    CHECK(m.Gate(EWidthClass::Cyrillic, U'А') == EProbeGate::Clean);
+    CHECK(m.Gate(EWidthClass::Cyrillic, CYR_ZHE) == EProbeGate::Clean);
+    auto p = WidthProbe::Create();
+    REQUIRE(p != nullptr);
+    CHECK_FALSE(
+        p->Build(m.R.E, m.R.View(), EWidthClass::Cyrillic, U'a').has_value());
+}
+
+TEST_CASE("the write carries the exit tail, as the mirror had the cursor") {
+    {
+        Env e;
+        e.C.Undo();
+        const auto w =
+            e.P->Build(e.C.R.E, e.C.R.View(), EWidthClass::Cyrillic, 0);
+        REQUIRE(w.has_value());
+        CHECK(Str(w->Tail) == "\x1b[0m\x1b[?25h\x1b[?2026l");
+        CHECK(w->Tail.size() <= PROBE_TAIL_BYTES_MAX);
+        // The mirror may change before the probe is written out: the tail is
+        // what it was at Build.
+        e.C.R.Output("\x1b[?25l");
+        CHECK(Str(w->Tail) == "\x1b[0m\x1b[?25h\x1b[?2026l");
+    }
+    {
+        Env e;
+        e.C.Agent("\x1b[?25l");
+        e.C.Undo();
+        const auto w =
+            e.P->Build(e.C.R.E, e.C.R.View(), EWidthClass::Cyrillic, 0);
+        REQUIRE(w.has_value());
+        CHECK(Str(w->Tail) == "\x1b[0m\x1b[?2026l");
+    }
+}
+
+TEST_CASE("the write carries the size of the mirror it was built for") {
+    Mirror m(13, 7);
+    auto p = WidthProbe::Create();
+    REQUIRE(p != nullptr);
+    const auto w = p->Build(m.R.E, m.R.View(), EWidthClass::Cyrillic, 0);
+    REQUIRE(w.has_value());
+    CHECK(w->Cols == 13);
+    CHECK(w->Rows == 7);
 }
 
 TEST_CASE("Build writes nothing where Check says no") {

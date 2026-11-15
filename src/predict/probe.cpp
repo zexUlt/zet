@@ -96,6 +96,11 @@ EProbeGate WidthProbe::Check(const PredictionEngine& engine,
     std::array<char32_t, PROBE_GLYPHS_MAX> glyphs{};
     const std::size_t k = Glyphs(cls, encountered, glyphs);
     if (k == 0) return EProbeGate::ClassNotProbed;
+    // The point the session met is of the class it was met for: one outside
+    // it would be left out of the probe, and the verdict would not cover it.
+    if (encountered != 0 && !InClass(cls, encountered)) {
+        return EProbeGate::PointNotOfClass;
+    }
 
     const grid::Grid& g = mirror.Screen;
     if (engine.Mode() == EDisplayMode::Never) return EProbeGate::NoMirror;
@@ -116,7 +121,7 @@ EProbeGate WidthProbe::Check(const PredictionEngine& engine,
     if (g.AnyUnmodelledMode()) return EProbeGate::UnmodelledMode;
     // The pen is put back from the mirror, which lacks such an attribute.
     if (g.HasUnmodelledSgr()) return EProbeGate::UnmodelledSgr;
-    if (!g.RowsTrusted()) return EProbeGate::RowsUntrusted;
+    if (!g.RowsCalibrated()) return EProbeGate::RowsUntrusted;
     if (!engine.ColumnTrusted() || g.ColumnDoubt()) {
         return EProbeGate::ColumnUntrusted;
     }
@@ -195,6 +200,17 @@ std::optional<WidthProbeWrite> WidthProbe::Build(
     out.Row = row;
     out.Col = x;
     out.Glyphs = static_cast<std::uint8_t>(k);
+    out.Cols = g.Cols();
+    out.Rows = g.Rows();
+    // The tail is the exit's, written when the rest did not go whole: it
+    // starts with ESC and breaks off a sequence left open. The gate keeps the
+    // program's own frame out, so ?2026l is always the probe's.
+    grid::EscWriter t{Tail_.data(), Tail_.size()};
+    t.WriteLiteral("\x1b[0m");
+    if (g.ModeSet(grid::EMode::Dectcem)) t.WriteLiteral("\x1b[?25h");
+    t.WriteLiteral("\x1b[?2026l");
+    if (t.Overflow) return std::nullopt;
+    out.Tail = ByteSpan{Tail_.data(), t.Pos};
     return out;
 }
 
