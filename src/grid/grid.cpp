@@ -202,8 +202,6 @@ void Grid::MarkWidthDoubt(std::uint16_t row, std::uint16_t col,
 
 void Grid::NoteClassGlyph(std::uint16_t row, std::uint16_t col,
                           EWidthClass cls) noexcept {
-    std::uint32_t& n = Path_.Glyphs[static_cast<std::size_t>(cls)];
-    if (n != UINT32_MAX) ++n;
     if (cls == EWidthClass::Cluster ||
         (Policy_.DoubtClasses & WidthClassBit(cls)) != 0)
         MarkWidthDoubt(row, col, cls);
@@ -214,32 +212,12 @@ void Grid::NoteColumnSet() noexcept {
     RestartPath();
 }
 
-bool Grid::PathBroken() const noexcept {
-    if (Path_.Broken) return true;
-    // The terminal's cursor stands at most one column right of the mirror's
-    // per glyph of a class that may be wider there (a class still in doubt,
-    // and Cluster, which never has a verdict). Once the mirror's column plus
-    // those glyphs reaches Cols, the terminal may have gone past its last
-    // column: it clamps there or wraps, and its reported column then no longer
-    // counts glyphs. One short of that (== Cols - 1) the terminal is at most
-    // in the last column without a pending wrap, and the difference still is
-    // exact. Needs no state of its own: the column only grows on a path,
-    // everything that moves it left or sets it breaks or restarts the path.
-    std::uint64_t doubtful =
-        Path_.Glyphs[static_cast<std::size_t>(EWidthClass::Cluster)];
-    for (std::size_t i = 0; i < WIDTH_CLASS_COUNT; ++i) {
-        const auto cls = static_cast<EWidthClass>(i);
-        if (cls != EWidthClass::Cluster &&
-            (Policy_.DoubtClasses & WidthClassBit(cls)) != 0)
-            doubtful += Path_.Glyphs[i];
-    }
-    return doubtful != 0 && CursorCol_ + doubtful >= Cols_;
-}
-
 void Grid::SetWidthPolicy(const WidthPolicy& policy) noexcept {
     Policy_ = policy;
     Policy_.Ambiguous = policy.Ambiguous == 2 ? 2 : 1;
-    Policy_.PrivateUse = policy.PrivateUse == 2 ? 2 : 1;
+    Policy_.Cyrillic = policy.Cyrillic == 2 ? 2 : 1;
+    Policy_.PrivateUseBmp = policy.PrivateUseBmp == 2 ? 2 : 1;
+    Policy_.PrivateUsePlanes = policy.PrivateUsePlanes == 2 ? 2 : 1;
 }
 
 void Grid::ClearWidthClass(EWidthClass cls) noexcept {
@@ -250,6 +228,18 @@ void Grid::ClearWidthClass(EWidthClass cls) noexcept {
             RecomputeWidthDoubt(lines[r]);
         }
     }
+}
+
+void Grid::ClearWidthClass(std::uint16_t row, EWidthClass cls) noexcept {
+    if (row >= Rows_) return;
+    Line& line = ActiveLine(row);
+    line.ClassDoubt[static_cast<std::size_t>(cls)] = 0;
+    RecomputeWidthDoubt(line);
+}
+
+void Grid::SetKnownFrom(std::uint16_t row, std::uint16_t col) noexcept {
+    if (row >= Rows_) return;
+    ActiveLine(row).KnownFrom = col < Cols_ ? col : Cols_;
 }
 
 void Grid::ForgetWidthClass(EWidthClass cls) noexcept {
@@ -480,20 +470,9 @@ void Grid::PutChar(char32_t cp, int width) noexcept {
                     cls = EWidthClass::Emoji;
             }
             if (cls == EWidthClass::Emoji && Policy_.Vs16Widens) {
-                std::uint32_t& n =
-                    Path_.Glyphs[static_cast<std::size_t>(EWidthClass::Emoji)];
-                if (n != UINT32_MAX) ++n;
                 // In the last column the terminals wrap in different ways.
                 if (!WidenForVs16(prev)) {
                     MarkWidthDoubt(CursorRow_, prev, EWidthClass::Cluster);
-                    BreakPath();
-                } else if (IsAmbiguousWidth(LastPrintedChar_) &&
-                           !IsPrivateUse(LastPrintedChar_)) {
-                    // Two columns whatever the base is: it is the emoji's
-                    // width the path now depends on, not the base's class.
-                    std::uint32_t& a = Path_.Glyphs[static_cast<std::size_t>(
-                        EWidthClass::Ambiguous)];
-                    if (a != 0 && a != UINT32_MAX) --a;
                 }
             } else {
                 NoteClassGlyph(CursorRow_, prev, cls);
@@ -502,10 +481,8 @@ void Grid::PutChar(char32_t cp, int width) noexcept {
         return;
     }
 
-    if (PendingWrap_) BreakPath();
     if (PendingWrap_ && ModeSet(EMode::Awm)) {
         WrapToNextRow();
-        BreakPath();  // under LNM the LineFeed restarted it
     }
     PendingWrap_ = false;
 
@@ -515,11 +492,20 @@ void Grid::PutChar(char32_t cp, int width) noexcept {
     int baseWidth = width;
     EWidthClass cls = EWidthClass::Ambiguous;
     const bool classed = IsAmbiguousWidth(cp);
-    if (classed) cls = IsPrivateUse(cp) ? EWidthClass::PrivateUse : cls;
+    if (classed) {
+        if (IsPrivateUseBmp(cp)) {
+            cls = EWidthClass::PrivateUseBmp;
+        } else if (IsPrivateUsePlanes(cp)) {
+            cls = EWidthClass::PrivateUsePlanes;
+        } else if (IsCyrillicAmbiguous(cp)) {
+            cls = EWidthClass::Cyrillic;
+        }
+    }
     if (classed && width == 1 && !mapped) {
-        const std::uint8_t w = cls == EWidthClass::PrivateUse
-                                   ? Policy_.PrivateUse
-                                   : Policy_.Ambiguous;
+        std::uint8_t w = Policy_.Ambiguous;
+        if (cls == EWidthClass::PrivateUseBmp) w = Policy_.PrivateUseBmp;
+        if (cls == EWidthClass::PrivateUsePlanes) w = Policy_.PrivateUsePlanes;
+        if (cls == EWidthClass::Cyrillic) w = Policy_.Cyrillic;
         if (w == 2) width = 2;
     }
 
@@ -539,7 +525,6 @@ void Grid::PutChar(char32_t cp, int width) noexcept {
     if (width == 2 && CursorCol_ + 1 >= Cols_) {
         if (ModeSet(EMode::Awm)) {
             WrapToNextRow();
-            BreakPath();
         } else {
             return;
         }
@@ -661,7 +646,6 @@ void Grid::ReverseIndex() noexcept {
 }
 
 void Grid::Backspace() noexcept {
-    BreakPath();
     NoteLeftMove();
     PendingWrap_ = false;
     if (CursorCol_ > 0) --CursorCol_;
@@ -669,7 +653,6 @@ void Grid::Backspace() noexcept {
 
 void Grid::HorizontalTab() noexcept {
     PendingWrap_ = false;
-    BreakPath();
     for (std::uint16_t c = static_cast<std::uint16_t>(CursorCol_ + 1);
          c < Cols_; ++c) {
         if ((TabStops_[c / 64] >> (c % 64)) & 1) {
@@ -681,7 +664,6 @@ void Grid::HorizontalTab() noexcept {
 }
 
 void Grid::HorizontalTabBack(std::uint16_t n) noexcept {
-    BreakPath();
     NoteLeftMove();
     PendingWrap_ = false;
     if (n == 0) n = 1;
@@ -751,17 +733,13 @@ void Grid::MoveCursorDown(std::uint16_t n) noexcept {
 void Grid::MoveCursorRight(std::uint16_t n) noexcept {
     PendingWrap_ = false;
     const std::uint16_t max = static_cast<std::uint16_t>(Cols_ - 1);
-    if (CursorCol_ + n > max) BreakPath();  // stopped at the edge
     CursorCol_ = (CursorCol_ + n <= max)
                      ? static_cast<std::uint16_t>(CursorCol_ + n)
                      : max;
 }
 
 void Grid::MoveCursorLeft(std::uint16_t n) noexcept {
-    if (n > 0) {
-        BreakPath();
-        NoteLeftMove();
-    }
+    if (n > 0) NoteLeftMove();
     PendingWrap_ = false;
     CursorCol_ =
         (n <= CursorCol_) ? static_cast<std::uint16_t>(CursorCol_ - n) : 0;
@@ -849,7 +827,6 @@ void Grid::RestoreCursor() noexcept {
     // The terminal's saved row is its own: the same as ours only if nothing
     // moved either of them since (a scroll on one side), which is not known.
     NoteDrift();
-    BreakPath();  // the terminal's saved column is its own
     const SavedCursor& sc = IsAltScreen() ? SavedCursorAlt_ : SavedCursorMain_;
     // ... and it is as far from the mirror's as it was at the save.
     Path_.LeftOverDoubt = sc.LeftOverDoubt;
@@ -1561,7 +1538,6 @@ void Grid::DesignateCharset(std::uint8_t g, std::uint8_t designator) noexcept {
 // clearFirst false (charproc.c); a switch into the current buffer is a no-op.
 void Grid::SwitchAltScreen(bool enter) noexcept {
     if (enter == IsAltScreen()) return;
-    BreakPath();
     if (enter) {
         Modes_ |= ModeFlag(EMode::AltScreen);
     } else {
@@ -1816,7 +1792,6 @@ GridResult<void> Grid::Resize(std::uint16_t newCols,
     };
     clampSC(SavedCursorMain_);
     clampSC(SavedCursorAlt_);
-    BreakPath();
     return {};
 }
 

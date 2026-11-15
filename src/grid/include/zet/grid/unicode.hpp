@@ -21,11 +21,31 @@ namespace zet::grid {
 /// Cyrillic, box drawing, Greek and private use.
 [[nodiscard]] bool IsAmbiguousWidth(char32_t cp) noexcept;
 
-/// Private use: U+E000-F8FF and planes 15-16. Ambiguous in the width table;
-/// terminals draw powerline and Nerd Fonts glyphs here in one or two columns.
-[[nodiscard]] constexpr bool IsPrivateUse(char32_t cp) noexcept {
-    return (cp >= 0xE000 && cp <= 0xF8FF) || (cp >= 0xF0000 && cp <= 0xFFFFD) ||
+/// Private use in the BMP: U+E000-F8FF. Ambiguous in the width table;
+/// terminals draw powerline glyphs and the older Nerd Fonts here in one or two
+/// columns.
+[[nodiscard]] constexpr bool IsPrivateUseBmp(char32_t cp) noexcept {
+    return cp >= 0xE000 && cp <= 0xF8FF;
+}
+
+/// Private use in planes 15 and 16: U+F0000-FFFFD and U+100000-10FFFD (Nerd
+/// Fonts v3 keeps its Material Design icons in plane 15). A terminal's width
+/// table can treat it apart from the BMP range.
+[[nodiscard]] constexpr bool IsPrivateUsePlanes(char32_t cp) noexcept {
+    return (cp >= 0xF0000 && cp <= 0xFFFFD) ||
            (cp >= 0x100000 && cp <= 0x10FFFD);
+}
+
+/// Private use anywhere: the two ranges above.
+[[nodiscard]] constexpr bool IsPrivateUse(char32_t cp) noexcept {
+    return IsPrivateUseBmp(cp) || IsPrivateUsePlanes(cp);
+}
+
+/// Cyrillic of East Asian ambiguous width: U+0401, U+0410-044F, U+0451. Wide
+/// on a terminal set to wide ambiguous (xterm cjkWidth, wezterm, vim
+/// ambiwidth=double), one cell elsewhere.
+[[nodiscard]] constexpr bool IsCyrillicAmbiguous(char32_t cp) noexcept {
+    return cp == 0x0401 || (cp >= 0x0410 && cp <= 0x044F) || cp == 0x0451;
 }
 
 /// A codepoint with an emoji variation sequence (emoji-variation-sequences.txt:

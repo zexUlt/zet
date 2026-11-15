@@ -163,7 +163,7 @@ TEST_CASE("after a snapshot the mirror equals the agent's grid") {
     mirror->Feed(
         Bytes("junk\x1b[31m\x1b[5;5Hjunk\x1b[?1049h\x1b"
               "7\x1b["));
-    REQUIRE(mirror->ResetFromSnapshot(owned->Bytes()));
+    REQUIRE(mirror->ResetFromSnapshot(owned->Bytes(), {}));
 
     CHECK(mirror->Parser().State() == grid::EParserState::Ground);
     CHECK(EncodeScreen(mirror->Screen()) == EncodeScreen(*agent.Grid));
@@ -193,7 +193,7 @@ TEST_CASE("a snapshot leaves nothing of what the mirror held before") {
               "7"
               "\x1b[?1049l\x1b[3g\x1b[1;6H\x1bH\x1b[5 q\x1b[?1000h"
               "\x1b[?7l\x1b[4h\x1b(0\x1b[?1004h"));
-    REQUIRE(mirror->ResetFromSnapshot(owned->Bytes()));
+    REQUIRE(mirror->ResetFromSnapshot(owned->Bytes(), {}));
     CHECK(Encode(mirror->Screen()) == Encode(*fresh.Grid));
 }
 
@@ -204,7 +204,7 @@ TEST_CASE("a snapshot keeps the size the mirror had") {
     REQUIRE(snap.has_value());
     const std::unique_ptr<grid::Snapshot> owned(*snap);
     auto mirror = NewMirror(30, 7);
-    REQUIRE(mirror->ResetFromSnapshot(owned->Bytes()));
+    REQUIRE(mirror->ResetFromSnapshot(owned->Bytes(), {}));
     CHECK(mirror->Screen().Cols() == 30);
     CHECK(mirror->Screen().Rows() == 7);
     CHECK(mirror->Screen().ScrollbackLimit() == 0);
@@ -217,7 +217,7 @@ TEST_CASE("bytes after a snapshot land in the new grid") {
     REQUIRE(snap.has_value());
     const std::unique_ptr<grid::Snapshot> owned(*snap);
     auto mirror = NewMirror(40, 10);
-    REQUIRE(mirror->ResetFromSnapshot(owned->Bytes()));
+    REQUIRE(mirror->ResetFromSnapshot(owned->Bytes(), {}));
     agent.Feed("after\x1b[1;31m!\r\nmore");
     mirror->Feed(Bytes("after\x1b[1;31m!\r\nmore"));
     CHECK(EncodeScreen(mirror->Screen()) == EncodeScreen(*agent.Grid));
@@ -263,7 +263,7 @@ TEST_CASE("a snapshot after a resize keeps the new size") {
     auto snap = grid::Snapshot::Create(*agent.Grid);
     REQUIRE(snap.has_value());
     const std::unique_ptr<grid::Snapshot> owned(*snap);
-    REQUIRE(mirror->ResetFromSnapshot(owned->Bytes()));
+    REQUIRE(mirror->ResetFromSnapshot(owned->Bytes(), {}));
     CHECK(mirror->Screen().Cols() == 25);
     CHECK(mirror->Screen().Rows() == 6);
     CHECK(EncodeScreen(mirror->Screen()) == EncodeScreen(*agent.Grid));
@@ -276,10 +276,60 @@ TEST_CASE(
     auto mirror = NewMirror(40, 10);
     mirror->Feed(Bytes("\x1bP1;2|swallowed by a device control string"));
     REQUIRE(mirror->Parser().State() != grid::EParserState::Ground);
-    REQUIRE(mirror->ResetFromSnapshot(Bytes("visible")));
+    REQUIRE(mirror->ResetFromSnapshot(Bytes("visible"), {}));
     CHECK(mirror->Parser().State() == grid::EParserState::Ground);
 
     AgentGrid expected{40, 10, 0};
     expected.Feed("visible");
     CHECK(Encode(mirror->Screen()) == Encode(*expected.Grid));
+}
+
+TEST_CASE("a snapshot is laid out under the policy the mirror is given") {
+    // Cyrillic, a powerline glyph and a Nerd Fonts glyph of plane 15, each
+    // filling a row of the agent's grid, which draws them one column wide.
+    // A terminal that draws one of the classes two columns wide wraps that
+    // row, and the rows below it move: the policy must be in force while the
+    // body is laid out, not after.
+    struct Case {
+        const char* Name;
+        const char* Glyph;
+        std::uint8_t grid::WidthPolicy::* Field;
+    };
+    const Case cases[] = {
+        {"Cyrillic", "\xd0\xb6", &grid::WidthPolicy::Cyrillic},
+        {"PrivateUseBmp", "\xee\x82\xb0", &grid::WidthPolicy::PrivateUseBmp},
+        {"PrivateUsePlanes", "\xf3\xb0\x89\x8b",
+         &grid::WidthPolicy::PrivateUsePlanes},
+    };
+    for (const Case& c : cases) {
+        CAPTURE(c.Name);
+        AgentGrid agent{8, 4};
+        std::string row;
+        for (int i = 0; i < 8; ++i) row += c.Glyph;
+        agent.Feed(row + "\r\nbelow");
+        auto snap = grid::Snapshot::Create(*agent.Grid);
+        REQUIRE(snap.has_value());
+        const std::unique_ptr<grid::Snapshot> owned(*snap);
+
+        grid::WidthPolicy policy;
+        policy.*c.Field = 2;
+
+        // The reference: a grid under the policy from the start, fed the body.
+        AgentGrid expected{8, 4, 0};
+        expected.Grid->SetWidthPolicy(policy);
+        expected.Parser.Feed(owned->Bytes().data(), owned->Bytes().size(),
+                             *expected.Grid);
+        REQUIRE(expected.Grid->CellAt(0, 0).Width == 2);
+
+        auto mirror = NewMirror(8, 4);
+        REQUIRE(mirror->ResetFromSnapshot(owned->Bytes(), policy));
+        CHECK(mirror->Screen().Policy() == policy);
+        CHECK(mirror->Screen().CellAt(0, 0).Width == 2);
+        CHECK(Encode(mirror->Screen()) == Encode(*expected.Grid));
+        // The default policy lays the same body out as the agent's grid.
+        REQUIRE(mirror->ResetFromSnapshot(owned->Bytes(), {}));
+        CHECK(mirror->Screen().Policy() == grid::WidthPolicy{});
+        CHECK(mirror->Screen().CellAt(0, 0).Width == 1);
+        CHECK(EncodeScreen(mirror->Screen()) == EncodeScreen(*agent.Grid));
+    }
 }
