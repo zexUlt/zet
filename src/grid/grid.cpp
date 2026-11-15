@@ -1066,7 +1066,12 @@ void Grid::ScrollUp(std::uint16_t n) noexcept {
 }
 
 bool Grid::RepeatChar(std::uint16_t n) noexcept {
-    if (LastPrintedChar_ == 0) return false;
+    if (LastPrintedChar_ == 0) {
+        // The terminal repeats a glyph the mirror never saw, into cells it
+        // cannot name: the cursor row is foreign until the program erases it.
+        ActiveLine(CursorRow_).KnownFrom = Cols_;
+        return false;
+    }
     if (n == 0) return true;
     for (std::uint16_t i = 0; i < n; ++i)
         PutChar(LastPrintedChar_, LastPrintedBaseWidth_);
