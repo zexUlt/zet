@@ -438,7 +438,19 @@ void CprDemux::Settle(Timestamp now, CprSink& out) noexcept {
 }
 
 void CprDemux::FlushDue(Timestamp now, CprSink& out) noexcept {
-    if (HeldLen_ > HeldForwarded_ && now >= HoldDeadline()) {
+    while (HeldLen_ > HeldForwarded_ && now >= HoldDeadline()) {
+        // A complete position with the start of a DA1 reply behind it: the
+        // hold that ran out is the position's. The bytes behind it came later
+        // and keep their own CPR_HOLD from their arrival, as the start of the
+        // client's own reply.
+        if (HeldForwarded_ == 0) {
+            const TryResult head = Scan(Held_.data(), HeldLen_);
+            if (head.Status == ETry::Position && head.Length < HeldLen_) {
+                ForwardHeld(head.Length, out);
+                Reprocess(head.Length, out);
+                continue;
+            }
+        }
         FlushHeld(out);
     }
 }
