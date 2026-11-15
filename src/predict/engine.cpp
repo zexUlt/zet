@@ -206,7 +206,8 @@ bool PredictionEngine::Predictable(const MirrorView& mirror) const noexcept {
     return Trusted_ && !Lagging_ && g.RowsTrusted() && !g.IsAltScreen() &&
            !g.ModeSet(grid::EMode::Irm) && g.CharsetG0() == 0 &&
            g.CharsetActive() == 0 && !g.PendingWrap() &&
-           g.CursorRow() < g.Rows() && g.CursorCol() < g.Cols();
+           !g.AnyUnmodelledMode() && g.CursorRow() < g.Rows() &&
+           g.CursorCol() < g.Cols();
 }
 
 PredictionEngine::Position PredictionEngine::BaseCursor(

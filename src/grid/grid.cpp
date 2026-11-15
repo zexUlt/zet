@@ -284,6 +284,7 @@ void Grid::ClearLine(Line& line) noexcept {
     line.WidthDoubt = 0;
     for (std::uint16_t& d : line.ClassDoubt) d = 0;
     line.KnownFrom = 0;
+    line.DoubleRow = false;
 }
 
 // Blank with the default background, whatever the pen is (Resync: the
@@ -293,6 +294,7 @@ void Grid::ClearLinePlain(Line& line) noexcept {
     line.WidthDoubt = 0;
     for (std::uint16_t& d : line.ClassDoubt) d = 0;
     line.KnownFrom = 0;
+    line.DoubleRow = false;
 }
 
 void Grid::ClearCells(Cell* cells, std::uint16_t count) noexcept {
@@ -381,6 +383,7 @@ void Grid::ScrollRegionDown(std::uint16_t n) noexcept {
         std::copy(std::begin(src.ClassDoubt), std::end(src.ClassDoubt),
                   std::begin(dst.ClassDoubt));
         dst.KnownFrom = src.KnownFrom;
+        dst.DoubleRow = src.DoubleRow;
     }
     for (std::uint16_t r = ScrollTop_; r < ScrollTop_ + n; ++r)
         ClearLine(ActiveLine(r));
@@ -440,6 +443,11 @@ void Grid::PutChar(char32_t cp, int width) noexcept {
         }
     }
 
+    // Anything from U+0080 up (a code point dropped for its zero width is one)
+    // may be drawn in another width than the table says (ColumnDoubt's
+    // sibling).
+    if (cp >= 0x80) Path_.NonAscii = true;
+
     // Zero-width combining mark: GRAPHEME_MAX_CODEPOINTS=1 — keep base, drop
     // mark. A terminal may draw the cluster in another width than the sum of
     // its parts (VS16 makes a text glyph wide, ZWJ glues), and the cell
@@ -453,6 +461,23 @@ void Grid::PutChar(char32_t cp, int width) noexcept {
             (PendingWrap_ ? LastPrintedCol_ == CursorCol_
                           : LastPrintedCol_ + LastPrintedWidth_ == CursorCol_);
         LastPrintedMarked_ = true;
+        // SOFT HYPHEN: zero width here, one cell on xterm (mk_wcwidth) and
+        // VTE. Its width is open like a cluster's, where the terminal would
+        // draw it: in the cursor's column, so the mark goes on the cell before
+        // (as a joiner's does) and the cursor's column is in doubt.
+        if (cp == 0x00AD) {
+            // In the first column, or with a wrap pending, no cell before
+            // the cursor's own holds the hyphen: the column itself is in
+            // doubt.
+            const bool noCellBefore = PendingWrap_ || CursorCol_ == 0;
+            if (noCellBefore) Path_.LeftOverDoubt = true;
+            NoteClassGlyph(CursorRow_,
+                           noCellBefore
+                               ? CursorCol_
+                               : static_cast<std::uint16_t>(CursorCol_ - 1),
+                           EWidthClass::Cluster);
+            return;
+        }
         if (IsClusterJoiner(cp)) {
             const std::uint16_t prev =
                 (PendingWrap_ || CursorCol_ == 0)
@@ -821,6 +846,8 @@ void Grid::SaveCursor() noexcept {
     sc.CharsetG1 = CharsetG1_;
     sc.CharsetActive = CharsetActive_;
     sc.LeftOverDoubt = Path_.LeftOverDoubt;
+    sc.NonAsciiPath = Path_.NonAscii;
+    sc.UnmodelledSgr = UnmodelledSgr_;
 }
 
 void Grid::RestoreCursor() noexcept {
@@ -830,6 +857,10 @@ void Grid::RestoreCursor() noexcept {
     const SavedCursor& sc = IsAltScreen() ? SavedCursorAlt_ : SavedCursorMain_;
     // ... and it is as far from the mirror's as it was at the save.
     Path_.LeftOverDoubt = sc.LeftOverDoubt;
+    Path_.NonAscii = sc.NonAsciiPath;
+    // The terminal's pen comes back with what the save held. What it held
+    // before may or may not have been replaced; the marks add up.
+    UnmodelledSgr_ |= sc.UnmodelledSgr;
     CursorRow_ = ClampRow(sc.Row);
     CursorCol_ = ClampCol(sc.Col);
     // xterm CursorRestoreFlags restores DECOM from the save, then CursorSet
@@ -889,8 +920,12 @@ void Grid::EraseInDisplay(std::uint8_t param) noexcept {
                 // ED 3 leaves the screen on a terminal, so what the mirror
                 // knew of it stays as it was.
                 const std::uint16_t known = line.KnownFrom;
+                const bool doubleRow = line.DoubleRow;
                 ClearLine(line);
-                if (param == 3) line.KnownFrom = known;
+                if (param == 3) {
+                    line.KnownFrom = known;
+                    line.DoubleRow = doubleRow;
+                }
             }
             if (param == 3 && !IsAltScreen()) {
                 HistoryStart_ = 0;
@@ -924,9 +959,16 @@ void Grid::EraseInLine(std::uint8_t param) noexcept {
             NoteKnown(line, 0, last);
             break;
         }
-        case 2:
+        case 2: {
+            // EL keeps the line attribute (xterm ClearInLine), ED resets it.
+            const bool doubleRow = line.DoubleRow;
             ClearLine(line);
+            if (doubleRow) {
+                line.DoubleRow = true;
+                line.KnownFrom = Cols_;
+            }
             break;
+        }
         default:
             break;
     }
@@ -963,7 +1005,7 @@ void Grid::DeleteChars(std::uint16_t n) noexcept {
     if (line.WidthDoubt != 0 && line.WidthDoubt - 1 >= CursorCol_)
         line.WidthDoubt = static_cast<std::uint16_t>(CursorCol_ + 1);
     // Known cells shift left with the text; the foreign ones to the left stay.
-    if (CursorCol_ < line.KnownFrom)
+    if (CursorCol_ < line.KnownFrom && !line.DoubleRow)
         line.KnownFrom = static_cast<std::uint16_t>(
             std::max<int>(CursorCol_, line.KnownFrom - n));
     MoveCells(line.Cells + CursorCol_, line.Cells + CursorCol_ + n,
@@ -1049,10 +1091,22 @@ bool Grid::RepeatChar(std::uint16_t n) noexcept {
         ActiveLine(CursorRow_).KnownFrom = Cols_;
         return false;
     }
-    if (n == 0) return true;
+    // A zero-width code point came after the glyph: the terminal may repeat
+    // that (xterm repeats a soft hyphen it drew), or the whole cluster.
+    const bool marked = LastPrintedMarked_;
     for (std::uint16_t i = 0; i < n; ++i)
         PutChar(LastPrintedChar_, LastPrintedBaseWidth_);
-    return true;
+    return !marked;
+}
+
+void Grid::MarkCursorRowForeign() noexcept {
+    Line& line = ActiveLine(CursorRow_);
+    line.KnownFrom = Cols_;
+    line.DoubleRow = true;
+}
+
+void Grid::ClearCursorRowDouble() noexcept {
+    ActiveLine(CursorRow_).DoubleRow = false;
 }
 
 // ---------------------------------------------------------------------------
@@ -1103,6 +1157,18 @@ void Grid::SetMode(std::uint16_t param, bool value) noexcept {
             break;
         case 7:
             apply(EMode::Awm);
+            break;
+        case 2:  // DECANM: reset enters VT52 mode, until ESC < or RIS
+            if (!value) SetUnmodelledMode(EUnmodelledMode::Vt52, true);
+            break;
+        case 3:
+            SetUnmodelledMode(EUnmodelledMode::ColumnMode, value);
+            break;
+        case 45:
+            SetUnmodelledMode(EUnmodelledMode::ReverseWrap, value);
+            break;
+        case 69:
+            SetUnmodelledMode(EUnmodelledMode::LeftRightMargins, value);
             break;
         case 20:
             apply(EMode::Lnm);
@@ -1187,6 +1253,7 @@ void Grid::SetMode(std::uint16_t param, bool value) noexcept {
 void Grid::ApplySgr(const std::uint16_t* params, const bool* colon,
                     std::size_t count) noexcept {
     auto resetPen = [&]() noexcept {
+        UnmodelledSgr_ = 0;
         PenAttrs_ = 0;
         PenAttrEx_ = 0;
         PenUlIdx_ = 0;
@@ -1200,6 +1267,14 @@ void Grid::ApplySgr(const std::uint16_t* params, const bool* colon,
         resetPen();
         return;
     }
+
+    auto setUnmodelled = [&](EUnmodelledSgr a) noexcept {
+        UnmodelledSgr_ |= static_cast<std::uint8_t>(a);
+    };
+    auto clearUnmodelled = [&](EUnmodelledSgr a) noexcept {
+        UnmodelledSgr_ &=
+            static_cast<std::uint8_t>(~static_cast<std::uint8_t>(a));
+    };
 
     for (std::size_t i = 0; i < count;) {
         const std::uint16_t p = params[i];
@@ -1238,6 +1313,9 @@ void Grid::ApplySgr(const std::uint16_t* params, const bool* colon,
             case 5:
                 PenAttrs_ |= Blink;
                 break;
+            case 6:
+                setUnmodelled(EUnmodelledSgr::RapidBlink);
+                break;
             case 7:
                 PenAttrs_ |= Inverse;
                 break;
@@ -1264,6 +1342,10 @@ void Grid::ApplySgr(const std::uint16_t* params, const bool* colon,
                 break;
             case 25:
                 PenAttrs_ &= static_cast<std::uint8_t>(~Blink);
+                clearUnmodelled(EUnmodelledSgr::RapidBlink);
+                break;
+            case 26:
+                setUnmodelled(EUnmodelledSgr::Proportional);
                 break;
             case 27:
                 PenAttrs_ &= static_cast<std::uint8_t>(~Inverse);
@@ -1398,9 +1480,26 @@ void Grid::ApplySgr(const std::uint16_t* params, const bool* colon,
                 PenBg_[0] = PenBg_[1] = PenBg_[2] = 0;
                 break;
 
+            case 50:
+                clearUnmodelled(EUnmodelledSgr::Proportional);
+                break;
+            case 51:
+            case 52:
+                setUnmodelled(EUnmodelledSgr::Frame);
+                break;
+            case 53:
+                setUnmodelled(EUnmodelledSgr::Overline);
+                break;
+            case 54:
+                clearUnmodelled(EUnmodelledSgr::Frame);
+                break;
+            case 55:
+                clearUnmodelled(EUnmodelledSgr::Overline);
+                break;
+
             // SGR 58/59 – underline colour (consume sub-params, store index
-            // when indexed colour is given, silently drop truecolour since
-            // UlIdx is only 1 byte reserved for future use).
+            // when indexed colour is given; a true colour does not fit
+            // UlIdx and is only remembered as unmodelled).
             case 58: {
                 if (i + 1 < count && colon[i + 1]) {
                     std::size_t sub = i + 1;
@@ -1408,19 +1507,35 @@ void Grid::ApplySgr(const std::uint16_t* params, const bool* colon,
                     const std::size_t nsub = sub - i;
                     if (nsub >= 2 && params[i + 1] == 5) {
                         PenUlIdx_ = static_cast<std::uint8_t>(params[i + 2]);
+                        // Index 0 reads as "default" in the pen.
+                        if (PenUlIdx_ == 0)
+                            setUnmodelled(EUnmodelledSgr::UnderlineColor);
+                    } else if (params[i + 1] == 2) {
+                        setUnmodelled(EUnmodelledSgr::UnderlineColor);
                     }
                     i = sub;
                 } else if (i + 2 < count && params[i + 1] == 5) {
                     PenUlIdx_ = static_cast<std::uint8_t>(params[i + 2]);
+                    if (PenUlIdx_ == 0)
+                        setUnmodelled(EUnmodelledSgr::UnderlineColor);
                     i += 2;
                 } else if (i + 4 < count && params[i + 1] == 2) {
-                    // Truecolour underline: consume but silently drop.
+                    // Truecolour underline: consume, the pen cannot hold it.
+                    setUnmodelled(EUnmodelledSgr::UnderlineColor);
                     i += 4;
                 }
                 break;
             }
             case 59:
                 PenUlIdx_ = 0;
+                clearUnmodelled(EUnmodelledSgr::UnderlineColor);
+                break;
+            case 73:
+            case 74:
+                setUnmodelled(EUnmodelledSgr::Script);
+                break;
+            case 75:
+                clearUnmodelled(EUnmodelledSgr::Script);
                 break;
 
             case 90:
@@ -1468,6 +1583,7 @@ void Grid::Reset(bool hard) noexcept {
     PenBgKind_ = EColorKind::Default;
     PenFg_[0] = PenFg_[1] = PenFg_[2] = 0;
     PenBg_[0] = PenBg_[1] = PenBg_[2] = 0;
+    UnmodelledSgr_ = 0;
     ScrollTop_ = 0;
     ScrollBot_ = static_cast<std::uint16_t>(Rows_ - 1);
     CharsetActive_ = 0;
@@ -1482,6 +1598,9 @@ void Grid::Reset(bool hard) noexcept {
         PendingWrap_ = false;
         if (IsAltScreen()) ++AltExitCount_;
         Modes_ = ModeFlag(EMode::Awm) | ModeFlag(EMode::Dectcem);
+        UnmodelledModes_ &= static_cast<std::uint8_t>(
+            ~(UNMODELLED_DEC_MODES |
+              static_cast<std::uint8_t>(EUnmodelledMode::Vt52)));
         for (std::uint16_t r = 0; r < Rows_; ++r) {
             ClearLine(MainLines_[r]);
             ClearLine(AltLines_[r]);
@@ -1503,6 +1622,7 @@ void Grid::Reset(bool hard) noexcept {
         const bool wasAlt = ModeSet(EMode::AltScreen);
         Modes_ = ModeFlag(EMode::Awm) | ModeFlag(EMode::Dectcem);
         if (wasAlt) Modes_ |= ModeFlag(EMode::AltScreen);
+        UnmodelledModes_ &= static_cast<std::uint8_t>(~UNMODELLED_DEC_MODES);
         // Cursor position and PendingWrap are preserved by DECSTR.
     }
 }
@@ -1566,8 +1686,15 @@ bool Grid::Resync(std::uint16_t row, std::uint16_t col,
 
     for (std::uint16_t r = 0; r < Rows_; ++r) {
         Line& line = MainLines_[r];
+        // The answer places the cursor, not the line attribute: a double width
+        // row stays double on the terminal, so it stays foreign here.
+        const bool doubleRow = line.DoubleRow;
         if (r > row) {
             ClearLinePlain(line);
+            if (doubleRow) {
+                line.DoubleRow = true;
+                line.KnownFrom = Cols_;
+            }
             continue;
         }
         line.WidthDoubt = 0;
@@ -1580,7 +1707,7 @@ bool Grid::Resync(std::uint16_t row, std::uint16_t col,
                 StoreCell(line.Cells[col - 1], Cell{});
             for (std::uint16_t c = col; c < Cols_; ++c)
                 StoreCell(line.Cells[c], Cell{});
-            line.KnownFrom = col;
+            if (!doubleRow) line.KnownFrom = col;
         }
     }
     for (std::uint16_t r = 0; r < Rows_; ++r) {
@@ -1710,6 +1837,7 @@ GridResult<void> Grid::Resize(std::uint16_t newCols,
         dst.KnownFrom = src.KnownFrom >= oldCols
                             ? newCols
                             : std::min(src.KnownFrom, newCols);
+        dst.DoubleRow = src.DoubleRow;
     };
     const std::uint16_t copyRows = newRows < oldRows ? newRows : oldRows;
     const std::uint16_t srcStart =

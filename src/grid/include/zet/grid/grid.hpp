@@ -50,6 +50,37 @@ enum class EMode : std::uint32_t {
     return static_cast<std::uint32_t>(m);
 }
 
+/// Modes that move the cursor, wrap the line or decode the bytes in ways the
+/// grid does not model (design.md §9, round C, "Режимы, которых зеркало не
+/// моделирует"). The grid only remembers that one is set: nothing is
+/// simulated, so while any is, the mirror's column or cells are a guess and the
+/// client neither predicts nor probes. Not part of the content: snapshots do
+/// not carry them.
+enum class EUnmodelledMode : std::uint8_t {
+    LeftRightMargins = 1U << 0,  ///< DECLRMM ?69, DECSLRM: CR goes to a margin
+    ReverseWrap = 1U << 1,       ///< ?45: BS and CUB in column 0 go up a row
+    ColumnMode = 1U << 2,        ///< DECCOLM ?3: 80/132 columns, clears, homes
+    Utf8Off = 1U << 3,           ///< ESC % @: the bytes are not UTF-8
+    Vt52 = 1U << 4,              ///< DECANM ?2 reset: VT52 mode, until ESC <
+};
+/// The bits RIS and DECSTR clear: the DEC private modes. Utf8Off stays until
+/// ESC % G, Vt52 until ESC < or RIS (DECSTR does not clear it).
+inline constexpr std::uint8_t UNMODELLED_DEC_MODES = 0x07;
+
+/// SGR attributes the pen cannot hold (design.md §9, round C, "Атрибуты SGR,
+/// которых зеркало не моделирует"). The grid remembers that the terminal's
+/// pen has one, so that whoever restores the pen from the mirror knows it
+/// would lose it. Each is set by its own parameters and cleared by its own
+/// reset, SGR 0, RIS and DECSTR.
+enum class EUnmodelledSgr : std::uint8_t {
+    RapidBlink = 1U << 0,      ///< 6; reset 25
+    Proportional = 1U << 1,    ///< 26; reset 50
+    Frame = 1U << 2,           ///< 51, 52; reset 54
+    Overline = 1U << 3,        ///< 53; reset 55
+    UnderlineColor = 1U << 4,  ///< 58 with a true colour or index 0; reset 59
+    Script = 1U << 5,          ///< 73, 74; reset 75
+};
+
 /// A class of glyphs whose width terminals disagree on (design.md §9, round C).
 /// Cyrillic, PrivateUseBmp and PrivateUsePlanes get a verdict per session; the
 /// others only mark rows as doubtful: Ambiguous (the rest of East Asian
@@ -111,6 +142,11 @@ struct Line {
     /// ordinary row, cols for a foreign one. Not part of the content:
     /// snapshots do not carry it.
     std::uint16_t KnownFrom{0};
+    /// The row was made double width or height (ESC # 3, 4, 6) and has not been
+    /// cleared by ED or made single again (ESC # 5, RIS). EL keeps the
+    /// attribute on a terminal, so while it is set KnownFrom stays at cols.
+    /// Moves with the row. Not part of the content: snapshots do not carry it.
+    bool DoubleRow{false};
 };
 
 /// Saved cursor state (DECSC/DECRC and alt-screen switch).
@@ -134,6 +170,10 @@ struct SavedCursor {
     /// WidthPath::LeftOverDoubt at the save: the terminal restores its own
     /// column, which is off from the mirror's as much as it was then.
     bool LeftOverDoubt{false};
+    /// WidthPath::NonAscii at the save, likewise.
+    bool NonAsciiPath{false};
+    /// Unmodelled SGR attributes (EUnmodelledSgr) the pen held at the save.
+    std::uint8_t UnmodelledSgr{0};
 };
 
 /// Sans-I/O terminal grid (design.md §9).
@@ -260,6 +300,18 @@ public:
         return Path_.LeftOverDoubt;
     }
 
+    /// Whether anything but printable ASCII was printed since the column was
+    /// last set absolutely (CR, CHA, CUP, HVP, RIS, resync): a glyph from
+    /// U+0080 up, or a zero-width code point the grid dropped. Terminals may
+    /// draw such a glyph in another width than the grid's table says, and
+    /// then the terminal's column is not the mirror's even where no mark is
+    /// left of the cursor: erasing the glyph again (CUB over it with ASCII,
+    /// EL 1) does not bring the column back. Kept beside ColumnDoubt; the width
+    /// probe asks for a path that is ASCII only (design.md §9).
+    [[nodiscard]] bool PathHasNonAscii() const noexcept {
+        return Path_.NonAscii;
+    }
+
     /// Same, for the classes in `classMask` (WidthClassBit) only.
     [[nodiscard]] bool WidthDoubtBefore(std::uint16_t row, std::uint16_t col,
                                         std::uint8_t classMask) const noexcept {
@@ -355,6 +407,38 @@ public:
         return (Modes_ & ModeFlag(m)) != 0;
     }
     [[nodiscard]] std::uint32_t Modes() const noexcept { return Modes_; }
+    /// Whether a mode the grid does not model (EUnmodelledMode) is set.
+    [[nodiscard]] bool UnmodelledModeSet(EUnmodelledMode m) const noexcept {
+        return (UnmodelledModes_ & static_cast<std::uint8_t>(m)) != 0;
+    }
+    [[nodiscard]] bool AnyUnmodelledMode() const noexcept {
+        return UnmodelledModes_ != 0;
+    }
+    /// Whether a DEC private mode the grid does not model is set: the ones
+    /// RIS and DECSTR clear (UNMODELLED_DEC_MODES).
+    [[nodiscard]] bool AnyUnmodelledDecMode() const noexcept {
+        return (UnmodelledModes_ & UNMODELLED_DEC_MODES) != 0;
+    }
+    /// Sets or clears a mode the grid does not model. The parser calls it for
+    /// the sequences that change one; DECSET/DECRST of ?3, ?45 and ?69 get
+    /// here through SetMode.
+    void SetUnmodelledMode(EUnmodelledMode m, bool value) noexcept {
+        const auto bit = static_cast<std::uint8_t>(m);
+        if (value)
+            UnmodelledModes_ |= bit;
+        else
+            UnmodelledModes_ &= static_cast<std::uint8_t>(~bit);
+    }
+
+    /// Whether the pen of the terminal holds an SGR attribute the grid cannot
+    /// store (EUnmodelledSgr): the mirror's pen, and what is restored from it,
+    /// lacks it.
+    [[nodiscard]] bool HasUnmodelledSgr() const noexcept {
+        return UnmodelledSgr_ != 0;
+    }
+    [[nodiscard]] std::uint8_t UnmodelledSgrMask() const noexcept {
+        return UnmodelledSgr_;
+    }
 
     [[nodiscard]] std::uint8_t CharsetG0() const noexcept { return CharsetG0_; }
     [[nodiscard]] std::uint8_t CharsetG1() const noexcept { return CharsetG1_; }
@@ -488,9 +572,21 @@ public:
     void ScrollDown(std::uint16_t n) noexcept;
     void ScrollUp(std::uint16_t n) noexcept;
 
-    /// REP — repeat last printed character. False when none was printed: the
-    /// terminal repeats a character the grid has not seen.
+    /// REP — repeat last printed character. False when the terminal may not
+    /// repeat what the grid does: none was printed (the terminal repeats a
+    /// character the grid has not seen, and the cursor row becomes foreign), or
+    /// a zero-width code point was dropped after it (the terminal may repeat
+    /// that, or the whole cluster). In the second case the grid still repeats
+    /// the glyph.
     bool RepeatChar(std::uint16_t n) noexcept;
+
+    /// ESC # 3, ESC # 4, ESC # 6: the terminal draws the cursor row in double
+    /// width, where the grid has single cells. The row becomes foreign
+    /// (KnownFrom = cols) and stays so (Line::DoubleRow) until ED clears it.
+    void MarkCursorRowForeign() noexcept;
+    /// ESC # 5: the cursor row is single width again. The cells drawn while it
+    /// was not stay foreign, but writes and erases make cells known again.
+    void ClearCursorRowDouble() noexcept;
 
     /// DECSTBM — set scroll region (1-based from caller).
     void SetScrollRegion(std::uint16_t top1, std::uint16_t bot1) noexcept;
@@ -571,6 +667,7 @@ private:
     /// The cells [x, x+n) of `line` were written or erased: they are known.
     static void NoteKnown(Line& line, std::uint16_t x,
                           std::uint16_t n) noexcept {
+        if (line.DoubleRow) return;  // EL keeps the attribute: still foreign
         if (static_cast<std::uint32_t>(x) + n >= line.KnownFrom &&
             x < line.KnownFrom)
             line.KnownFrom = x;
@@ -666,6 +763,8 @@ private:
     // Modes and appearance
     // -----------------------------------------------------------------------
     std::uint32_t Modes_{0};
+    std::uint8_t UnmodelledModes_{0};  ///< EUnmodelledMode bits
+    std::uint8_t UnmodelledSgr_{0};    ///< EUnmodelledSgr bits
     std::uint8_t PenAttrs_{0};
     EColorKind PenFgKind_{EColorKind::Default};
     EColorKind PenBgKind_{EColorKind::Default};
@@ -699,6 +798,9 @@ private:
         /// of where it was: the terminal's column is not the mirror's even
         /// where no mark is left of the cursor any more.
         bool LeftOverDoubt{false};
+        /// A glyph from U+0080 up was printed, or a zero-width code point
+        /// dropped.
+        bool NonAscii{false};
     };
     WidthPath Path_{};
     WidthPolicy Policy_{};

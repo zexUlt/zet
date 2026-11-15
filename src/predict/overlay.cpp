@@ -226,9 +226,13 @@ ByteSpan Overlay::BuildUpdate(const PredictionEngine& engine,
         engine.Mode() != EDisplayMode::Never && ground && !g.IsAltScreen() &&
         !g.PendingWrap() && !g.ModeSet(grid::EMode::Irm) &&
         g.CharsetG0() == 0 && g.CharsetActive() == 0 &&
-        engine.ColumnTrusted() && g.CursorRow() < g.Rows() &&
+        engine.ColumnTrusted() && !g.AnyUnmodelledMode() &&
+        !g.HasUnmodelledSgr() && g.CursorRow() < g.Rows() &&
         g.CursorCol() < g.Cols() && g.RowsTrusted() &&
         !g.WidthDoubtBefore(g.CursorRow(), g.CursorCol()) && !g.ColumnDoubt();
+    // An SGR attribute the mirror's pen lacks would be lost when the overlay
+    // sets the pen back (End), so nothing is drawn while one is set. What was
+    // drawn before it is taken off as usual: BuildUndo does not look.
     // What is drawn is taken off only at a point where bytes may go in; the
     // overlay is only ever drawn at one, and the next piece of bytes comes
     // after a restore, so a point that is not one has nothing to take off.
