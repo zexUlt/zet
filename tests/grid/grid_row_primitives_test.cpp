@@ -72,3 +72,40 @@ TEST_CASE("ClearWidthClass on a row clears that row's class only") {
     r.G->ClearWidthClass(9, EWidthClass::Ambiguous);
     CHECK(r.G->WidthDoubtClasses(1) == A);
 }
+
+TEST_CASE("SetKnownFrom goes with its row on a scroll") {
+    Rig r;
+    r.G->SetKnownFrom(1, 6);
+    r.Feed("\x1b[3;1H\n");  // scrolls the screen up by one
+    CHECK(r.G->KnownFrom(0) == 6);
+    CHECK(r.G->KnownFrom(1) == 0);
+}
+
+TEST_CASE("the row primitives act on the active screen only") {
+    Rig r;
+    r.Feed("\xce\xb1");  // alpha: marks row 0 of the main screen
+    r.G->SetKnownFrom(0, 4);
+    r.Feed("\x1b[?1049h");
+    CHECK(r.G->KnownFrom(0) == 0);
+    r.Feed("\xce\xb1");
+    REQUIRE(r.G->WidthDoubtClasses(0) == A);
+    r.G->ClearWidthClass(0, EWidthClass::Ambiguous);
+    r.G->SetKnownFrom(0, 7);
+    CHECK(r.G->WidthDoubtClasses(0) == 0);
+    r.Feed("\x1b[?1049l");
+    CHECK(r.G->WidthDoubtClasses(0) == A);
+    CHECK(r.G->KnownFrom(0) == 4);
+}
+
+TEST_CASE("SetKnownFrom survives a resize like the other KnownFrom") {
+    Rig r;
+    r.G->SetKnownFrom(0, 6);
+    r.G->SetKnownFrom(1, 10);
+    REQUIRE(r.G->Resize(4, 3).has_value());
+    CHECK(r.G->KnownFrom(0) == 4);
+    CHECK(r.G->KnownFrom(1) == 4);
+    r.G->SetKnownFrom(2, 3);
+    REQUIRE(r.G->Resize(8, 3).has_value());
+    CHECK(r.G->KnownFrom(2) == 3);
+    CHECK(r.G->KnownFrom(1) == 8);
+}

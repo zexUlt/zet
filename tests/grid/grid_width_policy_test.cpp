@@ -1,4 +1,4 @@
-// WidthPolicy, width classes, the path counters and the widening VS16
+// WidthPolicy, width classes and the widening VS16
 // (design.md §9, round C). The default policy is the width table as it always
 // was.
 #include <doctest/doctest.h>
@@ -919,4 +919,17 @@ TEST_CASE("the doubt mask silences each new class on its own") {
         r.Put({cp, ALPHA});
         CHECK(r.Classes(0) == A);
     }
+}
+
+TEST_CASE("private use planes stop at the code points next to the ranges") {
+    CHECK_FALSE(IsPrivateUsePlanes(0xEFFFF));
+    CHECK(IsPrivateUsePlanes(0xF0000));
+    CHECK(IsPrivateUsePlanes(0xFFFFD));
+    CHECK_FALSE(IsPrivateUsePlanes(0xFFFFE));
+    CHECK_FALSE(IsPrivateUsePlanes(0xFFFFF));
+    CHECK(IsPrivateUsePlanes(0x100000));
+    CHECK(IsPrivateUsePlanes(0x10FFFD));
+    CHECK_FALSE(IsPrivateUsePlanes(0x10FFFE));
+    CHECK_FALSE(IsPrivateUsePlanes(0x10FFFF));
+    CHECK_FALSE(IsPrivateUsePlanes(0x110000));
 }
