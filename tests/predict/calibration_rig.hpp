@@ -79,8 +79,8 @@ struct CalClient {
     /// cells wide (1 or 2): Real and Ref, and the grids a snapshot replaces
     /// them with.
     void TerminalWidths(std::uint8_t cyr, std::uint8_t pua = 1) {
-        TermCyr_ = cyr;
-        TermPua_ = pua;
+        TermCyr = cyr;
+        TermPua = pua;
         ApplyTerminalPolicy();
     }
     /// Whether the mirror's policy has Cyrillic among the doubted classes: the
@@ -363,13 +363,13 @@ struct CalClient {
     void ApplyTerminalPolicy() {
         for (Term* t : {&C.Real, &C.Ref}) {
             grid::WidthPolicy policy = t->G->Policy();
-            policy.Cyrillic = TermCyr_;
-            policy.PrivateUseBmp = TermPua_;
+            policy.Cyrillic = TermCyr;
+            policy.PrivateUseBmp = TermPua;
             t->G->SetWidthPolicy(policy);
         }
     }
-    std::uint8_t TermCyr_{1};
-    std::uint8_t TermPua_{1};
+    std::uint8_t TermCyr{1};
+    std::uint8_t TermPua{1};
 
     [[nodiscard]] std::string WireWithoutInserts() const {
         std::string out;
