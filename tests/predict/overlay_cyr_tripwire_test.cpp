@@ -15,8 +15,9 @@
 // tripwire fires.
 #include <doctest/doctest.h>
 
+#include <atomic>
 #include <chrono>
-#include <limits>
+#include <cstdint>
 #include <string>
 
 #include "calibration_rig.hpp"
@@ -27,6 +28,13 @@ using namespace zet::predict;
 using namespace zet::predict::test;
 using std::chrono::milliseconds;
 using std::chrono::seconds;
+
+/// Defined with the OOM injection in tests/grid/probe_test.cpp, which
+/// replaces the nothrow array new for this whole binary: blocks of at least
+/// this many bytes are refused while it is below SIZE_MAX. Process-wide, so it
+/// is armed only around the query under test. A size no allocator could grant
+/// would abort under the address sanitizer instead of returning null.
+extern std::atomic<std::size_t> G_REFUSE_NOTHROW_ARRAYS_FROM;
 
 namespace {
 
@@ -386,9 +394,12 @@ TEST_CASE("A parser that gave up turns Cyrillic off") {
 TEST_CASE("A mirror that cannot hold the wait turns Cyrillic off") {
     CalClient t(30, 8);
     Shell(t);
-    t.LagMax = std::numeric_limits<std::size_t>::max() / 2;
+    constexpr std::size_t HOLD = 6'000'000;
+    t.LagMax = HOLD;
     t.Before("");
+    G_REFUSE_NOTHROW_ARRAYS_FROM = HOLD;
     t.Begin();
+    G_REFUSE_NOTHROW_ARRAYS_FROM = SIZE_MAX;
     CHECK(t.Queries() == 0);
     CHECK(t.CyrDoubted());
 }
