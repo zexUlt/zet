@@ -82,7 +82,9 @@ enum class EUnmodelledSgr : std::uint8_t {
 };
 
 /// A class of glyphs whose width terminals disagree on (design.md §9, round C).
-/// Cyrillic, PrivateUseBmp and PrivateUsePlanes get a verdict per session; the
+/// Cyrillic is assumed narrow by a client with a calibration, until its
+/// tripwire fires (design.md §9, "Кириллица"); PrivateUseBmp and
+/// PrivateUsePlanes have a width in the policy but no client sets it. The
 /// others only mark rows as doubtful: Ambiguous (the rest of East Asian
 /// ambiguous), Emoji (a narrow text glyph followed by VS16) and Cluster (ZWJ,
 /// skin tone, VS15, VS16 outside the emoji case, and wrap doubts).
@@ -104,10 +106,12 @@ inline constexpr std::uint8_t WIDTH_CLASSES_ALL = 0x3F;
 
 /// How the grid sizes the glyphs of the classes terminals disagree on. The
 /// default is the table as it always was: the agent's grid and the snapshot
-/// format never see anything else. A client sets it from its verdicts.
+/// format never see anything else. A client with a calibration takes Cyrillic
+/// out of DoubtClasses and puts it back when the tripwire fires.
 struct WidthPolicy {
     /// Columns of an East Asian ambiguous glyph that is neither private use nor
-    /// Cyrillic: 1 or 2. No verdict ever changes it.
+    /// Cyrillic: 1 or 2. The client leaves it 1: the tripwire changes
+    /// DoubtClasses, not this.
     std::uint8_t Ambiguous{1};
     /// Columns of a Cyrillic glyph of East Asian ambiguous width: 1 or 2.
     std::uint8_t Cyrillic{1};
@@ -119,7 +123,8 @@ struct WidthPolicy {
     /// makes its cell wide (and moves the cursor one column further).
     bool Vs16Widens{false};
     /// Classes (WidthClassBit) whose glyphs mark the row as width-doubtful.
-    /// A class with a verdict drops out. Cluster always marks.
+    /// A class the client assumes narrow drops out (Cyrillic, until the
+    /// tripwire fires). Cluster always marks.
     std::uint8_t DoubtClasses{WIDTH_CLASSES_ALL};
 
     friend bool operator==(const WidthPolicy&, const WidthPolicy&) = default;
@@ -172,6 +177,8 @@ struct SavedCursor {
     bool LeftOverDoubt{false};
     /// WidthPath::NonAscii at the save, likewise.
     bool NonAsciiPath{false};
+    /// WidthPath::Cyrillic at the save, likewise.
+    bool CyrillicPath{false};
     /// Unmodelled SGR attributes (EUnmodelledSgr) the pen held at the save.
     std::uint8_t UnmodelledSgr{0};
     /// The rows were synced (RowSync Abs and Eq) when the slot was written,
@@ -322,11 +329,28 @@ public:
     /// draw such a glyph in another width than the grid's table says, and
     /// then the terminal's column is not the mirror's even where no mark is
     /// left of the cursor: erasing the glyph again (CUB over it with ASCII,
-    /// EL 1) does not bring the column back. Kept beside ColumnDoubt; the width
-    /// probe asks for a path that is ASCII only (design.md §9).
+    /// EL 1) does not bring the column back. Kept beside ColumnDoubt; the
+    /// unwired width probe asks for a path that is ASCII only (design.md §9).
     [[nodiscard]] bool PathHasNonAscii() const noexcept {
         return Path_.NonAscii;
     }
+
+    /// Whether a glyph of the class Cyrillic was printed since the column was
+    /// last set absolutely (CR, CHA, CUP, HVP, RIS, resync, ConfirmPath),
+    /// whatever the policy says about marking it. The calibration's tripwire
+    /// reads it: a column the terminal reports differently with Cyrillic on
+    /// the path is the evidence that Cyrillic is not one cell wide there
+    /// (design.md §9, "Кириллица"). Not PathHasNonAscii: that one would blame
+    /// Cyrillic for any other glyph of the path.
+    [[nodiscard]] bool PathHasCyrillic() const noexcept {
+        return Path_.Cyrillic;
+    }
+
+    /// The terminal confirmed the cursor column (a calibration answer that
+    /// matched the mirror): a new path begins, as after an absolute setting of
+    /// the column. The column itself does not change, so nothing is counted in
+    /// ColumnSetCount.
+    void ConfirmPath() noexcept { RestartPath(); }
 
     /// Same, for the classes in `classMask` (WidthClassBit) only.
     [[nodiscard]] bool WidthDoubtBefore(std::uint16_t row, std::uint16_t col,
@@ -354,20 +378,20 @@ public:
     /// The width policy in force (default: the table as it is).
     [[nodiscard]] const WidthPolicy& Policy() const noexcept { return Policy_; }
     /// Sets the policy for the glyphs printed from now on. Cells already
-    /// placed stay as they are: a client that learns a width mid-session
-    /// decides what to do with the rows that were laid out under the old one
-    /// (ForgetWidthClass). Widths other than 2 count as 1. Not part of the
-    /// grid's state: a fresh grid has the default policy, a snapshot carries
-    /// none, and the agent never sets one.
+    /// placed stay as they are: the tripwire puts Cyrillic back into
+    /// DoubtClasses together with a resync, which makes the rows laid out
+    /// under the old policy foreign (design.md §9, "Кириллица"). Widths other
+    /// than 2 count as 1. Not part of the grid's state: a fresh grid has the
+    /// default policy, a snapshot carries none, and the agent never sets one.
     void SetWidthPolicy(const WidthPolicy& policy) noexcept;
 
-    /// A verdict "narrow" for a class: drops its marks from every row of both
+    /// For a class known to be narrow: drops its marks from every row of both
     /// screens, they were laid out right.
     void ClearWidthClass(EWidthClass cls) noexcept;
     /// The same for one row of the active screen: the mark of `cls` goes, the
     /// row's contents and KnownFrom stay. Out of range rows are ignored.
     void ClearWidthClass(std::uint16_t row, EWidthClass cls) noexcept;
-    /// A verdict "wide" for a class: every row of both screens that holds a
+    /// For a class known to be wide: every row of both screens that holds a
     /// mark of it becomes foreign (KnownFrom = cols), what was laid out in it
     /// no longer matches the terminal, and loses the mark.
     void ForgetWidthClass(EWidthClass cls) noexcept;
@@ -822,6 +846,8 @@ private:
         /// A glyph from U+0080 up was printed, or a zero-width code point
         /// dropped.
         bool NonAscii{false};
+        /// A glyph of the class Cyrillic was printed, under any policy.
+        bool Cyrillic{false};
     };
     WidthPath Path_{};
     WidthPolicy Policy_{};

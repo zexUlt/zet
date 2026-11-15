@@ -608,6 +608,8 @@ void Grid::PutChar(char32_t cp, int width) noexcept {
         // keeps its mark and counts as a glyph of open width.
         NoteClassGlyph(CursorRow_, CursorCol_, EWidthClass::Cluster);
     } else if (IsAmbiguousWidth(cp)) {
+        // Narrow or not, marked or not: the path holds Cyrillic.
+        if (cls == EWidthClass::Cyrillic) Path_.Cyrillic = true;
         NoteClassGlyph(CursorRow_, CursorCol_, cls);
     } else if (IsClusterJoiner(cp)) {
         NoteClassGlyph(CursorRow_, CursorCol_, EWidthClass::Cluster);
@@ -847,6 +849,7 @@ void Grid::SaveCursor() noexcept {
     sc.CharsetActive = CharsetActive_;
     sc.LeftOverDoubt = Path_.LeftOverDoubt;
     sc.NonAsciiPath = Path_.NonAscii;
+    sc.CyrillicPath = Path_.Cyrillic;
     sc.UnmodelledSgr = UnmodelledSgr_;
     sc.Fresh = RowsCalibrated();
 }
@@ -868,6 +871,7 @@ bool Grid::RestoreCursor() noexcept {
     // ... and it is as far from the mirror's as it was at the save.
     Path_.LeftOverDoubt = sc.LeftOverDoubt;
     Path_.NonAscii = sc.NonAsciiPath;
+    Path_.Cyrillic = sc.CyrillicPath;
     // The terminal's pen comes back with what the save held. What it held
     // before may or may not have been replaced; the marks add up.
     UnmodelledSgr_ |= sc.UnmodelledSgr;

@@ -270,6 +270,9 @@ public:
         std::size_t AnswerMax{~std::size_t{0}};
         /// The client cannot rebuild its mirror from this snapshot (from 1).
         unsigned LoseMirrorAtSnapshot{0};
+        /// How wide the test's terminal draws Cyrillic (1 or 2): the answers
+        /// to the client's queries are its cursor.
+        std::uint8_t TermCyrillic{1};
     };
 
     ClientRig(std::uint8_t seed, Options options)
@@ -492,6 +495,15 @@ public:
         Pump(350ms);
     }
 
+    /// TypeAndEcho for a key of several bytes (a UTF-8 glyph).
+    void TypeAndEchoText(std::string_view text) {
+        const std::size_t seen = ShellIn_.size();
+        Keys(text);
+        REQUIRE(WaitFor([&] { return ShellIn_.size() >= seen + text.size(); }));
+        Print(text);
+        Pump(350ms);
+    }
+
     /// A prompt after the user's first Enter: the client is connected by then,
     /// and the agent's opening EchoAck, which comes first, has been taken. Two
     /// echoed keys of different glyphs confirm an epoch. The terminal then
@@ -654,6 +666,9 @@ private:
             auto made = zet::grid::Grid::Create(80, 24, 0);
             REQUIRE(made.has_value());
             Term_.reset(made.value());
+            auto policy = Term_->Policy();
+            policy.Cyrillic = Options_.TermCyrillic;
+            Term_->SetWidthPolicy(policy);
         }
         for (;;) {
             const std::size_t at = Out_.find(QUERY, TermAt_);

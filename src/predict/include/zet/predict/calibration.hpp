@@ -40,10 +40,16 @@ enum ECalReason : std::uint8_t {
     CalDcs = 4,       ///< a DCS/SOS/PM/APC string passed through
     CalAltExit = 8,   ///< the program left the alternate screen
     CalUnknown = 16,  ///< a sequence the mirror does not know
+    CalCyr = 32,      ///< Cyrillic on the path, not yet confirmed by an answer
 };
 
 /// Row synchronisation of the mirror by the terminal's cursor position report
-/// (design.md §9, round C, "Калибровка зеркала запросом позиции курсора").
+/// (design.md §9, round C, "Калибровка зеркала запросом позиции курсора"), and
+/// the tripwire of the assumption that Cyrillic is one cell wide (§9,
+/// "Кириллица"): the client puts the mirror's policy with Cyrillic out of
+/// DoubtClasses after Create, and the calibration puts it back, for good, on
+/// an answer whose column disagrees with Cyrillic on the path and in every
+/// state in which it stops asking (a silent terminal, Sticky_, Disabled_).
 /// Sans-I/O, after PredictionEngine: the client, the test rig and the fuzzer
 /// drive it through the same calls, and no clock or system call is inside.
 ///
@@ -172,6 +178,9 @@ public:
         return QueryUnwritten_;
     }
     [[nodiscard]] std::uint8_t Reasons() const noexcept { return Reasons_; }
+    /// A matched answer had Cyrillic on the path: CalCyr is not raised again
+    /// for the session.
+    [[nodiscard]] bool CyrConfirmed() const noexcept { return CyrConfirmed_; }
     /// Output held for the wait / the EchoAck held for it: neither outlives
     /// the wait (for the fuzzers).
     [[nodiscard]] bool HoldsLag() const noexcept {
@@ -215,6 +224,12 @@ private:
     void Rebase(const CalibrationTarget& target) noexcept;
     [[nodiscard]] static bool MirrorReady(const grid::Grid& g,
                                           const grid::VtParser& p) noexcept;
+    /// Whether the mirror's policy still has Cyrillic narrow.
+    [[nodiscard]] static bool CyrNarrow(const grid::Grid& g) noexcept;
+    /// The tripwire: Cyrillic goes back under the doubt marks of step 5, for
+    /// the rest of the session (a no-op when the policy never took it out).
+    /// Called before the held output is fed, so that it is laid out marked.
+    void CyrillicOff(const CalibrationTarget& target) noexcept;
     /// Handles what the last demultiplexer call reported.
     void Dispatch(Timestamp now, const CalibrationTarget& target) noexcept;
     void Apply(const CprEvent& event, Timestamp now,
@@ -239,6 +254,9 @@ private:
     bool Sticky_{false};
     bool Detached_{false};
     bool Disabled_{false};
+    /// An answer matched the mirror with Cyrillic on the path: the terminal
+    /// draws Cyrillic as the mirror does, and one proof per session is enough.
+    bool CyrConfirmed_{false};
 
     // What the query was asked for.
     std::uint8_t QueryReasons_{0};
