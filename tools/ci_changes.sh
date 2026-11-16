@@ -16,8 +16,27 @@
 #                            proven by running all of it
 # Documentation (docs/, .claude/, *.md) needs nothing.
 #
-# Usage: git diff --name-only BASE...HEAD | tools/ci_changes.sh
+# Usage: tools/ci_changes.sh BASE   the change from BASE to HEAD
+#        tools/ci_changes.sh        the changed paths on stdin, one per line
 set -uo pipefail
+
+if [ $# -gt 0 ]; then
+    # An empty BASE would diff HEAD with itself and skip every job.
+    if ! git rev-parse --verify -q "$1^{commit}" >/dev/null; then
+        echo "ci_changes: BASE '$1' is not a commit" >&2
+        exit 1
+    fi
+    # --no-renames: a rename is listed by its new name only, so moving
+    # src/mux/mux.cpp to docs/mux.md would look like a change to
+    # documentation and skip every job.
+    if ! changed=$(git diff --name-only --no-renames "$1"...HEAD); then
+        echo "ci_changes: git diff $1...HEAD failed" >&2
+        exit 1
+    fi
+    printf '%s\n' "$changed" >&2
+    # The paths become this script's stdin, read below.
+    exec <<<"$changed"
+fi
 
 readonly JOBS=(test integration coverage checks macos fuzz macos_e2e systemd)
 
