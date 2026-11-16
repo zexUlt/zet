@@ -35,10 +35,8 @@ runs:
       run: |
         set -euo pipefail
         if [ "$EVENT" = "pull_request" ]; then
-          changed=$(git diff --name-only "$BASE"...HEAD)
+          tools/ci_changes.sh "$BASE" | tee -a "$GITHUB_OUTPUT"
         else
           # Not a pull request: a path that runs everything.
-          changed=.github/everything
+          echo .github/everything | tools/ci_changes.sh | tee -a "$GITHUB_OUTPUT"
         fi
-        printf '%s\n' "$changed"
-        printf '%s\n' "$changed" | tools/ci_changes.sh | tee -a "$GITHUB_OUTPUT"

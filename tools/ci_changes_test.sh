@@ -85,6 +85,30 @@ expect "something/new.txt" "$all"
 # The union of what each path needs.
 expect "tests/integration/test_mux.py,fuzz/mux_fuzz.cpp" "integration fuzz checks"
 
+# The BASE form on a real history: code moved into documentation is still a
+# change to that code.
+repo=$(mktemp -d)
+trap 'rm -rf "$repo"' EXIT
+git_() { git -C "$repo" -c user.name=t -c user.email=t@t -c commit.gpgsign=false "$@"; }
+git_ init -q
+mkdir -p "$repo/src/mux" "$repo/docs"
+echo 'int main() {}' > "$repo/src/mux/mux.cpp"
+git_ add -A && git_ commit -q -m base
+base=$(git_ rev-parse HEAD)
+git_ mv src/mux/mux.cpp docs/mux.md
+git_ commit -q -m move
+want="checks integration systemd test "
+got=$(cd "$repo" && "$classify" "$base" 2>/dev/null |
+      awk -F= '$2 == "true" {print $1}' | sort | tr '\n' ' ')
+if [ "$got" != "$want" ]; then
+    printf 'FAIL rename src/mux/mux.cpp -> docs/mux.md\n  want: %s\n  got:  %s\n' "$want" "$got"
+    failures=$((failures + 1))
+fi
+if (cd "$repo" && "$classify" no-such-ref >/dev/null 2>&1); then
+    echo "FAIL an unknown BASE exits with 0"
+    failures=$((failures + 1))
+fi
+
 if [ "$failures" -ne 0 ]; then
     echo "$failures case(s) wrong"
     exit 1
