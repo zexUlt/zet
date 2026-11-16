@@ -85,29 +85,58 @@ expect "something/new.txt" "$all"
 # The union of what each path needs.
 expect "tests/integration/test_mux.py,fuzz/mux_fuzz.cpp" "integration fuzz checks"
 
-# The BASE form on a real history: code moved into documentation is still a
-# change to that code.
+# The BASE form on a real history. A git hook running this test exports
+# these, and they would point every git call below at the hook's repository.
+unset GIT_DIR GIT_INDEX_FILE GIT_WORK_TREE
 repo=$(mktemp -d)
 trap 'rm -rf "$repo"' EXIT
 git_() { git -C "$repo" -c user.name=t -c user.email=t@t -c commit.gpgsign=false "$@"; }
-git_ init -q
+
+# expect_base <name> <base> <jobs that run>: the jobs that run, and nothing
+# but job=true|false lines on stdout, which goes to $GITHUB_OUTPUT.
+expect_base() {
+    local name=$1 base=$2 want=$3 out got
+    out=$(cd "$repo" && "$classify" "$base" 2>/dev/null)
+    if printf '%s\n' "$out" | grep -qvE '^[a-z_0-9]+=(true|false)$'; then
+        printf 'FAIL %s: stdout is not only job=value lines:\n%s\n' "$name" "$out"
+        failures=$((failures + 1))
+        return
+    fi
+    got=$(printf '%s\n' "$out" | awk -F= '$2 == "true" {print $1}' | sort | tr '\n' ' ')
+    if [ "$got" != "$want" ]; then
+        printf 'FAIL %s\n  want: %s\n  got:  %s\n' "$name" "$want" "$got"
+        failures=$((failures + 1))
+    fi
+}
+
+git_ init -q -b trunk
 mkdir -p "$repo/src/mux" "$repo/docs"
 echo 'int main() {}' > "$repo/src/mux/mux.cpp"
+echo 'notes' > "$repo/docs/notes.md"
 git_ add -A && git_ commit -q -m base
 base=$(git_ rev-parse HEAD)
+
+# Code moved into documentation is still a change to that code.
+git_ checkout -q -b move
 git_ mv src/mux/mux.cpp docs/mux.md
 git_ commit -q -m move
-want="checks integration systemd test "
-got=$(cd "$repo" && "$classify" "$base" 2>/dev/null |
-      awk -F= '$2 == "true" {print $1}' | sort | tr '\n' ' ')
-if [ "$got" != "$want" ]; then
-    printf 'FAIL rename src/mux/mux.cpp -> docs/mux.md\n  want: %s\n  got:  %s\n' "$want" "$got"
-    failures=$((failures + 1))
-fi
-if (cd "$repo" && "$classify" no-such-ref >/dev/null 2>&1); then
-    echo "FAIL an unknown BASE exits with 0"
-    failures=$((failures + 1))
-fi
+expect_base "rename src/mux/mux.cpp -> docs/mux.md" "$base" "checks integration systemd test "
+
+# BASE...HEAD: what trunk did after the branch point is not this change.
+git_ checkout -q trunk
+echo 'int main() { return 0; }' > "$repo/src/mux/mux.cpp"
+git_ commit -q -am trunk-moves-on
+git_ checkout -q -b docs-only "$base"
+echo 'more notes' >> "$repo/docs/notes.md"
+git_ commit -q -am docs
+expect_base "docs on a branch behind trunk" trunk ""
+
+for bad in "" no-such-ref; do
+    if (cd "$repo" && "$classify" "$bad" >/dev/null 2>&1); then
+        echo "FAIL BASE '$bad' exits with 0"
+        failures=$((failures + 1))
+    fi
+done
 
 if [ "$failures" -ne 0 ]; then
     echo "$failures case(s) wrong"
